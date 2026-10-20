@@ -62,6 +62,8 @@ pub struct HistorySnapshot {
     epoch: u64,
     records: Vec<(Clock, Arc<[u8]>)>,
     admission: Arc<AtomicBool>,
+    retained_from: Option<DateTime<Utc>>,
+    truncated: bool,
 }
 
 impl Drop for HistorySnapshot {
@@ -73,6 +75,12 @@ impl Drop for HistorySnapshot {
 }
 
 impl HistorySnapshot {
+    pub(super) fn retained_from(&self) -> Option<DateTime<Utc>> {
+        self.retained_from
+    }
+    pub(super) fn truncated(&self) -> bool {
+        self.truncated
+    }
     pub(super) fn server_id(&self) -> &str {
         &self.server_id
     }
@@ -298,6 +306,12 @@ impl History {
             epoch: self.epoch,
             records: Vec::with_capacity(self.records.len()),
             admission: Arc::clone(&self.snapshot_admission),
+            retained_from: self
+                .records
+                .iter()
+                .map(|record| record.oldest_acquisition)
+                .min(),
+            truncated: self.truncated,
         };
         view.records.extend(
             self.records

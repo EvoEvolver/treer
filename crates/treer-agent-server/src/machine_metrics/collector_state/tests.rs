@@ -12,6 +12,172 @@ fn state() -> CollectorState {
     CollectorState::new("machine".into(), Limits::default()).unwrap()
 }
 
+fn system_metadata() -> crate::machine_metrics::field_query::SystemMetadata {
+    crate::machine_metrics::field_query::SystemMetadata {
+        logical_cpus: Some(8),
+        memory_method: treer_protocol::MachineMemoryMethod::LinuxMemAvailable,
+        gpu_status: MachineMetricStatus::NoDevice,
+    }
+}
+
+#[test]
+fn system_response_preserves_stale_current_and_marks_known_history_loss() {
+    let mut state = CollectorState::new(
+        "machine".into(),
+        Limits {
+            records: 1,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    for (ms, value) in [(0, 12.0), (5_000, 30.0)] {
+        record(&mut state, clock(ms, ms as u64), value);
+        let sample = frame(&mut state, clock(ms, ms as u64));
+        state.append_frame(clock(ms, ms as u64), &sample).unwrap();
+    }
+    let now = clock(25_000, 25_000);
+    let query = MachineMetricsQuery {
+        from: clock(0, 0).wall,
+        to: clock(10_000, 10_000).wall,
+        max_points: 2,
+    };
+    let mut view = state.detached_query(now, &mut || false).unwrap();
+    let result = view
+        .assemble_system_response(&query, system_metadata(), &mut || false)
+        .unwrap();
+    let response =
+        MachineMetricsResponse::parse_bounded(&result.bytes, &query, "machine", now.wall).unwrap();
+    assert!(response.truncated);
+    assert_eq!(response.retained_from, Some(clock(5_000, 5_000).wall));
+    assert!(response
+        .series
+        .iter()
+        .all(|series| series.points.iter().all(|bucket| bucket.partial)));
+    let cpu = &response.series[0];
+    assert_eq!(cpu.current.status, MachineMetricStatus::Stale);
+    assert_eq!(cpu.current.value, None);
+    assert_eq!(cpu.current.age_ms, Some(20_000));
+    assert_eq!(cpu.points[1].mean, Some(30.0));
+    assert_eq!(
+        response.series[1].current.status,
+        MachineMetricStatus::WarmingUp
+    );
+    assert!(response.series[1]
+        .points
+        .iter()
+        .all(|bucket| bucket.mean.is_none()));
+}
+
+#[test]
+fn system_response_keeps_snapshot_current_independent_of_historical_range() {
+    let mut state = state();
+    record(&mut state, clock(0, 0), 12.0);
+    state
+        .record_ram(clock(0, 0), MachineMetricStatus::Ok, Some((100, 70)))
+        .unwrap();
+    let sample = frame(&mut state, clock(0, 0));
+    state.append_frame(clock(0, 0), &sample).unwrap();
+    record(&mut state, clock(10_000, 10_000), 99.0);
+    let query = MachineMetricsQuery {
+        from: clock(0, 0).wall,
+        to: clock(5_000, 5_000).wall,
+        max_points: 1,
+    };
+    let mut view = state
+        .detached_query(clock(10_000, 10_000), &mut || false)
+        .unwrap();
+    record(&mut state, clock(15_000, 15_000), 42.0);
+    let result = view
+        .assemble_system_response(&query, system_metadata(), &mut || false)
+        .unwrap();
+    let parsed = MachineMetricsResponse::parse_bounded(
+        &result.bytes,
+        &query,
+        "machine",
+        clock(10_000, 10_000).wall,
+    )
+    .unwrap();
+    assert_eq!(result.epoch, 0);
+    assert_eq!(parsed.series.len(), 4);
+    assert_eq!(parsed.generated_at, clock(10_000, 10_000).wall);
+    let cpu = &parsed.series[0];
+    assert_eq!(cpu.current.value, Some(99.0));
+    assert_eq!(cpu.current.sampled_at, Some(clock(10_000, 10_000).wall));
+    assert_eq!(cpu.current.age_ms, Some(0));
+    assert_eq!(cpu.points[0].mean, Some(12.0));
+    assert_eq!(parsed.retained_from, Some(clock(0, 0).wall));
+    assert!(!parsed.truncated);
+    let mut bad = system_metadata();
+    bad.logical_cpus = Some(0);
+    assert!(view
+        .assemble_system_response(&query, bad, &mut || false)
+        .is_err());
+    assert!(view
+        .assemble_system_response(&query, system_metadata(), &mut || true)
+        .is_err());
+}
+
+#[test]
+fn system_response_refuses_both_current_and_retained_gpu_inventory() {
+    use crate::machine_metrics::{field_cache::FieldCache, field_query::SystemResponseError};
+    use treer_protocol::{MachineMetricSeries, MachineMetricUnit, MachineMetricsGpu};
+    let mut state = state();
+    let id = "a".repeat(64);
+    state
+        .record(
+            clock(0, 0),
+            MachineMetricKind::GpuUtilization,
+            Some(&id),
+            MachineMetricStatus::Ok,
+            Some(50.0),
+        )
+        .unwrap();
+    state
+        .record_vram(clock(0, 0), &id, MachineMetricStatus::Ok, Some((100, 50)))
+        .unwrap();
+    let mut sample = frame(&mut state, clock(0, 0));
+    sample.gpus.push(MachineMetricsGpu {
+        id: id.clone(),
+        name: "NVIDIA test".into(),
+        present: true,
+    });
+    sample.gpu_status = MachineMetricStatus::Ok;
+    for field in state.snapshot(clock(0, 0)).unwrap().fields {
+        sample.series.push(MachineMetricSeries {
+            kind: field.kind,
+            gpu_id: field.gpu_id,
+            unit: if field.kind == MachineMetricKind::GpuUtilization {
+                MachineMetricUnit::Percent
+            } else {
+                MachineMetricUnit::Bytes
+            },
+            current: field.current,
+            points: Vec::new(),
+        });
+    }
+    state.append_frame(clock(0, 0), &sample).unwrap();
+    let now = clock(5_000, 5_000);
+    let query = MachineMetricsQuery {
+        from: clock(0, 0).wall,
+        to: now.wall,
+        max_points: 1,
+    };
+    let mut view = state.detached_query(now, &mut || false).unwrap();
+    assert!(matches!(
+        view.assemble_system_response(&query, system_metadata(), &mut || false),
+        Err(SystemResponseError::InventoryRequired)
+    ));
+    drop(view);
+    // Simulate inventory retirement independently: retained GPU data must still
+    // forbid publishing an empty inventory via the system-only branch.
+    state.cache = FieldCache::new(0);
+    let mut view = state.detached_query(now, &mut || false).unwrap();
+    assert!(matches!(
+        view.assemble_system_response(&query, system_metadata(), &mut || false),
+        Err(SystemResponseError::InventoryRequired)
+    ));
+}
+
 #[test]
 fn response_encoding_validates_and_discards_every_cancelled_partial_buffer() {
     use crate::machine_metrics::response_encoding::{encode_bounded, EncodingError};

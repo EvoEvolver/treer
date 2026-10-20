@@ -621,3 +621,51 @@ being rejected as a whole. Its oversized JSON is built only by the test oracle.
 The complete response assembler, GPU inventory, per-range metadata, original
 fractional-span mismatch, source sampling/journal, Policy/IPC/routes, real
 deadline/disconnect and stale-epoch publication checks remain unfinished.
+
+## System-only wire response assembly checkpoint (not connected)
+
+A detached view now also owns the bounded current-field projection captured
+by CollectorState at the same maintained clock/epoch, plus the history view's
+earliest original acquisition and conservative instance truncation flag. The
+system-only assembler derives the four fixed CPU/RAM series internally, queries
+their history in one decode pass, and combines those buckets with the captured
+per-field current values. Callers provide only static platform metadata
+(logical CPU count, memory method and an unavailable/no-device GPU status),
+never current measurement values. Missing current fields become canonical
+warming_up, not a manufactured zero. Source metadata still needs a real
+platform adapter; accepting a method enum does not prove that method ran.
+
+The old-range query does not change current acquisition timestamps or ages:
+generated_at/current refer to the view's captured clock, historical buckets to
+the explicit range. Later live collection cannot replace the view's captured
+current values. Original successful historical observations remain useful even
+when their current projection has become stale and hides its value.
+
+This branch refuses if any current field has a GPU identity, or if any retained
+frame has GPU descriptors, even outside the requested range. It must not report
+an empty inventory while silently dropping an old GPU. Proper current/range
+inventory union is still unfinished; this conservative refusal deliberately
+limits the branch to system-only snapshots. Allowed GPU metadata statuses are
+no_device, driver_unavailable, unsupported_platform and disabled.
+
+Capacity/epoch discontinuity conservatively marks the response truncated and
+every bucket partial. The retained_from value is the earliest original field
+acquisition still present in this view. These are instance-wide metadata, not
+yet the required per-range loss precision; no retained_from is fabricated for
+an empty history. A best-effort reset boolean is not used as proof of absence
+of loss (it can be consumed by a Busy query); epoch remains authoritative.
+
+Assembly passes through the shared model checks and private capped encoder.
+It returns exact-length Box<[u8]> and captured epoch; converting the buffer can
+temporarily overlap the at-most-1-MiB original and its compact copy. Cancellation
+is checked again after compaction. The receiver still must enforce deadline,
+disconnect, latest live epoch and authorization before publication and drop the
+view promptly. This helper is not that publication guard or a network endpoint.
+
+Tests round-trip the actual assembled bytes through the shared bounded parser,
+keep an old-range mean distinct from a newer captured current (and subsequent
+live update), preserve stale-current versus original-history semantics, keep
+missing RAM warming_up, mark known capacity loss, reject invalid metadata and
+cancellation, and refuse both current GPU fields and retired-but-retained GPU
+inventory. GPU union, per-range loss flags, fractional spans, platform sampling,
+journal/source singleton/IPC/Policy/routes and measured overhead remain open.

@@ -19,6 +19,8 @@ pub struct MultiFieldHistory {
     pub reset: bool,
     /// Preserves request order. Missing fields still have empty partial buckets.
     pub fields: Vec<(FieldKey, Buckets)>,
+    /// Conservative: inventory anywhere in the retained view, not just range.
+    pub has_gpu_inventory: bool,
 }
 
 impl DetachedFieldQuery {
@@ -78,11 +80,13 @@ impl DetachedFieldQuery {
         // outside the requested range so identity conflicts cannot be hidden.
         let mut index: HashMap<(u64, u64), (usize, Observation)> = HashMap::new();
         let mut counts = vec![0; fields.len()];
+        let mut has_gpu_inventory = false;
         for (clock, bytes) in self.history.frames() {
             check(cancelled)?;
             let stored =
                 StoredFrame::decode(bytes, self.history.server_id(), clock, self.history.epoch())
                     .map_err(FieldQueryError::History)?;
+            has_gpu_inventory |= !stored.frame.gpus.is_empty();
             for field in stored.fields {
                 check(cancelled)?;
                 let Some(&position) = positions.get(&(field.kind, field.gpu_id.as_deref())) else {
@@ -127,6 +131,7 @@ impl DetachedFieldQuery {
             epoch: self.history.epoch(),
             reset: self.reset,
             fields: output,
+            has_gpu_inventory,
         })
     }
 }

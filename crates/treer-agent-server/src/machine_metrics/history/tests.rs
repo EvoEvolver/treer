@@ -81,6 +81,7 @@ fn field_query_refuses_conflicting_cached_identity_and_corrupt_staging_bytes() {
             history: history.detached_snapshot(clock(10_000)).unwrap(),
             clock: clock(10_000),
             reset: false,
+            current: Vec::new(),
         };
         assert!(matches!(
             view.query_fields(
@@ -112,6 +113,7 @@ fn field_query_refuses_conflicting_cached_identity_and_corrupt_staging_bytes() {
             history: history.detached_snapshot(clock(10_000)).unwrap(),
             clock: clock(10_000),
             reset: false,
+            current: Vec::new(),
         };
         assert!(matches!(
             view.query_fields(

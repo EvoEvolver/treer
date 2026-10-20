@@ -68,6 +68,7 @@ impl CollectorState {
             history,
             clock,
             reset: snapshot.reset,
+            current: snapshot.fields,
         })
     }
 

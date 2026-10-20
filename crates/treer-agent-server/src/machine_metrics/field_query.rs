@@ -1,7 +1,7 @@
 //! Bounded staging readers. Not the public response or runtime query route.
 use super::{
     aggregation::{self, AggregationError, Buckets, Observation},
-    field_cache::{field_unit, CacheError},
+    field_cache::{field_unit, CacheError, FieldSnapshot},
     history::{Clock, History, HistoryError, HistorySnapshot, MAX_RECORDS},
     stored_frame::StoredFrame,
 };
@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use treer_protocol::{MachineMetricKind, MachineMetricsQuery};
 
 mod multi;
+mod system_response;
 pub use multi::{FieldKey, MultiFieldHistory, MAX_INDEX_ACQUISITIONS};
+pub use system_response::{SystemMetadata, SystemResponse, SystemResponseError};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum FieldQueryError {
@@ -33,6 +35,7 @@ pub struct DetachedFieldQuery {
     pub(super) history: HistorySnapshot,
     pub(super) clock: Clock,
     pub(super) reset: bool,
+    pub(super) current: Vec<FieldSnapshot>,
 }
 
 impl DetachedFieldQuery {
