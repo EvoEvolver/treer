@@ -761,6 +761,16 @@ historical_inventory_incomplete bit. A later response assembler must propagate
 that bit or refuse; unknown current cannot erase historical incompleteness.
 The overlap rule includes frames with only CPU/RAM acquisitions in range,
 because their omitted GPU descriptors cannot be reconstructed from that frame.
+Consequently a known-current query overlapping an incomplete retained frame
+continues to refuse until that frame expires or leaves the ring; a fresh
+successful current enumeration does not repair missing historical inventory.
+Queries with no original acquisitions in range do not inherit that frame's bit.
+
+An integration test compares inventory membership, truncation overlap and
+aggregated GPU bucket samples at from-1 ns, from, to-1 ns and to, with the
+cached frame appended outside the range. The same exact half-open predicate
+must govern all three; this test uses a whole-millisecond query span and does
+not remove the aggregation helper's separate fractional-span restriction.
 
 Tests distinguish historical and current names for the same id, preserve a
 current-only device outside its historical acquisition range, retain an absent
