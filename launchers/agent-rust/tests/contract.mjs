@@ -841,7 +841,10 @@ test('Rust refuses a FIFO journal promptly before provider startup',{skip:useNod
   assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null),providerBefore);
 });
 test('Rust goal edits persist native state and deduplicate model-context delivery across restart',{skip:useNode},async t=>{
-  const s=await fixture(t,{FAKE_CODEX_GOAL_ACTIVE:'1'});
+  // Use the existing persisted-turn fixture so new turn identities survive
+  // provider restart. The relay-recovery fixture resets relay-1 on each process
+  // and is intentionally unsuitable for terminal identity reconciliation.
+  const s=await fixture(t,{FAKE_CODEX_GOAL_ACTIVE:'1',FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_IMAGES:'1'});
   const update=async (base,body,method='PUT')=>{
     const response=await fetch(base+'/api/goal',{method,body:JSON.stringify(body)});
     assert.equal(response.status,200,await response.clone().text());
