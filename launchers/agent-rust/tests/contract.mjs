@@ -1029,14 +1029,38 @@ test('Rust journal restart never replays an uncertain turn and preserves queued 
 
 const faultEnv=mode=>({CODEX_BIN:process.execPath,RUST_SPIKE_CODEX_ARGS:JSON.stringify([resolve(import.meta.dirname,'fixtures/fault-codex.mjs')]),RUST_SPIKE_FAULT:mode});
 const providerCalls=async s=>(await readFile(join(s.root,'provider.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
-for(const mode of ['event','observer','other-turn','terminal','terminal-error',...['full','empty','forward','kind','order','item-status','output','duplicate','empty-id','missing-id','id-type','id-mismatch','bound'].flatMap(m=>[m,'observer-'+m])])test('Rust final snapshot retains observed tool or refuses conflict: '+mode,{skip:useNode,timeout:25000},async t=>{
+for(const kind of ['file','tool'])for(const change of ['empty','extend','shrink','conflict'])for(const observer of [false,true])test(`Rust terminal ${kind} detail survives summary or refuses ${change} (${observer?'observer':'event'})`,{skip:useNode,timeout:20000},async t=>{
+  const s=await fixture(t,faultEnv(`final-${observer?'observer-':''}${kind}-${change}`));
+  const receipt=await s.post({text:'synthetic tool detail',operation_id:'typed-final'}).then(r=>r.json());
+  const read=()=>fetch(s.base+'/api/state').then(r=>r.json());
+  const live=await until(read,x=>x.thread.turns.some(t=>t.items.some(i=>i.id==='synthetic-command'&&i.status==='completed')));
+  const old=live.thread.turns.flatMap(t=>t.items).find(i=>i.id==='synthetic-command');
+  const failure=['shrink','conflict'].includes(change);
+  const state=await until(read,x=>failure?x.runtime.state==='blocked':x.thread.turns.some(t=>t.status==='completed'));
+  const tools=state.thread.turns.flatMap(t=>t.items).filter(i=>i.id==='synthetic-command');
+  assert.equal(tools.length,1);const item=tools[0];assert.equal(item.status,'completed');
+  const result=await fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers}).then(r=>r.json());
+  if(failure) {
+    assert.deepEqual(item,old);assert.equal(result.submission.state,'running');assert.equal(state.ready,false);
+    assert.equal(state.runtime.provider.finalProjection.refusals,1);assert.match(state.runtime.error,/Conflicting provider final snapshot/);
+    const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));assert.equal(journal.dispatchBlocked,true);
+    assert.equal(journal.records.find(r=>r.operation==='typed-final').submission.state,'running');
+  } else {
+    assert.equal(result.submission.state,'done');assert.equal(state.runtime.state,'idle');
+    const detail=kind==='file'?item.changes:JSON.parse(item.detailText).output;
+    const prior=kind==='file'?old.changes:JSON.parse(old.detailText).output;
+    assert.deepEqual(detail.slice(0,2),prior);assert.equal(detail.length,change==='extend'?3:2);
+  }
+  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
+});
+for(const mode of ['event','observer','other-turn','terminal','terminal-error',...['full','empty','forward','late-user','kind','order','item-status','output','duplicate','empty-id','missing-id','id-type','id-mismatch','bound'].flatMap(m=>[m,'observer-'+m])])test('Rust final snapshot retains observed tool or refuses conflict: '+mode,{skip:useNode,timeout:25000},async t=>{
   const scenario=mode.replace(/^observer-/,''),observer=mode==='observer'||mode.startsWith('observer-');
   const s=await fixture(t,faultEnv('final-'+mode));
   const receipt=await s.post({text:'synthetic read-only observation',operation_id:'final-retention'}).then(r=>r.json());
   const read=()=>fetch(s.base+'/api/state').then(r=>r.json());
   const live=await until(read,x=>x.thread.turns.some(t=>t.items.some(i=>i.id==='synthetic-command'&&i.status==='completed')));
   const turnId=live.thread.turns.find(t=>t.items.some(i=>i.id==='synthetic-command')).id;
-  const failure=!['event','observer','full','empty','forward'].includes(scenario);
+  const failure=!['event','observer','full','empty','forward','late-user'].includes(scenario);
   let state=await until(read,x=>failure?x.runtime.state==='blocked':x.thread.turns.some(t=>t.id===turnId&&t.status==='completed'));
   await new Promise(r=>setTimeout(r,350)); // observe duplicate final event too
   state=await read();

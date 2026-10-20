@@ -16,11 +16,17 @@ its own real execution only. Never replay either acceptance.
 The pinned public Codex0.162.1 protocol uses ThreadItem (including its string id)
 in ItemStartedNotification, ItemCompletedNotification and Turn.items:
 [item schema](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d92c603/codex-rs/app-server-protocol/src/protocol/v2/item.rs).
+The same version's [Turn schema](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d92c603/codex-rs/app-server-protocol/src/protocol/v2/thread_data.rs)
+explicitly labels itemsView as summary/notLoaded/full; fixtures use these labels
+without inferring full-history authority from them.
 This is a same-item identity contract, not proof that an arbitrary producer
 never changes an id. Differing IDs are never merged by position/text; an
 apparent duplicate message refuses except for existing receipt-owned user echo
 canonicalization. Other distinct items remain distinct. Missing/invalid stable
 identity refuses final reconciliation while preserving the observed projection.
+A legitimate repeated identical message under a different id, or a missing id
+in a summary, can therefore pause the queue with the fixed conflicting-final
+error; do not bypass that availability refusal or replay automatically.
 
 ## Preparation and stop boundary
 
@@ -81,8 +87,10 @@ Node backup/source eligibility procedure, not an implicit fallback here.
 
 Leader may authorize ONE distinct read-only observation, watched live through
 supported AIS scoped to its new turn. Require exactly one completed tool with
-matching public output, then same-turn final AIS state/transcript retaining
-that item/output once after settlement and repeated reads. Record only fixed
+matching public output, then same-turn final /api/state retaining the item and
+output once after settlement and repeated reads. Compact /v1/transcript retains
+its id/kind/command once; that route intentionally omits detailText/output.
+Record only fixed
 kinds/statuses/match booleans and IDs, not raw frames/commands/private output.
 Check finalProjection counts/refusals and no fault, plus itemized real-browser
 embedded/standalone/older-page acceptance and per-PID RSS samples. HTTP tests

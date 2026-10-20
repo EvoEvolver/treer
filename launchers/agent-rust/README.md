@@ -125,7 +125,14 @@ duplicate/invalid IDs, kind changes, terminal status/error conflicts and apparen
 same-text messages with differing IDs refuse with a content-free fence. The
 existing receipt-owned user-echo canonicalization remains the only text-based
 exception. Completed command output survives an omitted/empty same-ID output;
-nonempty output may only remain equal or append. The merged candidate passes
+nonempty output may only remain equal or append.
+Terminal file changes similarly keep empty omissions and require an unchanged
+prefix for nonempty extension. Terminal tool-call JSON detail retains omitted
+fields/empty values; nonempty arrays cannot shrink, strings may only append,
+and incompatible values refuse. The reconciliation moves owned detail values
+rather than deep-cloning every recursive level. Receipt-owned late user echoes
+replace the native payload at the original receipt slot, preserving order.
+The merged candidate passes
 the existing byte/node/window admission before receipts settle. Refusal retains
 the previously accepted turn and uncertain receipt, with no automatic replay.
 `runtime.provider.finalProjection` reports only latest-attempt numeric

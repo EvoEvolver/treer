@@ -46,7 +46,9 @@ for await(const line of readline.createInterface({input:process.stdin})) {
       const finalMode=mode.replace('final-observer-','final-');
       const observer=mode==='final-observer'||mode.startsWith('final-observer-');
       const user={id:'native-user',type:'userMessage',content:[{type:'text',text:request.params.input[0].text}]};
-      const tool={id:'synthetic-command',type:'commandExecution',command:'synthetic public-file checksum',status:'completed',aggregatedOutput:'synthetic bytes=42 sha256=fixture-only'};
+      let tool={id:'synthetic-command',type:'commandExecution',command:'synthetic public-file checksum',status:'completed',aggregatedOutput:'synthetic bytes=42 sha256=fixture-only'};
+      if(finalMode.startsWith('final-file-'))tool={id:tool.id,type:'fileChange',status:'completed',changes:[{path:'synthetic.txt',kind:'update',diff:'first diff'},{path:'other.txt',kind:'add',diff:'second diff'}]};
+      if(finalMode.startsWith('final-tool-'))tool={id:tool.id,type:'dynamicToolCall',tool:'synthetic-tool',status:'completed',output:[{text:'first result'},{text:'second result'}]};
       const answer={id:'synthetic-answer',type:'agentMessage',text:'synthetic answer'};
       if(finalMode==='final-bound')tool.aggregatedOutput='x'.repeat(9*1024*1024);
       turn.items=[user];emit('turn/started',{turn});
@@ -58,6 +60,7 @@ for await(const line of readline.createInterface({input:process.stdin})) {
       // any actual provider or file content.
       setTimeout(()=>{
         turn.status='completed';
+        turn.itemsView=finalMode==='final-empty'?'notLoaded':finalMode==='final-full'?'full':'summary';
         turn.items=finalMode==='final-full'?[user,tool,answer]:[user,answer];
         if(finalMode==='final-empty')turn.items=[];
         if(finalMode==='final-forward')turn.items=[user,{...tool,aggregatedOutput:tool.aggregatedOutput+' appended'},answer];
@@ -69,11 +72,18 @@ for await(const line of readline.createInterface({input:process.stdin})) {
         if(finalMode==='final-empty-id')turn.items=[user,{...answer,id:''}];
         if(finalMode==='final-missing-id')turn.items=[user,{type:'agentMessage',text:'no identity'}];
         if(finalMode==='final-id-type')turn.items=[user,{...answer,id:42}];
+        if(finalMode==='final-late-user')emit('item/completed',{turnId:turn.id,item:user});
         if(finalMode==='final-id-mismatch') {
           emit('item/completed',{turnId:turn.id,item:answer});
           turn.items=[user,{...answer,id:'different-answer-id'}];
         }
         if(finalMode==='final-bound')turn.items=[user,{...answer,text:'y'.repeat(9*1024*1024)}];
+        if(finalMode.startsWith('final-file-')||finalMode.startsWith('final-tool-')) {
+          const field=tool.type==='fileChange'?'changes':'output';
+          const change=finalMode.split('-').at(-1);
+          const values=change==='empty'?[]:change==='shrink'?tool[field].slice(0,1):change==='conflict'?[{...tool[field][0],...(field==='changes'?{diff:'conflict'}:{text:'conflict'})},tool[field][1]]:[...tool[field],field==='changes'?{path:'third.txt',kind:'add',diff:'third diff'}:{text:'third result'}];
+          turn.items=[user,{...tool,[field]:values},answer];
+        }
         if(finalMode==='final-other-turn')turn.id='other-final-turn';
         if(!observer) {
           emit('turn/completed',{turn});

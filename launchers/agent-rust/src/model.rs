@@ -102,6 +102,41 @@ impl std::fmt::Display for InvalidFinalSnapshot {
 }
 impl std::error::Error for InvalidFinalSnapshot {}
 
+// Only tool-call detail uses this recursive extension rule. Empty/missing
+// summary fields retain observed detail; nonempty arrays may extend, never
+// shrink. Both inputs already passed the provider depth/node/byte caps and the
+// resulting turn must still pass Transcript admission before publication.
+fn retained_tool_detail(old: Value, next: Value) -> Result<Value, InvalidFinalSnapshot> {
+    let empty = |v: &Value| v.is_null() || v.as_str() == Some("")
+        || v.as_array().is_some_and(Vec::is_empty)
+        || v.as_object().is_some_and(serde_json::Map::is_empty);
+    if empty(&next) { return Ok(old); }
+    if empty(&old) { return Ok(next); }
+    match (old, next) {
+        (Value::Object(mut old), Value::Object(next)) => {
+            for (key, value) in next {
+                let value = match old.remove(&key) {
+                    Some(prior) => retained_tool_detail(prior, value)?,
+                    None => value,
+                };
+                old.insert(key, value);
+            }
+            Ok(Value::Object(old))
+        }
+        (Value::Array(old), Value::Array(next)) if next.len() >= old.len() => {
+            let mut previous = old.into_iter();
+            let merged = next.into_iter().map(|value| match previous.next() {
+                Some(prior) => retained_tool_detail(prior, value),
+                None => Ok(value),
+            }).collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Array(merged))
+        }
+        (Value::String(old), Value::String(next)) if next.starts_with(&old) => Ok(json!(next)),
+        (old, next) if old == next => Ok(next),
+        _ => Err(InvalidFinalSnapshot),
+    }
+}
+
 fn item_positions(items: &[Value]) -> Result<std::collections::HashMap<String, usize>, InvalidFinalSnapshot> {
     let mut ids = std::collections::HashMap::new();
     for (n, item) in items.iter().enumerate() {
@@ -169,6 +204,19 @@ pub fn retain_final_items(old: &Value, next: &mut Value) -> Result<(usize, usize
                         _ => return Err(InvalidFinalSnapshot),
                     }
                 }
+            }
+            if terminal(&prior["status"]) && prior["kind"] == "fileChange" {
+                let old = prior["changes"].as_array().ok_or(InvalidFinalSnapshot)?;
+                let new = updated["changes"].as_array().ok_or(InvalidFinalSnapshot)?;
+                if new.is_empty() { updated["changes"] = prior["changes"].clone(); }
+                else if !new.starts_with(old) { return Err(InvalidFinalSnapshot); }
+            }
+            if terminal(&prior["status"]) && prior["kind"] == "toolCall" {
+                let old: Value = serde_json::from_str(prior["detailText"].as_str().ok_or(InvalidFinalSnapshot)?).map_err(|_| InvalidFinalSnapshot)?;
+                let new: Value = serde_json::from_str(updated["detailText"].as_str().ok_or(InvalidFinalSnapshot)?).map_err(|_| InvalidFinalSnapshot)?;
+                let detail = retained_tool_detail(old, new)?;
+                updated["text"] = prior["text"].clone();
+                updated["detailText"] = json!(detail.to_string());
             }
             merged.push(updated);
             shared += 1;

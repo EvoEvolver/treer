@@ -567,8 +567,12 @@ impl Runtime {
             // identical accepted steer inputs remain distinct submissions.
             let local = items.iter().position(|item| item["kind"] == "userMessage" && item["submissionId"] == record.submission["id"]);
             let native = items.iter().position(|item| item["kind"] == "userMessage" && item["text"] == record.text && !item["submissionId"].is_string());
-            if let (Some(local), Some(_)) = (local, native) {
-                items.remove(local);
+            if let (Some(local), Some(native)) = (local, native) {
+                // Keep the receipt-owned first-observed position when a late
+                // native echo arrives after tool items. Removing the local
+                // slot would otherwise reorder shared completion anchors.
+                let echoed = items.remove(native);
+                items[local - usize::from(native < local)] = echoed;
             }
             let existing = items.iter().position(|item| {
                 item["kind"] == "userMessage"
@@ -1288,6 +1292,7 @@ impl Runtime {
             "turn/completed" => {
                 self.final_projection = json!({"retainedOnly":0,"sameIdUpdates":0,"conflicts":0,"refusals":0});
                 let turn_id = p["turn"]["id"].clone();
+                if !turn_id.is_string() { return Err(InvalidTurnIdentity.into()); }
                 if self.thread["activeTurnId"].is_string() && self.thread["activeTurnId"] != turn_id {
                     return Err(model::InvalidFinalSnapshot.into());
                 }
