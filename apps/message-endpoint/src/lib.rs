@@ -71,6 +71,8 @@ pub mod email_workers;
 mod management;
 // Stage-2 contract; no runtime dispatch or migration activation yet.
 #[cfg(unix)]
+pub mod telegram_disposition_ack;
+#[cfg(unix)]
 pub mod telegram_disposition_admission;
 #[cfg(unix)]
 pub mod telegram_disposition_identity;

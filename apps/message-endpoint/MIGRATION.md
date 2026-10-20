@@ -750,10 +750,10 @@ error after the local mismatch COMMIT, keeping the delivery unacknowledged. No
 runtime worker invokes this stage, and no receipt-mode activation is implied.
 A two-connection local test verifies serialized Inserted/Replay with
 one persisted row and counter increment; this is not real Core ACK rehearsal.
-The recorded-discard outcome and exact confirmed-ACK marker, owner recovery and
-bounded mailbox scheduling remain
-pending. Do not deploy or downgrade this storage migration without its separate
-release review; a pre-v2 binary must not interpret or clear recovery holds.
+The recorded-discard outcome and composed confirmed-ACK wiring, owner recovery
+and bounded mailbox scheduling remain pending. The independent marker primitive
+is described below. Do not deploy or downgrade this storage migration without
+its separate release review; a pre-v2 binary must not interpret or clear recovery holds.
 
 The owner binding view overlays the durable hold reason, so a later metadata
 readback or ordinary pause cannot hide that recovery requirement. The unpause
@@ -772,3 +772,54 @@ pre-v2 binary is unsupported once holds exist.
 The local two-connection test checks the serialized Inserted/Replay result;
 its pre-BEGIN thread signal is not proof that SQLite actually waited for a
 write lock. Deterministic contention coverage requires a lock-wait handshake.
+
+### Exact confirmed-ACK marker primitive (not dispatched)
+
+`telegram_disposition_ack` provides a separate marker lifecycle for an already
+committed terminal-mismatch ledger row. `prepare` parses the borrowed immutable
+`AuthenticatedDelivery` against the supplied expected handoff, then checks its
+exact hashes, stable job/endpoint/generation/recipient tuple, terminal unequal
+Core ID, receipt-mode pin, live binding, schema and durable hub/workspace. A
+short read transaction finishes before the returned opaque `PendingAck` can
+perform any Core operation. Its retained monotonic ledger ordinal prevents
+confirmation from transferring to an identical key/digest/parent reinserted
+while the original row is gone. The future composed dispatcher must still derive
+the expected receipt fields from its authoritative durable handoff.
+
+`PendingAck::confirm` uses the pinned Core under the same hub identity and the
+existing deterministic ACK operation key. It borrows the same authenticated
+delivery throughout; a caller cannot swap in another ID/body after preparation.
+Only Core's exact delivery ID in `acknowledged_delivery_ids` or
+`already_acknowledged_delivery_ids` produces an opaque `ConfirmedAck`. A wrong ID,
+missing/malformed response, CLI error or lost reply cannot produce that value.
+No Store or database transaction is retained during the network call; the future
+caller must also release any enclosing Hub mutex before invoking it.
+
+`ConfirmedAck::mark` opens a separate IMMEDIATE transaction, repeats all durable
+checks, requires the same original ordinal and no conflict/recovery hold, and
+marks only that row acked. It does not change the parent final ID, mismatch
+counter, mappings, holds or pruning. A normal safety pause alone does not refuse
+an otherwise exact confirmation. A failed commit, dropped confirmation or row
+change cannot promote an unconfirmed disposition; prepare/reconfirm can retry
+Core's deterministic ACK and mark idempotently. A concurrent conflict during an
+already in-flight ACK cannot undo Core's external result: marking fails closed
+and retains the conflicted row/hold for audited recovery. This is not a claim of
+atomicity between Core and SQLite, or permission to acknowledge a conflicting
+new receipt.
+
+Synthetic tests exercise exact target-ID membership in acknowledged/already-
+acknowledged responses (the lists need not exclusively contain that ID),
+wrong-ID/malformed/error replies, immutable delivery scope and digest, schema/
+identity/mode/parent/hold drift, original-row replacement, marker COMMIT failure,
+lost local confirmation and private-Store reopen. A test drifts the database
+pathname inside the marker UPDATE with the real #217 COMMIT hook still installed:
+the marker rolls back, refusal stays sticky after path restoration, and a fresh
+Store reopens unacked before reconfirming the same deterministic ACK. A blocked
+fake Core ACK allows a second SQLite connection to commit a conflict while the call waits; late
+marking refuses without overwriting that conflict. No real Core receipt or ACK
+is used. Existing receipt completion still returns an error for a terminal
+mismatch and does not call this primitive: recorded-discard return semantics,
+composed ACK/marker wiring, real Core ACK-idempotence/process-death rehearsal,
+bounded dispatcher scheduling, owner-only masked visibility/recovery and
+production activation remain separate work. This increment changes no runtime
+activation, transport or credential configuration.

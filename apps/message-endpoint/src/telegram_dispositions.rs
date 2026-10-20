@@ -1,6 +1,6 @@
 //! Terminal-mismatch ledger schema, initialized by Hub startup; no ACK authority.
 //! Local admission and counter/hold composition live in telegram_disposition_admission;
-//! confirmed-ACK marking and owner recovery remain separate work.
+//! confirmed-ACK marking lives in telegram_disposition_ack; owner recovery is pending.
 use crate::store::{Error, Store};
 
 pub const SCHEMA_VERSION: i64 = 2;
