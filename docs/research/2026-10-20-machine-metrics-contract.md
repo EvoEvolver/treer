@@ -11,6 +11,14 @@ series/device membership, bucket boundaries/counts/coverage and current memory
 pairs. Source callers use `validate` before serialization. Neither is wired into
 a live route yet. The browser still needs its own equivalent validator. These
 checks establish internal wire consistency, not truthful machine measurements.
+Unknown response extension fields may be parsed for compatibility but MUST NOT
+be forwarded as raw bytes: Controller inner relays and Proxy return only a
+new serialization of the validated typed struct. This drops unknown UUID,
+driver and arbitrary nested payload fields. A regression adds such fields at
+three nesting levels and requires the forwarded value to equal the original
+clean structure. Route wiring must test that it actually uses this path.
+Logical CPU count is 1..65,535 when known. GPU names also reject zero-width
+U+200B..200F, bidi U+202A..202E / U+2066..2069 and U+FEFF format characters.
 
 ## Authorization and local boundary decisions
 
@@ -168,6 +176,8 @@ retained historical series. Every nonempty example currently has one bucket;
 partial_gap has a single partial bucket, whose plotted statistic is the bucket
 mean, not a fabricated raw reading at first/last_sample_at. Render it with a
 marked point/table value while breaking continuity.
+CPU current is deliberately 12.5 while the historical mean is 10 (min 5/max 15)
+so a consumer confusing bucket means with current readings fails its fixture.
 
 Rust and browser validators should consume the same emitted fixture documents.
 Web can capture the synthetic stdout in its own test assets (no live data) and

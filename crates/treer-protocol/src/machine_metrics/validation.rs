@@ -75,7 +75,9 @@ impl MachineMetricsResponse {
                         .checked_add_signed(chrono::Duration::seconds(15))
                         .unwrap_or(received_at)
                 && self.generated_at >= query.to
-                && self.logical_cpus.is_none_or(|count| count > 0)
+                && self
+                    .logical_cpus
+                    .is_none_or(|count| (1..=MACHINE_METRICS_MAX_LOGICAL_CPUS).contains(&count))
                 && self.gpus.len() <= MACHINE_METRICS_MAX_GPUS
                 && self.series.len() == 4 + self.gpus.len() * 3
                 && self.series.len() <= MACHINE_METRICS_MAX_SERIES
@@ -96,7 +98,11 @@ impl MachineMetricsResponse {
                     && ids.insert(gpu.id.as_str())
                     && !gpu.name.is_empty()
                     && gpu.name.len() <= 128
-                    && !gpu.name.chars().any(char::is_control),
+                    && !gpu.name.chars().any(|c| {
+                        c.is_control()
+                            || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+                            | '\u{2066}'..='\u{2069}' | '\u{feff}')
+                    }),
             )?;
         }
         let mut keys = HashSet::new();

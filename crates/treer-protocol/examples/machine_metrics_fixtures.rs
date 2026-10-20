@@ -47,9 +47,9 @@ fn base() -> (MachineMetricsQuery, MachineMetricsResponse) {
             }],
             first_sample_at: Some(query.from),
             last_sample_at: Some(query.to - Duration::seconds(5)),
-            mean: Some(value),
-            min: Some(value),
-            max: Some(value),
+            mean: Some(if index == 0 { 10.0 } else { value }),
+            min: Some(if index == 0 { 5.0 } else { value }),
+            max: Some(if index == 0 { 15.0 } else { value }),
             partial: false,
         }],
     })
@@ -168,6 +168,35 @@ mod tests {
             .unwrap();
             assert_eq!(parsed, response);
         }
+        let (_, healthy) = base();
+        assert_eq!(healthy.series[0].current.value, Some(12.5));
+        assert_eq!(healthy.series[0].points[0].mean, Some(10.0));
+        assert_ne!(
+            healthy.series[0].current.value,
+            healthy.series[0].points[0].mean
+        );
+    }
+
+    #[test]
+    fn unknown_fields_are_removed_only_by_forwarding_the_validated_struct() {
+        let (query, response) = base();
+        let mut raw = serde_json::to_value(&response).unwrap();
+        raw["raw_gpu_uuid"] = serde_json::json!("GPU-private-fingerprint");
+        raw["gpus"][0]["driver"] = serde_json::json!("private-driver-diagnostic");
+        raw["series"][0]["extra"] = serde_json::json!({"secret": "private"});
+        let bytes = serde_json::to_vec(&raw).unwrap();
+        let parsed = MachineMetricsResponse::parse_bounded(
+            &bytes,
+            &query,
+            "fixture-machine",
+            response.generated_at,
+        )
+        .unwrap();
+        let forwarded = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(forwarded, serde_json::to_value(response).unwrap());
+        assert!(forwarded.get("raw_gpu_uuid").is_none());
+        assert!(forwarded["gpus"][0].get("driver").is_none());
+        assert!(forwarded["series"][0].get("extra").is_none());
     }
 
     #[test]
@@ -203,6 +232,7 @@ mod tests {
             Box::new(|r| r.gpus[0].id = "GPU-raw-uuid".into()),
             Box::new(|r| r.gpus[0].name = "x".repeat(129)),
             Box::new(|r| r.gpus[0].name = "line\nbreak".into()),
+            Box::new(|r| r.logical_cpus = Some(MACHINE_METRICS_MAX_LOGICAL_CPUS + 1)),
             Box::new(|r| r.gpus[0].present = false),
             Box::new(|r| r.gpus = vec![r.gpus[0].clone(); 33]),
             Box::new(|r| r.series[0].points = vec![r.series[0].points[0].clone(); 721]),
@@ -216,6 +246,15 @@ mod tests {
                     .is_err(),
                 "rejected control {index}"
             );
+        }
+        for character in [
+            '\u{200b}', '\u{200f}', '\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}', '\u{feff}',
+        ] {
+            let mut response = valid.clone();
+            response.gpus[0].name = format!("GPU{character}spoof");
+            assert!(response
+                .validate(&query, "fixture-machine", valid.generated_at)
+                .is_err());
         }
         // Bound raw bytes, including ignored extension fields, before parsing.
         let oversized = vec![b' '; MACHINE_METRICS_MAX_RESPONSE_BYTES + 1];
