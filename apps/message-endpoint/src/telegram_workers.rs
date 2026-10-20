@@ -727,6 +727,9 @@ mod tests {
         }
     }
     fn fixture() -> SharedHub<NoCore> {
+        fixture_with_outbound(true)
+    }
+    fn fixture_with_outbound(outbound: bool) -> SharedHub<NoCore> {
         let mut hub = Hub::new(
             Store::memory(Limits::default()).unwrap(),
             NoCore,
@@ -772,6 +775,9 @@ mod tests {
             time,
         )
         .unwrap();
+        if !outbound {
+            return Arc::new(Mutex::new(hub));
+        }
         let envelope = Envelope::Outbound {
             delivery_id: "delivery_original".into(),
             message_id: "msg_original".into(),
@@ -1181,7 +1187,9 @@ mod tests {
     }
     #[test]
     fn token_change_drain_times_out_safely_and_mid_poll_does_not_admit() {
-        let state = fixture();
+        // Isolate poll-drain admission: no independent outbound work can finish
+        // before stop is requested and contaminate the lifetime send counter.
+        let state = fixture_with_outbound(false);
         let slow = Arc::new(BlockedBot::default());
         let workers = Arc::new(Mutex::new(
             TelegramWorkers::start(
@@ -1204,6 +1212,38 @@ mod tests {
         TelegramWorkers::stop_shared(&workers).unwrap();
         assert_eq!(workers.lock().unwrap().status()[0].admitted_batches, 0);
         assert_eq!(workers.lock().unwrap().status()[0].sent_chunks, 0);
+    }
+    #[test]
+    fn drain_preserves_send_completed_before_stop_without_admitting_blocked_poll() {
+        let state = fixture();
+        let slow = Arc::new(BlockedBot::default());
+        let workers = Arc::new(Mutex::new(
+            TelegramWorkers::start(
+                state,
+                vec![Account::new("bot_fixture".into(), 12345, slow.clone())],
+            )
+            .unwrap(),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        // A blocked poll has already verified the account. The independent
+        // sender may therefore finish queued work before any stop request.
+        while !slow.entered.load(Ordering::Acquire)
+            || workers.lock().unwrap().status()[0].sent_chunks != 1
+        {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(slow.inner.sent.lock().unwrap().len(), 1);
+        assert!(
+            TelegramWorkers::stop_shared_with_timeout(&workers, Duration::from_millis(10)).is_err()
+        );
+        assert!(!workers.lock().unwrap().readiness()("bot_fixture"));
+        slow.released.store(true, Ordering::Release);
+        TelegramWorkers::stop_shared(&workers).unwrap();
+        let status = workers.lock().unwrap().status();
+        assert_eq!(status[0].admitted_batches, 0);
+        assert_eq!(status[0].sent_chunks, 1);
+        assert_eq!(slow.inner.sent.lock().unwrap().len(), 1);
     }
     #[test]
     fn secret_startup_files_are_private_strict_and_never_have_an_origin_override() {
