@@ -2,7 +2,7 @@
 //! only bounded windows, never the complete wire line or complete turns array.
 use serde_json::{Map, Value};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -16,6 +16,7 @@ pub const WINDOW_TURNS: usize = 50;
 pub struct Selection {
     pub range: Option<(usize, usize)>,
     pub target: Option<String>,
+    pub full_history: bool,
 }
 pub type Selections = Arc<Mutex<HashMap<u64, Selection>>>;
 type Result<T> = std::result::Result<T, &'static str>;
@@ -37,12 +38,18 @@ pub struct Reader<R> {
     recent: Window,
     total: usize,
     active: Option<Arc<Value>>,
+    active_count: usize,
+    active_index: usize,
     targets: HashMap<u64, Arc<Value>>,
     max_depth: usize,
     frame_kind: &'static str,
     limit_kind: &'static str,
     outside_nodes: usize,
     history_seen: bool,
+    history_ids: HashSet<[u8; 32]>,
+    history_identity_valid: bool,
+    history_order_valid: bool,
+    last_started: Option<i64>,
 }
 #[derive(Default)]
 struct Window {
@@ -99,12 +106,18 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             recent: Window::default(),
             total: 0,
             active: None,
+            active_count: 0,
+            active_index: 0,
             targets: HashMap::new(),
             max_depth: 0,
             frame_kind: "responseOrUnknown",
             limit_kind: "none",
             outside_nodes: 0,
             history_seen: false,
+            history_ids: HashSet::new(),
+            history_identity_valid: true,
+            history_order_valid: true,
+            last_started: None,
         }
     }
     fn shape_limit(&mut self, kind: &'static str) -> &'static str {
@@ -112,7 +125,7 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         "provider_json_limit"
     }
     pub fn diagnostic(&self) -> Value {
-        serde_json::json!({"frameBytes":self.count,"outsideBytes":self.outside,"nodeCount":self.total_nodes,"shapeNodes":self.nodes,"outsideNodes":self.outside_nodes,"maxDepth":self.max_depth,"turnCount":self.total,"inHistory":self.in_history,"frameKind":self.frame_kind,"limitKind":self.limit_kind})
+        serde_json::json!({"frameBytes":self.count,"outsideBytes":self.outside,"nodeCount":self.total_nodes,"shapeNodes":self.nodes,"outsideNodes":self.outside_nodes,"maxDepth":self.max_depth,"turnCount":self.total,"inHistory":self.in_history,"frameKind":self.frame_kind,"limitKind":self.limit_kind,"inProgressCount":self.active_count})
     }
     fn outside_budget(&self) -> (usize,usize) {
         // Until the root method is read, use a bounded provisional envelope.
@@ -356,6 +369,9 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         loop {
             // Per-turn shape bound applies even to discarded history. Total
             // scan work additionally has the frame-byte ceiling and RPC deadline.
+            if self.total == 100_000 {
+                return Err(self.shape_limit("turnCount"));
+            }
             self.nodes = 0;
             let begin = self.count;
             self.turn_begin = Some(begin);
@@ -366,12 +382,32 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             }
             let bytes = serde_json::to_vec(&value)
                 .map_err(|_| "invalid_json")?
-                .len();
+                .len() + usize::from(value["status"] == "inProgress"); // interrupted is one byte longer
             let value = Arc::new(value);
-            if value["status"] == "inProgress" {
-                if self.active.is_some() {
-                    return Err(self.shape_limit("multipleActiveTurns"));
+            // Fixed-size hashes, not payloads/IDs: at most 100,000 entries
+            // under the existing scan cap. Duplicate identities fail closed.
+            use sha2::{Digest, Sha256};
+            if let Some(id) = value["id"].as_str().filter(|s| !s.is_empty()) {
+                if !self.history_ids.insert(Sha256::digest(id.as_bytes()).into()) {
+                    self.history_identity_valid = false;
                 }
+            } else {
+                self.history_identity_valid = false;
+            }
+            if !value["startedAt"].is_null() {
+                match value["startedAt"].as_i64() {
+                    Some(started) => {
+                        if self.last_started.is_some_and(|last| started < last) {
+                            self.history_order_valid = false;
+                        }
+                        self.last_started = Some(started);
+                    }
+                    None => self.history_order_valid = false,
+                }
+            }
+            if value["status"] == "inProgress" {
+                self.active_count += 1;
+                self.active_index = self.total;
                 self.active = Some(value.clone());
             }
             for (&id, selection) in &selections {
@@ -430,12 +466,18 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         self.recent = Window::default();
         self.total = 0;
         self.active = None;
+        self.active_count = 0;
+        self.active_index = 0;
         self.targets.clear();
         self.max_depth = 0;
         self.frame_kind = "responseOrUnknown";
         self.limit_kind = "none";
         self.outside_nodes = 0;
         self.history_seen = false;
+        self.history_ids.clear();
+        self.history_identity_valid = true;
+        self.history_order_valid = true;
+        self.last_started = None;
         self.spaces().await?;
         if self.peek().await?.is_none() {
             return Ok(None);
@@ -451,6 +493,39 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             _ => return Err("invalid_json"),
         }
         if value["result"]["thread"]["turns"].is_array() {
+            // Codex history can retain inProgress after a provider restart.
+            // Match Node's ordered full-history interpretation only with an
+            // explicit usable thread status. Metadata may follow the turns.
+            let status = match value["result"]["thread"]["status"]["type"].as_str() {
+                Some("idle") => Some("idle"), Some("active") => Some("active"),
+                None => None, _ => Some("other"),
+            };
+            let full_history = self.selections.lock().unwrap()
+                .get(&value["id"].as_u64().unwrap_or(0)).is_some_and(|s| s.full_history);
+            let paged = ["nextCursor", "next_cursor", "cursor", "previousCursor", "turnsBackwardsCursor", "itemsBackwardsCursor", "initialTurnsPage"]
+                .iter().any(|key| !value["result"][key].is_null() || !value["result"]["thread"][key].is_null())
+                || value["result"]["thread"]["hasMore"] == true || value["result"]["hasMore"] == true;
+            let normalize = full_history && !paged && matches!(status, Some("idle" | "active"));
+            if full_history && (!self.history_identity_valid || !self.history_order_valid || paged) {
+                return Err(self.shape_limit("historyAuthority"));
+            }
+            if !normalize && self.active_count > 1 {
+                return Err(self.shape_limit("multipleActiveTurns"));
+            }
+            let newest_active = self.active_index + 1 == self.total;
+            let live_id = if normalize {
+                if status == Some("active") && newest_active {
+                    self.active.as_ref().and_then(|t| t["id"].as_str()).map(str::to_owned)
+                } else {
+                    None
+                }
+            } else {
+                self.active.as_ref().and_then(|t| t["id"].as_str()).map(str::to_owned)
+            };
+            if normalize && live_id.is_none() {
+                self.active = None;
+            }
+            let mut live_turn = self.active.clone();
             let id = value["id"].as_u64().unwrap_or(0);
             let selected = self.windows.contains_key(&id);
             let mut window = self
@@ -497,10 +572,19 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                 window
                     .values
                     .into_iter()
-                    .map(|v| Arc::try_unwrap(v).unwrap_or_else(|v| (*v).clone()))
+                    .map(|v| {
+                        let is_live = live_turn.as_ref().is_some_and(|active| Arc::ptr_eq(active, &v));
+                        if is_live { live_turn = None; }
+                        let mut turn = Arc::try_unwrap(v).unwrap_or_else(|v| (*v).clone());
+                        if normalize && turn["status"] == "inProgress" && !is_live
+                        {
+                            turn["status"] = Value::String("interrupted".into());
+                        }
+                        turn
+                    })
                     .collect(),
             );
-            value["result"]["treerHistory"] = serde_json::json!({"total":self.total,"start":window.start,"frameBytes":self.count,"nodeCount":self.total_nodes,"elapsedMs":started.elapsed().as_millis()});
+            value["result"]["treerHistory"] = serde_json::json!({"total":self.total,"start":window.start,"frameBytes":self.count,"nodeCount":self.total_nodes,"elapsedMs":started.elapsed().as_millis(),"staleInProgressCount":if normalize {self.active_count-usize::from(live_id.is_some())} else {0},"threadStatus":match status {Some("idle")=>"idle",Some("active")=>"active",None=>"missing",_=>"other"}});
         }
         Ok(Some(value))
     }
@@ -510,6 +594,79 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[tokio::test]
+    async fn producer_history_status_normalizes_stale_turns_after_complete_metadata() {
+        for status in ["idle", "active"] {
+            for late in [false, true] {
+                let turns = json!([
+                    {"id":"stale","status":"inProgress"},
+                    {"id":"finished","status":"completed"},
+                    {"id":"newest","status":"inProgress"}
+                ]);
+                let metadata = format!("\"status\":{{\"type\":\"{status}\",\"activeFlags\":[]}}");
+                let thread = if late { format!("\"turns\":{turns},{metadata}") }
+                    else { format!("{metadata},\"turns\":{turns}") };
+                let wire = format!("{{\"id\":1,\"result\":{{\"thread\":{{{thread}}}}}}}\n");
+                let selections = Selections::default();
+                selections.lock().unwrap().insert(1, Selection { full_history: true, ..Selection::default() });
+                let result = Reader::new(wire.as_bytes(), selections).next().await.unwrap().unwrap();
+                let turns = result["result"]["thread"]["turns"].as_array().unwrap();
+                assert_eq!(turns[0]["status"], "interrupted");
+                assert_eq!(turns[1]["status"], "completed");
+                assert_eq!(turns[2]["status"], if status == "idle" { "interrupted" } else { "inProgress" });
+            }
+        }
+        for status in [Value::Null, json!({"type":"unknown"}), json!({"type":"systemError"})] {
+            let wire = serde_json::to_vec(&json!({"id":1,"result":{"thread":{"status":status,"turns":[
+                {"id":"one","status":"inProgress"},{"id":"two","status":"inProgress"}
+            ]}}})).unwrap();
+            let mut reader = Reader::new(wire.as_slice(), Selections::default());
+            assert_eq!(reader.next().await.unwrap_err(), "provider_json_limit");
+            assert_eq!(reader.diagnostic()["limitKind"], "multipleActiveTurns");
+        }
+    }
+    #[tokio::test]
+    async fn ambiguous_history_is_not_normalization_authority() {
+        for case in ["unregistered", "paged", "duplicate", "reordered"] {
+            let mut thread = json!({"status":{"type":"active"},"turns":[
+                {"id":"one","status":"inProgress","startedAt":10},
+                {"id":"two","status":"inProgress","startedAt":20}
+            ]});
+            match case {
+                "paged" => thread["nextCursor"] = json!("synthetic-next"),
+                "duplicate" => thread["turns"][1]["id"] = json!("one"),
+                "reordered" => thread["turns"][1]["startedAt"] = json!(9),
+                _ => {},
+            }
+            let bytes = serde_json::to_vec(&json!({"id":1,"result":{"thread":thread}})).unwrap();
+            let selections = Selections::default();
+            if case != "unregistered" { selections.lock().unwrap().insert(1, Selection { full_history: true, ..Default::default() }); }
+            let mut reader = Reader::new(bytes.as_slice(), selections);
+            assert_eq!(reader.next().await.unwrap_err(), "provider_json_limit", "{case}");
+        }
+    }
+    #[tokio::test]
+    async fn producer_52_turn_node_rich_history_keeps_existing_limits() {
+        let turns = (0..52).map(|n| json!({"id":format!("synthetic-{n}"),"startedAt":n,"status":"inProgress",
+            "items":[{"type":"dynamicToolCall","output":"x".repeat(230*1024),"content":vec![json!({"a":[0,1,2],"b":true});210]}]})).collect::<Vec<_>>();
+        let wire = serde_json::to_vec(&json!({"id":1,"result":{"thread":{"turns":turns,"status":{"type":"idle"}}}})).unwrap();
+        assert!(wire.len() > 11*1024*1024 && wire.len() < 13*1024*1024);
+        let selections = Selections::default();
+        selections.lock().unwrap().insert(1, Selection { full_history: true, ..Default::default() });
+        let result = Reader::new(wire.as_slice(), selections).next().await.unwrap().unwrap();
+        assert!(result["result"]["treerHistory"]["nodeCount"].as_u64().unwrap() > 86_000);
+        assert_eq!(result["result"]["treerHistory"]["staleInProgressCount"],52);
+        assert!(result["result"]["thread"]["turns"].as_array().unwrap().iter().all(|t| t["status"] == "interrupted"));
+    }
+    #[tokio::test]
+    async fn history_identity_hash_cap_refuses_instead_of_truncating() {
+        let turns=(0..100_001).map(|n|json!({"id":n.to_string(),"status":"completed"})).collect::<Vec<_>>();
+        let bytes=serde_json::to_vec(&json!({"id":1,"result":{"thread":{"turns":turns,"status":{"type":"idle"}}}})).unwrap();
+        let mut reader=Reader::new(bytes.as_slice(), Selections::default());
+        assert_eq!(reader.next().await.unwrap_err(),"provider_json_limit");
+        assert_eq!(reader.diagnostic()["limitKind"],"turnCount");
+        assert_eq!(reader.history_ids.len(),100_000);
+    }
     #[tokio::test]
     async fn bounded_live_tool_shapes_and_content_free_failure_diagnostics() {
         for count in [8_000, 80_000] {
@@ -553,6 +710,7 @@ mod tests {
             Selection {
                 range: Some((10, 20)),
                 target: None,
+                ..Selection::default()
             },
         );
         let turns = (0..100)
@@ -644,6 +802,7 @@ mod tests {
             Selection {
                 range: None,
                 target: Some("target".into()),
+                ..Selection::default()
             },
         );
         let mut turns = vec![json!({"id":"target","status":"completed"})];

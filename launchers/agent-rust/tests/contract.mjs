@@ -179,13 +179,12 @@ test('many-turn recent window evicts finished history without losing receipts or
   assert.equal(journal.records[0].source_messages[0].ackPending,true,'history eviction must not discard an unacknowledged Core message');
   assert.ok(!journal.turns,'older turns are not copied into the journal');
   assert.ok(peak<256*1024,`recent-window RSS ${peak} KiB exceeds256 MiB`);
+  const beforeRefusedResume=await readFile(join(s.state,'rust-spike.json'),'utf8');
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   const restarted=await s.launch({HISTORY_LARGE_RESUME:'1',HISTORY_LARGE_ACTIVE:'1'},false);
-  const resumed=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.ready,45000);
-  assert.ok(resumed.thread.turns.some(t=>t.id==='old-0'&&t.status==='inProgress'),'an active turn outside the newest suffix must survive');
-  assert.ok(resumed.thread.turns.length<=50);
-  const recovered=await fetch(restarted.base+'/v1/submissions/'+admitted[0],{headers:s.headers}).then(r=>r.json());
-  assert.equal(recovered.submission.state,'done');
+  const resumed=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.thread?.lastError,45000);
+  assert.equal(resumed.thread.status,'error','active status with only an old candidate cannot authorize a new turn');
+  assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),beforeRefusedResume,'refused resume must not rewrite durable receipts');
   t.diagnostic(JSON.stringify({baselineRssKiB:baseline,peakRssKiB:peak,retainedTurns:state.thread.turns.length,receipts:admitted.length}));
 });
 
@@ -327,6 +326,9 @@ test('streamed 50 MiB resume retains a recent window, fetches older pages on dem
   const originalReceipt=await s.post({text:'local text belongs only to this requested old turn',operation_id:'old-page-projection'}).then(r=>r.json());
   await until(()=>fetch(s.base+'/v1/submissions/'+originalReceipt.submission.id,{headers:s.headers}).then(r=>r.json()),x=>x.submission?.state==='done');
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  // Assert no preload by this resumed process, not observer calls made by the
+  // previous process while finishing the setup receipt.
+  await writeFile(join(s.root,'cwd/frames.jsonl'),'');
   let peak=0,pid=null,busy=false;
   const sample=setInterval(async()=>{if(!pid||busy)return;busy=true;try{peak=Math.max(peak,await rssKiB(pid));}catch{}finally{busy=false;}},25);
   t.after(()=>clearInterval(sample));
@@ -592,6 +594,66 @@ test('Rust history failure is visible but live receipts still publish',{skip:use
   assert.ok(saved.records.some(r=>r.operation==='history-live-op'));
   assert.equal(await readFile(extra,'utf8'),'keep untouched');
 });
+for(const scenario of ['normal','concurrent','mismatch','reopen'])test('Node import and producer-shaped stale history resume then real new-turn path '+scenario,{skip:useNode,timeout:60000},async t=>{
+  const failure=scenario!=='normal';
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl',HISTORY_STALE_SNAPSHOT:'1',...({concurrent:{HISTORY_CONCURRENT_ACTIVE:'1'},mismatch:{HISTORY_MISMATCH_START:'1'},reopen:{HISTORY_REOPEN_TERMINAL:'1'}}[scenario]||{})});
+  const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
+  await unlink(join(s.state,'rust-spike.json'));
+  const legacy=join(s.root,'cwd/.treer/agents/ag_contract');await mkdir(legacy,{recursive:true,mode:0o700});
+  const source=JSON.stringify({version:1,records:[]})+'\n';
+  await writeFile(join(legacy,'agent-ui.json'),JSON.stringify({threadId:'synthetic-history'})+'\n',{mode:0o600});
+  await writeFile(join(legacy,'queue.json'),source,{mode:0o600});
+  const imported=await s.launch({},true,['--import-node-state']);
+  assert.match(s.logs(),/node_state_imported/);
+  let state=await fetch(imported.base+'/api/state').then(r=>r.json());
+  assert.equal(state.thread.id,'synthetic-history');assert.equal(state.thread.status,'idle');
+  assert.equal(state.history.totalTurns,778);assert.equal(state.thread.turns.length,50);
+  assert.equal(state.thread.turns.at(-1).status,'interrupted');
+  assert.equal(state.runtime.provider.historyScan.staleInProgressCount,4);
+  assert.ok(state.runtime.provider.historyScan.frameBytes>45*1024*1024);
+  assert.equal(await readFile(join(s.state,'node-backup-v1/queue.json'),'utf8'),source);
+  const post=()=>fetch(imported.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'synthetic acceptance only',operation_id:'stale-after-import'})});
+  const accepted=await post();
+  assert.ok((scenario==='mismatch'?[202,400]:[202]).includes(accepted.status),'a mismatch discovered during the RPC may reject the HTTP call after its durable intent');
+  state=await until(()=>fetch(imported.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked'||(!failure&&x.thread.turns.some(t=>t.id==='history-779'&&t.status==='completed')),20000);
+  const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+  if(failure) {
+    assert.equal(state.runtime.state,'blocked');assert.match(state.runtime.error,({concurrent:/concurrent active turns/,mismatch:/disagrees with live turn/,reopen:/reopened a terminal turn/})[scenario]);
+    assert.equal(journal.dispatchBlocked,true);
+    assert.equal(journal.records.find(r=>r.operation==='stale-after-import').submission.state,scenario==='reopen'?'done':'running','uncertain receipt must not be invented complete; terminal receipt must not reopen');
+  } else {
+    assert.equal(state.ready,true);assert.equal(state.runtime.provider.transport,'open');
+    const turn=state.thread.turns.find(t=>t.id==='history-779');
+    assert.equal(turn.items.filter(i=>i.kind==='userMessage').length,1);
+    assert.equal(turn.items.filter(i=>i.kind==='agentMessage').length,1);
+    assert.equal((await (await post()).json()).duplicate,true);
+    const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+    assert.ok(frames.some(f=>f.method==='thread/read'&&f.bytes>45*1024*1024),'observer must parse full stale history while the new turn is active');
+    assert.equal(journal.records.find(r=>r.operation==='stale-after-import').submission.state,'done');
+    const older=await fetch(imported.base+'/api/history/older',{method:'POST',body:JSON.stringify({cursor:state.history.cursor})}).then(r=>r.json());
+    assert.equal(older.thread.turns.find(t=>t.id==='old-700').status,'interrupted');
+    assert.ok(older.thread.turns.every(t=>t.status!=='inProgress'),'old page uses the same stale normalization');
+  }
+  const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(frames.filter(f=>f.method==='turn/start').length,1);
+  assert.equal(await readFile(join(legacy,'queue.json'),'utf8'),source,'Node source stays unchanged');
+  t.diagnostic(JSON.stringify({historyScan:state.runtime.provider.historyScan,rssKiB:await rssKiB(imported.child.pid),scenario}));
+});
+
+for(const mode of ['missing','missingZero','missingOne','unknown','paged','duplicate','reordered','activeNoNewest'])test('producer-shaped ambiguous history refuses startup: '+mode,{skip:useNode,timeout:20000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
+  const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
+  const restarted=await s.launch({HISTORY_STALE_SNAPSHOT:'1',HISTORY_STALE_INVALID:mode},false);
+  const state=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.thread?.lastError);
+  assert.equal(state.ready,false);
+  if(mode==='missingZero'||mode==='missingOne') {
+    assert.match(state.thread.lastError,/Codex startup failed/,'public startup failure remains privacy-safe');
+    assert.notEqual((await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'synthetic must not dispatch',operation_id:'unknown-status'})})).status,202);
+  }
+  const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(frames.filter(f=>f.method==='turn/start').length,0);
+});
+
 test('Rust imports a Node queue once, resumes its thread, preserves retries and restores byte backup',{skip:useNode,timeout:20000},async t=>{
   const s=await fixture(t);
   const thread=(await fetch(s.base+'/api/state').then(r=>r.json())).thread.id;
@@ -927,8 +989,12 @@ for(const mode of ['omit','timeout'])test('Rust uncertain '+mode+' blocks all la
   const first=s.post({text:'accepted but ambiguous',operation_id:'uncertain'});
   await until(()=>providerCalls(s),calls=>calls.some(c=>c.method==='turn/start'));
   const second=s.post({text:'must remain queued',operation_id:'later'});
-  const initial=await first;assert.equal(initial.status,202);
-  const accepted=await initial.json();
+  const initial=await first;assert.equal(initial.status,mode==='timeout'?400:202);
+  const initialBody=await initial.json();
+  // A poisoned foreground RPC can reject HTTP after publishing dispatch intent.
+  // The durable receipt, not an HTTP 202, remains the reconciliation authority.
+  const durable=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+  const accepted=mode==='timeout'?{submission:durable.records.find(r=>r.operation==='uncertain').receipt}:initialBody;
   const following=await second;
   const admission=await following.json();
   if(mode==='timeout') {
@@ -936,7 +1002,12 @@ for(const mode of ['omit','timeout'])test('Rust uncertain '+mode+' blocks all la
     assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).runtime.provider.transport,'rpc_timeout');
   } else assert.equal(admission.submission.disposition,'queued');
   const original=await fetch(s.base+'/v1/submissions/'+accepted.submission.id,{headers:s.headers}).then(r=>r.json());
-  assert.equal(original.submission.state,'failed');assert.match(original.submission.error,/uncertain/);
+  if(mode==='timeout') {
+    assert.equal(original.submission.state,'running','poisoned RPC retains uncertain intent without inventing a terminal receipt');
+    assert.equal(durable.dispatchBlocked,true);
+  } else {
+    assert.equal(original.submission.state,'failed');assert.match(original.submission.error,/uncertain/);
+  }
   await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked');
   await new Promise(resolve=>setTimeout(resolve,2200));
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
@@ -945,7 +1016,11 @@ for(const mode of ['omit','timeout'])test('Rust uncertain '+mode+' blocks all la
   const retry=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'must remain queued',operation_id:'later'})}).then(r=>r.json());
   if(mode==='timeout')assert.equal(retry.submission.disposition,'queued');
   else assert.deepEqual(retry.submission,admission.submission);
-  assert.deepEqual(await fetch(restarted.base+'/v1/submissions/'+accepted.submission.id,{headers:s.headers}).then(r=>r.json()),original);
+  const afterRestart=await fetch(restarted.base+'/v1/submissions/'+accepted.submission.id,{headers:s.headers}).then(r=>r.json());
+  if(mode==='timeout') {
+    assert.equal(afterRestart.submission.state,'failed');assert.match(afterRestart.submission.error,/uncertain/);
+    assert.deepEqual({...afterRestart.submission,state:original.submission.state,error:original.submission.error},original.submission,'restart may mark uncertainty but cannot change receipt identity or resend');
+  } else assert.deepEqual(afterRestart,original);
   await new Promise(resolve=>setTimeout(resolve,2200));
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
 });

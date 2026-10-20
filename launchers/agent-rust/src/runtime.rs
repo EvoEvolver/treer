@@ -420,6 +420,21 @@ impl Runtime {
         if session.is_some_and(|s| s != id) {
             bail!("session identity mismatch");
         }
+        // Resumed history needs explicit status authority; an absent active
+        // candidate cannot establish that an existing provider thread is idle.
+        if (session.is_some() || result["thread"].get("status").is_some())
+            && !matches!(result["thread"]["status"]["type"].as_str(), Some("idle" | "active"))
+        {
+            bail!("unusable provider thread status");
+        }
+        // Explicit active status without an identifiable current turn cannot
+        // authorize dispatch. Do not guess an ID from historical stale turns.
+        if result["thread"]["status"]["type"] == "active"
+            && !result["thread"]["turns"].as_array().into_iter().flatten()
+                .any(|t| t["status"] == "inProgress")
+        {
+            bail!("active provider thread has no current turn");
+        }
         self.thread = json!({"id":id,"title":result["thread"]["name"].as_str().unwrap_or("Codex (Rust experiment)"),"cwd":config.cwd,"model":result["model"],"reasoningEffort":result["reasoningEffort"],"status":"idle","activeTurnId":null,"lastError":null,"createdAt":now(),"updatedAt":now(),"turns":[],"hasOlderItems":false});
         for turn in result["thread"]["turns"].as_array().into_iter().flatten() {
             self.turns.insert(model::turn(turn))?;
@@ -998,6 +1013,10 @@ impl Runtime {
             return Ok(());
         }
         let busy = self.thread["activeTurnId"].is_string();
+        if !busy && self.records.iter().any(|r| r.submission["state"] == "running")
+        {
+            return Ok(());
+        }
         let next = self
             .records
             .iter()
@@ -1043,6 +1062,7 @@ impl Runtime {
         let steering_turn = self.thread["activeTurnId"].clone();
         let response = self.provider_request(if busy { "turn/steer" } else { "turn/start" }, params)
             .await;
+        if self.history_failed { bail!("provider history blocked dispatch"); }
         match response {
             Ok(response) => {
                 let turn = if busy {
@@ -1055,6 +1075,10 @@ impl Runtime {
                     self.persist()?;
                     self.publish();
                     return Ok(());
+                }
+                if self.thread["activeTurnId"].is_string() && self.thread["activeTurnId"] != turn {
+                    self.stop_for_history_error("Provider turn response disagrees with live turn".into())?;
+                    bail!("provider turn identity mismatch");
                 }
                 self.records[index].submission["turn_id"] = turn.clone();
                 self.records[index].submission["position"] = Value::Null;
@@ -1232,6 +1256,18 @@ impl Runtime {
                 self.persist()?;
             }
             "turn/started" => {
+                if self.turns.iter().any(|t| t["id"] == p["turn"]["id"]
+                    && matches!(t["status"].as_str(), Some("completed" | "interrupted" | "failed")))
+                {
+                    self.stop_for_history_error("Provider reopened a terminal turn".into())?;
+                    bail!("terminal turn reopened");
+                }
+                if self.thread["activeTurnId"].is_string()
+                    && self.thread["activeTurnId"] != p["turn"]["id"]
+                {
+                    self.stop_for_history_error("Provider reported concurrent active turns".into())?;
+                    bail!("concurrent active turns");
+                }
                 self.upsert_turn(model::turn(&p["turn"]))?;
                 self.thread["status"] = json!("running");
                 self.thread["activeTurnId"] = p["turn"]["id"].clone();

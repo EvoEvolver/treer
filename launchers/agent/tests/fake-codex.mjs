@@ -136,7 +136,10 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     }
     const recoveryState = failed ? process.env.FAKE_CODEX_RECOVERY_STATE_FILE ? readFileSync(process.env.FAKE_CODEX_RECOVERY_STATE_FILE, "utf8") : process.env.FAKE_CODEX_RECOVERY_STATE : undefined;
     const status = recoveryState?.startsWith("systemError") ? { type: "systemError" } : recoveryState === "unknown" ? { type: "unknown" } : recoveryState === "idle" ? { type: turns.some(turn => turn.status === "inProgress") ? "active" : "idle" } : process.env.FAKE_CODEX_STATUS ? { type: process.env.FAKE_CODEX_STATUS } : undefined;
-    result = { thread: { id: threadId, cwd: process.cwd(), turns: recoveryState === "missing-turns" ? undefined : recoveryState === "systemError-empty" ? [] : turns, ...(status ? { status } : {}) }, model: "test" };
+    // Rust contract fixtures model explicit producer status on resume. Leave
+    // the Node fixture's deliberate missing-status scenarios unchanged.
+    const contractStatus = status ?? (process.env.RUST_SPIKE_PROVIDER_LOG ? { type: turns.some(turn => turn.status === "inProgress") ? "active" : "idle" } : undefined);
+    result = { thread: { id: threadId, cwd: process.cwd(), turns: recoveryState === "missing-turns" ? undefined : recoveryState === "systemError-empty" ? [] : turns, ...(contractStatus ? { status: contractStatus } : {}) }, model: "test" };
   }
   if (request.method === "turn/steer" && request.params.expectedTurnId !== "turn-live") {
     console.log(JSON.stringify({ id: request.id, error: { message: `expected active turn id \`${request.params.expectedTurnId}\` but found \`turn-live\`` } }));

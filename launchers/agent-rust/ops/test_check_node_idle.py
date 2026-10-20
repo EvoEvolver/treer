@@ -11,6 +11,26 @@ spec.loader.exec_module(check)
 
 
 class Check(unittest.TestCase):
+    def test_delivery_projection_excludes_prompt_and_other_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory).resolve()
+            (source / 'agent-ui.json').write_text('{"threadId":"synthetic"}')
+            (source / 'agent-ui.json').chmod(0o600)
+            record = dict(submission=dict(id='sub_one', state='done', text_preview='PRIVATE-SYNTHETIC'),
+                          text='PRIVATE-SYNTHETIC', notify=None, notification=None,
+                          sourceMessage=dict(messageId='msg_one', deliveryId='dlv_one', ackPending=False),
+                          sourceMessages=[dict(messageId='msg_two', deliveryId='dlv_two', ackPending=True)])
+            data = json.dumps(dict(version=1, records=[record]))
+            (source / 'queue.json').write_text(data)
+            (source / 'queue.json').chmod(0o600)
+            result = check.inspect(source, 'synthetic', delivery_audit=True)
+            self.assertEqual(result['pendingAck'], 1)
+            self.assertFalse(result['privateRootChecked'])
+            self.assertEqual(len(result['deliveries'][0]['sourceMessages']), 2)
+            self.assertEqual(result['deliveries'][0]['submission'], dict(id='sub_one', state='done'))
+            self.assertNotIn('PRIVATE-SYNTHETIC', json.dumps(result))
+            self.assertEqual((source / 'queue.json').read_text(), data)
+
     def test_pending_work_and_no_mutation(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory).resolve()

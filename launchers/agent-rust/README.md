@@ -42,6 +42,43 @@ per history turn, with separate non-history frame budgets below. Duplicate keys 
 discarded values are refused. Over-cap frames poison the transport with
 `line_too_large`; shape/value/deadline errors have distinct fixed reasons.
 Content-free `historyScan` diagnostics contain only bytes, turns, nodes and time.
+They also report fixed-category `threadStatus` and numeric
+`staleInProgressCount`. Only responses matched to an outstanding full
+`thread/resume`, or `thread/read` with `includeTurns: true`, without a request
+cursor/limit can normalize stale historical `inProgress` statuses. Explicit
+pagination markers, duplicate/empty turn IDs and descending supplied numeric
+`startedAt` values are refused. Full-history API array order is chronological,
+as interpreted by the Node adapter; nullable/missing timestamps do not supply an
+independent ordering proof. The wire has no continuous turn sequence or declared
+total: silent producer omissions without a pagination marker cannot be detected.
+This is reliance on the provider's full-history contract, not verification of
+native transcript completeness. An AIS window selects from that full scan and
+does not itself confer authority. Unknown/missing status keeps the previous
+multiple-active refusal in the parser. Startup of a resumed/imported thread
+requires explicit idle/active status even with zero or one candidate; missing
+status cannot authorize a new turn. Only fresh thread/start may omit status:
+the successful creation response establishes that new thread, rather than
+inferring idleness of an existing thread. For explicit idle status all historical candidates
+become interrupted; for explicit active status only the globally newest turn
+may remain in progress. Status metadata is interpreted after the complete frame,
+regardless of key order, including for older-page and observer projections.
+An active thread without an identifiable newest in-progress turn cannot start
+dispatch. This normalization never edits provider history or settles a durable
+receipt: only explicit correlated terminal events/observations settle receipts.
+The receipt journal remains the only durable dispatch state. Distinct live
+`turn/started` IDs, a response/live-ID mismatch, or reopening a terminal turn
+persist the dispatch fence; same-ID active notifications remain idempotent.
+Before a new turn, the runtime still requires readiness, no fence/known active
+turn or orphaned running receipt, and publishes
+the running intent before sending. Pending queued work is dispatched FIFO,
+not discarded to manufacture an empty queue.
+The import/pre-stop audit separately refuses pending message acknowledgements;
+normal runtime acknowledgements retain the existing persist-before-ack retry path.
+Duplicate detection stores at most 100,000 fixed 32-byte ID hashes (plus bounded
+hash-table overhead), under the existing turn cap; no full-history payload is
+retained and frame/window/node limits are unchanged. The #158/7101 sanitized
+incident proves the old rejection category, not the identities/statuses of its
+two conflicting historical turns; synthetic tests establish compatibility.
 Frame classes have separate bounds: history metadata and control notifications
 remain 4 MiB / 50,000 nodes; allow-listed turn/item notifications (including
 supported deltas) and other RPC responses allow 16 MiB / 500,000 nodes. This fits
@@ -580,6 +617,10 @@ For the leader-run apps-dev switch authorized in #158 decision 5559, see the
 eligibility checker. This supplement does not authorize other agent switches.
 The [second candidate runbook](ops/LAUNCHER-DEV-SWITCH.md) is preparation under
 decision 5648 and requires separate execution approval and acceptance evidence.
+After incident7101, the [successor retry runbook](ops/LAUNCHER-DEV-RETRY.md)
+preserves the previous failed-run tuple before fresh import, pins a new artifact,
+and retains the exact Node startup/NEW-backup rollback boundary. It requires
+Core/security review and leader execution; no helper runs as part of author tests.
 
 Before any disposable managed run, Core/security review this first checkpoint
 and the exact experiment command. Before any team-Agent switch, both a full

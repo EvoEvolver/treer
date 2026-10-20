@@ -33,7 +33,7 @@ for await(const line of readline.createInterface({input:process.stdin})) {
   if(mode==='burst-startup'&&request.method==='initialize') {
     process.stdout.write(Array.from({length:64},(_,n)=>JSON.stringify({method:'synthetic/startup',params:{n}})+'\n').join(''));
   }
-  if(['thread/start','thread/resume','thread/read'].includes(request.method))result={thread:{id:threadId,turns}};
+  if(['thread/start','thread/resume','thread/read'].includes(request.method))result={thread:{id:threadId,turns,status:{type:turns.some(t=>t.status==='inProgress')?'active':'idle'}}};
   if(request.method==='thread/start'&&mode==='unknown-request')setTimeout(()=>console.log(JSON.stringify({id:'provider-unknown',method:'unsafe/unknown',params:{}})),100);
   if(request.method==='thread/start'&&mode==='diagnostic-eof')setTimeout(()=>process.exit(7),150);
   if(request.method==='thread/start'&&mode==='diagnostic-invalid')setTimeout(()=>{

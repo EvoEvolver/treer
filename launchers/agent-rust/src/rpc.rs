@@ -59,6 +59,10 @@ impl Drop for ProviderChild {
 }
 
 type Reply = oneshot::Sender<Result<Value>>;
+fn full_history_request(method: &str, params: &Value) -> bool {
+    (method == "thread/resume" || (method == "thread/read" && params["includeTurns"] == true))
+        && ["cursor", "limit", "initialTurnsPage", "turnsLimit", "turnsCursor"].iter().all(|key| params.get(key).is_none())
+}
 #[derive(Clone)]
 pub struct Rpc {
     input: Arc<Mutex<ChildStdin>>,
@@ -124,7 +128,7 @@ impl Rpc {
                 let mut message = line;
                 let history=&message["result"]["treerHistory"];
                 if history.is_object() {
-                    reader_rpc.diagnostics.lock().unwrap()["historyScan"]=json!({"frameBytes":history["frameBytes"],"turnCount":history["total"],"nodeCount":history["nodeCount"],"elapsedMs":history["elapsedMs"]});
+                    reader_rpc.diagnostics.lock().unwrap()["historyScan"]=json!({"frameBytes":history["frameBytes"],"turnCount":history["total"],"nodeCount":history["nodeCount"],"elapsedMs":history["elapsedMs"],"staleInProgressCount":history["staleInProgressCount"],"threadStatus":history["threadStatus"]});
                 }
                 if message.get("method").is_some() {
                     // Runtime pumps this bounded queue while awaiting its RPCs.
@@ -185,14 +189,19 @@ impl Rpc {
     }
 
     pub async fn request_selected(&self, method: &str, params: Value, selection: Option<(usize,usize)>) -> Result<Value> {
-        self.request_history(method,params,selection.map(|range|crate::provider_stream::Selection{range:Some(range),target:None})).await
+        self.request_history(method,params,selection.map(|range|crate::provider_stream::Selection{range:Some(range),..Default::default()})).await
     }
     pub async fn request_target(&self, method: &str, params: Value, target: Option<String>) -> Result<Value> {
-        self.request_history(method,params,target.map(|target|crate::provider_stream::Selection{range:None,target:Some(target)})).await
+        self.request_history(method,params,target.map(|target|crate::provider_stream::Selection{target:Some(target),..Default::default()})).await
     }
     async fn request_history(&self, method: &str, params: Value, selection: Option<crate::provider_stream::Selection>) -> Result<Value> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        if let Some(selection)=selection {self.selections.lock().unwrap().insert(id,selection);}
+        let full_history = full_history_request(method, &params);
+        if full_history || selection.is_some() {
+            let mut selection = selection.unwrap_or_default();
+            selection.full_history = full_history;
+            self.selections.lock().unwrap().insert(id,selection);
+        }
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
         let result = async {
@@ -207,5 +216,20 @@ impl Rpc {
         self.pending.lock().await.remove(&id);
         self.selections.lock().unwrap().remove(&id);
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn history_authority_requires_full_request_contract() {
+        assert!(full_history_request("thread/resume", &json!({})));
+        assert!(full_history_request("thread/read", &json!({"includeTurns":true})));
+        for params in [json!({}),json!({"includeTurns":false}),json!({"includeTurns":true,"cursor":"next"}),json!({"includeTurns":true,"limit":50})] {
+            assert!(!full_history_request("thread/read", &params));
+        }
+        assert!(!full_history_request("thread/resume", &json!({"initialTurnsPage":{}})));
+        assert!(!full_history_request("thread/turns/list", &json!({"includeTurns":true})));
     }
 }

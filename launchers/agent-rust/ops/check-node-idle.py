@@ -48,7 +48,7 @@ def read_private(path, limit):
     return data
 
 
-def inspect(source, thread, private=None):
+def inspect(source, thread, private=None, delivery_audit=False):
     if private is not None:
         require(private.is_absolute())
         # First switch only: never interpret a leftover backup/journal as fresh.
@@ -77,6 +77,7 @@ def inspect(source, thread, private=None):
     records = queue.get("records")
     require(isinstance(records, list) and len(records) <= 4096)
     counts = dict(queued=0, running=0, pendingAck=0, pendingNotification=0, attachmentReferences=0)
+    deliveries = []
     for r in records:
         require(isinstance(r, dict) and isinstance(r.get("submission"), dict))
         counts["attachmentReferences"] += int("attachmentIds" in r or "attachmentSession" in r)
@@ -91,6 +92,12 @@ def inspect(source, thread, private=None):
         for message in messages:
             require(isinstance(message, dict) and type(message.get("ackPending")) is bool)
             counts["pendingAck"] += int(message["ackPending"])
+        if delivery_audit:
+            ids = [r["submission"].get("id")] + [m.get(k) for m in messages for k in ("messageId", "deliveryId")]
+            require(all(isinstance(value, str) and 0 < len(value) <= 256 and
+                        all(c.isascii() and (c.isalnum() or c in "_-") for c in value) for value in ids))
+            deliveries.append(dict(submission=dict(id=r["submission"]["id"], state=state),
+                                   sourceMessages=[{key: m[key] for key in ("messageId", "deliveryId", "ackPending")} for m in messages]))
         require("notification" in r and "notify" in r)
         notification = r["notification"]
         notify = r["notify"]
@@ -102,12 +109,15 @@ def inspect(source, thread, private=None):
             counts["pendingNotification"] += int(not notification["delivered"])
         elif state in on:
             counts["pendingNotification"] += 1
-    return dict(code="node_idle" if not any(counts.values()) else "node_pending_work",
+    result = dict(code="node_idle" if not any(counts.values()) else "node_pending_work",
                 records=len(records), **counts, queueBytes=len(queue_bytes),
                 queueSha256=hashlib.sha256(queue_bytes).hexdigest(),
                 threadFileSha256=hashlib.sha256(thread_bytes).hexdigest(),
                 files=[dict(name=name, bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
                        for name, data in [("agent-ui.json", thread_bytes), ("queue.json", queue_bytes)]])
+    if delivery_audit:
+        result.update(deliveries=deliveries, privateRootChecked=private is not None)
+    return result
 
 
 def main():
@@ -115,9 +125,11 @@ def main():
     parser.add_argument("source", type=Path)
     parser.add_argument("--thread", required=True)
     parser.add_argument("--private-root", required=True, type=Path)
+    parser.add_argument("--source-only", action="store_true", help="pre-stop source audit only; does not check private-root eligibility")
+    parser.add_argument("--delivery-audit", action="store_true", help="include submission state and message/delivery IDs only, never text")
     args = parser.parse_args()
     try:
-        result = inspect(args.source, args.thread, args.private_root)
+        result = inspect(args.source, args.thread, None if args.source_only else args.private_root, args.delivery_audit)
     except Exception:
         print('{"code":"node_idle_check_invalid"}')
         return 1
