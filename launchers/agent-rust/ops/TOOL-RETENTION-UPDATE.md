@@ -15,8 +15,8 @@ its own real execution only. Never replay either acceptance.
 
 The pinned public Codex0.162.1 protocol uses ThreadItem (including its string id)
 in ItemStartedNotification, ItemCompletedNotification and Turn.items:
-[item schema](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d92c603/codex-rs/app-server-protocol/src/protocol/v2/item.rs).
-The same version's [Turn schema](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d92c603/codex-rs/app-server-protocol/src/protocol/v2/thread_data.rs)
+[item schema](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/app-server-protocol/src/protocol/v2/item.rs).
+The same version's [Turn schema](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/app-server-protocol/src/protocol/v2/thread_data.rs)
 explicitly labels itemsView as summary/notLoaded/full; fixtures use these labels
 without inferring full-history authority from them.
 This is a same-item identity contract, not proof that an arbitrary producer
