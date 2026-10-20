@@ -1188,7 +1188,8 @@ until the output drops, even when the actual response is smaller. Input-model
 memory, allocator overhead, Arc bookkeeping and any transport copies are separate
 obligations; this is not a combined-query or RSS ceiling.
 
-Successful ChargedResponse has private fields and exposes only as_bytes(). It
+Successful ChargedResponse has private fields and exposes as_bytes() plus the
+read-only is_revoked() signal. It
 owns Charged<Box<[u8]>> followed by the Assembly, so bytes release before credit
 and credit before the slot. There is no extraction or Clone API; a future
 transport may share an Arc<ChargedResponse> and borrow chunks, keeping both
@@ -1196,6 +1197,9 @@ resources until its last owner drops. Deliberate borrowed-byte copies still
 require their own reservation. Cancellation and revocation are checked during
 serialization and after compaction. Failures and unwind drop the partial output
 before returning credit; any other assembly owner continues to hold the slot.
+The future writer must check is_revoked before the first byte and every following
+chunk, alongside live epoch/authorization checks. This cooperative signal does
+not atomically authorize a write or reclaim any owner, credit or slot.
 Final epoch/authorization checks, bounded queue admission and worker termination
 remain the caller's responsibility.
 

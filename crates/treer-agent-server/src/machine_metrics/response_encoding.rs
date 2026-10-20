@@ -22,10 +22,17 @@ pub enum ChargedEncodingError {
 /// Fields drop in order: bytes, then credit, then the assembly guard.
 pub struct ChargedResponse {
     bytes: Charged<Box<[u8]>>,
-    _assembly: Assembly,
+    assembly: Assembly,
 }
 
 impl ChargedResponse {
+    /// The writer must check before the first byte and every following chunk,
+    /// alongside live epoch/authorization checks. This is a cooperative signal,
+    /// not an atomic authorization of the next write or a reclaim operation.
+    pub fn is_revoked(&self) -> bool {
+        self.assembly.is_revoked()
+    }
+
     /// Borrow for transport writes. Any copied buffer needs its own reservation.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
@@ -60,10 +67,7 @@ pub fn encode_charged(
         })
         .map_err(ChargedEncodingError::Budget)?
         .map_err(ChargedEncodingError::Encoding)?;
-    Ok(ChargedResponse {
-        bytes,
-        _assembly: assembly,
-    })
+    Ok(ChargedResponse { bytes, assembly })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -143,9 +143,12 @@ fn slow_reader_keeps_encoded_bytes_credit_and_revoked_slot_until_last_drop() {
         response
     );
     let slow_reader = output.clone();
+    assert!(!slow_reader.is_revoked());
     assembly.revoke();
     drop(assembly);
     drop(output);
+    // A writer can still observe revocation after the worker's guard is gone.
+    assert!(slow_reader.is_revoked());
     // Reading part of an output does not free the rest or permit new assembly.
     assert!(!slow_reader.as_bytes()[..8].is_empty());
     assert_eq!(budget.charged_bytes(), AGGREGATE_BYTES);
