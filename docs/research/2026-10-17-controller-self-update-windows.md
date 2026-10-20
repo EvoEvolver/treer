@@ -1826,6 +1826,32 @@ closed; its validator compares creation-time full volume/file identity and exact
 bytes. This partial composition does not inject replacement or same-identity
 content changes during that gap.
 
+##### Pre-existing complete decision composition (native pending)
+
+The separate native_operation_decision_pin_refuses_preexisting_complete test
+adds the fourth matrix row for MoveOld and Publish. Under the original fixture
+ownership it seeds a valid independent 177-byte decision through pin_decision,
+validates and closes the pin, and records the full volume/file identity and
+bytes. A fresh matching native collision context reaches its matched hook and
+attempts exclusive decision creation, which must fail with ERROR_FILE_EXISTS
+(80). This is an occupied-slot refusal, not recovery or acceptance of the
+seeded record as authority. The sink observer must never run, sink count stays
+zero, evidence becomes spent, retry cannot enter its hook, and another exclusive
+creation also refuses. Both original decision identity/bytes and context
+evidence bytes must remain unchanged before explicit fixture-only cleanup.
+Released write/delete probes must succeed after refusal.
+
+Expected successor counts are operation26 and ordinary102 passed/four ignored;
+the retained-head filter stays four. Each operation and ordinary group must
+contain exactly two decision_existing_fixture markers, one per operation, with
+row=complete, create_win32=80, hook=1, sink=0, spent=1, bytes=177,
+identity=unchanged and retry=refused. Existing six decision_pin_fixture rows and
+all previous fault assertions remain unchanged. Cross compilation establishes
+no native result; exact-SHA Server 2022/2025 raw logs remain required. Partial
+files, post-create refusal, transition-gap replacement, post-transition head
+and evidence custody failures, and the other production/activation holds are
+still open.
+
 The first preparatory code slice only reorders `BoundStored::consume`: spend,
 binding check, evidence read, exact expected-context comparison, callback,
 post-callback binding check, sink. Its existing ten foreign-binding controls

@@ -1,5 +1,7 @@
-//! Partial native composition: three sink paths, never production authority.
+//! Partial native composition, never production authority.
 use super::*;
+
+mod preexisting;
 
 fn open_result(path: &Path, access: u32) -> u32 {
     let raw = unsafe {
