@@ -57,7 +57,9 @@ fn sample(clock: Clock) -> MachineMetricsResponse {
 
 #[test]
 fn history_evicts_oldest_on_point_and_exact_byte_limits() {
-    let size = serde_json::to_vec(&sample(clock(0))).unwrap().len();
+    let size = StoredFrame::encode(&sample(clock(0)), &[], 0, "fixture-machine", clock(0))
+        .unwrap()
+        .len();
     let mut history = History::new(
         "fixture-machine".into(),
         Limits {
@@ -73,9 +75,14 @@ fn history_evicts_oldest_on_point_and_exact_byte_limits() {
     assert_eq!(history.record_count(), 2);
     assert!(history.serialized_bytes() <= size * 2);
     assert!(history.truncated());
-    let first: MachineMetricsResponse =
-        serde_json::from_slice(history.frames(clock(10000)).next().unwrap()).unwrap();
-    assert_eq!(first.generated_at, clock(5000).wall);
+    let first = StoredFrame::decode(
+        history.frames(clock(10000)).next().unwrap(),
+        "fixture-machine",
+        clock(5000),
+        0,
+    )
+    .unwrap();
+    assert_eq!(first.frame.generated_at, clock(5000).wall);
 
     let mut byte_limited = History::new(
         "fixture-machine".into(),
@@ -241,4 +248,19 @@ fn epoch_exhaustion_clears_history_and_permanently_refuses_append() {
     );
     history.maintain(clock(5000));
     assert_eq!(history.ensure_live(), Err(HistoryError::SequenceExhausted));
+}
+
+#[test]
+fn retention_checks_every_frames_oldest_acquisition_and_accounts_removed_bytes() {
+    let mut history = History::new("fixture-machine".into(), Limits::default()).unwrap();
+    history.push(clock(5000), &sample(clock(5000))).unwrap();
+    history.push(clock(10000), &sample(clock(10000))).unwrap();
+    let retained_bytes = history.records[0].bytes.len();
+    // Exercise non-front expiry independently of inventory/acquisition order.
+    history.records[1].oldest_acquisition = clock(0).wall;
+    history.maintain(clock(MACHINE_METRICS_MAX_RANGE_MS as u64 + 1));
+    assert_eq!(history.record_count(), 1);
+    assert_eq!(history.serialized_bytes(), retained_bytes);
+    assert_eq!(history.records[0].tick, 0);
+    assert!(!history.truncated());
 }

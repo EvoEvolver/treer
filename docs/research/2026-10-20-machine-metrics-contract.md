@@ -290,9 +290,10 @@ refuses the snapshot until the collector handles epoch uncertainty.
 This is state arithmetic, not proof of actual hardware sampling. The future
 collector must call record only after real acquisition and coordinate epochs;
 paired RAM/VRAM refreshes still need consistent batch assembly. The History
-frame format does not yet carry these per-field identities. Its adapter must
-preserve them through serialization and deduplicate cached references before
-aggregation. This cache adds no sampler, timer, journal, IPC, API or capability.
+frame format now carries these per-field identities through the local staging
+envelope described below. A query adapter must still deduplicate cached
+references before aggregation. This cache adds no sampler, timer, journal,
+IPC, API or capability.
 
 ## Coordinated collector epoch checkpoint (not connected)
 
@@ -310,8 +311,8 @@ Frame admission compares every current field against that clock's cache
 projection, allowing canonical empty warming_up fields when absent. It refuses
 caller-invented or pre-reset values before staging, then runs the existing full
 frame validator. This is an inert state boundary, not a sampler or response
-assembler. Original per-field identities still need a bounded history encoding;
-the outer frame tick cannot replace them. Paired acquisitions, removed-GPU
+assembler. The bounded local staging encoding below preserves original
+per-field identities; the outer frame tick cannot replace them. Paired acquisitions, removed-GPU
 inventory, per-range epoch/partial flags, journal integration, singleton IPC,
 authorization and routes remain unfinished. No runtime capability is enabled.
 
@@ -324,3 +325,35 @@ This makes conservative reset loops observable to a future health adapter
 without exposing sample content; no logging, endpoint or UI is wired yet.
 An assembler must also preserve `Snapshot.reset` when deciding partial buckets,
 including when a subsequent frame admission fails.
+
+## Identity-preserving local staging frames (not a durable journal)
+
+History now stores a version-1 envelope containing its epoch, the validated
+current-only frame, and at most 100 original field acquisitions. Each carries
+kind/GPU key, epoch/tick, original timestamp, status and value. Serialization
+copies the collector cache's identity without assigning a new one: repeated
+cached references in later frames retain the same identity even after current
+becomes stale/null. The original successful value remains available for the
+historical acquisition, not for display as a fresh current value.
+
+Envelope encoding and decoding validate the machine, epoch, timestamp/value
+links, unique field keys and acquisition ticks, field types and value bounds,
+and the existing shared response invariants. A missing acquisition is allowed
+only for an empty warming_up series. Impossible acquisition tick exhaustion,
+future acquisitions, and acquisitions older than 24 hours are refused. The
+envelope and acquisition structs reject unknown fields; the embedded public
+frame retains the shared protocol's typed projection behavior. Decoding bounds
+raw input at 64 KiB before parsing. Encoding checks model bounds before cloning;
+the entire encoded envelope counts against both per-record and ring byte caps.
+
+Maintenance checks every record's earliest acquisition, as well as frame
+monotonic age. A new frame cannot extend an old cached acquisition's retention:
+if any acquisition expires, the whole frame is dropped without a capacity-loss
+truncation flag. This conservative policy may shorten useful coverage. It does
+not discard a current field from FieldCache; a future collector must replace or
+retire expired fields before it can append another frame containing them.
+
+The format is internal in-memory staging, not a public metrics response,
+authenticated integrity proof, restart/boot identity, checksum or file recovery
+format. No filesystem journal, query deduplication/assembly, collection task or
+route is enabled by this increment.

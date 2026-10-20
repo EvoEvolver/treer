@@ -8,7 +8,8 @@ use treer_protocol::{
 
 /// One actual field acquisition, not a cached value repeated on every tick.
 /// The adapter must deduplicate by acquisition before calling this function.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Observation {
     /// Collector-owned acquisition identity, independent of caller query bounds.
     pub epoch: u64,

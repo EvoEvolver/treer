@@ -1,12 +1,10 @@
 //! Bounded in-memory staging for local history; no filesystem or network I/O.
 //! A future private journal adapter must enforce its own metadata/temp-file
 //! budget as well. These byte counts do not claim a process RSS ceiling.
+use super::{field_cache::FieldSnapshot, stored_frame::StoredFrame};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::VecDeque;
-use treer_protocol::{
-    MachineMetricsQuery, MachineMetricsResponse, MACHINE_METRICS_MAX_RANGE_MS,
-    MACHINE_METRICS_SAMPLE_INTERVAL_MS,
-};
+use treer_protocol::{MachineMetricsResponse, MACHINE_METRICS_MAX_RANGE_MS};
 
 pub const MAX_RECORDS: usize = 17_280;
 pub const MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -48,6 +46,7 @@ pub enum HistoryError {
 struct Record {
     tick: u64,
     clock: Clock,
+    oldest_acquisition: DateTime<Utc>,
     bytes: Vec<u8>,
 }
 
@@ -148,49 +147,47 @@ impl History {
             }
         }
         self.last_clock = Some(clock);
-        while self.records.front().is_some_and(|record| {
-            clock.wall.signed_duration_since(record.clock.wall)
+        // Field age can differ from frame age. Do not assume that the oldest
+        // acquisition is ordered across frames when inventory changes.
+        let mut expired_bytes = 0;
+        self.records.retain(|record| {
+            let expired = clock.wall.signed_duration_since(record.oldest_acquisition)
                 > Duration::milliseconds(MACHINE_METRICS_MAX_RANGE_MS)
                 || clock.monotonic_ms.saturating_sub(record.clock.monotonic_ms)
-                    > MACHINE_METRICS_MAX_RANGE_MS as u64
-        }) {
-            self.remove_oldest();
-        }
+                    > MACHINE_METRICS_MAX_RANGE_MS as u64;
+            if expired {
+                expired_bytes += record.bytes.len();
+            }
+            !expired
+        });
+        self.bytes -= expired_bytes;
     }
 
+    #[cfg(test)]
     pub fn push(
         &mut self,
         clock: Clock,
         sample: &MachineMetricsResponse,
     ) -> Result<(), HistoryError> {
+        self.push_with_fields(clock, sample, &[])
+    }
+
+    pub(super) fn push_with_fields(
+        &mut self,
+        clock: Clock,
+        sample: &MachineMetricsResponse,
+        fields: &[FieldSnapshot],
+    ) -> Result<(), HistoryError> {
         self.maintain(clock);
         self.ensure_live()?;
         // The caller must project an actual collected frame, not aggregate it
         // from a chart query or timestamp it when a viewer happens to ask.
-        let query = MachineMetricsQuery {
-            from: clock
-                .wall
-                .checked_sub_signed(Duration::milliseconds(
-                    MACHINE_METRICS_SAMPLE_INTERVAL_MS as i64,
-                ))
-                .ok_or(HistoryError::InvalidSample)?,
-            to: clock.wall,
-            max_points: 1,
-        };
-        if sample.generated_at != clock.wall
-            || sample.series.iter().any(|series| !series.points.is_empty())
-            || sample
-                .validate(&query, &self.server_id, clock.wall)
-                .is_err()
-        {
-            return Err(HistoryError::InvalidSample);
-        }
+        let bytes = StoredFrame::encode(sample, fields, self.epoch, &self.server_id, clock)?;
         if self.records.back().is_some_and(|record| {
             clock.monotonic_ms <= record.clock.monotonic_ms || clock.wall <= record.clock.wall
         }) {
             return Err(HistoryError::DuplicateSample);
         }
-        let bytes = serde_json::to_vec(sample).map_err(|_| HistoryError::InvalidSample)?;
         if bytes.len() > MAX_RECORD_BYTES || bytes.len() > self.limits.bytes {
             return Err(HistoryError::OversizedRecord);
         }
@@ -203,7 +200,17 @@ impl History {
             self.truncated = true;
         }
         self.bytes += bytes.len();
-        self.records.push_back(Record { tick, clock, bytes });
+        let oldest_acquisition = fields
+            .iter()
+            .map(|field| field.observation.at)
+            .min()
+            .unwrap_or(clock.wall);
+        self.records.push_back(Record {
+            tick,
+            clock,
+            oldest_acquisition,
+            bytes,
+        });
         self.next_tick = next_tick;
         Ok(())
     }
@@ -217,8 +224,8 @@ impl History {
     /// Identities are assigned at successful append, never by a reader. Tick
     /// increases across eviction and epoch resets and refuses overflow. Within
     /// an epoch, admission also enforces increasing wall and monotonic times.
-    /// Cached fields need their ORIGINAL acquisition identity from the future
-    /// collector; adapters must not relabel them with the new frame tick.
+    /// Bytes contain StoredFrame with ORIGINAL field acquisition identities;
+    /// adapters must not relabel them with the outer frame tick.
     pub fn staged_frames(&mut self, clock: Clock) -> impl Iterator<Item = StagedFrame<'_>> {
         self.maintain(clock);
         let epoch = self.epoch;

@@ -131,7 +131,7 @@ impl CollectorState {
     }
 
     /// Refuse pre-reset or caller-invented current fields before staging a
-    /// frame. This is not the future field-identity serialization adapter.
+    /// frame. Original acquisition identities are serialized inside each frame.
     pub fn append_frame(
         &mut self,
         clock: Clock,
@@ -157,7 +157,7 @@ impl CollectorState {
             }
         }
         self.history
-            .push(clock, frame)
+            .push_with_fields(clock, frame, &snapshot.fields)
             .map_err(StateError::History)?;
         Ok(snapshot.reset)
     }

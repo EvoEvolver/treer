@@ -25,6 +25,146 @@ fn record(state: &mut CollectorState, clock: Clock, value: f64) -> bool {
 }
 
 #[test]
+fn stored_frames_preserve_cached_identity_and_original_value_after_staleness() {
+    use crate::machine_metrics::stored_frame::StoredFrame;
+    let mut state = state();
+    record(&mut state, clock(0, 0), 12.0);
+    let original = state.snapshot(clock(0, 0)).unwrap().fields[0].observation;
+    for ms in [0, 5_000, 20_000] {
+        let sample = frame(&mut state, clock(ms, ms as u64));
+        state.append_frame(clock(ms, ms as u64), &sample).unwrap();
+    }
+    let frames: Vec<_> = state
+        .history
+        .staged_frames(clock(20_000, 20_000))
+        .map(|frame| {
+            (
+                frame.tick,
+                StoredFrame::decode(frame.bytes, "machine", frame.clock, frame.epoch).unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(frames.len(), 3);
+    assert_eq!(frames[2].0, 2);
+    for (_, stored) in &frames {
+        assert_eq!(stored.fields[0].observation, original);
+    }
+    assert_eq!(
+        frames[2].1.frame.series[0].current.status,
+        MachineMetricStatus::Stale
+    );
+    assert_eq!(frames[2].1.frame.series[0].current.value, None);
+    assert_eq!(frames[2].1.fields[0].observation.value, Some(12.0));
+    state
+        .record(
+            clock(25_000, 25_000),
+            MachineMetricKind::CpuUtilization,
+            None,
+            MachineMetricStatus::TimedOut,
+            None,
+        )
+        .unwrap();
+    let failed = frame(&mut state, clock(25_000, 25_000));
+    state.append_frame(clock(25_000, 25_000), &failed).unwrap();
+    let stored = state
+        .history
+        .staged_frames(clock(25_000, 25_000))
+        .last()
+        .unwrap();
+    let decoded = StoredFrame::decode(stored.bytes, "machine", stored.clock, stored.epoch).unwrap();
+    assert_eq!(
+        decoded.fields[0].observation.status,
+        MachineMetricStatus::TimedOut
+    );
+    assert_eq!(decoded.fields[0].observation.value, None);
+    assert_eq!(decoded.fields[0].observation.tick, original.tick + 1);
+}
+
+#[test]
+fn stored_frame_refuses_corrupt_identity_links_and_bounds_before_parsing() {
+    use crate::machine_metrics::{history::MAX_RECORD_BYTES, stored_frame::StoredFrame};
+    let mut state = state();
+    record(&mut state, clock(0, 0), 12.0);
+    let sample = frame(&mut state, clock(0, 0));
+    state.append_frame(clock(0, 0), &sample).unwrap();
+    let bytes = state.history.frames(clock(0, 0)).next().unwrap().to_vec();
+    let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let mutations: Vec<(&str, serde_json::Value)> = vec![
+        ("version", 2.into()),
+        ("epoch", 1.into()),
+        ("fields.0.observation.epoch", 1.into()),
+        ("fields.0.observation.tick", u64::MAX.into()),
+        ("fields.0.observation.value", 99.into()),
+        ("fields.0.observation.at", "2030-01-01T00:00:00Z".into()),
+        ("fields.0.observation.status", "stale".into()),
+        ("fields.0.observation.extra", true.into()),
+        ("extra", true.into()),
+    ];
+    for (path, value) in mutations {
+        let mut changed = original.clone();
+        let mut target = &mut changed;
+        let parts: Vec<_> = path.split('.').collect();
+        for key in &parts[..parts.len() - 1] {
+            target = if let Ok(index) = key.parse::<usize>() {
+                &mut target[index]
+            } else {
+                &mut target[*key]
+            };
+        }
+        target[parts[parts.len() - 1]] = value;
+        assert!(
+            StoredFrame::decode(
+                &serde_json::to_vec(&changed).unwrap(),
+                "machine",
+                clock(0, 0),
+                0
+            )
+            .is_err(),
+            "{path}"
+        );
+    }
+    let mut missing = original.clone();
+    missing["fields"] = serde_json::json!([]);
+    assert!(StoredFrame::decode(
+        &serde_json::to_vec(&missing).unwrap(),
+        "machine",
+        clock(0, 0),
+        0
+    )
+    .is_err());
+    let mut duplicate = original.clone();
+    duplicate["fields"]
+        .as_array_mut()
+        .unwrap()
+        .push(original["fields"][0].clone());
+    assert!(StoredFrame::decode(
+        &serde_json::to_vec(&duplicate).unwrap(),
+        "machine",
+        clock(0, 0),
+        0
+    )
+    .is_err());
+    assert!(matches!(
+        StoredFrame::decode(&vec![b'x'; MAX_RECORD_BYTES + 1], "machine", clock(0, 0), 0),
+        Err(HistoryError::OversizedRecord)
+    ));
+    assert!(StoredFrame::decode(&bytes, "other-machine", clock(0, 0), 0).is_err());
+}
+
+#[test]
+fn recent_frame_does_not_extend_original_field_retention() {
+    let mut state = state();
+    record(&mut state, clock(0, 0), 12.0);
+    let sample = frame(&mut state, clock(5_000, 5_000));
+    state.append_frame(clock(5_000, 5_000), &sample).unwrap();
+    state.history.maintain(clock(86_400_000, 86_400_000));
+    assert_eq!(state.history.record_count(), 1);
+    state.history.maintain(clock(86_400_001, 86_400_001));
+    assert_eq!(state.history.record_count(), 0);
+    assert!(!state.history.truncated());
+}
+
+#[test]
 fn history_discontinuity_clears_fields_and_reacquisition_keeps_identity_distinct() {
     let mut state = state();
     assert_eq!(

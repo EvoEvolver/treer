@@ -4,3 +4,4 @@ pub mod aggregation;
 pub mod collector_state;
 pub mod field_cache;
 pub mod history;
+pub mod stored_frame;
