@@ -28,6 +28,7 @@ fn native_operation_decision_pin_refuses_preexisting_complete() {
         // slot never become authority, even if a later decision would differ.
         let seeded =
             crate::windows_update_bootstrap::checked_files::consume_record::fixture_bytes();
+        assert_eq!(seeded.len(), 177);
         let seed = ownership.pin_decision(&seeded).unwrap();
         seed.validate().unwrap();
         drop(seed);
@@ -46,6 +47,10 @@ fn native_operation_decision_pin_refuses_preexisting_complete() {
                 .decision_data(&stored, matched)?
                 .encode()
                 .ok_or_else(denied)?;
+            assert_ne!(
+                bytes, seeded,
+                "occupied record is independent of this context"
+            );
             hook.set(true);
             ownership.pin_decision(&bytes)
         });
@@ -69,9 +74,10 @@ fn native_operation_decision_pin_refuses_preexisting_complete() {
         assert_eq!(open_result(&path, GENERIC_WRITE), 0);
         assert_eq!(open_result(&path, DELETE), 0);
         eprintln!(
-            "decision_existing_fixture row=complete operation={} create_win32={} hook=1 sink=0 spent=1 bytes=177 identity=unchanged retry=refused",
+            "decision_existing_fixture row=complete operation={} create_win32={} hook=1 sink=0 spent=1 bytes={} would_differ=1 identity=unchanged retry=refused",
             if operation == Operation::MoveOld { "MoveOld" } else { "Publish" },
-            win32
+            win32,
+            seeded.len()
         );
         drop(sink);
         drop(stored);

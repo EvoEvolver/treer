@@ -1845,7 +1845,12 @@ Expected successor counts are operation26 and ordinary102 passed/four ignored;
 the retained-head filter stays four. Each operation and ordinary group must
 contain exactly two decision_existing_fixture markers, one per operation, with
 row=complete, create_win32=80, hook=1, sink=0, spent=1, bytes=177,
-identity=unchanged and retry=refused. Existing six decision_pin_fixture rows and
+would_differ=1, identity=unchanged and retry=refused. The seeded length is
+asserted and the marker prints its measured value; the matched hook asserts
+the would-be decision differs from the seeded record before creation. This row
+requires the seeded file to be closed; a live pre-existing handle causing a
+sharing violation (32 rather than 80) remains a separate uncovered case.
+Existing six decision_pin_fixture rows and
 all previous fault assertions remain unchanged. Cross compilation establishes
 no native result; exact-SHA Server 2022/2025 raw logs remain required. Partial
 files, post-create refusal, transition-gap replacement, post-transition head
