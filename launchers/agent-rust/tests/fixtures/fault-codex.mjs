@@ -111,7 +111,10 @@ for await(const line of readline.createInterface({input:process.stdin})) {
       await new Promise(()=>{});
     }
     if(mode==='burst-previous') {
-      emit('turn/completed',{turn:{id:'initial',status:'completed',items:[]}});
+      // Repeat the interrupted prior turn without contradicting its terminal
+      // outcome. Terminal-outcome conflicts have separate refusal fixtures;
+      // this case isolates the later dispatch's missing response identity.
+      emit('turn/completed',{turn:{id:'initial',status:'interrupted',items:[]}});
       for(let n=0;n<200;n++)emit('synthetic/notice',{n});
       console.log(JSON.stringify({id:request.id,result:{turn:{}}}));continue;
     }
