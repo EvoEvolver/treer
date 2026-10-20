@@ -5,6 +5,8 @@ use crate::windows_update_bootstrap::checked_files::{
     ownership::{head_pin::HeadPin, FixtureLock},
 };
 
+mod custody_fault;
+
 fn expected_head(binding: &Binding) -> Vec<u8> {
     let image = |value: &Image| head_record::Image {
         volume: value.volume,
@@ -56,13 +58,25 @@ impl<'a> Retained<'a> {
     }
 
     fn consume(&self, stored: &BoundStored<'_>, sink: &mut Sink) -> io::Result<()> {
+        self.consume_after_read(stored, sink, || Ok(()))
+    }
+
+    fn consume_after_read(
+        &self,
+        stored: &BoundStored<'_>,
+        sink: &mut Sink,
+        after_read: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<()> {
         // A failed precheck spends the underlying evidence as well. The same
         // in-memory fixture cannot retry after any head uncertainty.
         if let Err(error) = self.check(stored.composition) {
             stored.spent.set(true);
             return Err(error);
         }
-        stored.consume(&self.binding, sink, || self.check(stored.composition))
+        stored.consume(&self.binding, sink, || {
+            after_read()?;
+            self.check(stored.composition)
+        })
     }
 }
 

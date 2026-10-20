@@ -1413,6 +1413,31 @@ that a restarted updater has authenticated state, or that crash recovery is
 implemented. Native hosted evidence is required; end-to-end consumption refusal
 and a real committed-head advancement protocol remain separate work.
 
+The next composed negative fixture changes only security metadata on the
+disposable head while its restrictive read pin remains live. A separately
+opened `READ_CONTROL | WRITE_DAC` handle retains the original non-null private
+owner/SYSTEM ACL. `SetSecurityInfo` reapplies that ACL while clearing its
+protection flag, and `GetSecurityDescriptorControl` verifies the actual flag.
+No null or world ACL is installed; data-writer/deleter exclusion is unchanged.
+Owner security-metadata override is a test fault, not a newly claimed adversary
+boundary or a production security repair operation.
+
+For each move-old/publish collision the test stores real context-bound failure
+evidence, then clears the flag either before consumption or in a narrow hook
+after evidence read. The pre/post retained-head checks must refuse, the private
+sink stays zero and the evidence becomes spent. A hook-execution flag distinguishes
+the pre-read refusal from the post-read branch. After restoring the original
+protected ACL, native custody checks must succeed again, but consumption must
+still refuse and evidence bytes remain unchanged. An RAII guard also attempts
+restoration on unwind, targeting only that newly created fixture object.
+
+This covers composed refusal on an actual head ACL-custody failure, not an
+atomic head-advance/consume commit, arbitrary concurrent ACL rewrite detection,
+durable once-only consumption, or production recovery. The hook is private to
+the inert composition. Exact-SHA hosted tests on both Windows images must
+confirm the actual ACL transition and zero-sink/spent assertions before this
+slice is accepted; successful cross-target lint alone cannot prove them.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
