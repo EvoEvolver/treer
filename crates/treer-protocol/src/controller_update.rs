@@ -3,7 +3,7 @@
 //! override is accepted. Call `validate` at response boundaries after decoding;
 //! serde alone checks types and rejects extra fields, not semantic evidence.
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Intentionally absent from CONTROLLER_CAPABILITIES until #111 integration
 /// and native acceptance exist. Proxy support must be advertised separately.
@@ -20,6 +20,18 @@ pub const REPORT_GRACE_SECONDS: u64 = 600;
 pub const RESOLVED_RETENTION_SECONDS: u64 = 7 * 24 * 60 * 60;
 pub const MAX_RESOLVED_OPERATIONS: usize = 64;
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
+// Unlike serde's default Option handling, absence is an error; explicit null
+// means unknown. Keep the same strict wire requirement in the browser decoder.
+fn required_option<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    Option::deserialize(deserializer)
+}
+
+fn token(s: &str) -> bool {
+    s.len() >= 32 && opaque(s, 256)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvalidControllerUpdateModel;
@@ -105,7 +117,10 @@ impl Target {
             opaque(&self.target_id, 128)
                 && !self.version_label.is_empty()
                 && self.version_label.len() <= 128
-                && !self.version_label.chars().any(char::is_control),
+                && self
+                    .version_label
+                    .bytes()
+                    .all(|b| b.is_ascii_graphic() || b == b' '),
         )
     }
 }
@@ -136,7 +151,7 @@ impl std::fmt::Debug for ConfirmRequest {
 
 impl ConfirmRequest {
     pub fn validate(&self) -> Checked {
-        require(opaque(&self.confirmation_token, 256))
+        require(token(&self.confirmation_token))
     }
 }
 
@@ -231,7 +246,9 @@ wire_enum!(UpdateError {
 pub struct Catalog {
     pub support: Support,
     pub availability: Availability,
+    #[serde(deserialize_with = "required_option")]
     pub current: Option<Identity>,
+    #[serde(deserialize_with = "required_option")]
     pub observed_at: Option<DateTime<Utc>>,
     pub platform: Platform,
     pub catalog_revision: u64,
@@ -252,6 +269,10 @@ impl Catalog {
         require(
             self.availability != Availability::Ready
                 || (self.support == Support::Supported && self.current.is_some()),
+        )?;
+        require(
+            (self.support == Support::Supported && self.availability == Availability::Ready)
+                || self.targets.is_empty(),
         )?;
         for (i, target) in self.targets.iter().enumerate() {
             target.validate()?;
@@ -290,7 +311,7 @@ impl Preview {
             job_id(&self.operation_id)
                 && hex(&self.plan_digest, 64)
                 && self.steps == PLAN_STEPS
-                && opaque(&self.confirmation_token, 256)
+                && token(&self.confirmation_token)
                 && self.current != self.target.identity,
         )
     }
@@ -303,16 +324,23 @@ pub struct Operation {
     pub current: Identity,
     pub target: Target,
     pub state: State,
+    #[serde(deserialize_with = "required_option")]
     pub phase: Option<Phase>,
     pub observation: Observation,
+    #[serde(deserialize_with = "required_option")]
     pub observed_identity: Option<Identity>,
+    #[serde(deserialize_with = "required_option")]
     pub restored_identity: Option<Identity>,
     pub health: Health,
+    #[serde(deserialize_with = "required_option")]
     pub receipt_revision: Option<u64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(deserialize_with = "required_option")]
     pub observed_at: Option<DateTime<Utc>>,
+    #[serde(deserialize_with = "required_option")]
     pub finished_at: Option<DateTime<Utc>>,
+    #[serde(deserialize_with = "required_option")]
     pub error_code: Option<UpdateError>,
 }
 
@@ -367,14 +395,24 @@ impl Operation {
             State::Partial => require(
                 self.phase == Some(Phase::Partial)
                     && self.finished_at.is_some()
+                    && self.health != Health::Healthy
                     && self.error_code.is_some(),
             ),
             State::RollbackFailed => require(
                 self.phase == Some(Phase::RollbackFailed)
                     && self.finished_at.is_some()
+                    && self.health != Health::Healthy
                     && self.error_code.is_some(),
             ),
-            State::Accepted => require(self.phase.is_none() && self.finished_at.is_none()),
+            State::Accepted => require(
+                self.phase.is_none()
+                    && self.finished_at.is_none()
+                    && self.error_code.is_none()
+                    && self.health == Health::Unknown
+                    && self.observed_identity.is_none()
+                    && self.restored_identity.is_none()
+                    && self.observed_at.is_none(),
+            ),
             State::Updating => require(
                 matches!(
                     self.phase,
@@ -386,9 +424,14 @@ impl Operation {
                             | Phase::LauncherInstalling
                             | Phase::RollingBack
                     )
-                ) && self.finished_at.is_none(),
+                ) && self.finished_at.is_none()
+                    && self.error_code.is_none(),
             ),
-            State::Unconfirmed => require(self.finished_at.is_none() && self.error_code.is_some()),
+            State::Unconfirmed => require(
+                self.finished_at.is_none()
+                    && self.error_code.is_some()
+                    && self.health != Health::Healthy,
+            ),
         }
     }
 }
@@ -403,6 +446,22 @@ pub struct Discovery {
 impl Discovery {
     pub fn validate(&self) -> Checked {
         require(self.operations.len() <= MAX_DISCOVERY)?;
+        require(
+            self.operations
+                .iter()
+                .filter(|op| {
+                    matches!(
+                        op.state,
+                        State::Accepted
+                            | State::Updating
+                            | State::Unconfirmed
+                            | State::Partial
+                            | State::RollbackFailed
+                    )
+                })
+                .count()
+                <= 1,
+        )?;
         for (i, operation) in self.operations.iter().enumerate() {
             operation.validate()?;
             require(
@@ -410,6 +469,12 @@ impl Discovery {
                     .iter()
                     .any(|other| other.operation_id == operation.operation_id),
             )?;
+            if let Some(previous) = i.checked_sub(1).map(|j| &self.operations[j]) {
+                require(
+                    (previous.created_at, &previous.operation_id)
+                        >= (operation.created_at, &operation.operation_id),
+                )?;
+            }
         }
         Ok(())
     }

@@ -9,6 +9,14 @@ methods for shape/outcome consistency. Future adapters must call validation
 after bounded decoding, then independently verify authorization, catalog trust,
 token binding and native evidence. Model validation supplies none of that
 authority and cannot attest to a health check or signed receipt.
+Nullable response fields must be present: JSON null means unknown, whereas an
+omitted key is malformed. Browser decoders must enforce the same distinction.
+Before deserializing, future HTTP adapters cap request bodies at 1 KiB and
+response bodies at 64 KiB and bound collection visitors to 16 targets/operations
+and six plan steps; post-decode validation is not an allocation limit. Oversize
+body/vector/string negatives are required at that adapter boundary. Reject
+created/updated/observed/finished times beyond server now plus 30 seconds; model
+validation checks only internal chronology and cannot consult server time.
 
 ## Existing implementation boundary
 
@@ -102,7 +110,10 @@ the updater's reviewed artifact trust. No unverified remote "latest" response
 is authority. A channel alias resolves to an immutable target before preview;
 the first implementation can simply omit aliases. Same-version, downgrade,
 unknown ordering, mismatched platform or unavailable current identity cannot
-mint a token. Labels are untrusted plain text, bounded to 128 UTF-8 bytes.
+mint a token. Release labels are untrusted display-only ASCII text, bounded to
+128 bytes (printable characters and spaces only). This excludes Unicode bidi,
+format and zero-width characters; localized UI copy stays in UI dictionaries.
+Target IDs and labels never replace the artifact identity shown in details.
 Permission refusal is HTTP 403, not an empty catalog that looks unsupported.
 Catalog bytes change only through a reviewed Proxy release, not a runtime fetch.
 `catalog_revision` is a positive monotonic integer no greater than 2^53-1; persist
@@ -154,6 +165,10 @@ receipt exists. `core_healthy` alone must never produce `succeeded`.
 No raw receipt, output tail, path, exception message or token enters operation
 responses, browser persistence, audit or Proxy logs. The receipt is validated
 privately and projected to these fields. Diagnostic codes are fixed categories.
+Accepted intent has no error, observed/restored identity, health evidence or
+finished time. Updating has no error/finished result. Unconfirmed, partial and
+rollback-failed project health as unknown or unhealthy, never healthy: this
+minimal wire shape has no separate correlated healthy-component evidence.
 
 ## Confirmation, duplicates and conflict ownership
 
@@ -175,6 +190,9 @@ For the same authenticated creator/session and still-authorized scope, an
 already-consumed token returns its existing operation without dispatching again.
 This bounded consumed-token mapping is observation, not reusable authority;
 fresh tokens expire as usual. A replay in another scope/session is refused.
+Confirmation tokens contain 32 to 256 ASCII alphanumeric/underscore/hyphen
+characters. Actual generation uses cryptographic randomness and server lookup
+is hashed or constant-time; this structural length floor is not an entropy proof.
 The consumed-token lookup expires 420 seconds after original preparation (TTL
 plus five minutes); it never extends the 120-second acceptance deadline. After
 lookup expiry, refuse the token and use authenticated GET discovery. Foreign
@@ -223,6 +241,11 @@ manual Check status remains GET-only. This timer grants no recovery authority.
 Discovery returns at most the creator's 16 newest operations on that machine,
 always including its unresolved operation. Another creator's active slot is
 exposed only as `blocked_by_other_operation`, without identity or job details.
+Order is descending by created_at, then descending canonical operation UUID
+for ties. At most one unresolved claim (accepted, updating, unconfirmed, partial
+or rollback-failed) may appear. A malformed list refuses whole instead of asking
+the UI to choose an active operation. Non-ready or unsupported catalogs return
+no selectable targets, independently of durable operation discovery.
 Keep resolved observations seven days, capped at 64 per creator/machine; prune
 only resolved, safely reclaimable records. Unresolved records and slot ownership
 cannot be evicted to satisfy a cap; refuse new acceptance if durable capacity

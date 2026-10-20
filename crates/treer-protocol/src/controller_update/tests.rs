@@ -65,7 +65,7 @@ fn requests_reject_execution_inputs_and_tokens_are_redacted() {
         .is_err());
     }
     let confirm = ConfirmRequest {
-        confirmation_token: "secret-1".into(),
+        confirmation_token: "secret-1".repeat(8),
     };
     assert!(confirm.validate().is_ok());
     assert!(!format!("{confirm:?}").contains("secret-1"));
@@ -130,6 +130,8 @@ fn connectivity_never_changes_durable_success_and_unconfirmed_is_not_finished() 
     op.finished_at = None;
     assert!(op.validate().is_ok());
     op.state = State::Accepted;
+    op.error_code = None;
+    op.observed_at = None;
     assert!(op.validate().is_ok());
     op.state = State::Updating;
     assert!(op.validate().is_err()); // no receipt yet
@@ -192,6 +194,8 @@ fn catalog_rejects_wrong_platform_duplicates_invalid_hashes_and_unsafe_revisions
     catalog.support = Support::ManualUpdateRequired;
     assert!(catalog.validate().is_err()); // unsupported cannot claim ready
     catalog.availability = Availability::Offline;
+    assert!(catalog.validate().is_err()); // offline cannot offer new targets
+    catalog.targets.clear();
     assert!(catalog.validate().is_ok());
 }
 
@@ -204,7 +208,7 @@ fn preview_requires_v4_selector_fixed_plan_and_changed_target() {
         target: op.target,
         plan_digest: "a".repeat(64),
         steps: PLAN_STEPS.to_vec(),
-        confirmation_token: "synthetic-token".into(),
+        confirmation_token: "synthetic-token".repeat(4),
         expires_at: op.created_at,
     };
     assert!(preview.validate().is_ok());
@@ -239,4 +243,137 @@ fn discovery_is_bounded_unique_and_wire_enums_fail_closed() {
     wire["phase"] = json!("ready_for_any_shell_command");
     assert!(serde_json::from_value::<Operation>(wire).is_err());
     assert!(!crate::CONTROLLER_CAPABILITIES.contains(&CAPABILITY));
+}
+
+#[test]
+fn response_nullable_fields_must_be_present_and_explicit_null_round_trips() {
+    let wire = serde_json::to_value(operation()).unwrap();
+    for field in [
+        "phase",
+        "observed_identity",
+        "restored_identity",
+        "receipt_revision",
+        "observed_at",
+        "finished_at",
+        "error_code",
+    ] {
+        let mut omitted = wire.clone();
+        omitted.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<Operation>(omitted).is_err(),
+            "missing {field}"
+        );
+    }
+    assert!(serde_json::from_value::<Operation>(wire).is_ok());
+    let catalog = json!({"support":"manual_update_required","availability":"offline",
+        "current":null,"observed_at":null,"platform":"linux-x86_64",
+        "catalog_revision":1,"targets":[]});
+    assert!(serde_json::from_value::<Catalog>(catalog.clone())
+        .unwrap()
+        .validate()
+        .is_ok());
+    for field in ["current", "observed_at"] {
+        let mut omitted = catalog.clone();
+        omitted.as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<Catalog>(omitted).is_err());
+    }
+}
+
+#[test]
+fn uncertain_outcomes_cannot_claim_healthy_and_pending_has_no_outcome() {
+    for (state, phase, finished) in [
+        (State::Partial, Some(Phase::Partial), true),
+        (State::RollbackFailed, Some(Phase::RollbackFailed), true),
+        (State::Unconfirmed, None, false),
+    ] {
+        let mut op = operation();
+        op.state = state;
+        op.phase = phase;
+        op.receipt_revision = phase.map(|_| 3);
+        op.error_code = Some(UpdateError::RecoveryRequired);
+        op.finished_at = finished.then_some(op.updated_at);
+        assert!(op.validate().is_err());
+        op.health = Health::Unknown;
+        assert!(op.validate().is_ok());
+    }
+    let mut accepted = operation();
+    accepted.state = State::Accepted;
+    accepted.phase = None;
+    accepted.receipt_revision = None;
+    accepted.finished_at = None;
+    assert!(accepted.validate().is_err());
+    accepted.health = Health::Unknown;
+    accepted.observed_identity = None;
+    accepted.observed_at = None;
+    assert!(accepted.validate().is_ok());
+    accepted.error_code = Some(UpdateError::HealthFailed);
+    assert!(accepted.validate().is_err());
+    accepted.state = State::Updating;
+    accepted.phase = Some(Phase::Activating);
+    accepted.receipt_revision = Some(2);
+    assert!(accepted.validate().is_err());
+    accepted.error_code = None;
+    assert!(accepted.validate().is_ok());
+}
+
+#[test]
+fn display_labels_and_truncated_tokens_refuse_and_long_collections_are_bounded() {
+    for label in [
+        "version\u{202e}exe",
+        "\u{2066}v2\u{2069}",
+        "v\u{200b}2",
+        "v\u{feff}2",
+        "x\n",
+    ] {
+        let mut t = target();
+        t.version_label = label.into();
+        assert!(t.validate().is_err());
+    }
+    for length in [0, 1, 31, 257] {
+        assert!(ConfirmRequest {
+            confirmation_token: "x".repeat(length)
+        }
+        .validate()
+        .is_err());
+    }
+    let mut t = target();
+    t.version_label = "v".repeat(129);
+    assert!(t.validate().is_err());
+    let catalog = Catalog {
+        support: Support::Supported,
+        availability: Availability::Ready,
+        current: Some(identity('a')),
+        observed_at: Some(operation().created_at),
+        platform: Platform::LinuxX86_64,
+        catalog_revision: 1,
+        targets: vec![target(); MAX_TARGETS + 1],
+    };
+    assert!(catalog.validate().is_err());
+}
+
+#[test]
+fn discovery_has_one_unresolved_claim_and_is_deterministically_newest_first() {
+    let old = operation();
+    let mut new = old.clone();
+    new.operation_id = "22345678-1234-4234-8234-123456789abc".into();
+    let mut list = Discovery {
+        operations: vec![new.clone(), old.clone()],
+        blocked_by_other_operation: false,
+    };
+    assert!(list.validate().is_ok());
+    list.operations.reverse();
+    assert!(list.validate().is_err()); // UUID descending breaks equal-time ties
+    new.created_at += chrono::Duration::seconds(1);
+    new.updated_at = new.created_at;
+    new.observed_at = Some(new.created_at);
+    new.finished_at = Some(new.created_at);
+    list.operations = vec![new.clone(), old.clone()];
+    assert!(list.validate().is_ok());
+    for op in &mut list.operations {
+        op.state = State::Unconfirmed;
+        op.finished_at = None;
+        op.health = Health::Unknown;
+        op.error_code = Some(UpdateError::ResultUnconfirmed);
+    }
+    assert!(list.validate().is_err());
 }
