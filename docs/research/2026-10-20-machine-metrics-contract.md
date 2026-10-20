@@ -353,6 +353,22 @@ truncation flag. This conservative policy may shorten useful coverage. It does
 not discard a current field from FieldCache; a future collector must replace or
 retire expired fields before it can append another frame containing them.
 
+Collector contract: every acquired field, including RAM/VRAM capacities and
+other apparently static values, must be freshly re-acquired within each
+retention window or retired to canonical warming_up/no observation with a fixed,
+content-free diagnostic. Re-reading the same hardware value is a legitimate new
+acquisition and identity; copying its old cache entry with a new timestamp is
+not. Retire removed-device fields when fresh acquisition is no longer possible;
+the future inventory/response adapter still owes the removed-GPU semantics.
+The collector must prevent one unrefreshed field from indefinitely refusing
+otherwise healthy appends. This retirement behavior is not implemented yet.
+
+Expiry drops the whole stored frame, including other still-fresh fields; the
+query assembler must not assume partial salvage from an expired envelope.
+Decode each retained record with its own stored clock and matching epoch, never
+the query's current time. Maintenance applies the present-time retention check
+before those records become available to a reader.
+
 The format is internal in-memory staging, not a public metrics response,
 authenticated integrity proof, restart/boot identity, checksum or file recovery
 format. No filesystem journal, query deduplication/assembly, collection task or
