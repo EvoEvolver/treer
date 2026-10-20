@@ -888,3 +888,6 @@ only if each of its three current series reports `device_absent`. Present
 devices may report `warming_up` while awaiting an acquisition. Historical
 buckets remain independent of current presence, so removing a device does not
 erase its valid history. Inconsistent presence/status pairs reject the response.
+The eight fixed-answer presence cases for Core/Web parity live in
+`docs/fixtures/machine-metrics-presence-vectors.json`; the browser regression
+pins the file's SHA-256 before passing its inputs to the complete parser.

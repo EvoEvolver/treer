@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import { fixture, gotoWorkspace } from './fixtures/workspace-tabs'
 import { metricsFixture } from './fixtures/machine-metrics'
 import type { MetricsRequest, MachineMetrics } from '../src/lib/machine-metrics'
+import type { GpuPresenceVectors } from './fixtures/machine-metrics-presence'
 async function setup(page: Page, mode = 'normal', mutate?: (v: MachineMetrics) => void) {
   const live = await fixture(page)
   const machines = live.snapshot().servers.map(m => ({ ...m, capabilities: mode === 'unsupported' ? [] : ['machine.metrics.v1'], status: mode === 'offline' ? 'offline' : m.status }))
@@ -182,15 +183,15 @@ test('shared exact nanosecond span vectors accept source counts and reject decre
 
 test('GPU descriptor presence agrees with current status for all three GPU metrics', async ({ page }) => {
   await page.goto('/')
-  const results = await page.evaluate(async () => {
+  const raw = readFileSync(new URL('../../docs/fixtures/machine-metrics-presence-vectors.json', import.meta.url))
+  expect(createHash('sha256').update(raw).digest('hex')).toBe('85273f78b68942c49a04c51aa3c62ccbfaa7c2827acd79585dc4ee429d21bbc9')
+  const vectors = JSON.parse(raw.toString('utf8')) as GpuPresenceVectors
+  expect(vectors.schema).toBe(1)
+  expect(vectors.vectors).toHaveLength(8)
+  const results = await page.evaluate(async data => {
     const path = '/e2e/fixtures/machine-metrics-presence.ts'
     const { exerciseGpuPresence } = await import(/* @vite-ignore */ path)
-    return exerciseGpuPresence()
-  })
-  expect(results).toEqual([true, false].flatMap(present => [
-    { name: present ? 'present/warming_up' : 'absent/device_absent', accepted: true },
-    ...['gpu_utilization', 'gpu_memory_used', 'gpu_memory_total'].map(kind => ({
-      name: `${present ? 'present/device_absent' : 'absent/warming_up'}/${kind}`, accepted: false,
-    })),
-  ]))
+    return exerciseGpuPresence(data)
+  }, vectors)
+  expect(results).toEqual(vectors.vectors.map(v => ({ name: v.name, accepted: v.accepted })))
 })
