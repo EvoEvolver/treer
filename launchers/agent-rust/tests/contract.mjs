@@ -610,6 +610,8 @@ for(const scenario of ['normal','concurrent','mismatch','reopen'])test('Node imp
   assert.equal(state.history.totalTurns,778);assert.equal(state.thread.turns.length,50);
   assert.equal(state.thread.turns.at(-1).status,'interrupted');
   assert.equal(state.runtime.provider.historyScan.staleInProgressCount,4);
+  assert.equal(state.runtime.provider.historyScan.historyAuthority.normalizationRequired,true);
+  assert.equal(state.runtime.provider.historyScan.historyAuthority.normalizationApplied,true);
   assert.ok(state.runtime.provider.historyScan.frameBytes>45*1024*1024);
   assert.equal(await readFile(join(s.state,'node-backup-v1/queue.json'),'utf8'),source);
   const post=()=>fetch(imported.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'synthetic acceptance only',operation_id:'stale-after-import'})});
@@ -695,7 +697,7 @@ for(const scenario of ['collision','observer'])test(`projection-only history ret
   assert.equal(frames.filter(f=>f.method==='turn/start').length,1);
 });
 
-for(const mode of ['missing','missingZero','missingOne','unknown','unknownZero','activeZero','paged','duplicate','reordered','activeNoNewest'])test('producer-shaped ambiguous history refuses startup: '+mode,{skip:useNode,timeout:20000},async t=>{
+for(const mode of ['missing','missingZero','missingOne','unknown','unknownZero','unknownOne','activeZero','paged','duplicate','reordered','activeNoNewest'])test('producer-shaped ambiguous history refuses startup: '+mode,{skip:useNode,timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
   const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
   const restarted=await s.launch({HISTORY_STALE_SNAPSHOT:'1',HISTORY_STALE_INVALID:mode},false);

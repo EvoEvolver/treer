@@ -39,11 +39,11 @@ for await (const line of createInterface({ input: process.stdin })) {
       const mode=process.env.HISTORY_STALE_INVALID;
       result.thread.turns=result.thread.turns.slice(0,60);
       if(mode.startsWith('missing'))delete result.thread.status;
-      if(mode==='missingZero'||mode==='missingOne'||mode==='unknownZero'||mode==='activeZero') {
+      if(mode==='missingZero'||mode==='missingOne'||mode==='unknownZero'||mode==='unknownOne'||mode==='activeZero') {
         for(const turn of result.thread.turns)turn.status='completed';
-        if(mode==='missingOne')result.thread.turns[0].status='inProgress';
+        if(mode==='missingOne'||mode==='unknownOne')result.thread.turns[0].status='inProgress';
       }
-      if(mode==='unknown'||mode==='unknownZero')result.thread.status.type='unknown';
+      if(mode==='unknown'||mode==='unknownZero'||mode==='unknownOne')result.thread.status.type='unknown';
       if(mode==='activeZero')result.thread.status.type='active';
       if(mode==='paged')result.thread.nextCursor='synthetic-next';
       if(mode==='duplicate')result.thread.turns[51].id='old-0';

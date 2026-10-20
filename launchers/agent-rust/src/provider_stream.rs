@@ -703,7 +703,7 @@ mod tests {
                     let metadata = "\"status\":{\"type\":\"idle\"}";
                     let thread = if late { format!("\"turns\":{turns},{metadata}") }
                         else { format!("{metadata},\"turns\":{turns}") };
-                    let wire = format!("{{\"id\":1,\"result\":{{\"thread\":{{{thread}}}}}}}\n");
+                    let wire = format!("{{\"id\":1,\"result\":{{\"thread\":{{{thread}}}}}}}\n{{\"id\":2,\"result\":{{}}}}\n");
                     let selections = Selections::default();
                     selections.lock().unwrap().insert(1, Selection { full_history:true, ..Default::default() });
                     let mut reader = Reader::new(wire.as_bytes(), selections);
@@ -721,6 +721,15 @@ mod tests {
                     assert!(!diagnostic.to_string().contains("PRIVATE_"));
                     if let Ok(Some(value)) = result {
                         assert_eq!(value["result"]["thread"]["turns"][1]["status"], if candidates {"interrupted"} else {"completed"});
+                        reader.next().await.unwrap().unwrap();
+                        let reset = &reader.diagnostic()["historyAuthority"];
+                        for key in ["invalidIds", "duplicateIds", "decreasingTimestamps", "nonIntegerTimestamps"] {
+                            assert_eq!(reset[key],0,"{fault} did not reset {key}");
+                        }
+                        for key in ["identityValid", "orderValid"] { assert_eq!(reset[key],true); }
+                        for key in ["normalizationRequired", "normalizationApplied", "fullHistoryRequest"] { assert_eq!(reset[key],false); }
+                        assert_eq!(reset["paginationMarkers"],json!([]));
+                        assert_eq!(reset["threadStatus"],"missing");
                     }
                 }
             }

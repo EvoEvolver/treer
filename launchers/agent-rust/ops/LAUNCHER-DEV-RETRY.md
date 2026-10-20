@@ -231,15 +231,20 @@ historyScan counts INCLUDING staleInProgressCount/threadStatus and historyAuthor
 (invalidIds, duplicateIds, decreasingTimestamps, nonIntegerTimestamps,
 identityValid, orderValid, paginationMarkers, fullHistoryRequest,
 normalizationRequired, normalizationApplied, threadStatus), NEW backup manifest hash and entry hashes matching BOTH
-post-stop manifests. No fresh-thread fallback. Then remove the flag, no restart:
+post-stop manifests. No fresh-thread fallback.
 
 Require explicit threadStatus idle, same thread, no fence, and recorded counters.
 staleInProgressCount may be ZERO: zero candidates must report
 normalizationRequired false and normalizationApplied false; this is projection-only startup, not proof of
-stale-turn normalization. Nonzero invalid counters or any marker means a latent
-candidate-frame refusal; record it and request diagnosis/review before an
-acceptance turn or further rollout. Do not manufacture a candidate or retry to
-hide it. Candidate normalization still needs every original authority predicate.
+stale-turn normalization. Before ANY acceptance prompt, require all four numeric
+predicate counters zero, identityValid and orderValid true, fullHistoryRequest
+true and paginationMarkers empty. Otherwise HARD STOP: do not send acceptance;
+stop the exact new Rust process and verify its exits/holders, then perform the
+NEW-backup rollback below. Report the counters to Core/security. This is a
+latent candidate-frame refusal that would fence after a real turn started.
+Do not manufacture a candidate or retry to hide it. Candidate normalization
+still needs every original authority predicate. Only after all checks are clean,
+remove the import flag below without restarting.
 `totalTurns`/hasOlderItems describe observed projection, not proof of complete
 history when invalid predicates pass with zero candidates.
 
