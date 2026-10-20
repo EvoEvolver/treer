@@ -27,6 +27,14 @@ pub struct MultiFieldHistory {
     /// Range acquisitions only; sorted opaque ids, presence deliberately false.
     /// This is historical inventory, not the current/range response union.
     pub retained_gpus: Vec<MachineMetricsGpu>,
+    /// None means current enumeration is unknown, NOT an empty union.
+    pub inventory: Option<MergedInventory>,
+}
+
+pub struct MergedInventory {
+    pub gpus: Vec<MachineMetricsGpu>,
+    /// Derived exclusively from a fresh complete current enumeration.
+    pub gpu_status: treer_protocol::MachineMetricStatus,
 }
 
 impl DetachedFieldQuery {
@@ -88,6 +96,7 @@ impl DetachedFieldQuery {
         let mut counts = vec![0; fields.len()];
         let mut has_gpu_inventory = false;
         let mut retained_gpus = BTreeMap::new();
+        let mut incomplete_inventory = false;
         for (clock, bytes) in self.history.frames() {
             check(cancelled)?;
             let stored =
@@ -104,6 +113,9 @@ impl DetachedFieldQuery {
                 })
                 .filter_map(|field| field.gpu_id.as_deref())
                 .collect();
+            if !range_ids.is_empty() {
+                incomplete_inventory |= stored.frame.inventory_truncated;
+            }
             for gpu in &stored.frame.gpus {
                 check(cancelled)?;
                 if range_ids.contains(gpu.id.as_str()) {
@@ -130,6 +142,12 @@ impl DetachedFieldQuery {
                 }
             }
         }
+        check(cancelled)?;
+        let inventory = self
+            .inventory
+            .as_ref()
+            .map(|current| merge_inventory(current, &retained_gpus, incomplete_inventory))
+            .transpose()?;
         let mut observations: Vec<Vec<Observation>> =
             counts.into_iter().map(Vec::with_capacity).collect();
         for (_, (position, observation)) in index {
@@ -156,8 +174,42 @@ impl DetachedFieldQuery {
             fields: output,
             has_gpu_inventory,
             retained_gpus: retained_gpus.into_values().collect(),
+            inventory,
         })
     }
+}
+
+fn merge_inventory(
+    current: &crate::machine_metrics::gpu_inventory::InventorySnapshot,
+    retained: &BTreeMap<String, MachineMetricsGpu>,
+    incomplete: bool,
+) -> Result<MergedInventory, FieldQueryError> {
+    if incomplete {
+        return Err(FieldQueryError::IncompleteInventory);
+    }
+    // Inputs originate in the bounded cache and decoded historical map. Check
+    // the combined cap before cloning any output; never trim current or past.
+    let extra = current
+        .gpus
+        .iter()
+        .filter(|gpu| !retained.contains_key(&gpu.id))
+        .count();
+    if retained.len() + extra > MACHINE_METRICS_MAX_GPUS {
+        return Err(FieldQueryError::InventoryLimit);
+    }
+    let mut union = retained.clone();
+    for gpu in &current.gpus {
+        // Current capture alone supplies present=true AND the display name.
+        union.insert(gpu.id.clone(), gpu.clone());
+    }
+    Ok(MergedInventory {
+        gpus: union.into_values().collect(),
+        gpu_status: if current.gpus.is_empty() {
+            treer_protocol::MachineMetricStatus::NoDevice
+        } else {
+            treer_protocol::MachineMetricStatus::Ok
+        },
+    })
 }
 
 // Inputs have already passed StoredFrame's shared descriptor validation.
@@ -178,6 +230,47 @@ fn retain_gpu(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combined_inventory_cap_counts_overlap_and_refuses_incomplete_history() {
+        use crate::machine_metrics::gpu_inventory::InventorySnapshot;
+        let mut retained = BTreeMap::new();
+        for id in 0..MACHINE_METRICS_MAX_GPUS {
+            retain_gpu(
+                &mut retained,
+                &MachineMetricsGpu {
+                    id: format!("{id:064x}"),
+                    name: "historical".into(),
+                    present: true,
+                },
+            )
+            .unwrap();
+        }
+        let mut current = InventorySnapshot {
+            sampled_at: chrono::DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
+            gpus: vec![MachineMetricsGpu {
+                id: format!("{:064x}", 0),
+                name: "current wins".into(),
+                present: true,
+            }],
+        };
+        let merged = merge_inventory(&current, &retained, false).unwrap();
+        assert_eq!(merged.gpus.len(), MACHINE_METRICS_MAX_GPUS);
+        assert_eq!(merged.gpus[0].name, "current wins");
+        assert!(merged.gpus[0].present);
+        assert!(merged.gpus[1..].iter().all(|gpu| !gpu.present));
+        current.gpus[0].id = format!("{:064x}", MACHINE_METRICS_MAX_GPUS);
+        assert!(matches!(
+            merge_inventory(&current, &retained, false),
+            Err(FieldQueryError::InventoryLimit)
+        ));
+        assert!(matches!(
+            merge_inventory(&current, &retained, true),
+            Err(FieldQueryError::IncompleteInventory)
+        ));
+        assert_eq!(retained.len(), MACHINE_METRICS_MAX_GPUS);
+        assert!(retained.values().all(|gpu| !gpu.present));
+    }
 
     #[test]
     fn retained_inventory_is_bounded_sorted_and_never_claims_presence() {

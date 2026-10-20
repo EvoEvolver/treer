@@ -738,3 +738,32 @@ and history. This includes duplicate failed attempts, which cannot turn an old
 successful capture into a newly timed failure. True reversal still invalidates
 the shared epoch. Integration tests exercise both clocks tied, each clock tied
 alone and successful/failed duplicate inputs, with actual retained CPU history.
+
+## Current/range GPU inventory union checkpoint (not connected)
+
+The decode-once multi-field query now merges its discovered range descriptors
+with the fresh enumeration captured by that same detached view. Unknown current
+enumeration yields inventory=None, explicitly not an empty successful union.
+Only a fresh successful empty enumeration produces gpu_status=no_device;
+failed, stale and cold enumeration cannot produce that status in this helper.
+
+Historical entries remain present=false. An overlapping current id replaces
+both display name and presence, while current-only devices are included even
+when the historical range contains no observations for them. Output stays
+sorted by opaque id. The combined range-plus-current id count is checked against
+32 before cloning the output: overlap counts once, a new 33rd device refuses
+the whole query. Nothing is trimmed and no inventory_truncated flag is invented.
+If any frame carrying an in-range GPU acquisition declares inventory_truncated,
+a known-current union refuses with IncompleteInventory; this helper cannot
+claim that such a historical inventory is complete. Unknown-current queries
+may still return bounded history and inventory=None, without a completeness claim.
+
+Tests distinguish historical and current names for the same id, preserve a
+current-only device outside its historical acquisition range, retain an absent
+historical device after a successful empty enumeration, and keep failed/stale
+enumeration unknown. A full 32-device historical set plus an overlapping current
+device succeeds; a distinct current device refuses, as does incomplete history.
+This is metadata only: it does not yet aggregate the three GPU fields for the
+resulting union or assemble their DeviceAbsent current projections. The current
+system-only wire helper remains conservative and still refuses retained GPUs.
+Append-frame enumeration binding and runtime activation holds remain unchanged.

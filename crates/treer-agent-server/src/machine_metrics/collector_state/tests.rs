@@ -1059,6 +1059,16 @@ fn retained_gpu_inventory_uses_acquisition_range_not_cached_frame_time() {
     state
         .record_vram(clock(0, 0), &gpu, MachineMetricStatus::Ok, Some((100, 60)))
         .unwrap();
+    state
+        .record_inventory(
+            clock(0, 0),
+            Some(&[treer_protocol::MachineMetricsGpu {
+                id: gpu.clone(),
+                name: "Current capture".into(),
+                present: true,
+            }]),
+        )
+        .unwrap();
     for ms in [0, 5000] {
         let mut sample = gpu_frame(&mut state, clock(ms, ms as u64), &gpu);
         if ms == 5000 {
@@ -1085,11 +1095,54 @@ fn retained_gpu_inventory_uses_acquisition_range_not_cached_frame_time() {
     assert_eq!(result.retained_gpus[0].id, gpu);
     assert_eq!(result.retained_gpus[0].name, "Later label");
     assert!(!result.retained_gpus[0].present);
+    let inventory = result.inventory.unwrap();
+    assert_eq!(inventory.gpus[0].name, "Current capture");
+    assert!(inventory.gpus[0].present);
+    assert_eq!(inventory.gpu_status, MachineMetricStatus::Ok);
     query.from = clock(1, 1).wall;
     query.to = clock(5000, 5000).wall;
     let excluded = view.query_fields(&query, &keys, &mut || false).unwrap();
     assert!(excluded.has_gpu_inventory);
     assert!(excluded.retained_gpus.is_empty());
+    assert_eq!(excluded.inventory.unwrap().gpus.len(), 1);
+    drop(view);
+    // Failed enumeration must not become NoDevice, even with retained devices.
+    state.record_inventory(clock(5000, 5000), None).unwrap();
+    query.from = clock(0, 0).wall;
+    query.to = clock(1000, 1000).wall;
+    let mut unknown = state
+        .detached_query(clock(5000, 5000), &mut || false)
+        .unwrap();
+    assert!(unknown
+        .query_fields(&query, &keys, &mut || false)
+        .unwrap()
+        .inventory
+        .is_none());
+    drop(unknown);
+    state
+        .record_inventory(clock(10000, 10000), Some(&[]))
+        .unwrap();
+    let mut absent = state
+        .detached_query(clock(10000, 10000), &mut || false)
+        .unwrap();
+    let merged = absent
+        .query_fields(&query, &keys, &mut || false)
+        .unwrap()
+        .inventory
+        .unwrap();
+    assert_eq!(merged.gpu_status, MachineMetricStatus::NoDevice);
+    assert_eq!(merged.gpus.len(), 1);
+    assert_eq!(merged.gpus[0].name, "Later label");
+    assert!(!merged.gpus[0].present);
+    drop(absent);
+    let mut stale = state
+        .detached_query(clock(25001, 25001), &mut || false)
+        .unwrap();
+    assert!(stale
+        .query_fields(&query, &keys, &mut || false)
+        .unwrap()
+        .inventory
+        .is_none());
 }
 
 fn record(state: &mut CollectorState, clock: Clock, value: f64) -> bool {

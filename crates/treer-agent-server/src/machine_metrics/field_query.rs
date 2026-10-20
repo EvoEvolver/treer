@@ -10,7 +10,7 @@ use treer_protocol::{MachineMetricKind, MachineMetricsQuery};
 
 mod multi;
 mod system_response;
-pub use multi::{FieldKey, MultiFieldHistory, MAX_INDEX_ACQUISITIONS};
+pub use multi::{FieldKey, MergedInventory, MultiFieldHistory, MAX_INDEX_ACQUISITIONS};
 pub use system_response::{SystemMetadata, SystemResponse, SystemResponseError};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -22,6 +22,7 @@ pub enum FieldQueryError {
     InvalidFields,
     IndexLimit,
     InventoryLimit,
+    IncompleteInventory,
 }
 
 pub struct FieldHistory {
