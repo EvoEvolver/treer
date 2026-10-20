@@ -42,7 +42,8 @@ fn field_query_refuses_conflicting_cached_identity_and_corrupt_staging_bytes() {
             clock(10_000),
             &query,
             MachineMetricKind::CpuUtilization,
-            None
+            None,
+            &mut || false,
         ),
         Err(FieldQueryError::ConflictingAcquisition)
     ));
@@ -53,7 +54,8 @@ fn field_query_refuses_conflicting_cached_identity_and_corrupt_staging_bytes() {
             clock(10_000),
             &query,
             MachineMetricKind::CpuUtilization,
-            None
+            None,
+            &mut || false,
         ),
         Err(FieldQueryError::History(HistoryError::InvalidSample))
     ));

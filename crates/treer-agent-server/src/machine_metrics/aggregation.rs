@@ -21,6 +21,7 @@ pub struct Observation {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum AggregationError {
+    Cancelled,
     InvalidQuery,
     InvalidObservation,
     TooManyObservations,
@@ -43,6 +44,19 @@ pub fn aggregate(
     unit: MachineMetricUnit,
     observations: impl IntoIterator<Item = Observation>,
 ) -> Result<Buckets, AggregationError> {
+    aggregate_cancellable(query, now, unit, observations, &mut || false)
+}
+
+/// Cooperative cancellation only: the caller owns the deadline/disconnect flag.
+/// No partial result escapes after cancellation is observed.
+pub fn aggregate_cancellable(
+    query: &MachineMetricsQuery,
+    now: DateTime<Utc>,
+    unit: MachineMetricUnit,
+    observations: impl IntoIterator<Item = Observation>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Buckets, AggregationError> {
+    check_cancelled(cancelled)?;
     let span = query.to.signed_duration_since(query.from);
     let span_ms = span.num_milliseconds();
     if !query.valid_at(now) || span_ms < 1 || span != Duration::milliseconds(span_ms) {
@@ -56,6 +70,7 @@ pub fn aggregate(
     let mut points = Vec::new();
     let mut start = query.from;
     while start < query.to {
+        check_cancelled(cancelled)?;
         let end = start
             .checked_add_signed(Duration::milliseconds(width_ms as i64))
             .unwrap_or(query.to)
@@ -85,6 +100,7 @@ pub fn aggregate(
     let mut statuses: Vec<HashMap<MachineMetricStatus, u32>> =
         (0..points.len()).map(|_| HashMap::new()).collect();
     for (count, observation) in observations.into_iter().enumerate() {
+        check_cancelled(cancelled)?;
         if count >= super::history::MAX_RECORDS {
             return Err(AggregationError::TooManyObservations);
         }
@@ -128,8 +144,10 @@ pub fn aggregate(
             .or_insert(observation);
     }
     let mut selected: Vec<_> = slots.into_values().collect();
+    check_cancelled(cancelled)?;
     selected.sort_by_key(|v| (v.at, v.epoch, v.tick));
     for observation in selected {
+        check_cancelled(cancelled)?;
         let offset = observation
             .at
             .signed_duration_since(query.from)
@@ -170,6 +188,7 @@ pub fn aggregate(
         *statuses[index].entry(observation.status).or_default() += 1;
     }
     for (bucket, counts) in points.iter_mut().zip(statuses) {
+        check_cancelled(cancelled)?;
         bucket.status_counts = counts
             .into_iter()
             .map(|(status, count)| MachineMetricStatusCount { status, count })
@@ -178,7 +197,18 @@ pub fn aggregate(
         bucket.status_counts.sort_by_key(|entry| entry.status as u8);
         bucket.partial = bucket.valid_count != bucket.expected_count;
     }
+    check_cancelled(cancelled)?;
     Ok(Buckets { width_ms, points })
+}
+
+pub(super) fn check_cancelled(
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), AggregationError> {
+    if cancelled() {
+        Err(AggregationError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

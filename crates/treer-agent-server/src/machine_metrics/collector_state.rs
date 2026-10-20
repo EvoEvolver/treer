@@ -59,9 +59,25 @@ impl CollectorState {
         kind: MachineMetricKind,
         gpu_id: Option<&str>,
     ) -> Result<FieldHistory, StateError> {
+        self.query_field_cancellable(clock, query, kind, gpu_id, &mut || false)
+    }
+
+    /// Cancellation is caller-owned; this does not establish a runtime deadline
+    /// or move decoding outside exclusive collector access.
+    pub fn query_field_cancellable(
+        &mut self,
+        clock: Clock,
+        query: &MachineMetricsQuery,
+        kind: MachineMetricKind,
+        gpu_id: Option<&str>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<FieldHistory, StateError> {
+        super::aggregation::check_cancelled(cancelled)
+            .map_err(|error| StateError::Query(FieldQueryError::Aggregation(error)))?;
         let snapshot = self.snapshot(clock)?;
-        let buckets = field_query::aggregate_field(&mut self.history, clock, query, kind, gpu_id)
-            .map_err(StateError::Query)?;
+        let buckets =
+            field_query::aggregate_field(&mut self.history, clock, query, kind, gpu_id, cancelled)
+                .map_err(StateError::Query)?;
         Ok(FieldHistory {
             epoch: snapshot.epoch,
             reset: snapshot.reset,

@@ -482,3 +482,27 @@ decode/aggregation work, before enabling the route. Identity conflicts map to a
 fixed invalid-response error and a content-free diagnostic counter; they must
 not trigger retries or partial-success output. These concurrency, isolation,
 deadline and diagnostic requirements remain unimplemented by this reader.
+
+## Cooperative query cancellation checkpoint (not connected)
+
+The staging field reader and bucket aggregator now accept a caller-owned
+cancellation predicate. Checks run before collector maintenance, before each
+retained-frame decode, while building buckets, while visiting observations,
+before sorting, while emitting selected observations/status counts and before
+returning a result. Once observed, cancellation returns a distinct internal
+Cancelled error for the entire query; no partial bucket result is returned.
+The existing uncancelled helpers delegate with an always-false predicate.
+
+The regression interrupts a populated query at every reachable checkpoint,
+checks the explicit cancellation error and unchanged acquisition identity,
+then verifies an uncancelled retry gives the same complete buckets. An already
+cancelled request must not perform clock-reset maintenance. Cancellation after
+maintenance can still leave normal expiry/reset effects, as any query can.
+
+This is cooperative, not preemptive: one bounded 64 KiB frame decode, existing
+bounded maintenance and the at-most-17,280-observation sort are not interrupted
+internally. A callback must be cheap and must not block. There is no runtime
+deadline, disconnect wiring, admission semaphore or guarantee of wall-clock
+response time yet. The reader still holds exclusive collector access; bounded
+immutable snapshots/indexes and decode-once multi-series assembly remain
+required before a public route. No sampler, route or capability is enabled.

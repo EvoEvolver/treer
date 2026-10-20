@@ -13,6 +13,79 @@ fn state() -> CollectorState {
 }
 
 #[test]
+fn cancelled_query_never_returns_partial_buckets_or_consumes_acquisitions() {
+    use crate::machine_metrics::aggregation::AggregationError;
+    let mut state = state();
+    for ms in [0, 5_000, 10_000] {
+        record(&mut state, clock(ms, ms as u64), 12.0);
+        let sample = frame(&mut state, clock(ms, ms as u64));
+        state.append_frame(clock(ms, ms as u64), &sample).unwrap();
+    }
+    let now = clock(15_000, 15_000);
+    let query = MachineMetricsQuery {
+        from: clock(0, 0).wall,
+        to: now.wall,
+        max_points: 3,
+    };
+    let mut checks = 0;
+    let complete = state
+        .query_field_cancellable(
+            now,
+            &query,
+            MachineMetricKind::CpuUtilization,
+            None,
+            &mut || {
+                checks += 1;
+                false
+            },
+        )
+        .unwrap();
+    assert_eq!(complete.buckets.points.len(), 3);
+    assert!(checks > 10); // Includes scan, observation and output phases.
+    let tick = state.snapshot(now).unwrap().fields[0].observation.tick;
+    // Interrupt at every checkpoint, including after some buckets were built.
+    for stop_at in 1..=checks {
+        let mut visits = 0;
+        let result = state.query_field_cancellable(
+            now,
+            &query,
+            MachineMetricKind::CpuUtilization,
+            None,
+            &mut || {
+                visits += 1;
+                visits == stop_at
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(StateError::Query(FieldQueryError::Aggregation(
+                AggregationError::Cancelled
+            )))
+        ));
+        assert_eq!(visits, stop_at);
+        assert_eq!(
+            state.snapshot(now).unwrap().fields[0].observation.tick,
+            tick
+        );
+    }
+    // Already cancelled requests do not trigger clock-reset maintenance.
+    assert!(state
+        .query_field_cancellable(
+            clock(15_000, 1),
+            &query,
+            MachineMetricKind::CpuUtilization,
+            None,
+            &mut || true,
+        )
+        .is_err());
+    assert_eq!(state.reset_diagnostics().count, 0);
+    let retry = state
+        .query_field(now, &query, MachineMetricKind::CpuUtilization, None)
+        .unwrap();
+    assert_eq!(retry.buckets.points, complete.buckets.points);
+}
+
+#[test]
 fn field_query_counts_real_acquisitions_once_and_keeps_cached_slots_empty() {
     use treer_protocol::MachineMetricsQuery;
     let mut state = state();

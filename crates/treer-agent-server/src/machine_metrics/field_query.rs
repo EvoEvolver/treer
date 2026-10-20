@@ -28,16 +28,18 @@ pub(super) fn aggregate_field(
     query: &MachineMetricsQuery,
     kind: MachineMetricKind,
     gpu_id: Option<&str>,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Buckets, FieldQueryError> {
     let unit = field_unit(kind, gpu_id).map_err(FieldQueryError::Cache)?;
     // Reject invalid queries before scanning or parsing retained frames.
-    let empty = aggregation::aggregate(query, clock.wall, unit, [])
+    let empty = aggregation::aggregate_cancellable(query, clock.wall, unit, [], cancelled)
         .map_err(FieldQueryError::Aggregation)?;
     history.maintain(clock);
     history.ensure_live().map_err(FieldQueryError::History)?;
     let server_id = history.server_id().to_owned();
     let mut acquisitions: HashMap<(u64, u64), Observation> = HashMap::new();
     for frame in history.staged_frames(clock) {
+        aggregation::check_cancelled(cancelled).map_err(FieldQueryError::Aggregation)?;
         let stored = StoredFrame::decode(frame.bytes, &server_id, frame.clock, frame.epoch)
             .map_err(FieldQueryError::History)?;
         let Some(field) = stored
@@ -63,8 +65,15 @@ pub(super) fn aggregate_field(
         }
     }
     if acquisitions.is_empty() {
+        aggregation::check_cancelled(cancelled).map_err(FieldQueryError::Aggregation)?;
         return Ok(empty);
     }
-    aggregation::aggregate(query, clock.wall, unit, acquisitions.into_values())
-        .map_err(FieldQueryError::Aggregation)
+    aggregation::aggregate_cancellable(
+        query,
+        clock.wall,
+        unit,
+        acquisitions.into_values(),
+        cancelled,
+    )
+    .map_err(FieldQueryError::Aggregation)
 }
