@@ -884,3 +884,31 @@ single-field inconsistent cases. Rust uses those literal answers rather than
 recomputing expected results from its validator. Web's production parser is
 unchanged from d7287501; its successor browser/full gates and new freeze remain
 pending. Shared vectors alone do not establish browser or runtime acceptance.
+
+## Complete captured-response assembly (inert, explicit field plan)
+
+`assemble_captured_response` combines one decode-once multi-field query with
+its same-view current projections and inventory. The local caller must supply
+the full field plan: exactly four system keys and three keys per union GPU.
+Missing, extra or duplicate keys refuse, never publish a partial device or
+series set. All keys share aligned buckets and the total bucket budget. GPU
+currents come solely from the union projection (including absent devices);
+system currents come from the captured cache or canonical warming state.
+Collector/platform metadata supplies no GPU status or presence.
+
+This first policy refuses unknown current enumeration in full and refuses a
+known-current query whose overlapping historical inventory was incomplete.
+It never trims inventory: successful assembly has inventory_truncated=false.
+History discontinuity remains conservative instance-wide truncated=true and
+marks every bucket partial. The completed model passes the shared validator
+and cancellable capped encoder before returning exact-length owned bytes and
+its captured epoch. The caller must compare the live epoch before publication.
+No partial bytes are returned on cancellation or validation errors.
+
+This supplies a wire builder for a correct explicit field plan, not automatic
+discovery of that plan. Obtaining the current/range keys without a second
+history decode remains open. The system-only draft helper remains separate;
+this builder implements no failure-status fallback for unknown enumeration.
+Native acquisition, runtime authority/routes, actual deadline/disconnect/global
+admission and publication checks, Core/Web union, performance evidence and
+deployed acceptance remain pending.

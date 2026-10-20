@@ -8,8 +8,10 @@ use super::{
 use std::collections::HashMap;
 use treer_protocol::{MachineMetricKind, MachineMetricsQuery};
 
+mod captured_response;
 mod multi;
 mod system_response;
+pub use captured_response::{CapturedMetadata, CapturedResponseError};
 pub use multi::{FieldKey, MergedInventory, MultiFieldHistory, MAX_INDEX_ACQUISITIONS};
 pub use system_response::{SystemMetadata, SystemResponse, SystemResponseError};
 

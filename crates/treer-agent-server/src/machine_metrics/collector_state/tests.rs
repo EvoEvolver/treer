@@ -1108,6 +1108,119 @@ fn vram_batch_is_atomic_and_independent_of_utilization_failure() {
 }
 
 #[test]
+fn captured_response_requires_complete_gpu_series_and_known_complete_inventory() {
+    use crate::machine_metrics::field_query::{CapturedMetadata, CapturedResponseError, FieldKey};
+    for incomplete in [false, true] {
+        for unknown in [false, true] {
+            let mut state = state();
+            let gpu = "a".repeat(64);
+            state
+                .record(
+                    clock(0, 0),
+                    MachineMetricKind::GpuUtilization,
+                    Some(&gpu),
+                    MachineMetricStatus::Ok,
+                    Some(25.0),
+                )
+                .unwrap();
+            state
+                .record_vram(clock(0, 0), &gpu, MachineMetricStatus::Ok, Some((100, 60)))
+                .unwrap();
+            let mut sample = gpu_frame(&mut state, clock(0, 0), &gpu);
+            sample.inventory_truncated = incomplete;
+            state.append_frame(clock(0, 0), &sample).unwrap();
+            state
+                .record_inventory(clock(5000, 5000), if unknown { None } else { Some(&[]) })
+                .unwrap();
+            let now = clock(5000, 5000);
+            let query = MachineMetricsQuery {
+                from: clock(0, 0).wall,
+                to: now.wall,
+                max_points: 720,
+            };
+            let keys: Vec<_> = sample
+                .series
+                .iter()
+                .map(|s| FieldKey {
+                    kind: s.kind,
+                    gpu_id: s.gpu_id.clone(),
+                })
+                .collect();
+            let metadata = || CapturedMetadata {
+                logical_cpus: Some(8),
+                memory_method: treer_protocol::MachineMemoryMethod::LinuxMemAvailable,
+            };
+            let mut view = state.detached_query(now, &mut || false).unwrap();
+            let result = view.assemble_captured_response(&query, metadata(), &keys, &mut || false);
+            if unknown {
+                assert!(matches!(
+                    result,
+                    Err(CapturedResponseError::UnknownInventory)
+                ));
+            } else if incomplete {
+                assert!(matches!(
+                    result,
+                    Err(CapturedResponseError::Query(
+                        crate::machine_metrics::field_query::FieldQueryError::IncompleteInventory
+                    ))
+                ));
+            } else {
+                let result = result.unwrap();
+                let parsed = MachineMetricsResponse::parse_bounded(
+                    &result.bytes,
+                    &query,
+                    "machine",
+                    now.wall,
+                )
+                .unwrap();
+                assert_eq!(result.epoch, view.history.epoch());
+                assert_eq!(parsed.series.len(), 7);
+                assert_eq!(parsed.gpu_status, MachineMetricStatus::NoDevice);
+                assert!(!parsed.gpus[0].present && !parsed.inventory_truncated);
+                for series in &parsed.series[4..] {
+                    assert_eq!(series.current.status, MachineMetricStatus::DeviceAbsent);
+                    assert!(series.current.value.is_none());
+                    assert_eq!(series.points.len(), parsed.series[0].points.len());
+                    if series.kind == MachineMetricKind::GpuUtilization {
+                        assert_eq!(series.points[0].mean, Some(25.0));
+                    }
+                }
+                assert!(matches!(
+                    view.assemble_captured_response(&query, metadata(), &keys[..6], &mut || false),
+                    Err(CapturedResponseError::IncompleteSeries)
+                ));
+                assert!(view
+                    .assemble_captured_response(&query, metadata(), &keys, &mut || true)
+                    .is_err());
+                drop(view);
+                state
+                    .record_inventory(clock(10000, 10000), Some(&sample.gpus))
+                    .unwrap();
+                let mut returned = state
+                    .detached_query(clock(10000, 10000), &mut || false)
+                    .unwrap();
+                let result = returned
+                    .assemble_captured_response(&query, metadata(), &keys, &mut || false)
+                    .unwrap();
+                let parsed = MachineMetricsResponse::parse_bounded(
+                    &result.bytes,
+                    &query,
+                    "machine",
+                    clock(10000, 10000).wall,
+                )
+                .unwrap();
+                assert!(parsed.gpus[0].present);
+                assert_eq!(parsed.gpu_status, MachineMetricStatus::Ok);
+                for series in &parsed.series[4..] {
+                    assert_eq!(series.current.status, MachineMetricStatus::Ok);
+                    assert_eq!(series.current.sampled_at, Some(clock(0, 0).wall));
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn gpu_current_projection_preserves_history_and_distinguishes_absent_unknown_and_warming() {
     use crate::machine_metrics::field_query::FieldKey;
     use treer_protocol::MachineMetricsGpu;
