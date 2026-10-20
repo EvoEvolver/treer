@@ -21,6 +21,83 @@ fn system_metadata() -> crate::machine_metrics::field_query::SystemMetadata {
 }
 
 #[test]
+fn captured_frame_requires_fresh_inventory_and_exact_descriptors() {
+    use treer_protocol::MachineMetricsGpu;
+    let mut state = state();
+    let now = clock(0, 0);
+    let empty = frame(&mut state, now);
+    assert_eq!(
+        state.append_captured_frame(now, &empty),
+        Err(StateError::FrameMismatch)
+    );
+    let gpu = MachineMetricsGpu {
+        id: "a".repeat(64),
+        name: "Captured GPU".into(),
+        present: true,
+    };
+    state
+        .record(
+            now,
+            MachineMetricKind::GpuUtilization,
+            Some(&gpu.id),
+            MachineMetricStatus::Ok,
+            Some(25.0),
+        )
+        .unwrap();
+    state
+        .record_vram(now, &gpu.id, MachineMetricStatus::Ok, Some((100, 60)))
+        .unwrap();
+    state
+        .record_inventory(now, Some(std::slice::from_ref(&gpu)))
+        .unwrap();
+    let mut captured = gpu_frame(&mut state, now, &gpu.id);
+    captured.gpus[0] = gpu;
+    for variant in 0..6 {
+        let mut wrong = captured.clone();
+        match variant {
+            0 => wrong.gpus[0].name = "Invented name".into(),
+            1 => wrong.gpus[0].present = false,
+            2 => wrong.gpus[0].id = "b".repeat(64),
+            3 => wrong.gpus.clear(),
+            4 => wrong.inventory_truncated = true,
+            _ => wrong.gpu_status = MachineMetricStatus::DriverUnavailable,
+        }
+        assert_eq!(
+            state.append_captured_frame(now, &wrong),
+            Err(StateError::FrameMismatch)
+        );
+        assert_eq!(state.history.record_count(), 0);
+    }
+    state.append_captured_frame(now, &captured).unwrap();
+    assert_eq!(state.history.record_count(), 1);
+    let stale = clock(15_001, 15_001);
+    let mut stale_frame = gpu_frame(&mut state, stale, &captured.gpus[0].id);
+    stale_frame.gpus = captured.gpus;
+    assert_eq!(
+        state.append_captured_frame(stale, &stale_frame),
+        Err(StateError::FrameMismatch)
+    );
+    assert_eq!(state.history.record_count(), 1);
+}
+
+#[test]
+fn captured_frame_empty_enumeration_differs_from_failed_attempt() {
+    let mut state = state();
+    state.record_inventory(clock(0, 0), Some(&[])).unwrap();
+    let sample = frame(&mut state, clock(15_000, 15_000));
+    state
+        .append_captured_frame(clock(15_000, 15_000), &sample)
+        .unwrap();
+    state.record_inventory(clock(15_001, 15_001), None).unwrap();
+    let sample = frame(&mut state, clock(15_001, 15_001));
+    assert_eq!(
+        state.append_captured_frame(clock(15_001, 15_001), &sample),
+        Err(StateError::FrameMismatch)
+    );
+    assert_eq!(state.history.record_count(), 1);
+}
+
+#[test]
 fn current_inventory_is_captured_not_relabelled_and_failure_is_unknown() {
     use treer_protocol::MachineMetricsGpu;
     let mut state = state();

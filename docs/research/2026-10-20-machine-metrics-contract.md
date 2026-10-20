@@ -806,3 +806,25 @@ This is metadata only: it does not yet aggregate the three GPU fields for the
 resulting union or assemble their DeviceAbsent current projections. The current
 system-only wire helper remains conservative and still refuses retained GPUs.
 Append-frame enumeration binding and runtime activation holds remain unchanged.
+
+## Captured-inventory staging boundary (inert)
+
+`CollectorState::append_captured_frame` now captures fields and enumeration in
+one state snapshot before staging. It requires a fresh successful complete
+enumeration, exact sorted descriptor equality (id, name and presence), no
+inventory truncation, and `ok` for a nonempty list or `no_device` for a successful
+empty list. Cold, failed and stale enumeration refuse the entire append; they
+cannot authorize an empty list. The existing field-identity and typed stored
+frame validation still apply before history insertion. Rejected frames do not
+insert a record; ordinary snapshot maintenance may still expire history or
+reset the collector on clock uncertainty.
+
+This entry point is for current capture staging, not historical/current union
+responses: historical names and absent descriptors do not belong in its current
+enumeration list. The older `append_frame` remains an explicitly model-only
+field-bound staging helper for synthetic history/query tests and does not bind
+enumeration. Future runtime integration must use the captured boundary; this
+change supplies no native enumeration, caller authorization, runtime adapter,
+or guarantee that production callers use that boundary. Unknown-enumeration
+status categories, GPU response assembly and exact Core/Web integration remain
+open.

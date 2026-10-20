@@ -320,14 +320,51 @@ impl CollectorState {
         )
     }
 
-    /// Refuse pre-reset or caller-invented current fields before staging a
-    /// frame. Original acquisition identities are serialized inside each frame.
+    /// Bind a staging frame to the same fresh, complete enumeration and field
+    /// snapshot. Unknown enumeration cannot establish an empty device list.
+    /// This inert seam does not itself acquire devices or authorize a caller.
+    pub fn append_captured_frame(
+        &mut self,
+        clock: Clock,
+        frame: &MachineMetricsResponse,
+    ) -> Result<bool, StateError> {
+        let snapshot = self.snapshot(clock)?;
+        let inventory = snapshot
+            .inventory
+            .as_ref()
+            .ok_or(StateError::FrameMismatch)?;
+        let expected_status = if inventory.gpus.is_empty() {
+            MachineMetricStatus::NoDevice
+        } else {
+            MachineMetricStatus::Ok
+        };
+        if frame.inventory_truncated
+            || frame.gpu_status != expected_status
+            || frame.gpus != inventory.gpus
+        {
+            return Err(StateError::FrameMismatch);
+        }
+        self.append_snapshot(clock, frame, snapshot)
+    }
+
+    /// Model-only staging: binds fields but not caller-provided GPU inventory.
+    /// Runtime integration must use the captured-inventory boundary above.
+    /// Original acquisition identities are serialized inside each frame.
     pub fn append_frame(
         &mut self,
         clock: Clock,
         frame: &MachineMetricsResponse,
     ) -> Result<bool, StateError> {
         let snapshot = self.snapshot(clock)?;
+        self.append_snapshot(clock, frame, snapshot)
+    }
+
+    fn append_snapshot(
+        &mut self,
+        clock: Clock,
+        frame: &MachineMetricsResponse,
+        snapshot: Snapshot,
+    ) -> Result<bool, StateError> {
         for series in &frame.series {
             let field = snapshot
                 .fields
