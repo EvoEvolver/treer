@@ -1574,6 +1574,32 @@ bind a real supervisor lifetime, dispatch a continuation or persist once-only
 consumption across deletion/replay/power loss. Those remain separate reviewed
 slices; an exclusively created file alone grants none of those guarantees.
 
+The staging slice `47dee255` passed hosted run 39363419251 on Server
+2022/2025: two stage tests, actual competing write/delete 32 and released 0,
+partial 17-byte preservation/retry refusal, and ordinary 90 passed/four ignored
+(Core 6446, security 6444, raw logs read).
+
+The next private transition consumes the original `Stage`, validates it,
+closes its writer, then opens the fixed name with read access and read sharing
+only. It retains the original full identity and bytes, borrows the same live
+fixture lock, and validates lock/directory/ACL/type/non-inheritance/path and
+exact read-back before returning a private `ReadPin`. Each later validation
+also independently opens the current fixed name and compares identity/bytes.
+There is no constructor from an existing path, parsed record or restarted lock.
+This type supplies storage custody only, no continuation or consumed token.
+
+The writer-close/reopen gap has only cooperative-lock protection. Tests inject
+either an error there or an actual in-place write/sync changing status 183 to
+182 (still syntactically valid). Both must refuse, preserve the existing object
+and exact resulting bytes, and refuse another exclusive creation. This is not
+process-death or sync-failure evidence, nor detection of an invisible rewrite
+that restores its bytes before reopen. The successful transition test requires
+real write/delete sharing errors 32 while the read pin lives and released
+access 0 afterwards, with the unchanged burn file still refusing creation.
+Actual replacement-identity interference in this transition and integration
+with a continuation remain separate work. All new Windows assertions require
+exact-SHA hosted execution; no production locking or replay/CAS claim follows.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 

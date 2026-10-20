@@ -1,5 +1,7 @@
-//! Exclusive decision staging only. No read-pin transition or continuation.
+//! Private decision storage custody only, never continuation authority.
 use super::*;
+
+mod read_pin;
 
 struct Stage<'a> {
     ownership: &'a FixtureLock<'a>,
