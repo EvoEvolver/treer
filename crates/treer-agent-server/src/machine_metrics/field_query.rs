@@ -8,6 +8,7 @@ use super::{
 use std::collections::HashMap;
 use treer_protocol::{MachineMetricKind, MachineMetricsQuery};
 
+mod acquisition_index;
 mod captured_response;
 mod multi;
 mod system_response;

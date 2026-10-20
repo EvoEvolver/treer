@@ -89,16 +89,10 @@ impl DetachedFieldQuery {
         };
         aggregation::aggregate_cancellable(&query, self.clock.wall, units[0], [], cancelled)
             .map_err(FieldQueryError::Aggregation)?;
-        let positions: HashMap<_, _> = fields
-            .iter()
-            .enumerate()
-            .map(|(index, field)| ((field.kind, field.gpu_id.as_deref()), index))
-            .collect();
         // Collector ticks are globally unique across fields in one epoch.
         // Store each original acquisition once, including cached references
         // outside the requested range so identity conflicts cannot be hidden.
-        let mut index: HashMap<(u64, u64), (usize, Observation)> = HashMap::new();
-        let mut counts = vec![0; fields.len()];
+        let mut index = acquisition_index::AcquisitionIndex::new(limit);
         let mut has_gpu_inventory = false;
         let mut retained_gpus = BTreeMap::new();
         let mut incomplete_inventory = false;
@@ -133,22 +127,16 @@ impl DetachedFieldQuery {
             }
             for field in stored.fields {
                 check(cancelled)?;
-                let Some(&position) = positions.get(&(field.kind, field.gpu_id.as_deref())) else {
+                if !keys.contains(&(field.kind, field.gpu_id.as_deref())) {
                     continue;
-                };
-                let observation = field.observation;
-                let identity = (observation.epoch, observation.tick);
-                if let Some(previous) = index.get(&identity) {
-                    if *previous != (position, observation) {
-                        return Err(FieldQueryError::ConflictingAcquisition);
-                    }
-                } else {
-                    if index.len() >= limit || counts[position] >= MAX_RECORDS {
-                        return Err(FieldQueryError::IndexLimit);
-                    }
-                    index.insert(identity, (position, observation));
-                    counts[position] += 1;
                 }
+                index.insert(
+                    &FieldKey {
+                        kind: field.kind,
+                        gpu_id: field.gpu_id,
+                    },
+                    field.observation,
+                )?;
             }
         }
         check(cancelled)?;
@@ -202,12 +190,7 @@ impl DetachedFieldQuery {
                 Ok::<_, FieldQueryError>(output)
             })
             .transpose()?;
-        let mut observations: Vec<Vec<Observation>> =
-            counts.into_iter().map(Vec::with_capacity).collect();
-        for (_, (position, observation)) in index {
-            check(cancelled)?;
-            observations[position].push(observation);
-        }
+        let observations = index.into_selected(fields, cancelled)?;
         let mut output = Vec::with_capacity(fields.len());
         for ((field, unit), observations) in fields.iter().zip(units).zip(observations) {
             check(cancelled)?;

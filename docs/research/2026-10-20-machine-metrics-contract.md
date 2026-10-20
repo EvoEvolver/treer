@@ -980,3 +980,47 @@ and byte equality with the explicit-plan builder for equivalent snapshots.
 A test-only decode counter must assert one decode per retained frame rather
 than infer that property from equal bytes. No route, capability advertisement,
 sampler, journal adapter or activation is authorized by this contract.
+
+### Exact shared-key acquisition index (implemented staging prerequisite)
+
+The multi-field staging query now uses AcquisitionIndex: one owned FieldKey
+per candidate field, a small integer field position per acquisition, and the
+full original Observation. GPU strings are cloned once per distinct field,
+not per acquisition. This preserves exact equality for every reference,
+including out-of-range references; digest-only comparison is not adopted.
+It does not claim a memory reduction over the previous explicit-plan query,
+which already indexed by request position. It provides that representation
+for future incrementally discovered fields without per-acquisition Strings.
+
+The existing aggregate 262144 and per-field 17280 acquisition caps remain.
+An additional 4096 distinct-candidate-field cap bounds retained device churn
+before cloning keys; exhaustion is IndexLimit, without eviction or partial
+output. The current explicit-plan path still selects at most 100 fields;
+the larger candidate cap is a prerequisite for automatic discovery, not a
+change to the wire series cap. Identical repeated references remain accepted
+at capacity, while key/value conflicts remain ConflictingAcquisition even
+when the budget is full. Regrouping consumes the index, but the backing hash
+table allocation may coexist with the output vectors until draining ends.
+
+A local 64-bit debug capacity-payload measurement at 262144 acquisitions
+reports 458752 map capacity, 33030144 bytes of entry payload and up to
+12582912 bytes of output Observation payload. With 32 GPU field keys, the
+key table plus owned string capacities add 4288 bytes. A second max-churn
+case uses all 4096 distinct fields and reports 548864 key-table/string bytes.
+At that shape, budget approximately
+46 MiB for capacity payload, table controls, key strings, count/selection
+vectors and overlapping regrouping; allocator metadata, growth-time transient
+allocations, decoded-frame allocations and retained history bytes are extra.
+This is a representation estimate, NOT a measured heap/RSS peak or enforced
+byte ceiling. A maximum ring has up to 17280 frames, each up to 100 fields,
+but the index refuses after 262144 unique acquisitions rather than indexing
+all 1728000 candidates. The 64 MiB retained history and the one currently
+decoded frame coexist separately. A real heap-peak measurement and any tighter
+index byte policy remain open before runtime integration; do not relabel the
+capacity-payload test as closing that part of security review.
+
+Tests exercise exact duplicate/conflict behavior at capacity, whole-index and
+per-field exhaustion, 4096-field churn refusal, cancelled regrouping, and the
+32-field/max-churn capacity measurements. The automatic single-decode discovery
+algorithm, unknown-current pre-scan refusal and its decode counter are still
+unimplemented. Existing explicit-plan queries retain their prior field filter.
