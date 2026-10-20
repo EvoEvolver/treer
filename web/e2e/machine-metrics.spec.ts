@@ -179,3 +179,18 @@ test('shared exact nanosecond span vectors accept source counts and reject decre
   }, vectors)
   expect(results).toEqual(vectors.vectors.map(v => ({ name: v.name, counts: v.expected_counts, decrementedRefused: true })))
 })
+
+test('GPU descriptor presence agrees with current status for all three GPU metrics', async ({ page }) => {
+  await page.goto('/')
+  const results = await page.evaluate(async () => {
+    const path = '/e2e/fixtures/machine-metrics-presence.ts'
+    const { exerciseGpuPresence } = await import(/* @vite-ignore */ path)
+    return exerciseGpuPresence()
+  })
+  expect(results).toEqual([true, false].flatMap(present => [
+    { name: present ? 'present/warming_up' : 'absent/device_absent', accepted: true },
+    ...['gpu_utilization', 'gpu_memory_used', 'gpu_memory_total'].map(kind => ({
+      name: `${present ? 'present/device_absent' : 'absent/warming_up'}/${kind}`, accepted: false,
+    })),
+  ]))
+})

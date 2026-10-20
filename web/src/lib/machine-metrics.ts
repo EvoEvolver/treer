@@ -47,7 +47,7 @@ export function parseMachineMetrics(input: unknown, request: MetricsRequest, rec
     const value = (v: unknown) => v === null ? null : number(v, unit === 'percent' ? 100 : Number.MAX_SAFE_INTEGER)
     const c = object(s.current), state = status(c.status), sampled = optionalStamp(c.sampled_at), age = c.age_ms === null ? null : integer(c.age_ms), currentValue = value(c.value)
     if ((sampled === null) !== (age === null) || (sampled !== null && time(sampled) > time(generated)) || (state === 'ok' ? currentValue === null || age === null || age > staleAfter : currentValue !== null)) fail()
-    if ((sampled !== null && age !== ms(generated, sampled)) || (state === 'stale' && (age === null || age <= staleAfter)) || (currentValue !== null && unit === 'bytes' && !Number.isSafeInteger(currentValue)) || (gpuId && !gpus.find(g => g.id === gpuId)!.present && state !== 'device_absent')) fail()
+    if ((sampled !== null && age !== ms(generated, sampled)) || (state === 'stale' && (age === null || age <= staleAfter)) || (currentValue !== null && unit === 'bytes' && !Number.isSafeInteger(currentValue)) || (gpuId && gpus.find(g => g.id === gpuId)!.present === (state === 'device_absent'))) fail()
     const points = array(s.points, Math.min(720, request.maxPoints)).map(v => {
       const b = object(v), a = stamp(b.from), z = stamp(b.to), expected = integer(b.expected_count), valid = integer(b.valid_count), partial = bool(b.partial)
       if (time(a) < time(from) || time(z) > time(to) || time(a) >= time(z) || valid > expected || BigInt(expected) !== (time(z) - time(a) + sampleIntervalNs - 1n) / sampleIntervalNs || time(z) !== minTime(time(a) + BigInt(bucketWidth) * 1000000n, time(to))) fail()

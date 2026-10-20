@@ -882,3 +882,9 @@ expects one sample, and a 5 s + 1 ns bucket expects two. Shared input and
 expected-count vectors live in `docs/fixtures/machine-metrics-span-vectors.json`;
 the browser regression also rejects each decremented expected count. Sample age
 continues to floor to milliseconds after exact timestamp ordering.
+
+GPU current statuses follow Core #220 `c0407bca`: a descriptor is absent if and
+only if each of its three current series reports `device_absent`. Present
+devices may report `warming_up` while awaiting an acquisition. Historical
+buckets remain independent of current presence, so removing a device does not
+erase its valid history. Inconsistent presence/status pairs reject the response.
