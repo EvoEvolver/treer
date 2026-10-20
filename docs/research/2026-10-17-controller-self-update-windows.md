@@ -1711,6 +1711,22 @@ fixture and this deterministic regression require exact-SHA hosted validation
 before accepting the successor. The original callback-order controls, actual
 ReadFile and ACL-loss coverage remain required.
 
+The next preparatory accessor is `HeadPin::snapshot_for`: inside the existing
+Windows test-only checked-files boundary it validates live lock, head custody,
+attempt identity and exact independent expected bytes, then returns only the
+retained full file identity and SHA-256 digest as plain arrays/integers. Existing
+`digest_for` delegates to this same validation path, so all replacement/ACL-loss
+controls still exercise it. No handle, capability, constructor or continuation
+is returned, and no accessor is exported from the library.
+
+A new native snapshot control independently compares the returned identity to
+an open handle and digest to SHA-256 of the known bytes. A foreign live attempt
+and a syntactically valid different component expectation must both refuse;
+the original expectation must still succeed with unchanged identity/bytes and
+no decision/evidence file. Existing replacement and ACL-loss controls remain
+required in the exact-SHA hosted suite. This implements the data-only accessor
+precondition of 6491, not the decision composition or its remaining matrix.
+
 This adds no durable consume-plus-head transaction, external deletion/replay
 fence, independently committed production expectations, authenticated health,
 real installation lock or real supervisor lifetime. A fresh process remains

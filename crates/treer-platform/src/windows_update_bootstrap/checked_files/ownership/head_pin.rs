@@ -3,6 +3,8 @@ use super::*;
 
 mod diagnosis;
 
+type HeadSnapshot = ((u64, [u8; 16]), [u8; 32]);
+
 pub(in crate::windows_update_bootstrap::checked_files) struct HeadPin<'a> {
     ownership: &'a FixtureLock<'a>,
     file: File,
@@ -67,6 +69,20 @@ impl<'a> FixtureLock<'a> {
 }
 
 impl HeadPin<'_> {
+    // Plain identity/digest data, with no borrowed handle or capability. Only
+    // the live pin plus independent expected bytes can obtain this snapshot.
+    pub(in crate::windows_update_bootstrap::checked_files) fn snapshot_for(
+        &self,
+        attempt: &Attempt,
+        expected: &[u8],
+    ) -> io::Result<HeadSnapshot> {
+        self.validate()?;
+        if !ptr::eq(self.ownership.attempt, attempt) || self.bytes != expected {
+            return Err(denied());
+        }
+        Ok((self.object, Sha256::digest(&self.bytes).into()))
+    }
+
     // Independent expectations are fixed before native acquisition. This
     // returns data only, and cannot reconstruct a pin from a file or digest.
     pub(in crate::windows_update_bootstrap::checked_files) fn digest_for(
@@ -74,11 +90,8 @@ impl HeadPin<'_> {
         attempt: &Attempt,
         expected: &[u8],
     ) -> io::Result<[u8; 32]> {
-        self.validate()?;
-        if !ptr::eq(self.ownership.attempt, attempt) || self.bytes != expected {
-            return Err(denied());
-        }
-        Ok(Sha256::digest(&self.bytes).into())
+        self.snapshot_for(attempt, expected)
+            .map(|(_, digest)| digest)
     }
 
     fn validate(&self) -> io::Result<()> {
@@ -102,6 +115,52 @@ impl HeadPin<'_> {
             }
         }
         self.ownership.validate()
+    }
+}
+
+#[test]
+fn native_head_pin_snapshot_requires_live_expected_custody() {
+    let fixture = super::super::super::tests::PrivateImage::new();
+    let attempt = Attempt::create(
+        &fixture.directory,
+        "attempt-00000000000000000000000000000075",
+    )
+    .unwrap();
+    let foreign = Attempt::create(
+        &fixture.directory,
+        "attempt-00000000000000000000000000000076",
+    )
+    .unwrap();
+    let ownership = FixtureLock::acquire(&attempt, true).unwrap();
+    let bytes = head_record::fixture_bytes();
+    let pin = ownership.publish_head(&bytes).unwrap();
+    let (object, digest) = pin.snapshot_for(&attempt, &bytes).unwrap();
+    let reader = open_head(&attempt.path.join("receipt.json")).unwrap();
+    assert_eq!(object, full_identity(&reader).unwrap());
+    assert_eq!(digest, <[u8; 32]>::from(Sha256::digest(&bytes)));
+    assert!(pin.snapshot_for(&foreign, &bytes).is_err());
+    let mut changed = bytes.clone();
+    changed[42] = 2; // Valid component, different independent expectation.
+    assert!(head_record::valid_bytes(&changed));
+    assert!(pin.snapshot_for(&attempt, &changed).is_err());
+    assert_eq!(
+        pin.snapshot_for(&attempt, &bytes).unwrap(),
+        (object, digest)
+    );
+    assert_eq!(read_head(&reader).unwrap(), bytes);
+    assert!(!attempt.path.join("consume.intent").exists());
+    assert!(!attempt.path.join("reason.evidence").exists());
+    eprintln!("head_snapshot_fixture identity_match=1 digest_match=1 foreign_refused=1 expected_refused=1 unchanged=1");
+    drop(reader);
+    drop(pin);
+    drop(ownership);
+    std::fs::remove_file(attempt.path.join("receipt.json")).unwrap();
+    std::fs::remove_file(attempt.path.join("fixture.lock")).unwrap();
+    let paths = [attempt.path.clone(), foreign.path.clone()];
+    drop(attempt);
+    drop(foreign);
+    for path in paths {
+        std::fs::remove_dir(path).unwrap();
     }
 }
 
