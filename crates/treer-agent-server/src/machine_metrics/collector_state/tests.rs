@@ -13,6 +13,72 @@ fn state() -> CollectorState {
 }
 
 #[test]
+fn detached_query_releases_collector_borrow_and_bounds_retained_views() {
+    let mut state = state();
+    record(&mut state, clock(0, 0), 12.0);
+    let sample = frame(&mut state, clock(0, 0));
+    state.append_frame(clock(0, 0), &sample).unwrap();
+    let now = clock(5_000, 5_000);
+    let query = MachineMetricsQuery {
+        from: clock(0, 0).wall,
+        to: now.wall,
+        max_points: 1,
+    };
+    let mut view = state.detached_query(now, &mut || false).unwrap();
+    assert!(matches!(
+        state.detached_query(now, &mut || false),
+        Err(StateError::History(HistoryError::SnapshotBusy))
+    ));
+    // A detached reader owns no borrow or lock on the source. Actual collector
+    // progress and even an epoch reset can occur while old immutable bytes live.
+    record(&mut state, now, 99.0);
+    let sample = frame(&mut state, now);
+    state.append_frame(now, &sample).unwrap();
+    state.snapshot(clock(10_000, 1)).unwrap();
+    assert_eq!(state.reset_diagnostics().count, 1);
+    let old = view
+        .query_field(&query, MachineMetricKind::CpuUtilization, None, &mut || {
+            false
+        })
+        .unwrap();
+    assert_eq!(old.epoch, 0);
+    assert_eq!(old.buckets.points[0].mean, Some(12.0));
+    assert!(matches!(
+        state.detached_query(clock(10_000, 1), &mut || false),
+        Err(StateError::History(HistoryError::SnapshotBusy))
+    ));
+    // Cancellation does not accidentally release admission while a view lives.
+    assert!(view
+        .query_field(&query, MachineMetricKind::CpuUtilization, None, &mut || {
+            true
+        })
+        .is_err());
+    drop(view);
+    let mut next = state
+        .detached_query(clock(10_000, 1), &mut || false)
+        .unwrap();
+    let fresh = next
+        .query_field(&query, MachineMetricKind::CpuUtilization, None, &mut || {
+            false
+        })
+        .unwrap();
+    assert_eq!(fresh.epoch, 1);
+    assert_eq!(fresh.buckets.points[0].mean, None);
+    drop(next);
+    // Unwinding a worker also releases its reservation.
+    let view = state
+        .detached_query(clock(10_000, 1), &mut || false)
+        .unwrap();
+    let _ = std::panic::catch_unwind(move || {
+        let _held = view;
+        panic!("worker failure");
+    });
+    assert!(state
+        .detached_query(clock(10_000, 1), &mut || false)
+        .is_ok());
+}
+
+#[test]
 fn cancelled_query_never_returns_partial_buckets_or_consumes_acquisitions() {
     use crate::machine_metrics::aggregation::AggregationError;
     let mut state = state();

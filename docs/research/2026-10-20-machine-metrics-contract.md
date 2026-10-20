@@ -506,3 +506,39 @@ deadline, disconnect wiring, admission semaphore or guarantee of wall-clock
 response time yet. The reader still holds exclusive collector access; bounded
 immutable snapshots/indexes and decode-once multi-series assembly remain
 required before a public route. No sampler, route or capability is enabled.
+
+## Detached immutable query view checkpoint (not connected)
+
+History frames now own immutable reference-counted byte slices. A detached view
+copies at most 17,280 clock/reference pairs and the bounded machine identifier;
+it does not clone or decode serialized frame payloads. CollectorState captures
+the maintained epoch/reset and query clock with that view, then returns an
+owned object with no collector borrow. The caller can release its collector
+lock before decoding and aggregating a field. Old borrowed query helpers stay
+available for staging tests; they are not the runtime query path.
+
+Each History instance admits at most one detached view, using an atomic busy
+flag shared with its non-Clone reservation. A second view returns SnapshotBusy.
+Dropping the first view clears its frame references before releasing admission,
+including during worker unwinding. Thus the live 64 MiB serialized ring can
+coexist with at most one old view retaining at most another 64 MiB, plus bounded
+record/reference metadata. This is a serialized-payload bound, not an RSS cap:
+decoded models, aggregation maps and returned buckets have separate allocations.
+The view requires mutable access for queries, preventing simultaneous queries
+through shared references to that one view in safe Rust.
+
+Appending, eviction and epoch reset continue while the old view exists. The
+view intentionally remains a consistent snapshot at its captured clock/epoch,
+not a claim of current freshness after reset. The runtime must impose the same
+10 s monotonic deadline, drop views promptly on cancellation/disconnect, and
+reject an obsolete epoch before publication. It must not retain views as a
+history cache or after the retention/deadline boundary. These checks and the
+singleton service are not wired yet; per-instance admission is not a global
+per-machine/per-principal policy. Capturing references and maintenance remain
+bounded work under exclusive collector access and need measurement.
+
+The regression keeps a detached view alive while the collector records and
+resets, proves the view still returns its original data/epoch, refuses a second
+view even after cancellation, then proves drop and panic release admission and
+the next view sees the cleared new epoch. Decode-once multi-series assembly,
+response budgets, deadline/Policy/IPC/journal and native collection remain open.

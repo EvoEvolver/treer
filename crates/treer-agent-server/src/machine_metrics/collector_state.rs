@@ -50,6 +50,27 @@ pub struct CollectorState {
 }
 
 impl CollectorState {
+    /// Capture under collector access; execute queries after releasing it.
+    /// One view per state instance, bounded by the existing ring caps.
+    pub fn detached_query(
+        &mut self,
+        clock: Clock,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<field_query::DetachedFieldQuery, StateError> {
+        super::aggregation::check_cancelled(cancelled)
+            .map_err(|error| StateError::Query(FieldQueryError::Aggregation(error)))?;
+        let snapshot = self.snapshot(clock)?;
+        let history = self
+            .history
+            .detached_snapshot(clock)
+            .map_err(StateError::History)?;
+        Ok(field_query::DetachedFieldQuery {
+            history,
+            clock,
+            reset: snapshot.reset,
+        })
+    }
+
     /// Reads cached acquisitions only; never performs native acquisition.
     /// This single-field adapter is not a multi-series/public response.
     pub fn query_field(

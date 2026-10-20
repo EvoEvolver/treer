@@ -2,6 +2,34 @@ use super::*;
 use treer_protocol::*;
 
 #[test]
+fn detached_view_shares_payload_and_releases_evicted_bytes_before_readmission() {
+    let mut history = History::new(
+        "fixture-machine".into(),
+        Limits {
+            records: 1,
+            bytes: MAX_BYTES,
+        },
+    )
+    .unwrap();
+    history.push(clock(0), &sample(clock(0))).unwrap();
+    let weak = Arc::downgrade(&history.records[0].bytes);
+    let view = history.detached_snapshot(clock(0)).unwrap();
+    assert!(Arc::ptr_eq(&history.records[0].bytes, &view.records[0].1));
+    assert_eq!(weak.strong_count(), 2);
+    history.push(clock(5000), &sample(clock(5000))).unwrap();
+    assert_eq!(history.record_count(), 1);
+    assert_eq!(weak.strong_count(), 1); // Only the old view pins evicted bytes.
+    assert!(matches!(
+        history.detached_snapshot(clock(5000)),
+        Err(HistoryError::SnapshotBusy)
+    ));
+    drop(view);
+    assert!(weak.upgrade().is_none());
+    let next = history.detached_snapshot(clock(5000)).unwrap();
+    assert!(Arc::ptr_eq(&history.records[0].bytes, &next.records[0].1));
+}
+
+#[test]
 fn field_query_refuses_conflicting_cached_identity_and_corrupt_staging_bytes() {
     use crate::machine_metrics::{
         field_cache::FieldCache,
@@ -30,7 +58,7 @@ fn field_query_refuses_conflicting_cached_identity_and_corrupt_staging_bytes() {
         StoredFrame::decode(&history.records[1].bytes, "fixture-machine", clock(5000), 0).unwrap();
     changed.fields[0].observation.value = Some(99.0);
     changed.frame.series[0].current.value = Some(99.0);
-    history.records[1].bytes = serde_json::to_vec(&changed).unwrap();
+    history.records[1].bytes = serde_json::to_vec(&changed).unwrap().into();
     let query = MachineMetricsQuery {
         from: clock(0).wall,
         to: clock(10_000).wall,
@@ -47,7 +75,7 @@ fn field_query_refuses_conflicting_cached_identity_and_corrupt_staging_bytes() {
         ),
         Err(FieldQueryError::ConflictingAcquisition)
     ));
-    history.records[1].bytes = b"invalid".to_vec();
+    history.records[1].bytes = b"invalid".to_vec().into();
     assert!(matches!(
         aggregate_field(
             &mut history,

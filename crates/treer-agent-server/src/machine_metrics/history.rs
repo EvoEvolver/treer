@@ -4,6 +4,10 @@
 use super::{field_cache::FieldSnapshot, stored_frame::StoredFrame};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::VecDeque;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use treer_protocol::{MachineMetricsResponse, MACHINE_METRICS_MAX_RANGE_MS};
 
 pub const MAX_RECORDS: usize = 17_280;
@@ -36,6 +40,7 @@ impl Default for Limits {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryError {
+    SnapshotBusy,
     InvalidLimits,
     InvalidSample,
     OversizedRecord,
@@ -47,7 +52,40 @@ struct Record {
     tick: u64,
     clock: Clock,
     oldest_acquisition: DateTime<Utc>,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
+}
+
+/// One admitted immutable view per History instance. Not Clone: dropping the
+/// view releases admission, including when a worker exits on error or panic.
+pub struct HistorySnapshot {
+    server_id: String,
+    epoch: u64,
+    records: Vec<(Clock, Arc<[u8]>)>,
+    admission: Arc<AtomicBool>,
+}
+
+impl Drop for HistorySnapshot {
+    fn drop(&mut self) {
+        // Release retained bytes before allowing the next snapshot.
+        self.records.clear();
+        self.admission.store(false, Ordering::Release);
+    }
+}
+
+impl HistorySnapshot {
+    pub(super) fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub(super) fn frames(&self) -> impl Iterator<Item = (Clock, &[u8])> {
+        self.records
+            .iter()
+            .map(|(clock, bytes)| (*clock, bytes.as_ref()))
+    }
 }
 
 /// Borrowed collector frame identity. Scoped to one History instance, not a
@@ -72,6 +110,7 @@ pub struct History {
     next_tick: u64,
     exhausted: bool,
     truncated: bool,
+    snapshot_admission: Arc<AtomicBool>,
 }
 
 impl History {
@@ -99,6 +138,7 @@ impl History {
             next_tick: 0,
             exhausted: false,
             truncated: false,
+            snapshot_admission: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -213,7 +253,7 @@ impl History {
             tick,
             clock,
             oldest_acquisition,
-            bytes,
+            bytes: bytes.into(),
         });
         self.next_tick = next_tick;
         Ok(())
@@ -237,8 +277,34 @@ impl History {
             epoch,
             tick: record.tick,
             clock: record.clock,
-            bytes: record.bytes.as_slice(),
+            bytes: record.bytes.as_ref(),
         })
+    }
+
+    /// Maintain first, then copy only bounded metadata and Arc references. The
+    /// ring can append/evict/reset while the admitted worker reads old bytes.
+    /// At most one old 64 MiB view may be pinned in addition to the live ring.
+    pub(super) fn detached_snapshot(
+        &mut self,
+        clock: Clock,
+    ) -> Result<HistorySnapshot, HistoryError> {
+        self.maintain(clock);
+        self.ensure_live()?;
+        self.snapshot_admission
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .map_err(|_| HistoryError::SnapshotBusy)?;
+        let mut view = HistorySnapshot {
+            server_id: self.server_id.clone(),
+            epoch: self.epoch,
+            records: Vec::with_capacity(self.records.len()),
+            admission: Arc::clone(&self.snapshot_admission),
+        };
+        view.records.extend(
+            self.records
+                .iter()
+                .map(|record| (record.clock, Arc::clone(&record.bytes))),
+        );
+        Ok(view)
     }
 
     pub fn record_count(&self) -> usize {
