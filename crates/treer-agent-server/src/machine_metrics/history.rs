@@ -87,7 +87,6 @@ impl History {
     fn remove_oldest(&mut self) {
         if let Some(record) = self.records.pop_front() {
             self.bytes -= record.bytes.len();
-            self.truncated = true;
         }
     }
 
@@ -167,6 +166,7 @@ impl History {
             || self.bytes + bytes.len() > self.limits.bytes
         {
             self.remove_oldest();
+            self.truncated = true;
         }
         self.bytes += bytes.len();
         self.records.push_back(Record { clock, bytes });
@@ -192,6 +192,8 @@ impl History {
         self.epoch
     }
 
+    /// Capacity loss or clock uncertainty in this collector instance. Normal
+    /// expiration at the retention boundary does not set or clear this flag.
     pub fn truncated(&self) -> bool {
         self.truncated
     }

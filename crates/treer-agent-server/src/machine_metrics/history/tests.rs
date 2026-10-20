@@ -103,10 +103,12 @@ fn history_ages_without_reads_and_wake_does_not_backfill() {
     history.maintain(clock(day + 1));
     assert_eq!(history.record_count(), 0);
     assert_eq!(history.serialized_bytes(), 0);
+    assert!(!history.truncated()); // Routine retention roll-off is not loss.
     let wake = clock(day + 5000);
     history.push(wake, &sample(wake)).unwrap();
     assert_eq!(history.record_count(), 1); // No synthetic missed samples.
     assert_eq!(history.epoch(), 0); // Consistent wall/monotonic gap, not a jump.
+    assert!(!history.truncated());
 }
 
 #[test]

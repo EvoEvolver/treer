@@ -221,8 +221,12 @@ either wall or monotonic age. The future collector must call maintenance without
 viewers and before serving after wake. No missed samples are backfilled.
 
 A backwards wall clock, reset monotonic clock, or divergence exceeding 10 seconds
-clears the ring and marks a truncated epoch. A new ring starts empty. These are
-in-memory semantics, not proof of restart recovery or periodic cleanup: no timer,
+clears the ring and marks a truncated epoch. A new ring starts empty.
+Capacity eviction also sets the instance's sticky truncated
+flag; routine 24-hour expiry neither sets nor clears it. A future query adapter
+must derive range-specific truncation rather than copy this instance-wide flag
+blindly into every response. These in-memory semantics do not prove restart
+recovery or periodic cleanup: no timer,
 collector startup, journal, IPC or public query invokes this module yet. The
 future disk adapter must separately bound metadata and temporary files, validate
 corruption and permissions, and reconcile clock epochs before exposing history.
