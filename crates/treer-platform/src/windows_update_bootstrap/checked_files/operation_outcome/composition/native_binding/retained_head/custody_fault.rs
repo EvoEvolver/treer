@@ -111,6 +111,102 @@ impl Drop for AclFault {
 }
 
 #[test]
+fn native_operation_decision_pin_refuses_post_transition_head_acl_loss() {
+    for operation in [Operation::MoveOld, Operation::Publish] {
+        let fixture = Fixture::new(operation);
+        let ownership = FixtureLock::acquire(&fixture.attempt, true).unwrap();
+        let independent = Binding::before_acquisition(&fixture, 1).unwrap();
+        let head_bytes = expected_head(&independent);
+        let head = ownership.publish_head(&head_bytes).unwrap();
+        let retained = Retained::before_acquisition(&fixture, &head).unwrap();
+        let context = fixture.context();
+        let composition = Composition::new(
+            &context,
+            &fixture.attempt,
+            &fixture.source,
+            &fixture.target,
+            context.intent,
+        )
+        .unwrap();
+        let Captured::Failure(failure) = composition.acquisition.capture(|_| Ok(())) else {
+            panic!("native collision required");
+        };
+        let stored = BoundStored::store(&composition, &retained.binding, &failure).unwrap();
+        let evidence = stored.pin.read().unwrap();
+        let head_path = fixture.attempt.path.join("receipt.json");
+        let read_identity = |path: &Path| {
+            let file = OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ)
+                .open(path)
+                .unwrap();
+            file_id(&file).unwrap()
+        };
+        let original_head_id = read_identity(&head_path);
+        let fault = AclFault::prepare(&head_path).unwrap();
+        let path = fixture.attempt.path.join("consume.intent");
+        let injected = Cell::new(false);
+        let decision_id = Cell::new(None);
+        let mut expected = None;
+        let mut sink = Sink {
+            on_accept: Some(Box::new(|_| panic!("head ACL fault reached sink"))),
+            ..Sink::default()
+        };
+        let result = stored.consume_with_guard(&retained.binding, &mut sink, |matched| {
+            let bytes = retained
+                .decision_data(&stored, matched)?
+                .encode()
+                .ok_or_else(denied)?;
+            assert_eq!(bytes.len(), 177);
+            let pin = ownership.pin_decision(&bytes)?;
+            pin.validate()?;
+            retained.check(&composition)?;
+            decision_id.set(Some(read_identity(&path)));
+            assert_eq!(std::fs::read(&path)?, bytes);
+            expected = Some(bytes);
+            fault.protection(false)?;
+            injected.set(true);
+            // The operation binding still passes; retained-head custody alone
+            // must refuse after the decision transitioned successfully.
+            retained.binding.check(&composition)?;
+            retained.check(&composition)?;
+            Ok(pin)
+        });
+        assert!(injected.get());
+        assert!(result.is_err());
+        assert_eq!(sink.accepted, 0);
+        assert!(stored.spent.get());
+        fault.protection(true).unwrap();
+        retained.check(&composition).unwrap();
+        assert_eq!(read_identity(&head_path), original_head_id);
+        assert_eq!(std::fs::read(&head_path).unwrap(), head_bytes);
+        let expected = expected.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        assert_eq!(Some(read_identity(&path)), decision_id.get());
+        drop(OpenOptions::new().write(true).open(&path).unwrap());
+        assert_eq!(stored.pin.read().unwrap(), evidence);
+        assert!(stored
+            .consume(&retained.binding, &mut sink, || panic!(
+                "spent retry entered hook"
+            ))
+            .is_err());
+        assert!(ownership.pin_decision(&expected).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        eprintln!("decision_head_acl_fixture operation={} injected=1 pin_validated=1 binding=ok retained=refused restored=1 sink=0 spent=1 bytes={} head_identity=unchanged decision_identity=unchanged post_write=0 retry=refused", if operation == Operation::MoveOld { "MoveOld" } else { "Publish" }, expected.len());
+        drop(sink);
+        drop(fault);
+        drop(stored);
+        drop(retained);
+        drop(head);
+        drop(ownership);
+        for name in ["consume.intent", "receipt.json", "fixture.lock"] {
+            std::fs::remove_file(fixture.attempt.path.join(name)).unwrap();
+        }
+        cleanup(fixture);
+    }
+}
+
+#[test]
 fn native_operation_guard_reread_acl_failure_spends_and_drops_once() {
     struct Guard<'a>(&'a Cell<usize>);
     impl Drop for Guard<'_> {

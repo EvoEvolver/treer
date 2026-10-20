@@ -1883,6 +1883,31 @@ and sink-path rows remain unchanged. Exact-SHA dual-Windows native evidence is
 required; partial decisions, transition replacement, head/evidence custody
 faults and all other integrity/production/activation gaps remain open.
 
+##### Post-transition head ACL loss (native pending)
+
+native_operation_decision_pin_refuses_post_transition_head_acl_loss adds the
+head-custody matrix row for both collision operations, outside the unchanged
+four-test retained-head filter. The matched hook creates the complete decision,
+validates its read pin and retained head, snapshots decision bytes/full identity,
+and only then clears head DACL protection using the existing scoped fault.
+The injection flag is set after that mutation succeeds. Operation binding still
+passes, but the retained-head check must refuse before the pin can be returned
+to the consumer or the sink. This is actual scoped private-fixture ACL loss,
+not data corruption, a native ReadFile error, or ACL mutation exclusion.
+
+After refusal, restore and explicitly revalidate head custody, preserve head
+bytes/full identity, complete decision bytes/full identity and context evidence,
+prove a write handle can reopen after pin release, and refuse spent retry and
+exclusive recreation. Drop all guards before explicit owned-file cleanup.
+Expected counts become operation28 and ordinary104 passed/four ignored, with
+two decision_head_acl_fixture markers per operation/ordinary group per OS:
+MoveOld/Publish, injected=1, pin_validated=1, binding=ok, retained=refused,
+restored=1, sink=0, spent=1, bytes=177 (measured), head_identity=unchanged,
+decision_identity=unchanged, post_write=0, retry=refused. No new caught panic
+is expected. Earlier markers remain unchanged; exact-SHA dual-Windows logs
+are still required. Partial decisions, gap replacement, post-transition evidence
+custody and all remaining integrity/production/W4 gaps stay open.
+
 The first preparatory code slice only reorders `BoundStored::consume`: spend,
 binding check, evidence read, exact expected-context comparison, callback,
 post-callback binding check, sink. Its existing ten foreign-binding controls
