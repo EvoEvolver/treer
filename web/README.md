@@ -861,7 +861,7 @@ selection and expandable bounded values tables expose the same data.
 
 The client bounds raw response bytes to 1 MiB before JSON parsing, validates the
 selected machine/range, finite values, fixed enums, nanosecond UTC ordering with floored millisecond sample age, shared ascending
-buckets, coverage counts and GPU/series/point caps, and projects only known
+buckets, exact nanosecond ceiling coverage counts and GPU/series/point caps, and projects only known
 fields. GPU names are bounded plain text; raw OS errors are never displayed.
 Queries use credentials and no-store with redirects refused; responses must
 carry no-store. Data stays in one current component view, without storage or
@@ -876,3 +876,9 @@ owns collector/privacy/retention/Policy enforcement and source aggregation.
 Local browser fixtures prove presentation and request behavior, not native
 collector overhead, hardware compatibility or deployed endpoint acceptance.
 The parent #220 remains open until those results and release acceptance exist.
+
+Fractional-span coverage follows Core #220 `554ad16b`: even a 1 ns bucket
+expects one sample, and a 5 s + 1 ns bucket expects two. Shared input and
+expected-count vectors live in `docs/fixtures/machine-metrics-span-vectors.json`;
+the browser regression also rejects each decremented expected count. Sample age
+continues to floor to milliseconds after exact timestamp ordering.

@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { readFileSync } from 'node:fs'
 import { fixture, gotoWorkspace } from './fixtures/workspace-tabs'
 import { metricsFixture } from './fixtures/machine-metrics'
 import type { MetricsRequest, MachineMetrics } from '../src/lib/machine-metrics'
@@ -159,4 +160,19 @@ test('fractional age uses exact UTC ordering before flooring milliseconds', asyn
     return { valid, refused }
   }, { body, request })
   expect(result).toEqual({ valid: 0, refused: true })
+})
+
+
+test('shared exact nanosecond span vectors accept source counts and reject decremented counts', async ({ page }) => {
+  await page.goto('/')
+  const vectors = JSON.parse(readFileSync(new URL('../../docs/fixtures/machine-metrics-span-vectors.json', import.meta.url), 'utf8')) as {
+    from: string; sample_interval_ms: number;
+    vectors: { name: string; span_ns: string; max_points: number; bucket_width_ms: number; expected_counts: number[] }[];
+  }
+  const results = await page.evaluate(async data => {
+    const path = '/e2e/fixtures/machine-metrics-spans.ts'
+    const { exerciseSpanVectors } = await import(/* @vite-ignore */ path)
+    return exerciseSpanVectors(data)
+  }, vectors)
+  expect(results).toEqual(vectors.vectors.map(v => ({ name: v.name, counts: v.expected_counts, decrementedRefused: true })))
 })

@@ -1,4 +1,4 @@
-// Browser projection of treer-protocol machine_metrics.rs, checkpoint 3f1b84d8.
+// Browser projection of treer-protocol machine_metrics.rs; exact spans aligned with #220 554ad16b.
 // This module keeps no cache and never persists samples.
 import { proxyUrl } from './api'
 export const metricStatuses = ['ok', 'warming_up', 'no_device', 'driver_unavailable', 'unsupported_platform', 'unsupported_metric', 'collection_failed', 'timed_out', 'stale', 'device_absent', 'disabled'] as const
@@ -35,6 +35,7 @@ export function parseMachineMetrics(input: unknown, request: MetricsRequest, rec
   if (r.schema !== 'machine.metrics.v1' || r.server_id !== request.serverId || time(from) !== time(request.from) || time(to) !== time(request.to) || time(to) <= time(from) || time(to) - time(from) > 86400000000000n || time(generated) < time(to) || time(generated) > BigInt(Math.trunc(receivedAt + 15000)) * 1000000n || r.scope !== 'os_visible_machine') fail()
   const sampleInterval = integer(r.sample_interval_ms), bucketWidth = integer(r.bucket_width_ms), staleAfter = integer(r.stale_after_ms)
   if (sampleInterval !== 5000 || bucketWidth < sampleInterval || bucketWidth > 86400000 || staleAfter !== 15000) fail()
+  const sampleIntervalNs = BigInt(sampleInterval) * 1000000n
   const gpus = array(r.gpus, 32).map(v => { const g = object(v), id = text(g.id, 128); if (!/^[a-f0-9]{64}$/.test(id)) fail(); return { id, name: text(g.name, 128) || fail(), present: bool(g.present) } })
   const ids = new Set(gpus.map(g => g.id)); if (ids.size !== gpus.length) fail()
   const keys = new Set<string>(); let total = 0; let bounds: string[] | undefined
@@ -49,7 +50,7 @@ export function parseMachineMetrics(input: unknown, request: MetricsRequest, rec
     if ((sampled !== null && age !== ms(generated, sampled)) || (state === 'stale' && (age === null || age <= staleAfter)) || (currentValue !== null && unit === 'bytes' && !Number.isSafeInteger(currentValue)) || (gpuId && !gpus.find(g => g.id === gpuId)!.present && state !== 'device_absent')) fail()
     const points = array(s.points, Math.min(720, request.maxPoints)).map(v => {
       const b = object(v), a = stamp(b.from), z = stamp(b.to), expected = integer(b.expected_count), valid = integer(b.valid_count), partial = bool(b.partial)
-      if (time(a) < time(from) || time(z) > time(to) || time(a) >= time(z) || valid > expected || ms(z, a) <= 0 || expected !== Math.ceil(ms(z, a) / sampleInterval) || time(z) !== minTime(time(a) + BigInt(bucketWidth) * 1000000n, time(to))) fail()
+      if (time(a) < time(from) || time(z) > time(to) || time(a) >= time(z) || valid > expected || BigInt(expected) !== (time(z) - time(a) + sampleIntervalNs - 1n) / sampleIntervalNs || time(z) !== minTime(time(a) + BigInt(bucketWidth) * 1000000n, time(to))) fail()
       const seen = new Set<MetricStatus>(); let observed = 0, ok = 0
       const counts = array(b.status_counts, metricStatuses.length).map(v => { const c = object(v), st = status(c.status), n = integer(c.count); if (!n || seen.has(st)) fail(); seen.add(st); observed += n; if (st === 'ok') ok = n; return { status: st, count: n } })
       if (observed > expected || ok !== valid || (!partial && (valid !== expected || !valid))) fail()
