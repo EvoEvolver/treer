@@ -1,6 +1,8 @@
 //! Cooperative publication and read custody only, not acquisition authority.
 use super::*;
 
+mod diagnosis;
+
 pub(in crate::windows_update_bootstrap::checked_files) struct HeadPin<'a> {
     ownership: &'a FixtureLock<'a>,
     file: File,

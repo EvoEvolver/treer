@@ -1395,6 +1395,24 @@ Fresh-process diagnose-only, end-to-end refusal during evidence consumption,
 and actual committed-head advancement remain acceptance work. Exact-SHA
 hosted Windows execution is required for these two new validator tests.
 
+The subsequent fresh-process rehearsal spawns the exact diagnostic test twice
+as a bounded, non-inheriting native child: once while the parent retains its
+lock and restrictive head pin, once after both have closed. The child receives
+only the fixed head path and returns the unit diagnostic `ParsedUntrusted`
+after bounded syntactic parsing (or `Refused` on a read/format error). Its branch
+never calls ownership acquisition, constructs a `HeadPin`/context, performs
+native rename, publishes evidence or invokes a consume sink. A parsed file is
+untrusted data even if its original publisher was valid.
+
+The parent requires successful child exit within ten seconds, kills/reaps only
+its own child on timeout or unwind, and checks the retained pin after the first
+probe and the original full identity/bytes after the second. No reason evidence
+or staged record may appear. This proves execution of the deliberately limited
+diagnostic entry point, not that arbitrary future code cannot misuse a path,
+that a restarted updater has authenticated state, or that crash recovery is
+implemented. Native hosted evidence is required; end-to-end consumption refusal
+and a real committed-head advancement protocol remain separate work.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
