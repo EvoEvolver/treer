@@ -1,7 +1,9 @@
-//! Inert terminal-mismatch ledger schema. No runtime caller or ACK authority.
-//! Local admission lives in telegram_disposition_admission; counter/hold
-//! composition, confirmed-ACK marking and owner recovery remain separate work.
+//! Terminal-mismatch ledger schema, initialized by Hub startup; no ACK authority.
+//! Local admission and counter/hold composition live in telegram_disposition_admission;
+//! confirmed-ACK marking and owner recovery remain separate work.
 use crate::store::{Error, Store};
+
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub const PER_BINDING_ROWS: i64 = 32;
 pub const GLOBAL_ROWS: i64 = 256;
@@ -27,7 +29,7 @@ pub fn initialize(store: &mut Store) -> Result<(), Error> {
         [],
         |r| r.get(0),
     )?;
-    if version != 1 {
+    if version != 1 && version != SCHEMA_VERSION {
         return Err(Error::Invalid);
     }
     tx.execute_batch(
@@ -63,6 +65,18 @@ pub fn initialize(store: &mut Store) -> Result<(), Error> {
           WHEN EXISTS(SELECT 1 FROM telegram_terminal_dispositions WHERE job=OLD.id)
           BEGIN SELECT RAISE(ABORT,'terminal_disposition_parent'); END;",
     )?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS telegram_terminal_holds(
+          endpoint TEXT PRIMARY KEY REFERENCES endpoints(id) ON DELETE RESTRICT ON UPDATE RESTRICT,
+          conflict INTEGER NOT NULL DEFAULT 0 CHECK(typeof(conflict)='integer' AND conflict IN(0,1)),
+          full INTEGER NOT NULL DEFAULT 0 CHECK(typeof(full)='integer' AND full IN(0,1)),
+          CHECK(conflict=1 OR full=1));
+         CREATE TRIGGER IF NOT EXISTS telegram_terminal_hold_resume
+          BEFORE UPDATE OF paused ON endpoints WHEN NEW.paused=0 AND
+          EXISTS(SELECT 1 FROM telegram_terminal_holds WHERE endpoint=OLD.id)
+          BEGIN SELECT RAISE(ABORT,'terminal_disposition_hold'); END;
+         UPDATE telegram_terminal_disposition_schema SET version=2 WHERE singleton=1;",
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -87,7 +101,7 @@ mod tests {
         assert!(sql.contains(&format!(")>={GLOBAL_ROWS} OR")));
         assert!(sql.contains(&format!(")>={PER_BINDING_ROWS}\n")));
         s.db.execute(
-            "UPDATE telegram_terminal_disposition_schema SET version=2",
+            "UPDATE telegram_terminal_disposition_schema SET version=3",
             [],
         )
         .unwrap();
@@ -99,7 +113,55 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
+    }
+
+    #[test]
+    fn v1_upgrade_preserves_existing_dispositions_and_adds_sticky_hold_guard() {
+        let mut s = Store::memory(Limits::default()).unwrap();
+        initialize(&mut s).unwrap();
+        let job = parent(&s, 1, 1);
+        insert(&s, job, 1, 10).unwrap();
+        s.db.execute_batch("DROP TRIGGER telegram_terminal_hold_resume; DROP TABLE telegram_terminal_holds; UPDATE telegram_terminal_disposition_schema SET version=1;").unwrap();
+        initialize(&mut s).unwrap();
+        assert_eq!(
+            s.db.query_row(
+                "SELECT version FROM telegram_terminal_disposition_schema",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            SCHEMA_VERSION
+        );
+        assert_eq!(
+            s.db.query_row(
+                "SELECT job,first_seen,acked FROM telegram_terminal_dispositions",
+                [],
+                |r| Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?
+                ))
+            )
+            .unwrap(),
+            (job, 10, 0)
+        );
+        s.db.execute(
+            "INSERT INTO telegram_terminal_holds(endpoint,full) VALUES('endpoint_1',1)",
+            [],
+        )
+        .unwrap();
+        assert!(s
+            .db
+            .execute("UPDATE endpoints SET paused=0 WHERE id='endpoint_1'", [])
+            .is_err());
+        initialize(&mut s).unwrap();
+        assert_eq!(
+            s.db.query_row("SELECT count(*) FROM telegram_terminal_holds", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
 
     #[test]

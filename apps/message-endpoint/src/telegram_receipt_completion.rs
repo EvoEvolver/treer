@@ -178,12 +178,26 @@ impl<M: Mailbox + Directory> Hub<M> {
         // Core ID. A changed assertion must not be acknowledged or resurrect
         // history, including after restart or mapping eviction.
         if !row.pending && row.core_id.as_deref() != Some(&receipt.final_core_message_id) {
-            tx.execute(
-                "UPDATE telegram_reply_counters SET terminal_mismatch=CASE
-                 WHEN terminal_mismatch<9223372036854775807 THEN terminal_mismatch+1
-                 ELSE terminal_mismatch END WHERE singleton=1",
-                [],
+            let disposition_identity =
+                crate::telegram_disposition_identity::Identity::from_authenticated(
+                    authenticated,
+                    &self.workspace,
+                    &self.own_id,
+                    intent.job,
+                    Expected {
+                        scope: &scope,
+                        job_id: &job_id,
+                        payload_digest: &digest,
+                        native_message_id: native_id,
+                    },
+                )?;
+            let _admission = crate::telegram_disposition_admission::record_and_hold_in_transaction(
+                &tx,
+                &disposition_identity,
+                now,
             )?;
+            // Deliberately still no ACK: a separate reviewed delta must add the
+            // confirmed-ACK marker and recorded-discard return contract.
             tx.commit()?;
             return Err(Error::Binding);
         }

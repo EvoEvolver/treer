@@ -722,3 +722,39 @@ cleanup inside the open transaction, so the caller must roll back the entire
 transaction on error. The explicit rollback restores the original row and count.
 This enforces write ownership, not the still-pending composed authorization,
 counter/hold or ACK contract.
+
+### Local mismatch composition (unactivated, ACK still refused)
+
+The Hub now migrates the local ledger schema from version 1 to 2 atomically,
+preserving v1 hashes and records. Version 2 adds one bounded recovery row per
+stable endpoint, with conflict/full bits and a restrictive FK. Unknown versions
+refuse startup. A SQLite trigger rejects ordinary unpause while that row exists;
+changing the display reason, generation or normal resume cannot clear it. There
+is intentionally no unaudited clear/delete API. Audited owner recovery after
+confirmed ACK remains to be designed and reviewed before activation.
+
+After its existing sealed workspace/principal, durable hub identity, current
+binding/generation/recipient, receipt-mode, lease, source and exact payload checks,
+the completion transaction now constructs the sealed disposition identity and
+calls local composition. Inserted increments the saturating mismatch counter
+once; Replay does not increment. Conflict/Full commit the ledger observation,
+single sticky recovery hold, paused endpoint and visible binding reason/revision
+in that same IMMEDIATE transaction. Repeated held deliveries neither allocate
+records nor increment counts/revisions. Errors propagate with `?` to drop and
+roll back the entire transaction; only Ok(Conflict/Full) can commit a hold.
+Historical attempt counts are preserved, so the aggregate has mixed historical
+provenance and remains at-least-once after confirmed-acked pruning.
+
+This is still an intermediate no-ACK result: the completion stage returns an
+error after the local mismatch COMMIT, keeping the delivery unacknowledged. No
+runtime worker invokes this stage, and no receipt-mode activation is implied.
+A two-connection local contention test verifies serialized Inserted/Replay with
+one persisted row and counter increment; this is not real Core ACK rehearsal.
+The recorded-discard outcome and exact confirmed-ACK marker, owner recovery and
+bounded mailbox scheduling remain
+pending. Do not deploy or downgrade this storage migration without its separate
+release review; a pre-v2 binary must not interpret or clear recovery holds.
+
+The owner binding view overlays the durable hold reason, so a later metadata
+readback or ordinary pause cannot hide that recovery requirement. The unpause
+trigger remains the enforcement boundary even if a caller bypasses the view.

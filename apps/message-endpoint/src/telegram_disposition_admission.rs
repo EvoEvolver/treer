@@ -4,7 +4,7 @@
 use crate::{
     store::Error,
     telegram_disposition_identity::Identity,
-    telegram_dispositions::{ACKED_FLOOR, GLOBAL_ROWS, PER_BINDING_ROWS},
+    telegram_dispositions::{ACKED_FLOOR, GLOBAL_ROWS, PER_BINDING_ROWS, SCHEMA_VERSION},
 };
 use rusqlite::{params, DatabaseName, OptionalExtension, Transaction, TransactionState};
 
@@ -32,7 +32,7 @@ pub fn record_in_transaction(
         [],
         |r| r.get(0),
     )?;
-    if version != 1 {
+    if version != SCHEMA_VERSION {
         return Err(Error::Invalid);
     }
     let (job, endpoint, generation, recipient) = identity.parent();
@@ -112,6 +112,66 @@ pub fn record_in_transaction(
     Ok(Admission::Inserted)
 }
 
+/// Compose the local disposition, counter and bounded recovery hold. The Hub
+/// completion caller must perform authoritative authorization in this SAME write
+/// transaction first; every Err requires rollback. No result authorizes ACK.
+pub(crate) fn record_and_hold_in_transaction(
+    tx: &Transaction<'_>,
+    identity: &Identity,
+    now: i64,
+) -> Result<Admission, Error> {
+    if now < 0 || tx.transaction_state(Some(DatabaseName::Main))? != TransactionState::Write {
+        return Err(Error::Invalid);
+    }
+    let (_, endpoint, _, _) = identity.parent();
+    // The caller has already validated scope. Existing holds are sticky and
+    // new mailbox deliveries cannot grow rows or counters behind that hold.
+    let held: Option<bool> = tx
+        .query_row(
+            "SELECT conflict FROM telegram_terminal_holds WHERE endpoint=?1",
+            [endpoint],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(conflict) = held {
+        return Ok(if conflict {
+            Admission::Conflict
+        } else {
+            Admission::Full
+        });
+    }
+    let result = record_in_transaction(tx, identity, now)?;
+    match result {
+        Admission::Inserted => {
+            let changed = tx.execute("UPDATE telegram_reply_counters SET terminal_mismatch=CASE WHEN terminal_mismatch<9223372036854775807 THEN terminal_mismatch+1 ELSE terminal_mismatch END WHERE singleton=1", [])?;
+            if changed != 1 {
+                return Err(Error::Invalid);
+            }
+        }
+        Admission::Conflict | Admission::Full => {
+            tx.execute(
+                "INSERT INTO telegram_terminal_holds(endpoint,conflict,full) VALUES(?1,?2,?3)",
+                params![
+                    endpoint,
+                    result == Admission::Conflict,
+                    result == Admission::Full
+                ],
+            )?;
+            if tx.execute("UPDATE endpoints SET paused=1 WHERE id=?1", [endpoint])? != 1 {
+                return Err(Error::Invalid);
+            }
+            let reason = if result == Admission::Conflict {
+                "terminal_receipt_conflict"
+            } else {
+                "terminal_receipt_full"
+            };
+            if tx.execute("UPDATE hub_bindings SET revision=revision+1,reason=?2 WHERE endpoint=?1 AND reason!=?2",params![endpoint,reason])? != 1 { return Err(Error::Invalid); }
+        }
+        Admission::Replay => {}
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,13 +184,17 @@ mod tests {
     fn fixture() -> Store {
         let mut s = Store::memory(Limits::default()).unwrap();
         initialize(&mut s).unwrap();
+        crate::telegram_reply_store::Mappings::new(&mut s).unwrap();
+        s.db.execute_batch("CREATE TABLE hub_bindings(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),revision INTEGER NOT NULL DEFAULT 1,reason TEXT NOT NULL DEFAULT 'active');").unwrap();
         for n in 1..=9 {
             let endpoint = format!("endpoint_{n}");
             s.db.execute(
-                "INSERT INTO endpoints(id,generation,recipient) VALUES(?1,1,'ag_recipient')",
+                "INSERT INTO endpoints(id,generation,recipient,paused) VALUES(?1,1,'ag_recipient',0)",
                 [&endpoint],
             )
             .unwrap();
+            s.db.execute("INSERT INTO hub_bindings(endpoint) VALUES(?1)", [&endpoint])
+                .unwrap();
             s.db.execute("INSERT INTO inbound(id,endpoint,generation,external_id,recipient,body,digest,pending,core_id) VALUES(?1,?2,1,'one','ag_recipient','synthetic',zeroblob(32),0,'msg_final')", params![n,endpoint]).unwrap();
         }
         s
@@ -154,6 +218,210 @@ mod tests {
         )
         .unwrap()
     }
+    fn composed(s: &mut Store, id: &Identity) -> Admission {
+        let tx =
+            s.db.transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+        let result = record_and_hold_in_transaction(&tx, id, 1).unwrap();
+        tx.commit().unwrap();
+        result
+    }
+    fn counter(s: &Store) -> i64 {
+        s.db.query_row(
+            "SELECT terminal_mismatch FROM telegram_reply_counters",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn concurrent_composed_writers_serialize_and_count_once() {
+        use std::{sync::mpsc, time::Duration};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("synthetic.sqlite");
+        let s = fixture();
+        s.db.execute("VACUUM main INTO ?1", [path.to_str().unwrap()])
+            .unwrap();
+        // Open both before contention and keep them alive until BOTH writers
+        // finish: closing any same-process fd early could release POSIX locks.
+        let mut first = rusqlite::Connection::open(&path).unwrap();
+        let mut second = rusqlite::Connection::open(&path).unwrap();
+        first.pragma_update(None, "foreign_keys", true).unwrap();
+        second.pragma_update(None, "foreign_keys", true).unwrap();
+        second.busy_timeout(Duration::from_secs(5)).unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let a = std::thread::spawn(move || {
+            let tx = first
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            assert_eq!(
+                record_and_hold_in_transaction(&tx, &identity(1, 1, 1), 1).unwrap(),
+                Admission::Inserted
+            );
+            ready_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            tx.commit().unwrap();
+            first
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let b = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let tx = second
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            let result = record_and_hold_in_transaction(&tx, &identity(1, 1, 1), 2).unwrap();
+            tx.commit().unwrap();
+            (second, result)
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        release_tx.send(()).unwrap();
+        let first = a.join().unwrap();
+        let (second, result) = b.join().unwrap();
+        assert_eq!(result, Admission::Replay);
+        assert_eq!(
+            first
+                .query_row(
+                    "SELECT terminal_mismatch FROM telegram_reply_counters",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            second
+                .query_row(
+                    "SELECT count(*) FROM telegram_terminal_dispositions",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        // Both connections remain in scope until both joins and checks finish.
+    }
+
+    #[test]
+    fn composed_counter_is_once_and_conflict_hold_is_sticky_and_bounded() {
+        let mut s = fixture();
+        assert_eq!(composed(&mut s, &identity(1, 1, 1)), Admission::Inserted);
+        assert_eq!(composed(&mut s, &identity(1, 1, 1)), Admission::Replay);
+        assert_eq!(counter(&s), 1);
+        assert_eq!(composed(&mut s, &identity(1, 1, 2)), Admission::Conflict);
+        for key in 2..10 {
+            assert_eq!(composed(&mut s, &identity(1, key, 0)), Admission::Conflict);
+        }
+        assert_eq!(count(&s), 1);
+        assert_eq!(counter(&s), 1);
+        assert_eq!(
+            s.db.query_row("SELECT count(*) FROM telegram_terminal_holds", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.db.query_row(
+                "SELECT revision,reason FROM hub_bindings WHERE endpoint='endpoint_1'",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            )
+            .unwrap(),
+            (2, "terminal_receipt_conflict".into())
+        );
+        assert!(s
+            .db
+            .execute("UPDATE endpoints SET paused=0 WHERE id='endpoint_1'", [])
+            .is_err());
+    }
+    #[test]
+    fn full_hold_commits_without_counting_or_evicting_and_repeated_full_is_noop() {
+        let mut s = fixture();
+        for key in 0..32 {
+            composed(&mut s, &identity(1, key, key as u8));
+        }
+        assert_eq!(composed(&mut s, &identity(1, 32, 0)), Admission::Full);
+        let before = s.db.total_changes();
+        assert_eq!(composed(&mut s, &identity(1, 33, 0)), Admission::Full);
+        assert_eq!(s.db.total_changes(), before);
+        assert_eq!(counter(&s), 32);
+        assert_eq!(count(&s), 32);
+        assert_eq!(
+            s.db.query_row("SELECT full FROM telegram_terminal_holds", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+    #[test]
+    fn counter_and_hold_sql_failures_require_outer_rollback() {
+        let mut s = fixture();
+        s.db.execute_batch("CREATE TRIGGER reject_counter BEFORE UPDATE ON telegram_reply_counters BEGIN SELECT RAISE(ABORT,'synthetic_counter'); END;").unwrap();
+        let tx =
+            s.db.transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+        assert!(record_and_hold_in_transaction(&tx, &identity(1, 1, 1), 1).is_err());
+        tx.rollback().unwrap();
+        assert_eq!(count(&s), 0);
+        assert_eq!(counter(&s), 0);
+        s.db.execute_batch("DROP TRIGGER reject_counter;").unwrap();
+        composed(&mut s, &identity(1, 1, 1));
+        s.db.execute_batch("CREATE TRIGGER reject_hold BEFORE UPDATE ON hub_bindings BEGIN SELECT RAISE(ABORT,'synthetic_hold'); END;").unwrap();
+        let tx =
+            s.db.transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+        assert!(record_and_hold_in_transaction(&tx, &identity(1, 1, 2), 1).is_err());
+        tx.rollback().unwrap();
+        assert_eq!(record(&mut s, &identity(1, 1, 1)), Admission::Replay);
+        assert_eq!(
+            s.db.query_row("SELECT count(*) FROM telegram_terminal_holds", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            s.db.query_row(
+                "SELECT paused FROM endpoints WHERE id='endpoint_1'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn hold_commit_failure_rolls_back_latch_pause_and_revision() {
+        let mut s = fixture();
+        composed(&mut s, &identity(1, 1, 1));
+        s.db.commit_hook(Some(|| true));
+        let tx =
+            s.db.transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+        assert_eq!(
+            record_and_hold_in_transaction(&tx, &identity(1, 1, 2), 1).unwrap(),
+            Admission::Conflict
+        );
+        assert!(tx.commit().is_err());
+        s.db.commit_hook(None::<fn() -> bool>);
+        assert_eq!(record(&mut s, &identity(1, 1, 1)), Admission::Replay);
+        assert_eq!(
+            s.db.query_row("SELECT count(*) FROM telegram_terminal_holds", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            s.db.query_row(
+                "SELECT revision FROM hub_bindings WHERE endpoint='endpoint_1'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
     #[test]
     fn deferred_and_read_only_transactions_cannot_enter_admission() {
         let mut s = fixture();

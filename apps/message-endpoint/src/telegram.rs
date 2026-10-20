@@ -1480,6 +1480,57 @@ print(json.dumps({'acknowledged_delivery_ids':['del_receipt'],'already_acknowled
     }
 
     #[test]
+    fn terminal_disposition_conflict_is_atomic_sticky_and_visible_after_readback_reason_changes() {
+        let (mut h, _) = fixture_store(Store::memory(Limits::default()).unwrap());
+        let intent = receipt_job(&mut h);
+        h.complete_test_telegram_receipt(receipt_delivery(&intent, "msg_final"), &intent, NOW)
+            .unwrap();
+        for asserted in ["msg_changed", "msg_other"] {
+            assert!(matches!(
+                h.complete_test_telegram_receipt(receipt_delivery(&intent, asserted), &intent, NOW),
+                Err(HubError::Binding)
+            ));
+        }
+        assert_eq!(
+            h.store
+                .db
+                .query_row(
+                    "SELECT terminal_mismatch FROM telegram_reply_counters",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT conflict FROM telegram_terminal_holds", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        h.store
+            .db
+            .execute(
+                "UPDATE hub_bindings SET reason='owner_paused' WHERE endpoint=?1",
+                [&intent.endpoint],
+            )
+            .unwrap();
+        let view = h.view(&intent.endpoint).unwrap();
+        assert!(view.paused);
+        assert_eq!(view.reason, "terminal_receipt_conflict");
+        assert!(h
+            .store
+            .db
+            .execute(
+                "UPDATE endpoints SET paused=0 WHERE id=?1",
+                [&intent.endpoint]
+            )
+            .is_err());
+    }
+
+    #[test]
     fn terminal_receipt_ack_requires_durable_final_id_across_restart_and_eviction() {
         use std::{os::unix::fs::PermissionsExt, sync::Mutex};
         for evicted in [false, true] {
@@ -1568,7 +1619,7 @@ print(json.dumps({'acknowledged_delivery_ids':['del_receipt'],'already_acknowled
                             |r| r.get::<_, i64>(0)
                         )
                         .unwrap(),
-                    if round == 2 { i64::MAX } else { round + 1 }
+                    if round == 2 { i64::MAX } else { 1 }
                 );
                 assert_eq!(
                     h.store

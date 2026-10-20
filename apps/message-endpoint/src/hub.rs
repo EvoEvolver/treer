@@ -151,6 +151,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         }
         // Initialize/migrate local history before any audited deletion can retire it.
         crate::telegram_reply_store::Mappings::new(&mut store)?;
+        crate::telegram_dispositions::initialize(&mut store)?;
         let tx = store.db.transaction()?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS hub_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1), agent TEXT NOT NULL,workspace TEXT NOT NULL,blocked INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hub_bindings(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id), definition TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,reason TEXT NOT NULL DEFAULT 'owner_paused',observed TEXT,checked_at INTEGER,diagnostic TEXT,diagnostic_at INTEGER);
@@ -291,7 +292,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             return Err(Error::Binding);
         }
         let (definition,revision,paused,reason,observed,checked_at,diagnostic):(String,i64,bool,String,Option<String>,Option<i64>,Option<String>)=self.store.db.query_row(
-            "SELECT b.definition,b.revision,e.paused,b.reason,b.observed,b.checked_at,b.diagnostic FROM hub_bindings b JOIN endpoints e ON e.id=b.endpoint WHERE e.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
+            "SELECT b.definition,b.revision,e.paused,CASE WHEN h.conflict=1 THEN 'terminal_receipt_conflict' WHEN h.full=1 THEN 'terminal_receipt_full' ELSE b.reason END,b.observed,b.checked_at,b.diagnostic FROM hub_bindings b JOIN endpoints e ON e.id=b.endpoint LEFT JOIN telegram_terminal_holds h ON h.endpoint=b.endpoint WHERE e.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
         Ok(View {
             activity: self.activation_activity(id)?,
             isolation: self.isolation_choice(id)?,
