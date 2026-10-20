@@ -96,6 +96,7 @@ function WorkspaceAppContent() {
   const [mobileTreeOpen, setMobileTreeOpen] = useState(preview)
   const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 767px)").matches)
   const [ctrlArmed, setCtrlArmed] = useState(false)
+  const installReturnFocus = useRef<HTMLElement | null>(null)
   const terminalPaneRef = useRef<TerminalPaneHandle>(null)
   const treeWidth = useTreeWidth(user?.user_id, () => requestAnimationFrame(() => terminalPaneRef.current?.fit()))
   const ctrlArmedRef = useRef(false)
@@ -893,7 +894,7 @@ function WorkspaceAppContent() {
       setWindowsInstallCommand(data.windows_install_command ?? t("app.update_the_proxy_to_obtain"))
       setWindowsConnectCommand(data.windows_connect_command ?? data.connect_command)
       setInstallCommand(data.install_command); setConnectCommand(data.connect_command); setInstallOpen(true)
-    } catch (reason) { showError(reason) }
+    } catch (reason) { installReturnFocus.current = null; showError(reason) }
   }
 
   useEffect(() => {
@@ -1056,7 +1057,7 @@ function WorkspaceAppContent() {
           <span data-tour="create-workspace"><IconButton label={workspace ? t("app.workspace_settings") : t("org.create_workspace")} disabled={!organizationId} className={cn("max-md:size-11", mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
         </div>
         <button type="button" aria-label={t("app.workspace_overview")} onClick={showOverview} className={cn("mx-3 mb-2 flex min-h-10 items-center gap-2 rounded-md px-2 text-left text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", mainView === "overview" && "bg-accent")}><LayoutDashboard aria-hidden="true" className="size-3.5" />{t("app.overview")}</button>
-        <WorkloadTree pins={pins} key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} workloadHref={workloadHref} onOpenInNewTab={openInNewTab} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
+        <WorkloadTree pins={pins} key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} workloadHref={workloadHref} onOpenInNewTab={openInNewTab} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} onAddMachine={(trigger) => { installReturnFocus.current = trigger; void openInstall() }} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
 
         <UserMenu user={user} role={roleLabel(currentRole)} preview={preview} collapseRef={treeWidth.collapseRef} onCollapse={treeWidth.toggle} onSettings={openSettings} onTour={replayFirstRunTour} onLogout={logout} />
       </aside>
@@ -1094,7 +1095,7 @@ function WorkspaceAppContent() {
 
     <ErrorToast message={error} onDismiss={() => setError(null)} />
 
-    <WorkspaceDialogs state={dialogState}
+    <WorkspaceDialogs state={dialogState} installReturnFocus={installReturnFocus}
       creationFailure={creationFailure}
       creationCommandMissing={creationCommandMissing}
       reservationCleaned={reservationCleaned}

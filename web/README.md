@@ -1,5 +1,9 @@
 # Treer control plane
 
+The Tree header **+** menu includes **Add machine**, using the same workspace
+setup dialog as Workspace settings, whether or not a machine is already enrolled.
+Machines belong to the current workspace, not the selected Tree folder.
+
 Agent operations use stable IDs. Display names are unique within a Tree folder,
 so the same label can appear in different folders. Hover a workload row to see
 its complete path; the selected Agent's header shows folder breadcrumbs. The
