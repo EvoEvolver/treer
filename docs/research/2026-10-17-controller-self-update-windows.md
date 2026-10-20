@@ -1454,19 +1454,21 @@ format review must precede a decision writer or Controller adapter.
 Propose one immutable fixed `consume.intent` file inside the already pinned
 attempt directory, separate from the head and `reason.evidence`. Creation is
 exclusive, never replace, append, truncate, delete-and-retry or open-existing
-as permission to consume. The proposed binary record is exactly 145 bytes:
+as permission to consume. After security review 6402, the proposed binary record
+is exactly 177 bytes, including an installation/lock-lifetime binding:
 
 | Offset | Bytes | Meaning |
 | --- | --- | --- |
 | 0 | 8 | ASCII `TRCONS01`, distinct from head/context/pipe domains |
-| 8 | 2 | Little-endian total length, exactly 145 |
-| 10 | 32 | Independently committed attempt-directory binding |
-| 42 | 24 | Retained predecessor head full volume-u64/file-id-128 identity |
-| 66 | 32 | SHA-256 of the exact retained predecessor head bytes |
-| 98 | 32 | SHA-256 of the exact retained 225-byte context evidence |
-| 130 | 3 | Component, image role, operation selectors |
-| 133 | 8 | Nonzero committed intent revision, little-endian |
-| 141 | 4 | Actual retained nonzero Win32 failure status, little-endian |
+| 8 | 2 | Little-endian total length, exactly 177 |
+| 10 | 32 | Installation and live supervisor lock-lifetime binding |
+| 42 | 32 | Independently committed attempt-directory binding |
+| 74 | 24 | Retained predecessor head full volume-u64/file-id-128 identity |
+| 98 | 32 | SHA-256 of the exact retained predecessor head bytes |
+| 130 | 32 | SHA-256 of the exact retained 225-byte context evidence |
+| 162 | 3 | Component, image role, operation selectors |
+| 165 | 8 | Nonzero committed intent revision, little-endian |
+| 173 | 4 | Actual retained nonzero Win32 failure status, little-endian |
 
 Use the existing identifier/selector/role-operation rules. Digest bytes have
 no reserved sentinel; a valid digest is not authority. The evidence digest
@@ -1476,6 +1478,12 @@ match all independently committed expectations. A successful parse never
 constructs an accepted/consumed token. Component and revision must originate in
 the prior committed intent, not a caller's failure classification or a fresh
 observation. This format remains a proposal, not an implemented file contract.
+The installation/lifetime identifier rejects all-zero/all-ones values and must
+eventually come from the real supervisor's independently retained ownership,
+not from the directory or its decision file. A codec fixture may use an
+explicitly synthetic 32-byte constant; it proves neither installation identity
+nor lock ownership. Copying a decision to another installation/lifetime must
+fail exact comparison with that separately supplied expectation.
 
 The intended live ordering under one supervisor-owned installation/enrollment
 lock lifetime is: validate committed head and retained failure/evidence; spend
@@ -1486,6 +1494,13 @@ Any error after starting decision creation refuses continuation and preserves
 all records, including partial files. The lock order and real supervisor entry
 still need their own implementation review; the disposable `FixtureLock` does
 not satisfy this production requirement.
+During writing, the new decision handle has write access with read sharing
+only, never write/delete sharing. The restrictive read-back pin then stays open
+for the entire continuation. The writer-to-reader transition still needs a
+separately tested custody/ACL contract; a gap cannot be hidden by calling it
+continuous pinning. After the continuation closes its pin, the file remains as
+the burn marker, protected by the attempt directory's ACL rather than an open
+handle. That protection does not prevent an authorized owner deleting it.
 
 Every interruption from decision creation through continuation and subsequent
 head publication is diagnose-and-stop on a new process. An existing decision
@@ -1496,6 +1511,15 @@ file. A decision that reached read-back is not proof of survival across power
 loss. No atomic consume-plus-head CAS, automatic retry/recovery, or completed
 update claim follows from this write-ahead shape. A separate committed-head
 publication protocol must resolve that boundary before production wiring.
+In particular, deletion/replay protection requires independently protected
+consumption state outside the attempt directory, bound to the committed head
+by the real supervisor-owned installation protocol. A consumed attempt must
+not become fresh when its intent file or directory disappears, is copied or is
+restored from an older snapshot. A supervisor-maintained monotonic attempt
+generation is one possible future design, not an implemented or approved epoch
+mechanism here. The format and intent file alone supply no such protection.
+This requirement adds no HKLM operation, registry/reboot experiment or recovery
+authorization; its storage and head publication contract require separate review.
 
 First implement only the strict codec with an independent literal golden
 vector, all truncations/trailing data and cross-domain refusals, every bound
