@@ -42,11 +42,22 @@ pub enum HistoryError {
     InvalidSample,
     OversizedRecord,
     DuplicateSample,
+    SequenceExhausted,
 }
 
 struct Record {
+    tick: u64,
     clock: Clock,
     bytes: Vec<u8>,
+}
+
+/// Borrowed collector frame identity. Scoped to one History instance, not a
+/// durable boot identifier or proof that every cached field was reacquired.
+pub struct StagedFrame<'a> {
+    pub epoch: u64,
+    pub tick: u64,
+    pub clock: Clock,
+    pub bytes: &'a [u8],
 }
 
 /// Exactly one collector owns this ring. Viewers do not create or refresh it.
@@ -59,6 +70,7 @@ pub struct History {
     bytes: usize,
     last_clock: Option<Clock>,
     epoch: u64,
+    next_tick: u64,
     truncated: bool,
 }
 
@@ -80,6 +92,7 @@ impl History {
             bytes: 0,
             last_clock: None,
             epoch: 0,
+            next_tick: 0,
             truncated: false,
         })
     }
@@ -162,6 +175,8 @@ impl History {
         if bytes.len() > MAX_RECORD_BYTES || bytes.len() > self.limits.bytes {
             return Err(HistoryError::OversizedRecord);
         }
+        let tick = self.next_tick;
+        let next_tick = tick.checked_add(1).ok_or(HistoryError::SequenceExhausted)?;
         while self.records.len() >= self.limits.records
             || self.bytes + bytes.len() > self.limits.bytes
         {
@@ -169,15 +184,31 @@ impl History {
             self.truncated = true;
         }
         self.bytes += bytes.len();
-        self.records.push_back(Record { clock, bytes });
+        self.records.push_back(Record { tick, clock, bytes });
+        self.next_tick = next_tick;
         Ok(())
     }
 
     /// Borrowed raw staging frames, not a public query response. Every read
     /// reaps first; the future query adapter must parse and aggregate locally.
     pub fn frames(&mut self, clock: Clock) -> impl Iterator<Item = &[u8]> {
+        self.staged_frames(clock).map(|frame| frame.bytes)
+    }
+
+    /// Identities are assigned at successful append, never by a reader. Tick
+    /// increases across eviction and epoch resets and refuses overflow. Within
+    /// an epoch, admission also enforces increasing wall and monotonic times.
+    /// Cached fields need their ORIGINAL acquisition identity from the future
+    /// collector; adapters must not relabel them with the new frame tick.
+    pub fn staged_frames(&mut self, clock: Clock) -> impl Iterator<Item = StagedFrame<'_>> {
         self.maintain(clock);
-        self.records.iter().map(|record| record.bytes.as_slice())
+        let epoch = self.epoch;
+        self.records.iter().map(move |record| StagedFrame {
+            epoch,
+            tick: record.tick,
+            clock: record.clock,
+            bytes: record.bytes.as_slice(),
+        })
     }
 
     pub fn record_count(&self) -> usize {

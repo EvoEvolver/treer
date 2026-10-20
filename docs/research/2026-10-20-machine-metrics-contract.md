@@ -232,6 +232,18 @@ future disk adapter must separately bound metadata and temporary files, validate
 corruption and permissions, and reconcile clock epochs before exposing history.
 Serialized-byte bounds are not a process RSS claim. Response assembly remains pending.
 
+Successful appends now assign a strictly increasing frame tick. Borrowed
+`staged_frames` expose that tick, the current epoch and both acquisition clocks
+alongside the bytes, after retention maintenance. Readers do not assign ticks;
+rejected appends do not consume one, eviction and epoch clearing do not reset
+the sequence, and exhaustion refuses further appends before capacity eviction.
+Within an epoch the existing admission rules require increasing wall and
+monotonic timestamps. These identities are scoped to one in-memory instance:
+startup still needs a separate collector-instance/boot identity for a journal.
+A frame tick is not a per-field acquisition identity: cached field values must
+retain their original collector-owned identity when projected for aggregation,
+not acquire the surrounding frame's new tick. That adapter remains unimplemented.
+
 ## Local bucket arithmetic checkpoint (not connected)
 
 `machine_metrics::aggregation` builds uniform buckets locally from at most

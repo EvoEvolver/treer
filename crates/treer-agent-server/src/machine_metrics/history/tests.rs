@@ -180,3 +180,48 @@ fn history_rejects_queries_foreign_invalid_and_duplicate_samples() {
     )
     .is_err());
 }
+
+#[test]
+fn frame_ticks_are_append_owned_and_survive_eviction_and_epoch_reset() {
+    let mut history = History::new(
+        "fixture-machine".into(),
+        Limits {
+            records: 1,
+            bytes: MAX_BYTES,
+        },
+    )
+    .unwrap();
+    history.push(clock(0), &sample(clock(0))).unwrap();
+    let first = history.staged_frames(clock(0)).next().unwrap();
+    assert_eq!(
+        (first.epoch, first.tick, first.clock.monotonic_ms),
+        (0, 0, 0)
+    );
+    assert!(!first.bytes.is_empty());
+    assert_eq!(
+        history.push(clock(0), &sample(clock(0))),
+        Err(HistoryError::DuplicateSample)
+    );
+    history.push(clock(5000), &sample(clock(5000))).unwrap();
+    assert_eq!(history.staged_frames(clock(5000)).next().unwrap().tick, 1);
+    // Readers neither allocate ticks nor reset their sequence.
+    assert_eq!(history.staged_frames(clock(5000)).next().unwrap().tick, 1);
+    let reset = Clock {
+        wall: clock(10000).wall,
+        monotonic_ms: 1,
+    };
+    history.push(reset, &sample(reset)).unwrap();
+    let after = history.staged_frames(reset).next().unwrap();
+    assert_eq!((after.epoch, after.tick), (1, 2));
+    history.next_tick = u64::MAX; // Test-only exhaustion, never wrap/reuse.
+    let later = Clock {
+        wall: reset.wall + Duration::seconds(5),
+        monotonic_ms: 5001,
+    };
+    assert_eq!(
+        history.push(later, &sample(later)),
+        Err(HistoryError::SequenceExhausted)
+    );
+    assert_eq!(history.record_count(), 1);
+    assert_eq!(history.staged_frames(later).next().unwrap().tick, 2);
+}
