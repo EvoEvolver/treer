@@ -166,10 +166,15 @@ impl<'a> BoundStored<'a> {
         }
         self.binding.check(self.composition)?;
         let bytes = self.pin.read()?;
+        let expected = expected.with_failure(self.failure)?;
+        // The callback is not allowed to observe an unmatched context. In
+        // particular, future inert decision creation must follow this check.
+        if !context_record::matches_expected(&bytes, &expected) {
+            return Err(denied());
+        }
         after_read()?;
         self.binding.check(self.composition)?;
-        let expected = expected.with_failure(self.failure)?;
-        if !context_record::matches_expected(&bytes, &expected) || sink.refuse {
+        if sink.refuse {
             return Err(denied());
         }
         sink.accepted += 1;
@@ -291,7 +296,9 @@ fn native_operation_bound_context_custody_and_single_use() {
                 accepted: 0,
                 refuse: scenario == 1,
             };
+            let hook_ran = Cell::new(false);
             let result = stored.consume(&expected, &mut sink, || {
+                hook_ran.set(true);
                 if scenario == 2 {
                     return Err(denied());
                 }
@@ -320,6 +327,7 @@ fn native_operation_bound_context_custody_and_single_use() {
                 }
                 Ok(())
             });
+            assert!(hook_ran.get());
             assert_eq!(result.is_ok(), scenario == 0 || scenario == 4);
             assert_eq!(sink.accepted, usize::from(result.is_ok()));
             assert!(stored
@@ -378,14 +386,28 @@ fn native_operation_bound_context_refuses_foreign_bindings() {
                 _ => unreachable!(),
             }
             let mut sink = Sink::default();
-            assert!(stored.consume(&expected, &mut sink, || Ok(())).is_err());
+            assert!(stored
+                .consume(&expected, &mut sink, || panic!(
+                    "unmatched context reached hook"
+                ))
+                .is_err());
             assert_eq!(sink.accepted, 0);
+            assert!(stored.spent.get());
+            assert!(!fixture.attempt.path.join("consume.intent").exists());
             assert!(stored
                 .consume(&binding, &mut sink, || panic!("refusal spent evidence"))
                 .is_err());
             drop(stored);
             cleanup(fixture);
         }
+        eprintln!(
+            "context_order_fixture operation={} mismatches=10 hook=0 sink=0 spent=1 decision=0",
+            if operation == Operation::MoveOld {
+                "MoveOld"
+            } else {
+                "Publish"
+            }
+        );
     }
 }
 

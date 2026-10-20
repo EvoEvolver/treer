@@ -1622,9 +1622,9 @@ compose the accepted codec, exclusive writer and restrictive read pin with the
 retained-head/native-failure fixture. This is a design contract for review, not
 permission to wire a Controller adapter or perform a rollback.
 
-The existing `BoundStored::consume` callback runs after evidence read but before
-its exact context comparison. It must not be reused as a decision-publication
-hook in that order. The composed private path must first spend the in-memory
+At design checkpoint `279cd85b`, the `BoundStored::consume` callback ran after
+evidence read but before its exact context comparison. It must not be reused as
+a decision-publication hook in that order. The composed private path must first spend the in-memory
 evidence latch, validate the retained head and live operation binding, read the
 strict context evidence and match every field against the independently supplied
 fixture expectations plus the retained actual failure. Only after this match
@@ -1664,6 +1664,32 @@ with zero sink visits. A flag must prove each injected boundary was reached.
 Retain existing actual ReadFile-error and ACL-loss coverage. Review the exact
 test matrix before implementation; exact-SHA hosted native execution is required
 afterward, and compile-only checks cannot establish the composition.
+
+Security review 6491 accepted this order with seven implementation conditions:
+hash the exact first matched context bytes once and compare later read-back to
+that digest; include independent per-field mismatch controls before any decision
+creation; observe actual write/delete 32 inside the sink and release afterward;
+prove the old ReadFile/ACL fault boundaries still execute; isolate the distinct
+synthetic lifetime and all capabilities to Windows test builds, including a
+non-test compilation/source-boundary check; preserve both a replaced complete
+decision object and a 17-byte partial decision; and keep the validated head
+snapshot accessor private and data-only. The field matrix must independently
+cover operation, role, component, revision, head identity/digest, context digest
+and actual failure status, with spent evidence, zero sink and no decision file.
+Those decision-composition checks remain pending until their code lands.
+
+The first preparatory code slice only reorders `BoundStored::consume`: spend,
+binding check, evidence read, exact expected-context comparison, callback,
+post-callback binding check, sink. Its existing ten foreign-binding controls
+for each operation now panic if the callback runs, assert spent evidence and
+no decision file, then retry the correct binding and require refusal. The
+five matching-context scenarios explicitly assert callback entry, including
+injected failure, post-read native slot mutation and evidence-sharing probes.
+The actual ReadFile-error fixture retains its panic-on-callback and native read
+trace checks; the head ACL fixture retains pre/post hook-execution flags.
+No decision is written and no new accessor, digest handoff, sink capability or
+production API exists in this preparatory slice. Exact-SHA hosted evidence is
+still required to accept its reordered native controls.
 
 This adds no durable consume-plus-head transaction, external deletion/replay
 fence, independently committed production expectations, authenticated health,
