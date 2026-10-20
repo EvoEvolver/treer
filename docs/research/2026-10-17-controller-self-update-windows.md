@@ -1883,6 +1883,40 @@ and sink-path rows remain unchanged. Exact-SHA dual-Windows native evidence is
 required; partial decisions, transition replacement, head/evidence custody
 faults and all other integrity/production/activation gaps remain open.
 
+##### Pre-existing 17-byte decision composition (native pending)
+
+native_operation_decision_pin_refuses_preexisting_partial reuses the existing
+complete-record composition assertions for both operations, but seeds exactly
+17 bytes through the existing private Stage interruption branch. The new
+interrupt_decision_for_fixture wrapper invokes that branch and maps away any
+Stage; it returns only an error, never a pin or authority. The source boundary
+gate explicitly inventories this additional unit-returning method and checks
+its delegation. The entire module remains cfg(all(windows, test)).
+
+The test starts with an absent slot, supplies valid independent 177-byte input,
+requires the synthetic PermissionDenied without a native OS error, and checks
+the resulting exact 17-byte invalid prefix and full volume/file identity.
+This is labelled interruption injection after write/sync, not a process-death
+or native sync-failure claim. Fresh matching collision evidence must reach its
+matched hook and fail CREATE_NEW with ERROR_FILE_EXISTS (80). The sink cannot
+run, evidence is spent, retry cannot enter its hook, and recreation with VALID
+complete input must independently fail with 80 (not reject the partial input
+before reaching the occupied slot). Preserve all 17 bytes, original full file
+identity, evidence bytes and retained head custody before explicit cleanup.
+Released write/delete opens must succeed. Nothing completes or deletes the
+partial file during refusal.
+
+Expected counts become operation29 and ordinary105 passed/four ignored; the
+retained-head filter remains four. Each operation/ordinary group per OS adds
+exactly two decision_partial_fixture rows, MoveOld/Publish, create_win32=80,
+hook=1, sink=0, spent=1, bytes=17 (measured), valid=0, identity=unchanged,
+retry=refused, recreate_win32=80. Earlier complete-decision marker counts stay
+two, and all other prior markers/panic counts stay unchanged. Shared complete
+coverage additionally checks recreation with valid bytes and revalidates head
+custody. Exact-SHA hosted Server 2022/2025 raw evidence is required. Gap
+replacement, post-transition evidence ACL and all other integrity/production/W4
+holds remain open.
+
 ##### Post-transition head ACL loss (native pending)
 
 native_operation_decision_pin_refuses_post_transition_head_acl_loss adds the

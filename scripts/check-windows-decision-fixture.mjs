@@ -29,11 +29,12 @@ for (const source of ['pub use super::Stage;', 'pub(super) use super::ReadPin;']
 }
 rejectReexports(stage);
 rejectReexports(pin);
-assert.deepEqual(exportedNames(`${stage}\n${pin}`), ['into_read_pin', 'pin_decision', 'validate']);
+assert.deepEqual(exportedNames(`${stage}\n${pin}`), ['interrupt_decision_for_fixture', 'into_read_pin', 'pin_decision', 'validate']);
 const exports = [...`${stage}\n${pin}`.matchAll(new RegExp(`${visibleFunction}\\s*(?:<[^>]*>)?\\s*\\(([\\s\\S]*?)\\)\\s*->`, 'g'))];
 for (const [, name, argumentsText] of exports) {
   assert.doesNotMatch(argumentsText, /\b(?:Path|PathBuf|Record|File|Stage)\b/, name);
 }
 assert.match(stage, /Stage::create\(self, bytes, false\)\?\.into_read_pin\(\|\| Ok\(\(\)\)\)/);
+assert.match(stage, /Stage::create\(self, bytes, true\)\.map\(drop\)/);
 assert.match(pin, /if full_identity\(&current\)\? != self\.0\.object \|\| read_bytes\(&current\)\? != self\.0\.bytes/);
 console.log('Windows decision fixture source boundary passed (test-only; no exported path/parsed-record/raw-stage constructor).');

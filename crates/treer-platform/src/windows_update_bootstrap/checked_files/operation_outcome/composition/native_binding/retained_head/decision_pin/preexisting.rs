@@ -1,8 +1,17 @@
-//! A closed complete decision is burned, even for a fresh matching context.
+//! Closed complete and partial decisions are burned, never recovered authority.
 use super::*;
 
 #[test]
 fn native_operation_decision_pin_refuses_preexisting_complete() {
+    refuses_preexisting(false);
+}
+
+#[test]
+fn native_operation_decision_pin_refuses_preexisting_partial() {
+    refuses_preexisting(true);
+}
+
+fn refuses_preexisting(partial: bool) {
     for operation in [Operation::MoveOld, Operation::Publish] {
         let fixture = Fixture::new(operation);
         let ownership = FixtureLock::acquire(&fixture.attempt, true).unwrap();
@@ -26,13 +35,35 @@ fn native_operation_decision_pin_refuses_preexisting_complete() {
         let evidence = stored.pin.read().unwrap();
         // Deliberately independent of this context: valid bytes at an occupied
         // slot never become authority, even if a later decision would differ.
-        let seeded =
+        let complete =
             crate::windows_update_bootstrap::checked_files::consume_record::fixture_bytes();
-        assert_eq!(seeded.len(), 177);
-        let seed = ownership.pin_decision(&seeded).unwrap();
-        seed.validate().unwrap();
-        drop(seed);
+        assert_eq!(complete.len(), 177);
         let path = fixture.attempt.path.join("consume.intent");
+        assert!(!path.exists());
+        let seeded = if partial {
+            // Reuse the restrictive CREATE_NEW/write/sync interruption path,
+            // rather than truncating or rewriting any complete record.
+            let interrupted = ownership
+                .interrupt_decision_for_fixture(&complete)
+                .unwrap_err();
+            assert_eq!(interrupted.kind(), io::ErrorKind::PermissionDenied);
+            assert!(
+                interrupted.raw_os_error().is_none(),
+                "expected injected refusal, not native I/O error"
+            );
+            assert!(
+                !crate::windows_update_bootstrap::checked_files::consume_record::valid_bytes(
+                    &complete[..17]
+                )
+            );
+            complete[..17].to_vec()
+        } else {
+            let seed = ownership.pin_decision(&complete).unwrap();
+            seed.validate().unwrap();
+            drop(seed);
+            complete.clone()
+        };
+        assert_eq!(seeded.len(), if partial { 17 } else { 177 });
         let original = OpenOptions::new().read(true).open(&path).unwrap();
         let identity = file_id(&original).unwrap();
         drop(original);
@@ -65,20 +96,32 @@ fn native_operation_decision_pin_refuses_preexisting_complete() {
                 "spent retry entered hook"
             ))
             .is_err());
-        assert!(ownership.pin_decision(&seeded).is_err());
+        // Retry with valid complete input, so refusal must reach the occupied
+        // slot rather than merely reject malformed partial bytes.
+        let recreate = ownership.pin_decision(&complete).err().unwrap();
+        assert_eq!(recreate.raw_os_error(), Some(ERROR_FILE_EXISTS as i32));
         assert_eq!(std::fs::read(&path).unwrap(), seeded);
         let preserved = OpenOptions::new().read(true).open(&path).unwrap();
         assert_eq!(file_id(&preserved).unwrap(), identity);
         drop(preserved);
         assert_eq!(stored.pin.read().unwrap(), evidence);
+        retained.check(&composition).unwrap();
         assert_eq!(open_result(&path, GENERIC_WRITE), 0);
         assert_eq!(open_result(&path, DELETE), 0);
-        eprintln!(
+        if partial {
+            eprintln!(
+                "decision_partial_fixture operation={} create_win32={} hook=1 sink=0 spent=1 bytes={} valid=0 identity=unchanged retry=refused recreate_win32={}",
+                if operation == Operation::MoveOld { "MoveOld" } else { "Publish" },
+                win32, seeded.len(), recreate.raw_os_error().unwrap()
+            );
+        } else {
+            eprintln!(
             "decision_existing_fixture row=complete operation={} create_win32={} hook=1 sink=0 spent=1 bytes={} would_differ=1 identity=unchanged retry=refused",
             if operation == Operation::MoveOld { "MoveOld" } else { "Publish" },
             win32,
             seeded.len()
-        );
+            );
+        }
         drop(sink);
         drop(stored);
         drop(retained);

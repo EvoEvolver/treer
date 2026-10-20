@@ -11,6 +11,15 @@ impl<'a> FixtureLock<'a> {
     ) -> io::Result<read_pin::ReadPin<'a>> {
         Stage::create(self, bytes, false)?.into_read_pin(|| Ok(()))
     }
+
+    // Fixture fault only: the existing exclusive-stage path writes/syncs 17
+    // bytes and returns an error. Never exports a Stage, pin or authority.
+    pub(in crate::windows_update_bootstrap::checked_files) fn interrupt_decision_for_fixture(
+        &'a self,
+        bytes: &[u8],
+    ) -> io::Result<()> {
+        Stage::create(self, bytes, true).map(drop)
+    }
 }
 
 struct Stage<'a> {
