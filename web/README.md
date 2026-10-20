@@ -885,3 +885,14 @@ The client interface must not be backed by a fake successful production adapter.
 Local synthetic Chromium/Firefox/WebKit tests cover component states and the
 existing installer parsers; they do not establish HTTP/Policy/transaction,
 native platform, deployed-browser acceptance or a complete author gate.
+
+Release labels wrap even when all 128 characters form one token. Screenshot
+fixtures disable transitions, assert computed text contrast, and cover waiting,
+recorded success while offline, verified rollback and unconfirmed results.
+Only the short outcome text is a live status; polling timestamps stay outside it.
+Before wiring, also support a separately confirmed next update after the API
+proves the previous claim resolved and a fresh catalog/cooldown permits it;
+the current inert component conservatively blocks while any operation remains.
+Session/user changes must reset the client scope and ignore late responses.
+The strict shared-model successor is `321e006c`; adapter fixtures must follow
+its required nullable keys and conservative outcome rules.

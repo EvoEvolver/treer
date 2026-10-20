@@ -45,20 +45,46 @@ test('unmount and new view recover existing durable operation by inspect only', 
   await expect(dialog(page)).toContainText('Waiting for the machine')
   expect(await page.evaluate(() => (window as any).updateHarness.counts.dispatch)).toBe(1)
 })
-test('long release labels fit en/zh light/dark desktop and touch preview', async ({ page }, info) => {
-  await mount(page, 'long')
+async function appearance(page: Page, language: string, dark: boolean, width: number) {
+  await page.addStyleTag({ content: '*, *::before, *::after { transition: none !important; animation: none !important; }' })
+  await page.evaluate(async ({ language, dark }) => { const path = '/src/i18n/index.ts'; const { setLocale } = await import(/* @vite-ignore */ path); setLocale(language, false); document.documentElement.classList.toggle('dark', dark) }, { language, dark })
+  await page.setViewportSize({ width, height: 900 })
+  await expect(dialog(page).getByRole('heading', { name: language === 'zh' ? '更新 Controller' : 'Update Controller', exact: true })).toBeVisible()
+  // Wait for rendered theme tokens, then measure actual computed text contrast.
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  const contrast = await dialog(page).evaluate(e => {
+    const luminance = (color: string) => {
+      const rgb = color.match(/[\d.]+/g)!.slice(0, 3).map(Number).map(c => { c /= 255; return c <= .04045 ? c / 12.92 : ((c + .055) / 1.055) ** 2.4 })
+      return .2126 * rgb[0] + .7152 * rgb[1] + .0722 * rgb[2]
+    }
+    const bg = luminance(getComputedStyle(e).backgroundColor)
+    return [...e.querySelectorAll('p, h2, h3')].map(p => { const fg = luminance(getComputedStyle(p).color); return (Math.max(fg, bg) + .05) / (Math.min(fg, bg) + .05) })
+  })
+  for (const ratio of contrast) expect(ratio).toBeGreaterThanOrEqual(4.5)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  expect(await dialog(page).evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true)
+}
+for (const mode of ['long', 'long-token']) test(`${mode} release labels fit en/zh light/dark desktop and touch preview`, async ({ page }, info) => {
+  await mount(page, mode)
   await dialog(page).getByRole('button', { name: /^Preview / }).click()
   for (const language of ['en', 'zh']) for (const dark of [false, true]) for (const width of [1360, 390]) {
-    await page.evaluate(async ({ language, dark }) => { const path = '/src/i18n/index.ts'; const { setLocale } = await import(/* @vite-ignore */ path); setLocale(language, false); document.documentElement.classList.toggle('dark', dark) }, { language, dark })
-    await page.setViewportSize({ width, height: 900 })
-    await expect(dialog(page).getByRole('heading', { name: language === 'zh' ? '更新 Controller' : 'Update Controller', exact: true })).toBeVisible()
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await appearance(page, language, dark, width)
+    await dialog(page).locator('summary').click()
     expect(await dialog(page).evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true)
     await expect(dialog(page).locator('img')).toHaveCount(0)
+    await dialog(page).locator('summary').click()
     if (width === 390) for (const b of await dialog(page).getByRole('button').all()) { const box = await b.boundingBox(); expect(box!.height).toBeGreaterThanOrEqual(44) }
-    await page.screenshot({ path: info.outputPath(`controller-update-${language}-${dark ? 'dark' : 'light'}-${width}.png`) })
+    await page.screenshot({ path: info.outputPath(`controller-update-${mode}-${language}-${dark ? 'dark' : 'light'}-${width}.png`), animations: 'disabled' })
   }
   expect(await page.evaluate(() => [...Object.values(localStorage), ...Object.values(sessionStorage)].some(v => v.includes('PRIVATE-CONFIRMATION-TOKEN')))).toBe(false)
+})
+for (const mode of ['waiting', 'known-offline', 'rollback', 'unverified']) test(`stable ${mode} state screenshots`, async ({ page }, info) => {
+  await mount(page, mode)
+  await expect(dialog(page).getByRole('status')).not.toHaveCount(0)
+  for (const language of ['en', 'zh']) for (const dark of [false, true]) {
+    await appearance(page, language, dark, 390)
+    await page.screenshot({ path: info.outputPath(`controller-update-${mode}-${language}-${dark ? 'dark' : 'light'}-390.png`), animations: 'disabled' })
+  }
 })
 
 test('success needs whole receipt, health and all four identity fields; core health alone is insufficient', async ({ page }) => {

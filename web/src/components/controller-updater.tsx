@@ -105,7 +105,7 @@ export function ControllerUpdater({ machineId, client }: { machineId: string; cl
     <Dialog open={open} onOpenChange={changeOpen}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] max-w-xl overflow-y-auto max-md:[&>button:last-child]:min-h-11 max-md:[&>button:last-child]:min-w-11" onCloseAutoFocus={event => { if (trigger.current) { event.preventDefault(); trigger.current.focus() } }}>
         <DialogHeader><DialogTitle>{t('controller_update.title')}</DialogTitle><DialogDescription>{t('controller_update.disconnect')}</DialogDescription></DialogHeader>
-        <div className="min-w-0 space-y-4 text-sm">
+        <div className="min-w-0 space-y-4 text-sm [overflow-wrap:anywhere] [&_p]:[unicode-bidi:plaintext]">
           {error && <p role="alert">{t('controller_update.unavailable')}</p>}
           <p className="break-all font-mono text-xs">{machineId}</p>
           {snapshot && <p className="break-words">{t('controller_update.current', { version: snapshot.current?.version ?? t('machine.unknown') })}</p>}
@@ -113,8 +113,8 @@ export function ControllerUpdater({ machineId, client }: { machineId: string; cl
           {snapshot && !snapshot.supported && <p role="status">{t(snapshot.unavailableReason === 'offline' ? 'controller_update.offline' : snapshot.unavailableReason === 'forbidden' ? 'controller_update.forbidden' : snapshot.unavailableReason === 'unavailable' ? 'controller_update.unavailable' : 'controller_update.manual')}</p>}
           {uncertain && <p role="status">{t(operation ? 'controller_update.observation_unavailable' : 'controller_update.unconfirmed')}</p>}
           {paused && <p role="status">{t('controller_update.paused')}</p>}
-          {operation && <div className="space-y-2 rounded-md border bg-muted/30 p-3" role="status">
-            <p>{t(`controller_update.${state!}`)}</p>
+          {operation && <div className="space-y-2 rounded-md border bg-muted/30 p-3">
+            <p role="status">{t(`controller_update.${state!}`)}</p>
             <p className="break-words">{t('controller_update.target', { version: operation.target.version })}</p>
             <p className="break-all font-mono text-xs">{operation.id}</p>
             {operation.phase && <p>{t(`controller_update.phase_${operation.phase}`)}</p>}

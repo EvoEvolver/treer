@@ -9,6 +9,7 @@ export function mountControllerUpdate(mode = 'normal') {
   const counts = { inspect: 0, prepare: 0, dispatch: 0 }
   const operation = (status: ControllerUpdateOperation['status']): ControllerUpdateOperation => ({ id: 'update-one', machineId: snapshot.machineId, current, target, status, receiptVerified: false, health: 'unknown', observedAt: null, restored: null, observation: 'available', phase: null })
   if (['unsupported', 'offline', 'forbidden', 'unavailable'].includes(mode)) { snapshot.supported = false; snapshot.unavailableReason = mode as never }
+  if (mode === 'waiting') snapshot.operation = operation('waiting_for_reconnect')
   if (mode === 'unverified') snapshot.operation = operation('succeeded')
   if (mode === 'success') snapshot.operation = { ...operation('succeeded'), observedIdentity: target.identity, phase: 'complete', receiptVerified: true, health: 'passed', observedAt: '2026-10-20T19:00:00Z' }
   if (mode === 'busy') snapshot.blockedByOtherOperation = true
@@ -18,6 +19,7 @@ export function mountControllerUpdate(mode = 'normal') {
   if (mode === 'rollback-failed') snapshot.operation = operation('rollback_failed')
   if (mode === 'partial') snapshot.operation = operation('partial')
   if (mode === 'rollback') snapshot.operation = { ...operation('rolled_back'), restored: current, observedIdentity: current.identity, receiptVerified: true, phase: 'rolled_back', health: 'passed' }
+  if (mode === 'long-token') { current.version = 'c'.repeat(128); target.version = 'v'.repeat(128) }
   if (mode === 'long') { target.version = '<img src=x onerror=alert(1)>'.repeat(4); target.platform = 'macos-arm64' }
   const client: ControllerUpdateClient = {
     async inspect(signal) { counts.inspect++; if (signal.aborted) throw Error('aborted'); return structuredClone(snapshot) },
