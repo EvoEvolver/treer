@@ -52,7 +52,12 @@ impl DetachedFieldQuery {
         }) {
             return Err(SystemResponseError::InvalidMetadata);
         }
-        if self.current.iter().any(|field| field.gpu_id.is_some()) {
+        if self.current.iter().any(|field| field.gpu_id.is_some())
+            || self
+                .inventory
+                .as_ref()
+                .is_some_and(|capture| !capture.gpus.is_empty())
+        {
             return Err(SystemResponseError::InventoryRequired);
         }
         let fields: Vec<_> = [

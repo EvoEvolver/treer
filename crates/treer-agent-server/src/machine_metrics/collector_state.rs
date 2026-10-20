@@ -3,6 +3,7 @@
 use super::{
     field_cache::{CacheError, FieldCache, FieldSnapshot, FieldUpdate},
     field_query::{self, FieldHistory, FieldQueryError},
+    gpu_inventory::{InventoryCache, InventoryError, InventorySnapshot},
     history::{Clock, History, HistoryError, Limits},
 };
 use treer_protocol::{
@@ -15,6 +16,7 @@ pub enum StateError {
     Cache(CacheError),
     FrameMismatch,
     Query(FieldQueryError),
+    Inventory(InventoryError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +24,7 @@ pub enum ResetCause {
     HistoryClock,
     FieldClock,
     AcquisitionClock,
+    InventoryClock,
 }
 
 /// Fixed, content-free diagnostics for a future collector health surface.
@@ -37,6 +40,7 @@ pub struct Snapshot {
     pub reset: bool,
     /// Empty after uncertainty; an assembler must use warming_up/no observation.
     pub fields: Vec<FieldSnapshot>,
+    pub inventory: Option<InventorySnapshot>,
 }
 
 /// History owns the authoritative epoch. Neither component is exposed for
@@ -47,6 +51,7 @@ pub struct CollectorState {
     epoch: u64,
     last_reset_cause: Option<ResetCause>,
     expired_fields: u64,
+    inventory: InventoryCache,
 }
 
 impl CollectorState {
@@ -69,6 +74,7 @@ impl CollectorState {
             clock,
             reset: snapshot.reset,
             current: snapshot.fields,
+            inventory: snapshot.inventory,
         })
     }
 
@@ -114,6 +120,7 @@ impl CollectorState {
             epoch: 0,
             last_reset_cause: None,
             expired_fields: 0,
+            inventory: InventoryCache::default(),
         })
     }
 
@@ -127,6 +134,7 @@ impl CollectorState {
             .start_epoch(self.history.epoch())
             .map_err(StateError::Cache)?;
         self.epoch = self.history.epoch();
+        self.inventory = InventoryCache::default();
         self.last_reset_cause = Some(ResetCause::HistoryClock);
         Ok(true)
     }
@@ -167,12 +175,44 @@ impl CollectorState {
             Err(error) => return Err(StateError::Cache(error)),
         };
         self.expired_fields = self.expired_fields.saturating_add(retired as u64);
+        let inventory = match self.inventory.snapshot(clock) {
+            Ok(inventory) => inventory,
+            Err(InventoryError::ClockReversed) => {
+                self.invalidate(clock, ResetCause::InventoryClock)?;
+                reset = true;
+                None
+            }
+            Err(error) => return Err(StateError::Inventory(error)),
+        };
         let fields = self.cache.snapshot(clock).map_err(StateError::Cache)?;
         Ok(Snapshot {
             epoch: self.epoch,
             reset,
             fields,
+            inventory,
         })
+    }
+
+    /// Collector completion clock only. Some is complete enumeration (empty
+    /// means no devices); None records failure and immediately removes presence.
+    /// This is not a route accepting user-provided descriptors.
+    pub fn record_inventory(
+        &mut self,
+        clock: Clock,
+        gpus: Option<&[treer_protocol::MachineMetricsGpu]>,
+    ) -> Result<bool, StateError> {
+        let mut reset = self.snapshot(clock)?.reset;
+        match self.inventory.record(clock, gpus) {
+            Err(InventoryError::ClockReversed) => {
+                self.invalidate(clock, ResetCause::InventoryClock)?;
+                reset = true;
+                self.inventory
+                    .record(clock, gpus)
+                    .map_err(StateError::Inventory)?;
+            }
+            result => result.map_err(StateError::Inventory)?,
+        }
+        Ok(reset)
     }
 
     /// Only real completed acquisitions/attempts may enter here. A conflicting

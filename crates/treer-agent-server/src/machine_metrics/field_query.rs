@@ -37,6 +37,7 @@ pub struct DetachedFieldQuery {
     pub(super) clock: Clock,
     pub(super) reset: bool,
     pub(super) current: Vec<FieldSnapshot>,
+    pub(super) inventory: Option<super::gpu_inventory::InventorySnapshot>,
 }
 
 impl DetachedFieldQuery {

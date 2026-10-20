@@ -694,3 +694,39 @@ Current inventory capture/union, inventory_truncated propagation and full GPU
 response assembly remain unfinished. The system-only wire helper still refuses
 all retained GPUs, including ones outside the requested range; this change does
 not relax that guard or advertise the capability.
+
+## Current GPU enumeration capture checkpoint (not connected)
+
+CollectorState now owns a separate enumeration cache in the same epoch domain
+as history and measured fields. Only a completed collector-clock capture enters
+it: Some(descriptors) means a complete successful enumeration, including an
+explicit empty list for no devices; None means failure/unknown and immediately
+clears any previous presence claim. This interface carries no truncation flag:
+an oversized enumeration refuses in full, rather than implying completeness.
+No native helper or request-facing caller is connected to this method.
+
+Before cloning, the cache checks at most 32 distinct descriptors, each with
+present=true and the same opaque id/plain-name validation used by the shared
+response validator. That descriptor check is now a reusable shape-only method;
+it establishes neither provenance nor the truth of presence. Sorted captured
+descriptors retain their actual enumeration time. Reads do not refresh it.
+After more than 15,000 ms on either wall or monotonic clock, a snapshot returns
+unknown (None), not an empty successful enumeration or DeviceAbsent. Failed
+enumeration and absent enumeration therefore cannot be conflated by a future
+assembler. Status-specific failure reporting remains to be added.
+
+Reverse clocks or accumulated wall/monotonic disagreement above ten seconds
+invalidate the entire epoch, clearing fields, enumeration and history together.
+InventoryClock is a fixed content-free reset cause. Detached queries clone the
+bounded enumeration at the same capture boundary as fields/history; later
+updates/failures cannot change that view. The existing system-only assembler
+also refuses a captured nonempty inventory, even before GPU measurements exist.
+
+Tests cover cold/failed versus explicit empty success, captured original time,
+snapshot isolation, immediate failure invalidation, exact freshness boundary,
+invalid names/duplicates/false presence/oversize preserving the previous
+capture, maximum-size sorted capture, and accumulated inventory clock drift
+clearing actual retained history and fields. Current/range inventory union,
+historical DeviceAbsent projection and full GPU wire assembly remain pending;
+append_frame is not yet bound to this new enumeration cache. Runtime, helper,
+deadline, authorization and publication holds remain unchanged.

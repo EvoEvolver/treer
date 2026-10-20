@@ -21,6 +21,151 @@ fn system_metadata() -> crate::machine_metrics::field_query::SystemMetadata {
 }
 
 #[test]
+fn current_inventory_is_captured_not_relabelled_and_failure_is_unknown() {
+    use treer_protocol::MachineMetricsGpu;
+    let mut state = state();
+    assert!(state.snapshot(clock(0, 0)).unwrap().inventory.is_none());
+    let first = MachineMetricsGpu {
+        id: "a".repeat(64),
+        name: "current name".into(),
+        present: true,
+    };
+    state
+        .record_inventory(clock(0, 0), Some(std::slice::from_ref(&first)))
+        .unwrap();
+    let capture = state
+        .snapshot(clock(5000, 5000))
+        .unwrap()
+        .inventory
+        .unwrap();
+    assert_eq!(capture.sampled_at, clock(0, 0).wall);
+    assert_eq!(capture.gpus, vec![first.clone()]);
+    let mut view = state
+        .detached_query(clock(5000, 5000), &mut || false)
+        .unwrap();
+    assert!(matches!(
+        view.assemble_system_response(
+            &MachineMetricsQuery {
+                from: clock(0, 0).wall,
+                to: clock(5000, 5000).wall,
+                max_points: 1,
+            },
+            system_metadata(),
+            &mut || false
+        ),
+        Err(crate::machine_metrics::field_query::SystemResponseError::InventoryRequired)
+    ));
+    state.record_inventory(clock(5000, 5000), None).unwrap();
+    assert!(state
+        .snapshot(clock(5000, 5000))
+        .unwrap()
+        .inventory
+        .is_none());
+    assert_eq!(view.inventory.as_ref().unwrap().gpus, vec![first]);
+    drop(view);
+    state
+        .record_inventory(clock(10000, 10000), Some(&[]))
+        .unwrap();
+    assert!(state
+        .snapshot(clock(25000, 25000))
+        .unwrap()
+        .inventory
+        .unwrap()
+        .gpus
+        .is_empty());
+    assert!(state
+        .snapshot(clock(25001, 25001))
+        .unwrap()
+        .inventory
+        .is_none());
+}
+
+#[test]
+fn invalid_inventory_preserves_capture_and_inventory_drift_resets_epoch() {
+    use treer_protocol::{MachineMetricsGpu, MACHINE_METRICS_MAX_GPUS};
+    let mut state = state();
+    record(&mut state, clock(0, 0), 12.0);
+    let sample = frame(&mut state, clock(0, 0));
+    state.append_frame(clock(0, 0), &sample).unwrap();
+    let gpu = MachineMetricsGpu {
+        id: "a".repeat(64),
+        name: "valid".into(),
+        present: true,
+    };
+    state
+        .record_inventory(clock(0, 0), Some(std::slice::from_ref(&gpu)))
+        .unwrap();
+    let mut invalid = gpu.clone();
+    invalid.name = "bad\u{202e}name".into();
+    let mut absent = gpu.clone();
+    absent.present = false;
+    for descriptors in [
+        vec![invalid],
+        vec![absent],
+        vec![gpu.clone(), gpu.clone()],
+        vec![gpu.clone(); MACHINE_METRICS_MAX_GPUS + 1],
+    ] {
+        assert_eq!(
+            state.record_inventory(clock(5000, 5000), Some(&descriptors)),
+            Err(StateError::Inventory(
+                crate::machine_metrics::gpu_inventory::InventoryError::InvalidCapture
+            ))
+        );
+        assert_eq!(
+            state
+                .snapshot(clock(5000, 5000))
+                .unwrap()
+                .inventory
+                .unwrap()
+                .gpus,
+            vec![gpu.clone()]
+        );
+    }
+    let maximum: Vec<_> = (0..MACHINE_METRICS_MAX_GPUS)
+        .rev()
+        .map(|id| MachineMetricsGpu {
+            id: format!("{id:064x}"),
+            name: "current".into(),
+            present: true,
+        })
+        .collect();
+    state
+        .record_inventory(clock(5000, 5000), Some(&maximum))
+        .unwrap();
+    let capture = state
+        .snapshot(clock(5000, 5000))
+        .unwrap()
+        .inventory
+        .unwrap();
+    assert_eq!(capture.gpus.len(), MACHINE_METRICS_MAX_GPUS);
+    assert!(capture.gpus.windows(2).all(|pair| pair[0].id < pair[1].id));
+    // Small history-clock steps hide accumulated disagreement from History;
+    // inventory maintenance must still clear the entire invalidation domain.
+    assert!(state
+        .snapshot(clock(10000, 5000))
+        .unwrap()
+        .inventory
+        .is_some());
+    // Keep the independent CPU clock fresh so inventory detects drift first.
+    record(&mut state, clock(10000, 5000), 13.0);
+    assert!(state
+        .snapshot(clock(15000, 5000))
+        .unwrap()
+        .inventory
+        .is_some());
+    let reset = state.snapshot(clock(15001, 5000)).unwrap();
+    assert!(reset.reset);
+    assert_eq!(reset.epoch, 1);
+    assert!(reset.inventory.is_none());
+    assert!(reset.fields.is_empty());
+    assert_eq!(state.history.record_count(), 0);
+    assert_eq!(
+        state.reset_diagnostics().last_cause,
+        Some(ResetCause::InventoryClock)
+    );
+}
+
+#[test]
 fn system_response_preserves_stale_current_and_marks_known_history_loss() {
     let mut state = CollectorState::new(
         "machine".into(),

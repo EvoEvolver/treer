@@ -35,6 +35,26 @@ impl MachineMetricKind {
     }
 }
 
+impl MachineMetricsGpu {
+    /// Descriptor shape only; does not establish collector provenance/presence.
+    pub fn validate_descriptor(&self) -> Result<()> {
+        require(
+            self.id.len() == 64
+                && self
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && !self.name.is_empty()
+                && self.name.len() <= 128
+                && !self.name.chars().any(|c| {
+                    c.is_control()
+                        || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}' | '\u{feff}')
+                }),
+        )
+    }
+}
+
 impl MachineMetricsResponse {
     /// Validate untrusted transport bytes before exposing a response. The raw
     /// frame is bounded before parsing, including ignored extension fields.
@@ -103,21 +123,8 @@ impl MachineMetricsResponse {
         )?;
         let mut ids = HashSet::new();
         for gpu in &self.gpus {
-            require(
-                gpu.id.len() == 64
-                    && gpu
-                        .id
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                    && ids.insert(gpu.id.as_str())
-                    && !gpu.name.is_empty()
-                    && gpu.name.len() <= 128
-                    && !gpu.name.chars().any(|c| {
-                        c.is_control()
-                            || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
-                            | '\u{2066}'..='\u{2069}' | '\u{feff}')
-                    }),
-            )?;
+            gpu.validate_descriptor()?;
+            require(ids.insert(gpu.id.as_str()))?;
         }
         let mut keys = HashSet::new();
         let mut total = 0usize;

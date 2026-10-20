@@ -82,6 +82,7 @@ fn field_query_refuses_conflicting_cached_identity_and_corrupt_staging_bytes() {
             clock: clock(10_000),
             reset: false,
             current: Vec::new(),
+            inventory: None,
         };
         assert!(matches!(
             view.query_fields(
@@ -114,6 +115,7 @@ fn field_query_refuses_conflicting_cached_identity_and_corrupt_staging_bytes() {
             clock: clock(10_000),
             reset: false,
             current: Vec::new(),
+            inventory: None,
         };
         assert!(matches!(
             view.query_fields(
