@@ -381,6 +381,9 @@ mod tests {
             .unwrap();
     }
     fn intent(q: &mut Queue<'_>, n: i64) -> Intent {
+        intent_at(q, n, n * 61)
+    }
+    fn intent_at(q: &mut Queue<'_>, n: i64, now: i64) -> Intent {
         q.admit(
             "ag_email",
             1,
@@ -395,10 +398,10 @@ mod tests {
                     .into(),
                 context_ids: vec![],
             },
-            n * 61,
+            now,
         )
         .unwrap();
-        q.claim_proxy("ag_email", 1, n * 61, &format!("{n:064x}"))
+        q.claim_proxy("ag_email", 1, now, &format!("{n:064x}"))
             .unwrap()
             .unwrap()
     }
@@ -678,6 +681,206 @@ print(json.dumps({'access_token':'synthetic.app.signature','token_type':'Bearer'
         std::fs::write(&exe, source).unwrap();
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
         crate::core::Core::new(&exe, "app_own").unwrap()
+    }
+    #[cfg(feature = "hub")]
+    #[test]
+    fn in_flight_http_stop_preserves_acceptance_or_contains_lost_completion_on_reopen() {
+        use crate::email::proxy::Sender as ProxySender;
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            sync::{
+                atomic::{AtomicBool, AtomicUsize, Ordering},
+                mpsc, Arc, Mutex,
+            },
+            thread,
+            time::{Duration, Instant},
+        };
+        for lose_completion in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().canonicalize().unwrap().join("state");
+            let core = fake_core(dir.path(), true);
+            let mut store = Store::open(&path, Limits::default()).unwrap();
+            setup(&mut store);
+            let now = wall_time().unwrap();
+            let (intent, attempt) = {
+                let mut q = Queue::new(&mut store).unwrap();
+                let i = intent_at(&mut q, 1, now);
+                q.prepare_proxy_delivery(&i, URL, now).unwrap();
+                let attempt = q.begin_proxy_delivery_now(&i, URL).unwrap();
+                (i, attempt)
+            };
+            let expected = attempt.payload().to_vec();
+            let payload = expected.clone();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let sender = ProxySender::new(
+                &format!("http://{}/", listener.local_addr().unwrap()),
+                "svc_hub",
+            )
+            .unwrap();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let server_requests = requests.clone();
+            let (received, observed) = mpsc::channel();
+            let (release, response) = mpsc::channel();
+            let server = thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((s, _)) => break s,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline);
+                            thread::sleep(Duration::from_millis(2));
+                        }
+                        Err(e) => panic!("fake proxy accept: {e}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0];
+                while !head.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    head.extend(byte);
+                    assert!(head.len() < 16384);
+                }
+                let head = String::from_utf8(head).unwrap().to_ascii_lowercase();
+                assert!(head.starts_with("post /api/apps/svc_hub/email http/1.1\r\n"));
+                assert!(head.contains("authorization: bearer synthetic.app.signature\r\n"));
+                let size = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length: "))
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                assert_eq!(size, expected.len());
+                let mut actual = vec![0; size];
+                stream.read_exact(&mut actual).unwrap();
+                assert_eq!(actual, expected);
+                server_requests.fetch_add(1, Ordering::Release);
+                received.send(()).unwrap(); // POST consumed; no response yet.
+                response.recv_timeout(Duration::from_secs(5)).unwrap();
+                let body = r#"{"status":"sent","email_id":"email_test"}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                listener
+            });
+            let shared = Arc::new(Mutex::new(store));
+            let stopped = Arc::new(AtomicBool::new(false));
+            let (worker_state, stop) = (shared.clone(), stopped.clone());
+            let worker = thread::spawn(move || {
+                let completion = sender.send_committed(&core, attempt, || {
+                    if stop.load(Ordering::Acquire) {
+                        return false;
+                    }
+                    let mut store = worker_state.lock().unwrap();
+                    Queue::new(&mut store)
+                        .unwrap()
+                        .proxy_dispatch_allowed_now(&intent, URL)
+                });
+                (intent, completion)
+            });
+            observed.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(requests.load(Ordering::Acquire), 1);
+            stopped.store(true, Ordering::Release);
+            // The transport must not hold SQLite while waiting for its response.
+            {
+                let store = shared.try_lock().expect("HTTP retained the database mutex");
+                let mut other = Connection::open(path.join("hub.sqlite3")).unwrap();
+                other.busy_timeout(Duration::from_secs(1)).unwrap();
+                let tx = other
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .unwrap();
+                tx.execute("UPDATE endpoints SET paused=1 WHERE id='ag_email'", [])
+                    .unwrap();
+                tx.commit().unwrap();
+                assert!(store
+                    .db
+                    .query_row(
+                        "SELECT paused FROM endpoints WHERE id='ag_email'",
+                        [],
+                        |r| r.get::<_, bool>(0)
+                    )
+                    .unwrap());
+            }
+            release.send(()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !worker.is_finished() || !server.is_finished() {
+                assert!(
+                    Instant::now() < deadline,
+                    "fake HTTP threads did not finish"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            let (intent, completion) = worker.join().unwrap();
+            assert!(stopped.load(Ordering::Acquire));
+            let listener = server.join().unwrap();
+            assert!(
+                matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+            );
+            let mut store = match Arc::try_unwrap(shared) {
+                Ok(mutex) => mutex.into_inner().unwrap(),
+                Err(_) => panic!("transport still owns state after join"),
+            };
+            {
+                let mut q = Queue::new(&mut store).unwrap();
+                assert_eq!(state(&q, &intent.id), "dispatching");
+                if lose_completion {
+                    drop(completion);
+                } else {
+                    completion.commit(&mut q).unwrap();
+                }
+            }
+            drop(store);
+            let reopened = Store::open(&path, Limits::default()).unwrap();
+            let mut reopened =
+                crate::email_workers::tests::recover_private_store_with_startup_lease(reopened);
+            let mut q = Queue::new(&mut reopened).unwrap();
+            assert_eq!(
+                state(&q, &intent.id),
+                if lose_completion {
+                    "uncertain"
+                } else {
+                    "provider_accepted"
+                }
+            );
+            let (done, mode, frozen): (i64, Option<String>, Vec<u8>) = q.store.db.query_row(
+                "SELECT i.state,i.mode,d.payload FROM email_intents i JOIN email_dispatch d ON d.id=i.id WHERE i.id=?1", [&intent.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+            ).unwrap();
+            assert_eq!(frozen, payload);
+            assert_eq!(done, i64::from(!lose_completion));
+            assert_eq!(
+                mode.as_deref(),
+                if lose_completion { None } else { Some("proxy") }
+            );
+            // Restore ordinary dispatch eligibility: the journal, not pause,
+            // must prevent another reservation after accepted/lost completion.
+            q.store
+                .db
+                .execute("UPDATE endpoints SET paused=0 WHERE id='ag_email'", [])
+                .unwrap();
+            assert!(q.begin_proxy_delivery_now(&intent, URL).is_err());
+            assert!(q
+                .claim_proxy("ag_email", 1, now + 61, &"c".repeat(64))
+                .unwrap()
+                .is_none());
+            let counts = q.proxy_delivery_status("ag_email").unwrap();
+            assert_eq!(requests.load(Ordering::Acquire), 1);
+            assert_eq!(reserved(&q.store.db, &intent.id).unwrap(), lose_completion);
+            assert_eq!(counts.uncertain, i64::from(lose_completion));
+            assert_eq!(counts.provider_accepted, i64::from(!lose_completion));
+            // Keep the listener until after reopen/recovery and future claim.
+            assert!(
+                matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+            );
+            assert_eq!(q.recover_interrupted_proxy_deliveries().unwrap(), 0);
+        }
     }
     #[cfg(feature = "hub")]
     #[test]

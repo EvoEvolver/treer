@@ -171,6 +171,28 @@ must request stop during an in-flight request, exercise both accepted completion
 and deliberately lost completion, and verify their different recovery outcomes.
 Never release worker ownership on an elapsed timeout while a worker may live.
 
+A hermetic transport/storage composition test now exercises those two result
+paths with a persistent private Store and an actual loopback HTTP client. The
+fake Proxy consumes the exact frozen POST before the harness requests stop and
+pauses the binding; it withholds the response until both actions are complete.
+The acquired accepted Completion is committed despite that flag and pause in
+one branch. In the other branch the harness deliberately drops Completion.
+After closing and reopening SQLite through the actual exclusive startup lease,
+accepted stays accepted with a completed
+intent, while the lost result becomes uncertain with the intent incomplete.
+The frozen bytes persist unchanged, and restoring ordinary pause eligibility
+still cannot reserve either journal entry again. A post-mint fresh-clock journal
+fence is used. A separate SQLite connection commits the pause while the HTTP
+response is withheld, proving the network wait retains neither the Store mutex
+nor a SQLite write lock. Both fake threads must finish within a bounded test
+wait before joining; this is not a production shutdown deadline.
+
+This is a transport/storage harness, not an assembled Proxy-mode Workers stop
+or an OS process-kill test: the stop flag is controlled by the test. Real-send
+runtime wiring, process supervision, restart ownership and crash rehearsal remain
+activation blockers. The loopback fake does not establish provider delivery.
+
+
 Before wiring real-send primitives into workers, the remaining storage lifecycle
 requirements from review 5999 must also be implemented and tested:
 

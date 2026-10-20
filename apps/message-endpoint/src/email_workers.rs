@@ -469,7 +469,7 @@ fn step<M: Mailbox + Directory>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         core::{AgentMetadata, Delivery},
@@ -501,6 +501,19 @@ mod tests {
         }
         fn ack(&self, _: &str) -> Result<(), crate::core::Error> {
             panic!("startup containment must not acknowledge");
+        }
+    }
+    /// Cross-module composition fixture: invoke the actual exclusive startup
+    /// recovery guard, without starting workers or making any Core call.
+    pub(crate) fn recover_private_store_with_startup_lease(store: Store) -> Store {
+        let hub = Arc::new(std::sync::Mutex::new(
+            Hub::new(store, NoIo, "ag_hub", "ws_test").unwrap(),
+        ));
+        let lease = StartupLease::acquire(&hub).unwrap();
+        drop(lease);
+        match Arc::try_unwrap(hub) {
+            Ok(mutex) => mutex.into_inner().unwrap().store,
+            Err(_) => panic!("startup lease retained the store"),
         }
     }
     fn fixture() -> SharedHub<NoIo> {
