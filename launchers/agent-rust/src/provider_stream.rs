@@ -17,6 +17,8 @@ pub struct Selection {
     pub range: Option<(usize, usize)>,
     pub target: Option<String>,
     pub full_history: bool,
+    pub resume_history: bool,
+    pub reviewed_provider: bool,
 }
 pub type Selections = Arc<Mutex<HashMap<u64, Selection>>>;
 type Result<T> = std::result::Result<T, &'static str>;
@@ -55,6 +57,10 @@ pub struct Reader<R> {
     decreasing_timestamps: usize,
     non_integer_timestamps: usize,
     pagination_markers: Vec<String>,
+    pagination_blockers: Vec<String>,
+    backward_cursors: [&'static str; 2],
+    resume_history: bool,
+    reviewed_provider: bool,
     full_history: bool,
     history_status: &'static str,
     normalization_applied: bool,
@@ -131,6 +137,10 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             decreasing_timestamps: 0,
             non_integer_timestamps: 0,
             pagination_markers: Vec::new(),
+            pagination_blockers: Vec::new(),
+            backward_cursors: ["absent"; 2],
+            resume_history: false,
+            reviewed_provider: false,
             full_history: false,
             history_status: "missing",
             normalization_applied: false,
@@ -149,7 +159,10 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         serde_json::json!({"invalidIds":self.invalid_ids,"duplicateIds":self.duplicate_ids,
             "decreasingTimestamps":self.decreasing_timestamps,"nonIntegerTimestamps":self.non_integer_timestamps,
             "identityValid":self.history_identity_valid,"orderValid":self.history_order_valid,
-            "paginationMarkers":self.pagination_markers,"fullHistoryRequest":self.full_history,
+            "paginationMarkers":self.pagination_markers,"paginationBlockers":self.pagination_blockers,
+            "backwardCursors":{"turns":self.backward_cursors[0],"items":self.backward_cursors[1]},
+            "resumeHistoryRequest":self.resume_history,"fullHistoryRequest":self.full_history,
+            "providerVersion":if self.reviewed_provider {"0.162.1"} else {"unreviewed"},
             "threadStatus":self.history_status,"normalizationRequired":self.active_count>0,
             "normalizationApplied":self.normalization_applied})
     }
@@ -515,6 +528,10 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         self.decreasing_timestamps = 0;
         self.non_integer_timestamps = 0;
         self.pagination_markers.clear();
+        self.pagination_blockers.clear();
+        self.backward_cursors = ["absent"; 2];
+        self.resume_history = false;
+        self.reviewed_provider = false;
         self.full_history = false;
         self.history_status = "missing";
         self.normalization_applied = false;
@@ -540,18 +557,39 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                 Some("idle") => Some("idle"), Some("active") => Some("active"),
                 None => None, _ => Some("other"),
             };
-            let full_history = self.selections.lock().unwrap()
-                .get(&value["id"].as_u64().unwrap_or(0)).is_some_and(|s| s.full_history);
+            let selection = self.selections.lock().unwrap()
+                .get(&value["id"].as_u64().unwrap_or(0)).cloned().unwrap_or_default();
+            let full_history = selection.full_history;
             self.full_history = full_history;
+            self.resume_history = full_history && selection.resume_history;
+            self.reviewed_provider = selection.reviewed_provider;
             self.history_status = match status {Some("idle")=>"idle",Some("active")=>"active",None=>"missing",_=>"other"};
+            for (i,key) in ["turnsBackwardsCursor","itemsBackwardsCursor"].iter().enumerate() {
+                self.backward_cursors[i] = match value["result"].get(key) {
+                    None => "absent", Some(Value::Null) => "null",
+                    Some(Value::String(s)) if s.is_empty() => "emptyString",
+                    Some(Value::String(s)) if s.len()>1024 => "oversizedString",
+                    Some(Value::String(_)) => "nonemptyString", Some(_) => "invalidType",
+                };
+            }
             for (scope, object) in [("result", &value["result"]), ("thread", &value["result"]["thread"])] {
                 for key in ["nextCursor", "next_cursor", "cursor", "previousCursor", "turnsBackwardsCursor", "itemsBackwardsCursor", "initialTurnsPage", "hasMore"] {
                     if if key == "hasMore" { object[key] == true } else { !object[key].is_null() } {
-                        self.pagination_markers.push(format!("{scope}.{key}"));
+                        let marker = format!("{scope}.{key}");
+                        self.pagination_markers.push(marker.clone());
+                        // Codex0.162.1 full resume hydrates all turns/items,
+                        // then independently supplies backward list anchors.
+                        // Only this matched response location/type is known;
+                        // read responses, malformed anchors and page signals
+                        // retain the conservative authority refusal.
+                        let resume_anchor = self.resume_history && self.reviewed_provider && scope == "result"
+                            && matches!(key,"turnsBackwardsCursor"|"itemsBackwardsCursor")
+                            && object[key].as_str().is_some_and(|s| !s.is_empty() && s.len()<=1024);
+                        if !resume_anchor { self.pagination_blockers.push(marker); }
                     }
                 }
             }
-            let paged = !self.pagination_markers.is_empty();
+            let paged = !self.pagination_blockers.is_empty();
             // Authority is needed to reinterpret inProgress, not to pass
             // completed history through the ordinary bounded projection.
             // Zero candidates grants no ordering/completeness authority; the
@@ -730,6 +768,66 @@ mod tests {
                         for key in ["normalizationRequired", "normalizationApplied", "fullHistoryRequest"] { assert_eq!(reset[key],false); }
                         assert_eq!(reset["paginationMarkers"],json!([]));
                         assert_eq!(reset["threadStatus"],"missing");
+                    }
+                }
+            }
+        }
+    }
+    #[tokio::test]
+    async fn supported_resume_anchors_are_not_partial_history_markers() {
+        for mode in ["absent","null","empty","nonempty","max","oversized","object","number","array","bool"] {
+            for keys in [vec!["turnsBackwardsCursor"],vec!["itemsBackwardsCursor"],vec!["turnsBackwardsCursor","itemsBackwardsCursor"]] {
+                for candidates in [0,1,2] {
+                    for late in [false,true] {
+                        for request in ["resume","unreviewedResume","read","unregistered","pagedResume"] {
+                            for mixed in [false,true] {
+                                let status = "\"status\":{\"type\":\"idle\"}";
+                                let turns = json!([
+                                    {"id":"first","startedAt":1,"status":if candidates==2 {"inProgress"} else {"completed"}},
+                                    {"id":"last","startedAt":2,"status":if candidates>0 {"inProgress"} else {"completed"}}
+                                ]);
+                                let thread = if late {format!("\"turns\":{turns},{status}")} else {format!("{status},\"turns\":{turns}")};
+                                let mut metadata = Map::new();
+                                for key in &keys {
+                                    if mode != "absent" {
+                                        metadata.insert((*key).into(),match mode {
+                                            "null"=>Value::Null,"empty"=>json!(""),"nonempty"=>json!("PRIVATE_OPAQUE_CURSOR"),
+                                            "object"=>json!({"secret":"PRIVATE_CURSOR_OBJECT"}),"number"=>json!(123),
+                                            "max"=>json!("x".repeat(1024)),"oversized"=>json!("x".repeat(1025)),
+                                            "array"=>json!([]),"bool"=>json!(false),_=>unreachable!(),
+                                        });
+                                    }
+                                }
+                                if mixed {metadata.insert("nextCursor".into(),json!("PRIVATE_FORWARD"));}
+                                let extra = serde_json::to_string(&metadata).unwrap();
+                                let extra = &extra[1..extra.len()-1];
+                                let wire = format!("{{\"id\":1,\"result\":{{\"thread\":{{{thread}}}{}{extra}}}}}\n{{\"id\":2,\"result\":{{}}}}\n",if extra.is_empty(){""}else{","});
+                                let selections=Selections::default();
+                                let full=matches!(request,"resume"|"unreviewedResume"|"read");
+                                if request!="unregistered" {selections.lock().unwrap().insert(1,Selection{full_history:full,resume_history:request!="read",reviewed_provider:request!="unreviewedResume",..Default::default()});}
+                                let mut reader=Reader::new(wire.as_bytes(),selections);
+                                let blockers = mixed || !(matches!(mode,"absent"|"null") || matches!(mode,"nonempty"|"max")&&request=="resume");
+                                let refuse = candidates>0&&full&&blockers || candidates>1&&!full;
+                                let result=reader.next().await;
+                                assert_eq!(result.is_err(),refuse,"{mode} {keys:?} candidates={candidates} late={late} request={request} mixed={mixed}");
+                                let a=reader.diagnostic()["historyAuthority"].clone();
+                                assert_eq!(!a["paginationBlockers"].as_array().unwrap().is_empty(),blockers);
+                                let state=match mode {"absent"=>"absent","null"=>"null","empty"=>"emptyString","nonempty"|"max"=>"nonemptyString","oversized"=>"oversizedString",_=>"invalidType"};
+                                for (key,name) in [("turnsBackwardsCursor","turns"),("itemsBackwardsCursor","items")] {
+                                    assert_eq!(a["backwardCursors"][name],if keys.contains(&key){state}else{"absent"});
+                                }
+                                assert_eq!(a["resumeHistoryRequest"],matches!(request,"resume"|"unreviewedResume"));
+                                assert_eq!(a["normalizationApplied"],!refuse&&candidates>0&&full&&!blockers);
+                                assert!(!a.to_string().contains("PRIVATE_"));
+                                if !refuse {
+                                    reader.next().await.unwrap();
+                                    let a=reader.diagnostic()["historyAuthority"].clone();
+                                    assert_eq!(a["paginationBlockers"],json!([]));
+                                    assert_eq!(a["backwardCursors"],json!({"turns":"absent","items":"absent"}));
+                                    assert_eq!(a["resumeHistoryRequest"],false);
+                                }
+                            }
+                        }
                     }
                 }
             }

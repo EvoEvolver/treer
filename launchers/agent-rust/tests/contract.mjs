@@ -594,9 +594,9 @@ test('Rust history failure is visible but live receipts still publish',{skip:use
   assert.ok(saved.records.some(r=>r.operation==='history-live-op'));
   assert.equal(await readFile(extra,'utf8'),'keep untouched');
 });
-for(const scenario of ['normal','concurrent','mismatch','reopen'])test('Node import and producer-shaped stale history resume then real new-turn path '+scenario,{skip:useNode,timeout:60000},async t=>{
+for(const scenario of ['normal','concurrent','mismatch','reopen','partialObserver','readAnchors'])test('Node import and producer-shaped stale history resume then real new-turn path '+scenario,{skip:useNode,timeout:60000},async t=>{
   const failure=scenario!=='normal';
-  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl',HISTORY_STALE_SNAPSHOT:'1',...({concurrent:{HISTORY_CONCURRENT_ACTIVE:'1'},mismatch:{HISTORY_MISMATCH_START:'1'},reopen:{HISTORY_REOPEN_TERMINAL:'1'}}[scenario]||{})});
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl',HISTORY_STALE_SNAPSHOT:'1',HISTORY_BACKWARD_ENVELOPE:scenario==='partialObserver'?'observerPartial':scenario==='readAnchors'?'read':'both',...({concurrent:{HISTORY_CONCURRENT_ACTIVE:'1'},mismatch:{HISTORY_MISMATCH_START:'1'},reopen:{HISTORY_REOPEN_TERMINAL:'1'}}[scenario]||{})});
   const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
   await unlink(join(s.state,'rust-spike.json'));
   const legacy=join(s.root,'cwd/.treer/agents/ag_contract');await mkdir(legacy,{recursive:true,mode:0o700});
@@ -612,6 +612,10 @@ for(const scenario of ['normal','concurrent','mismatch','reopen'])test('Node imp
   assert.equal(state.runtime.provider.historyScan.staleInProgressCount,4);
   assert.equal(state.runtime.provider.historyScan.historyAuthority.normalizationRequired,true);
   assert.equal(state.runtime.provider.historyScan.historyAuthority.normalizationApplied,true);
+  assert.deepEqual(state.runtime.provider.historyScan.historyAuthority.paginationBlockers,[]);
+  assert.deepEqual(state.runtime.provider.historyScan.historyAuthority.paginationMarkers,['result.turnsBackwardsCursor','result.itemsBackwardsCursor']);
+  assert.deepEqual(state.runtime.provider.historyScan.historyAuthority.backwardCursors,{turns:'nonemptyString',items:'nonemptyString'});
+  assert.equal(state.runtime.provider.historyScan.historyAuthority.resumeHistoryRequest,true);
   assert.ok(state.runtime.provider.historyScan.frameBytes>45*1024*1024);
   assert.equal(await readFile(join(s.state,'node-backup-v1/queue.json'),'utf8'),source);
   const post=()=>fetch(imported.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'synthetic acceptance only',operation_id:'stale-after-import'})});
@@ -620,7 +624,12 @@ for(const scenario of ['normal','concurrent','mismatch','reopen'])test('Node imp
   state=await until(()=>fetch(imported.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked'||(!failure&&x.thread.turns.some(t=>t.id==='history-779'&&t.status==='completed')),20000);
   const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
   if(failure) {
-    assert.equal(state.runtime.state,'blocked');assert.match(state.runtime.error,({concurrent:/concurrent active turns/,mismatch:/disagrees with live turn/,reopen:/reopened a terminal turn/})[scenario]);
+    assert.equal(state.runtime.state,'blocked');assert.match(state.runtime.error,({concurrent:/concurrent active turns/,mismatch:/disagrees with live turn/,reopen:/reopened a terminal turn/,partialObserver:/provider_json_limit|transport/,readAnchors:/provider_json_limit|transport/})[scenario]);
+    if(scenario==='partialObserver'||scenario==='readAnchors') {
+      assert.equal(state.runtime.provider.frameFailure.limitKind,'historyAuthority');
+      assert.deepEqual(state.runtime.provider.frameFailure.historyAuthority.paginationBlockers,scenario==='partialObserver'?['result.nextCursor']:['result.turnsBackwardsCursor','result.itemsBackwardsCursor']);
+      assert.equal(state.runtime.provider.frameFailure.historyAuthority.normalizationRequired,true);
+    }
     assert.equal(journal.dispatchBlocked,true);
     assert.equal(journal.records.find(r=>r.operation==='stale-after-import').submission.state,scenario==='reopen'?'done':'running','uncertain receipt must not be invented complete; terminal receipt must not reopen');
   } else {
@@ -642,6 +651,41 @@ for(const scenario of ['normal','concurrent','mismatch','reopen'])test('Node imp
   t.diagnostic(JSON.stringify({historyScan:state.runtime.provider.historyScan,rssKiB:await rssKiB(imported.child.pid),scenario}));
 });
 
+for(const mode of ['absent','null','turns','items','both','empty','object','mixed','thread','oversized','unknownVersion'])for(const candidates of ['zero','one'])test(`resume backward anchors actual import ${mode}:${candidates}`,{skip:useNode,timeout:20000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
+  const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
+  await unlink(join(s.state,'rust-spike.json'));
+  const legacy=join(s.root,'cwd/.treer/agents/ag_contract');await mkdir(legacy,{recursive:true,mode:0o700});
+  const source=JSON.stringify({version:1,records:[]})+'\n';
+  await writeFile(join(legacy,'agent-ui.json'),JSON.stringify({threadId:'synthetic-history'})+'\n',{mode:0o600});
+  await writeFile(join(legacy,'queue.json'),source,{mode:0o600});
+  const imported=await s.launch({HISTORY_AUTHORITY_CASE:`valid:${candidates}`,HISTORY_BACKWARD_ENVELOPE:mode,...(mode==='unknownVersion'?{HISTORY_PROVIDER_VERSION:'unknown'}:{})},false,['--import-node-state']);
+  const state=await until(()=>fetch(imported.base+'/api/state').then(r=>r.json()),x=>x.ready||x.thread?.lastError);
+  const blocked=['empty','object','mixed','thread','oversized','unknownVersion'].includes(mode);
+  const failure=blocked&&candidates==='one';
+  assert.equal(state.ready,!failure);
+  const provider=state.runtime.provider;
+  const authority=failure?provider.frameFailure.historyAuthority:provider.historyScan.historyAuthority;
+  assert.equal(authority.normalizationRequired,candidates==='one');
+  assert.equal(authority.normalizationApplied,candidates==='one'&&!blocked);
+  assert.equal(authority.fullHistoryRequest,true);assert.equal(authority.resumeHistoryRequest,true);
+  assert.equal(authority.threadStatus,'idle');
+  assert.equal(authority.providerVersion,mode==='unknownVersion'?'unreviewed':'0.162.1');
+  const cursorState=mode==='absent'?'absent':mode==='null'?'null':mode==='empty'?'emptyString':mode==='object'?'invalidType':mode==='oversized'?'oversizedString':'nonemptyString';
+  assert.deepEqual(authority.backwardCursors,{turns:mode==='items'?'absent':cursorState,items:mode==='turns'?'absent':cursorState});
+  const blockers=mode==='mixed'?['result.nextCursor']:mode==='thread'?['thread.turnsBackwardsCursor']:blocked?['result.turnsBackwardsCursor','result.itemsBackwardsCursor']:[];
+  assert.deepEqual(authority.paginationBlockers,blockers);
+  for(const key of ['invalidIds','duplicateIds','decreasingTimestamps','nonIntegerTimestamps'])assert.equal(authority[key],0);
+  assert.equal(authority.identityValid,true);assert.equal(authority.orderValid,true);
+  if(failure)assert.equal(provider.frameFailure.limitKind,'historyAuthority');
+  else assert.equal(state.thread.turns.at(-1).status,candidates==='one'?'interrupted':'completed');
+  assert.doesNotMatch(JSON.stringify(provider),/PRIVATE_|synthetic-[0-9]/);
+  assert.equal(await readFile(join(s.state,'node-backup-v1/queue.json'),'utf8'),source);
+  assert.equal(await readFile(join(legacy,'queue.json'),'utf8'),source);
+  const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(frames.filter(f=>f.method==='turn/start').length,0);
+});
+
 for(const fault of ['invalidId','duplicateId','decreasing','nonInteger','paged'])for(const candidates of ['zero','one'])test(`history authority actual entry ${fault}:${candidates}`,{skip:useNode,timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
   const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
@@ -660,7 +704,7 @@ for(const fault of ['invalidId','duplicateId','decreasing','nonInteger','paged']
   assert.equal(authority.normalizationApplied,false);
   assert.equal(authority.fullHistoryRequest,true);
   assert.equal(authority.threadStatus,'idle');
-  assert.deepEqual(authority.paginationMarkers,fault==='paged'?['result.turnsBackwardsCursor']:[]);
+  assert.deepEqual(authority.paginationMarkers,fault==='paged'?['result.nextCursor']:[]);
   for(const [key,mode] of Object.entries({invalidIds:'invalidId',duplicateIds:'duplicateId',decreasingTimestamps:'decreasing',nonIntegerTimestamps:'nonInteger'}))assert.equal(authority[key],Number(fault===mode));
   assert.equal(authority.identityValid,!['invalidId','duplicateId'].includes(fault));
   assert.equal(authority.orderValid,!['decreasing','nonInteger'].includes(fault));

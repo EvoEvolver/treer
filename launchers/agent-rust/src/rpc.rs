@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, VecDeque},
     process::Stdio,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -59,8 +59,18 @@ impl Drop for ProviderChild {
 }
 
 type Reply = oneshot::Sender<Result<Value>>;
+fn reviewed_provider_version(result: &Value) -> bool {
+    // Only a fixed allowlist result is retained. Never persist userAgent:
+    // its platform, originator and suffix are unrelated private metadata.
+    result["userAgent"].as_str().and_then(|s| s.split_ascii_whitespace().next())
+        .and_then(|s| s.split_once('/'))
+        .is_some_and(|(originator,version)| !originator.is_empty() && originator.len()<=128
+            && originator.bytes().all(|b| b.is_ascii_alphanumeric()||matches!(b,b'_'|b'-'|b'.'))
+            && version=="0.162.1")
+}
 fn full_history_request(method: &str, params: &Value) -> bool {
     (method == "thread/resume" || (method == "thread/read" && params["includeTurns"] == true))
+        && !params.get("excludeTurns").is_some_and(|value| value != false)
         && ["cursor", "limit", "initialTurnsPage", "turnsLimit", "turnsCursor"].iter().all(|key| params.get(key).is_none())
 }
 #[derive(Clone)]
@@ -68,6 +78,7 @@ pub struct Rpc {
     input: Arc<Mutex<ChildStdin>>,
     pending: Arc<Mutex<HashMap<u64, Reply>>>,
     next: Arc<AtomicU64>,
+    reviewed_provider: Arc<AtomicBool>,
     diagnostics: Arc<std::sync::Mutex<Value>>,
     selections: Selections,
 }
@@ -92,6 +103,7 @@ impl Rpc {
             input: Arc::new(Mutex::new(child.stdin.take().unwrap())),
             pending: Arc::default(),
             next: Arc::new(AtomicU64::new(1)),
+            reviewed_provider: Arc::new(AtomicBool::new(false)),
             diagnostics: Arc::new(std::sync::Mutex::new(json!({"transport":"open","beforeCleanup":null,"stderrCapture":if capture_stderr {"pending"} else {"disabled"}}))),
             selections: Arc::default(),
         };
@@ -200,6 +212,8 @@ impl Rpc {
         if full_history || selection.is_some() {
             let mut selection = selection.unwrap_or_default();
             selection.full_history = full_history;
+            selection.resume_history = full_history && method == "thread/resume";
+            selection.reviewed_provider = self.reviewed_provider.load(Ordering::Relaxed);
             self.selections.lock().unwrap().insert(id,selection);
         }
         let (tx, rx) = oneshot::channel();
@@ -215,6 +229,11 @@ impl Rpc {
         };
         self.pending.lock().await.remove(&id);
         self.selections.lock().unwrap().remove(&id);
+        if method == "initialize" {
+            let reviewed = result.as_ref().is_ok_and(reviewed_provider_version);
+            self.reviewed_provider.store(reviewed,Ordering::Relaxed);
+            self.diagnostics.lock().unwrap()["providerVersion"] = json!(if reviewed {"0.162.1"} else {"unreviewed"});
+        }
         result
     }
 }
@@ -230,6 +249,20 @@ mod tests {
             assert!(!full_history_request("thread/read", &params));
         }
         assert!(!full_history_request("thread/resume", &json!({"initialTurnsPage":{}})));
+        assert!(full_history_request("thread/resume", &json!({"excludeTurns":false})));
+        for value in [json!(true),Value::Null,json!("false")] {
+            assert!(!full_history_request("thread/resume", &json!({"excludeTurns":value})));
+        }
         assert!(!full_history_request("thread/turns/list", &json!({"includeTurns":true})));
+    }
+    #[test]
+    fn only_reviewed_initialize_version_can_allow_resume_anchors() {
+        for ua in [json!("treer-rust-spike/0.162.1 (PRIVATE_SUFFIX)"),json!("codex_cli_rs/0.162.1 (synthetic)")] {
+            assert!(reviewed_provider_version(&json!({"userAgent":ua})));
+        }
+        for ua in [Value::Null,json!(123),json!(""),json!("treer/0.162.2"),json!("treer/0.162.10"),json!("treer/0.162.1-dev"),json!("treer/unknown (0.162.1)"),json!("/0.162.1"),json!("treer/0.162.1/private")] {
+            assert!(!reviewed_provider_version(&json!({"userAgent":ua})));
+        }
+        assert!(!reviewed_provider_version(&json!({})));
     }
 }

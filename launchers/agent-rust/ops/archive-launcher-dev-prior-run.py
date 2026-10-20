@@ -13,7 +13,7 @@ from pathlib import Path
 import stat
 
 ROOT = Path('/Users/dooms/.local/state/treer/agent-private/srv_9452d9fd5db447d3b242dd66c7689594/ag_cfc9d39a455d48d4995faf3d314adf08')
-AUDIT = Path('/Users/dooms/.local/state/treer/switch-evidence/launcher-dev-active-history-attempt-4')
+AUDIT = Path('/Users/dooms/.local/state/treer/switch-evidence/launcher-dev-active-history-attempt-5')
 ARCHIVE = AUDIT / 'prior-run'
 REQUIRED = ['rust-spike.json', 'node-backup-v1', '.node-backup-restored']
 OPTIONAL = ['rust-journal-history', 'rust-images', 'rust-provider-stderr.log']

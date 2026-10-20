@@ -13,6 +13,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
   if (request.id === undefined) continue;
   let result = {};
+  if(request.method==='initialize')result={userAgent:process.env.HISTORY_PROVIDER_VERSION==='unknown'?'synthetic/0.999.0 (PRIVATE_UA)':'treer-rust-spike/0.162.1 (PRIVATE_UA)'};
   if (request.method === 'model/list') result = { data: [] };
   if (['thread/start','thread/resume','thread/read'].includes(request.method)) result = { thread: { id: threadId, turns:
     process.env.HISTORY_OVERSIZED === '1' ? [{id:'too-large',status:'completed',items:[{id:'large',type:'agentMessage',text:'x'.repeat(17*1024*1024)}]}] : [] } };
@@ -70,8 +71,22 @@ for await (const line of createInterface({ input: process.stdin })) {
     if(fault==='duplicateId')old.id='synthetic-59';
     if(fault==='decreasing')result.thread.turns[1].startedAt=-1;
     if(fault==='nonInteger')old.startedAt='PRIVATE_TIMESTAMP_VALUE';
-    if(fault==='paged')result.turnsBackwardsCursor='PRIVATE_CURSOR_VALUE';
+    if(fault==='paged')result.nextCursor='PRIVATE_CURSOR_VALUE';
     if(currentTurn)result.thread.turns.push(currentTurn);
+  }
+  if (['thread/resume','thread/read'].includes(request.method) && process.env.HISTORY_BACKWARD_ENVELOPE) {
+    const mode=process.env.HISTORY_BACKWARD_ENVELOPE;
+    // Public Codex0.162.1 full resume supplies separate list-hydration
+    // anchors even when thread.turns was materialized in full. Read has no
+    // such result fields. Values below are synthetic privacy sentinels.
+    if(request.method==='thread/resume'||mode==='read') {
+      for(const key of (mode==='turns'?['turnsBackwardsCursor']:mode==='items'?['itemsBackwardsCursor']:['turnsBackwardsCursor','itemsBackwardsCursor'])) {
+        if(mode!=='absent')result[key]=mode==='null'?null:mode==='empty'?'':mode==='object'?{secret:'PRIVATE_CURSOR_OBJECT'}:mode==='oversized'?'x'.repeat(1025):'PRIVATE_CURSOR_VALUE';
+      }
+      if(mode==='mixed')result.nextCursor='PRIVATE_FORWARD_VALUE';
+      if(mode==='thread')result.thread.turnsBackwardsCursor=result.turnsBackwardsCursor;
+    }
+    if(mode==='observerPartial'&&request.method==='thread/read')result.nextCursor='PRIVATE_FORWARD_VALUE';
   }
   if(request.method==='thread/read'&&process.env.HISTORY_RECONCILE_OLD==='1') {
     result.thread.turns=[{id:'history-1',status:'completed',items:[]},...Array.from({length:80},(_,n)=>({id:`later-${n}`,status:'completed',items:[]}))];

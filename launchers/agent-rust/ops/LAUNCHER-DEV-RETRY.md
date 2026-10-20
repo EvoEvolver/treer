@@ -1,6 +1,6 @@
 # #158 launcher-dev retry after historyAuthority — leader only
 
-Prepared after incident7167 and verified Node rollback. This successor requires
+Prepared after incident7205 and verified Node rollback. This successor requires
 Core/security review of the exact commit, gate, artifact and this runbook before
 ONE leader-run retry. It does not execute anything or authorize a third agent.
 Do not retry afd8f310 or f5c393df, or overwrite prior manifests/audits. The user authorization
@@ -15,9 +15,12 @@ refuse readiness, including zero or one active candidate. Non-null startedAt
 must be an integer when a candidate exists; a float/string intentionally refuses
 then (actual incident timestamp values were not available in the sanitized audit).
 Zero candidates passes bounded projection without rewriting any status; the
-identity/order/pagination rules remain unchanged for every candidate frame.
-The real failing predicate is unknown: record the successful historyAuthority
-counters below; an invalid predicate is a latent refusal on any later candidate
+identity/order rules remain unchanged for every candidate frame. Only nonempty
+string result-level backward hydration anchors on matched full resume are now
+nonblocking; all other pagination signals remain conservative. See
+[the versioned source rationale](../CURSOR-SEMANTICS.md).
+Attempt4 isolated the two result backward markers; their prior raw values/types
+were not read. Record the new type and blocker diagnostics; an invalid predicate is a latent refusal on any later candidate
 frame, not proof of repaired real-producer normalization. Every inProgress
 candidate reserves one conservative extra byte, even when not normalized.
 A silent default page limit without any marker is also an unprovable omission.
@@ -28,15 +31,18 @@ Record these residuals, not a gap-free claim.
 Target /treer-dev-team/launcher-dev = ag_cfc9d39a455d48d4995faf3d314adf08;
 machine srv_9452d9fd5db447d3b242dd66c7689594; Controller cwd treer;
 provider cwd /Users/dooms/treer; saved thread 01a12e09-93e9-79a1-9e66-45a25bac49d8.
-Prepared against Node generation21 / PID44096 after incident7167 rollback.
+Prepared against Node generation24 / PID72577 after incident7205 rollback.
 PID is historical: record the current PID plus birth immediately before stopping. This is
 the author agent: the leader, not this process, performs the switch and sampling.
 The attempt-2 acceptance submission5cfbce65-09b9-4e4f-ac26-9f8b6210e6ee /
 turn01a15a95-ff47-7951-942a-9dd87b305f7a was interrupted and visible once after
 rollback. Do not resend it or either prior acceptance prompt. Preserve
-attempt-1, attempt-2 AND attempt-3 unchanged. Attempt-3 failed before readiness
+attempt-1, attempt-2, attempt-3 AND attempt-4 unchanged. Attempt-3 failed before readiness
 at historyAuthority with 785 scanned turns, zero inProgress candidates; no
 acceptance was submitted. Its original audit and manifests remain evidence.
+Attempt4 was ready/idle with four numeric counters zero and both backward
+markers. It hard-stopped before any acceptance or import-flag removal and
+restored the NEW backup. This repair does not reuse either acceptance prompt.
 Use sanitized rust-acceptance-failure.json and node-rollback-verification.json
 from attempt-2 for prior diagnosis; do not read provider-native history/config.
 
@@ -70,14 +76,14 @@ helper below before fresh import. Apps-dev is out of scope.
 ## Prerequisites, manifests, quiet window and process identity
 
 Binary/supplement tree is separately pinned by the successor freeze comment:
-/Users/dooms/.local/opt/treer-rust-launcher/history-authority-v1.
+/Users/dooms/.local/opt/treer-rust-launcher/cursor-semantics-v1.
 Compare binary bytes/SHA and SHA256SUMS SHA with that exact reviewed post.
 Directories0555/files0444/binary0555 prevent accidents, not same-user replacement.
 This tree contains the new binary, unchanged browser assets, checker, this
 runbook and target-specific archive helper; old frozen trees remain untouched.
 
 ```sh
-cd /Users/dooms/.local/opt/treer-rust-launcher/history-authority-v1
+cd /Users/dooms/.local/opt/treer-rust-launcher/cursor-semantics-v1
 shasum -a 256 SHA256SUMS
 shasum -a 256 -c SHA256SUMS
 treer agent show ag_cfc9d39a455d48d4995faf3d314adf08
@@ -85,7 +91,15 @@ treer agent admin startup show ag_cfc9d39a455d48d4995faf3d314adf08
 ```
 
 Compare hashes with the exact reviewed freeze before stop AND immediately before
-start. Announce a short quiet window to all senders: no messages/prompts to this
+start. Also require the public installed Codex package metadata version 0.162.1
+and native provider binary SHA256
+74c6a6d263f40d65f99c27a815275f5b4ed0bcc2baecc396b4cf3255498bdfc0
+at /Users/dooms/.local/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex.
+Read only package metadata and executable hash; do not execute a provider to
+probe, or read home/config/auth/native history. A different/missing version,
+path or hash requires a new review, not a fallback. The runtime independently
+allowlists initialize-reported 0.162.1; it never retains the raw userAgent.
+Announce a short quiet window to all senders: no messages/prompts to this
 agent until accepted. Do not prompt the target to test idleness. Require its last
 turn complete, idle, empty prompt queue, no pending ack/notification/goal edit,
 attachment or draft. Inspect goal edits locally without logging content.
@@ -95,7 +109,7 @@ Use a NEW absent audit directory (never reuse it for a retry):
 ```sh
 set -eu
 umask 077
-audit=/Users/dooms/.local/state/treer/switch-evidence/launcher-dev-active-history-attempt-4
+audit=/Users/dooms/.local/state/treer/switch-evidence/launcher-dev-active-history-attempt-5
 test ! -e "$audit"
 test ! -L "$audit"
 mkdir -m 700 "$audit"
@@ -105,7 +119,7 @@ treer agent admin startup show ag_cfc9d39a455d48d4995faf3d314adf08 > "$audit/nod
 # sourceMessage/sourceMessages messageId/deliveryId/ackPending plus pending
 # notification/attachment counts into queue-before-stop.json (0600).
 # Require queued/running/ackPending/notification/attachment counts all zero.
-python3 /Users/dooms/.local/opt/treer-rust-launcher/history-authority-v1/check-node-idle.py \
+python3 /Users/dooms/.local/opt/treer-rust-launcher/cursor-semantics-v1/check-node-idle.py \
   /Users/dooms/treer/.treer/agents/ag_cfc9d39a455d48d4995faf3d314adf08 \
   --thread 01a12e09-93e9-79a1-9e66-45a25bac49d8 \
   --private-root /Users/dooms/.local/state/treer/agent-private/srv_9452d9fd5db447d3b242dd66c7689594/ag_cfc9d39a455d48d4995faf3d314adf08 \
@@ -126,18 +140,18 @@ Only after verified exit of launcher AND provider/descendants, take lsof of the
 two source files and recursive private tree (see checks below) and require no
 holders before the preservation helper. Keep the agent stopped throughout.
 
-### Preserve attempt-3 tuple before a fresh import
+### Preserve attempt-4 tuple before a fresh import
 
 Leader executes the reviewed target-specific helper, replacing RECORDED_PID
-with the just-stopped Node launcher PID, never the historical PID44096:
+with the just-stopped Node launcher PID, never the historical PID72577:
 
 ```sh
-python3 /Users/dooms/.local/opt/treer-rust-launcher/history-authority-v1/archive-launcher-dev-prior-run.py --stopped-pid RECORDED_PID
+python3 /Users/dooms/.local/opt/treer-rust-launcher/cursor-semantics-v1/archive-launcher-dev-prior-run.py --stopped-pid RECORDED_PID
 ```
 
 It takes the existing lease inode; moves rust-spike.json, node-backup-v1 and
 .node-backup-restored, plus any existing rust-journal-history, empty rust-images
-and stderr log, into the new attempt-4/prior-run directory; before/after numeric
+and stderr log, into the new attempt-5/prior-run directory; before/after numeric
 size+hash manifests must match. Nothing is deleted. Images must be empty. Unknown
 entries, links, shared files, an existing archive or unsafe modes refuse. The
 helper is a preservation step, not proof that descendants exited. Keep backups
@@ -150,8 +164,8 @@ Then run the durable checker twice:
 ```sh
 set -eu
 umask 077
-audit=/Users/dooms/.local/state/treer/switch-evidence/launcher-dev-active-history-attempt-4
-python3 /Users/dooms/.local/opt/treer-rust-launcher/history-authority-v1/check-node-idle.py \
+audit=/Users/dooms/.local/state/treer/switch-evidence/launcher-dev-active-history-attempt-5
+python3 /Users/dooms/.local/opt/treer-rust-launcher/cursor-semantics-v1/check-node-idle.py \
   /Users/dooms/treer/.treer/agents/ag_cfc9d39a455d48d4995faf3d314adf08 \
   --thread 01a12e09-93e9-79a1-9e66-45a25bac49d8 \
   --private-root /Users/dooms/.local/state/treer/agent-private/srv_9452d9fd5db447d3b242dd66c7689594/ag_cfc9d39a455d48d4995faf3d314adf08 \
@@ -175,7 +189,7 @@ Run lsof on the two source files and private root, record output to lsof.txt
 ```sh
 set -eu
 umask 077
-audit=/Users/dooms/.local/state/treer/switch-evidence/launcher-dev-active-history-attempt-4
+audit=/Users/dooms/.local/state/treer/switch-evidence/launcher-dev-active-history-attempt-5
 set +e
 /usr/sbin/lsof -nP +D /Users/dooms/.local/state/treer/agent-private/srv_9452d9fd5db447d3b242dd66c7689594/ag_cfc9d39a455d48d4995faf3d314adf08 > "$audit/lsof.txt" 2> "$audit/lsof-error.txt"
 lsof_status=$?
@@ -221,7 +235,7 @@ After all checks and manifest reverification, use the target's own Controller
 injected credential/private root. Stderr capture OFF, message watcher ON.
 
 ```sh
-treer agent admin startup set ag_cfc9d39a455d48d4995faf3d314adf08 --cwd treer -- /usr/bin/env AGENT_UI_CWD=/Users/dooms/treer AGENT_UI_PUBLIC_DIR=/Users/dooms/.local/opt/treer-rust-launcher/history-authority-v1/public AGENT_UI_SESSION_ID=01a12e09-93e9-79a1-9e66-45a25bac49d8 AGENT_UI_PORT=0 RUST_SPIKE_REGISTER=1 /Users/dooms/.local/opt/treer-rust-launcher/history-authority-v1/treer-agent-rust-spike --import-node-state
+treer agent admin startup set ag_cfc9d39a455d48d4995faf3d314adf08 --cwd treer -- /usr/bin/env AGENT_UI_CWD=/Users/dooms/treer AGENT_UI_PUBLIC_DIR=/Users/dooms/.local/opt/treer-rust-launcher/cursor-semantics-v1/public AGENT_UI_SESSION_ID=01a12e09-93e9-79a1-9e66-45a25bac49d8 AGENT_UI_PORT=0 RUST_SPIKE_REGISTER=1 /Users/dooms/.local/opt/treer-rust-launcher/cursor-semantics-v1/treer-agent-rust-spike --import-node-state
 treer agent start ag_cfc9d39a455d48d4995faf3d314adf08
 ```
 
@@ -229,7 +243,8 @@ Require node_state_imported; byte_backup_retained, same saved thread, new
 generation/registered interface, ready/open transport, no fence/error. Record
 historyScan counts INCLUDING staleInProgressCount/threadStatus and historyAuthority
 (invalidIds, duplicateIds, decreasingTimestamps, nonIntegerTimestamps,
-identityValid, orderValid, paginationMarkers, fullHistoryRequest,
+identityValid, orderValid, paginationMarkers, paginationBlockers, providerVersion,
+backwardCursors, resumeHistoryRequest, fullHistoryRequest,
 normalizationRequired, normalizationApplied, threadStatus), NEW backup manifest hash and entry hashes matching BOTH
 post-stop manifests. No fresh-thread fallback.
 
@@ -238,18 +253,28 @@ staleInProgressCount may be ZERO: zero candidates must report
 normalizationRequired false and normalizationApplied false; this is projection-only startup, not proof of
 stale-turn normalization. Before ANY acceptance prompt, require all four numeric
 predicate counters zero, identityValid and orderValid true, fullHistoryRequest
-true and paginationMarkers empty. Otherwise HARD STOP: do not send acceptance;
+true and paginationBlockers empty. Require providerVersion exactly 0.162.1
+(also the provider-level initialization diagnostic), resumeHistoryRequest true;
+backwardCursors.turns/items must each be absent, null or nonemptyString (all
+fixed enum strings). paginationMarkers may contain ONLY result.turnsBackwardsCursor
+and/or result.itemsBackwardsCursor, exactly matching the nonemptyString states;
+absent/null states must have no corresponding marker. Missing/extra/invalid
+diagnostics, emptyString/oversizedString/invalidType, misplaced or mixed forward markers are
+HARD STOP: do not send acceptance;
 stop the exact new Rust process and verify its exits/holders, then perform the
 NEW-backup rollback below. Report the counters to Core/security. This is a
 latent candidate-frame refusal that would fence after a real turn started.
 Do not manufacture a candidate or retry to hide it. Candidate normalization
-still needs every original authority predicate. Only after all checks are clean,
+still needs all identity/order/status/newest checks plus no pagination blocker.
+Known result backward anchors neither prove nor deny complete history. Keep the
+quiet window in force THROUGH reading/recording these exact counters; the
+import-to-acceptance interval is already a live Rust process. Only after all checks are clean,
 remove the import flag below without restarting.
 `totalTurns`/hasOlderItems describe observed projection, not proof of complete
 history when invalid predicates pass with zero candidates.
 
 ```sh
-treer agent admin startup set ag_cfc9d39a455d48d4995faf3d314adf08 --cwd treer -- /usr/bin/env AGENT_UI_CWD=/Users/dooms/treer AGENT_UI_PUBLIC_DIR=/Users/dooms/.local/opt/treer-rust-launcher/history-authority-v1/public AGENT_UI_SESSION_ID=01a12e09-93e9-79a1-9e66-45a25bac49d8 AGENT_UI_PORT=0 RUST_SPIKE_REGISTER=1 /Users/dooms/.local/opt/treer-rust-launcher/history-authority-v1/treer-agent-rust-spike
+treer agent admin startup set ag_cfc9d39a455d48d4995faf3d314adf08 --cwd treer -- /usr/bin/env AGENT_UI_CWD=/Users/dooms/treer AGENT_UI_PUBLIC_DIR=/Users/dooms/.local/opt/treer-rust-launcher/cursor-semantics-v1/public AGENT_UI_SESSION_ID=01a12e09-93e9-79a1-9e66-45a25bac49d8 AGENT_UI_PORT=0 RUST_SPIKE_REGISTER=1 /Users/dooms/.local/opt/treer-rust-launcher/cursor-semantics-v1/treer-agent-rust-spike
 ```
 
 ## Acceptance, per-PID samples and rollback
@@ -302,7 +327,7 @@ and existing rotation/crash test evidence.
 Before NEW import begins, an abort may restore the exact prior evidence tuple:
 
 ```sh
-python3 /Users/dooms/.local/opt/treer-rust-launcher/history-authority-v1/archive-launcher-dev-prior-run.py --stopped-pid RECORDED_PID --undo
+python3 /Users/dooms/.local/opt/treer-rust-launcher/cursor-semantics-v1/archive-launcher-dev-prior-run.py --stopped-pid RECORDED_PID --undo
 ```
 
 Only use --undo before any fresh import writes and if ALL destinations remain
@@ -319,7 +344,7 @@ After published import, independently validate the NEW backup's identity,
 complete manifest and all file size/SHA256 entries. Stop/verify exit first, then:
 
 ```sh
-treer agent admin startup set ag_cfc9d39a455d48d4995faf3d314adf08 --cwd treer -- /usr/bin/env AGENT_UI_CWD=/Users/dooms/treer /Users/dooms/.local/opt/treer-rust-launcher/history-authority-v1/treer-agent-rust-spike --restore-node-backup
+treer agent admin startup set ag_cfc9d39a455d48d4995faf3d314adf08 --cwd treer -- /usr/bin/env AGENT_UI_CWD=/Users/dooms/treer /Users/dooms/.local/opt/treer-rust-launcher/cursor-semantics-v1/treer-agent-rust-spike --restore-node-backup
 treer agent start ag_cfc9d39a455d48d4995faf3d314adf08
 ```
 

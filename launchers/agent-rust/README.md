@@ -46,7 +46,7 @@ They also report fixed-category `threadStatus` and numeric
 `staleInProgressCount`. Only responses matched to an outstanding full
 `thread/resume`, or `thread/read` with `includeTurns: true`, without a request
 cursor/limit can normalize stale historical `inProgress` statuses. Explicit
-pagination markers, duplicate/empty turn IDs and descending supplied numeric
+blocking pagination markers, duplicate/empty turn IDs and descending supplied numeric
 `startedAt` values are refused whenever a candidate would be reinterpreted.
 With zero `inProgress` candidates, history passes only through the ordinary
 bounded projection; no status is rewritten or normalization authority granted.
@@ -55,7 +55,15 @@ Both success and failure include `historyAuthority`: numeric `invalidIds`,
 `identityValid`, `orderValid`, `fullHistoryRequest`, `normalizationRequired`,
 `normalizationApplied`,
 recognized `threadStatus`, and at most 16 fixed schema `paginationMarkers`
-names (scope/key only, no values). All reset per frame. An invalid predicate on
+names (scope/key only, no values). `paginationBlockers` separates partial/ambiguous
+history signals from the two supported nonempty result-level backward hydration
+anchors on a matched full resume only. `resumeHistoryRequest` and fixed-class
+`backwardCursors.turns/items` distinguish absent/null/emptyString/nonemptyString/
+oversizedString/invalidType without exposing cursor contents. The anchor exception
+requires initialize-reported version `0.162.1` (`providerVersion`, otherwise
+`unreviewed`) and at most 1024 UTF-8 bytes per anchor. Read responses and misplaced,
+malformed or mixed pagination signals keep refusing candidate interpretation.
+See [versioned semantics and limits](CURSOR-SEMANTICS.md). All reset per frame. An invalid predicate on
 a zero-candidate frame is a latent refusal on any later frame with a candidate;
 startup success does not validate that later path. Duplicate completed IDs do
 not bypass the existing terminal-reopen fence. `totalTurns` counts observed
