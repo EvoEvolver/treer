@@ -915,3 +915,68 @@ this builder implements no failure-status fallback for unknown enumeration.
 Native acquisition, runtime authority/routes, actual deadline/disconnect/global
 admission and publication checks, Core/Web union, performance evidence and
 deployed acceptance remain pending.
+
+## Automatic captured field-plan implementation contract (not implemented)
+
+The next inert assembler must accept only the query, collector/platform
+metadata and cancellation callback. It must discover keys from its existing
+detached view; neither request fields nor another collector capture may supply
+the inventory. The explicit-plan helper remains a staging API until this
+replacement has equivalent refusal coverage.
+
+Validate the original query and check cancellation before scanning. An unknown
+captured current enumeration refuses the complete response. Decode each retained
+frame exactly once, validating its captured epoch and original field links as
+today. During that scan, retain only owned acquisition data and bounded GPU
+descriptors; drop each decoded frame before decoding the next. Do not retain
+decoded response models or clone the complete history for a second pass.
+
+Discover historical descriptors using the existing exact half-open predicate:
+an original GPU acquisition must be in [from, to), not merely its cached frame
+append time. Preserve the existing overlapping-any-field truncation predicate,
+including CPU-only overlap. Merge the fresh captured enumeration with the
+historical descriptors using the existing complete-inventory union rule; more
+than 32 union GPUs or overlapping incomplete historical inventory refuses the
+whole response. Removed GPUs retain history and project DeviceAbsent; a current
+GPU with no acquisition projects warming-up. The latest retained descriptor
+wins historically, while the current capture supplies a present device's name.
+
+Before the final union is known, acquisition identity checks cannot skip keys
+that appear unrequested: a later frame may discover that GPU in range. Use a
+single bounded identity index keyed by (epoch, tick), carrying the original
+FieldKey and Observation. Repeated identities must match BOTH key and
+observation, including references outside the requested range. Bound unique
+indexed acquisitions by MAX_INDEX_ACQUISITIONS (262144) and each field by
+MAX_RECORDS (17280), checking before insertion. Candidate keys and counters
+must also be bounded by the acquisition cap; do not create an unbounded map
+from out-of-range device churn. Exceeding this staging budget refuses the
+request even if its final series would fit; this is an explicit availability
+limit, not a process RSS ceiling. Never silently discard a conflicting or
+over-budget candidate to obtain a successful response.
+
+Only after discovery and union validation, derive the canonical plan: CPU,
+RAM used/available/total, then sorted GPU ids with utilization/used/total.
+Calculate the per-series bucket allowance from this final count, validate the
+shared exact-span bucket geometry and keep the 7200 total-bucket limit. Group
+indexed observations into those final keys without decoding frames again;
+candidate fields outside the union contribute no response series. Avoid
+holding a duplicate full observation index while regrouping: consume entries
+into the aggregation input. All output series, inventory, current values,
+generated_at and epoch must come from this same detached view. Reuse the
+canonical complete-response validation and cancellable capped encoding path.
+
+Check cancellation during decode, descriptor discovery, identity indexing,
+regrouping, aggregation and encoding, including after final compaction. Local
+errors release their owned index; the caller still owns the detached view and
+must drop it to release admission. Real deadlines, disconnect cancellation,
+global admission and a live-epoch comparison before publication remain runtime
+work; this local contract does not provide them.
+
+Acceptance coverage must include no GPU, removed/reappeared/new GPUs, two GPU
+ordering, unknown and incomplete enumeration, exact range edges, CPU-only
+truncation overlap, out-of-range cached references later selected by discovery,
+cross-field identity conflicts, both index caps, cancellation at each stage,
+and byte equality with the explicit-plan builder for equivalent snapshots.
+A test-only decode counter must assert one decode per retained frame rather
+than infer that property from equal bytes. No route, capability advertisement,
+sampler, journal adapter or activation is authorized by this contract.
