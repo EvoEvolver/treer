@@ -2,8 +2,8 @@
 use super::*;
 use std::collections::{BTreeMap, HashSet};
 use treer_protocol::{
-    MachineMetricsGpu, MACHINE_METRICS_MAX_GPUS, MACHINE_METRICS_MAX_SERIES,
-    MACHINE_METRICS_MAX_TOTAL_BUCKETS,
+    MachineMetricCurrent, MachineMetricStatus, MachineMetricsGpu, MACHINE_METRICS_MAX_GPUS,
+    MACHINE_METRICS_MAX_SERIES, MACHINE_METRICS_MAX_TOTAL_BUCKETS,
 };
 
 /// Aggregate entry cap across all requested fields, independent of viewers.
@@ -31,6 +31,9 @@ pub struct MultiFieldHistory {
     pub historical_inventory_incomplete: bool,
     /// None means current enumeration is unknown, NOT an empty union.
     pub inventory: Option<MergedInventory>,
+    /// Three current projections per union GPU, independent of requested
+    /// history keys. None when current enumeration is unknown.
+    pub gpu_current: Option<Vec<(FieldKey, MachineMetricCurrent)>>,
 }
 
 pub struct MergedInventory {
@@ -154,6 +157,51 @@ impl DetachedFieldQuery {
             .as_ref()
             .map(|current| merge_inventory(current, &retained_gpus, incomplete_inventory))
             .transpose()?;
+        let gpu_current = inventory
+            .as_ref()
+            .map(|inventory| {
+                let mut output = Vec::with_capacity(inventory.gpus.len() * 3);
+                for gpu in &inventory.gpus {
+                    check(cancelled)?;
+                    for kind in [
+                        MachineMetricKind::GpuUtilization,
+                        MachineMetricKind::GpuMemoryUsed,
+                        MachineMetricKind::GpuMemoryTotal,
+                    ] {
+                        let current = if !gpu.present {
+                            MachineMetricCurrent {
+                                status: MachineMetricStatus::DeviceAbsent,
+                                value: None,
+                                sampled_at: None,
+                                age_ms: None,
+                            }
+                        } else {
+                            self.current
+                                .iter()
+                                .find(|field| {
+                                    field.kind == kind
+                                        && field.gpu_id.as_deref() == Some(gpu.id.as_str())
+                                })
+                                .map(|field| field.current.clone())
+                                .unwrap_or(MachineMetricCurrent {
+                                    status: MachineMetricStatus::WarmingUp,
+                                    value: None,
+                                    sampled_at: None,
+                                    age_ms: None,
+                                })
+                        };
+                        output.push((
+                            FieldKey {
+                                kind,
+                                gpu_id: Some(gpu.id.clone()),
+                            },
+                            current,
+                        ));
+                    }
+                }
+                Ok::<_, FieldQueryError>(output)
+            })
+            .transpose()?;
         let mut observations: Vec<Vec<Observation>> =
             counts.into_iter().map(Vec::with_capacity).collect();
         for (_, (position, observation)) in index {
@@ -182,6 +230,7 @@ impl DetachedFieldQuery {
             retained_gpus: retained_gpus.into_values().collect(),
             historical_inventory_incomplete: incomplete_inventory,
             inventory,
+            gpu_current,
         })
     }
 }

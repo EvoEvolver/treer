@@ -1107,6 +1107,111 @@ fn vram_batch_is_atomic_and_independent_of_utilization_failure() {
     state.append_frame(clock(5000, 5000), &valid).unwrap();
 }
 
+#[test]
+fn gpu_current_projection_preserves_history_and_distinguishes_absent_unknown_and_warming() {
+    use crate::machine_metrics::field_query::FieldKey;
+    use treer_protocol::MachineMetricsGpu;
+    let mut state = state();
+    let gpu = "a".repeat(64);
+    state
+        .record(
+            clock(0, 0),
+            MachineMetricKind::GpuUtilization,
+            Some(&gpu),
+            MachineMetricStatus::Ok,
+            Some(25.0),
+        )
+        .unwrap();
+    state
+        .record_vram(clock(0, 0), &gpu, MachineMetricStatus::Ok, Some((100, 60)))
+        .unwrap();
+    let frame = gpu_frame(&mut state, clock(0, 0), &gpu);
+    state.append_frame(clock(0, 0), &frame).unwrap();
+    let query = MachineMetricsQuery {
+        from: clock(0, 0).wall,
+        to: clock(1000, 1000).wall,
+        max_points: 1,
+    };
+    let keys = [FieldKey {
+        kind: MachineMetricKind::GpuUtilization,
+        gpu_id: Some(gpu.clone()),
+    }];
+    state
+        .record_inventory(clock(5000, 5000), Some(&[]))
+        .unwrap();
+    let mut view = state
+        .detached_query(clock(5000, 5000), &mut || false)
+        .unwrap();
+    let result = view.query_fields(&query, &keys, &mut || false).unwrap();
+    assert_eq!(result.fields[0].1.points[0].mean, Some(25.0));
+    let currents = result.gpu_current.unwrap();
+    assert_eq!(currents.len(), 3);
+    for (key, current) in currents {
+        assert_eq!(key.gpu_id.as_deref(), Some(gpu.as_str()));
+        assert_eq!(current.status, MachineMetricStatus::DeviceAbsent);
+        assert!(
+            current.value.is_none() && current.sampled_at.is_none() && current.age_ms.is_none()
+        );
+    }
+    // The captured field still has a real value; absence only overrides the
+    // response projection, never the acquisition or its historical sample.
+    assert_eq!(
+        view.current
+            .iter()
+            .find(|f| f.kind == keys[0].kind && f.gpu_id == keys[0].gpu_id)
+            .unwrap()
+            .current
+            .value,
+        Some(25.0)
+    );
+    drop(view);
+    state
+        .record_inventory(
+            clock(10000, 10000),
+            Some(&[
+                MachineMetricsGpu {
+                    id: gpu.clone(),
+                    name: "Returned GPU".into(),
+                    present: true,
+                },
+                MachineMetricsGpu {
+                    id: "b".repeat(64),
+                    name: "New GPU".into(),
+                    present: true,
+                },
+            ]),
+        )
+        .unwrap();
+    let mut view = state
+        .detached_query(clock(20000, 20000), &mut || false)
+        .unwrap();
+    let result = view.query_fields(&query, &keys, &mut || false).unwrap();
+    assert_eq!(result.fields[0].1.points[0].mean, Some(25.0));
+    let currents = result.gpu_current.unwrap();
+    assert_eq!(currents.len(), 6);
+    for (key, current) in currents {
+        if key.gpu_id.as_deref() == Some(gpu.as_str()) {
+            assert_eq!(current.status, MachineMetricStatus::Stale);
+            assert_eq!(current.sampled_at, Some(clock(0, 0).wall));
+            assert_eq!(current.age_ms, Some(20000));
+            assert!(current.value.is_none());
+        } else {
+            assert_eq!(current.status, MachineMetricStatus::WarmingUp);
+            assert!(
+                current.value.is_none() && current.sampled_at.is_none() && current.age_ms.is_none()
+            );
+        }
+    }
+    drop(view);
+    state.record_inventory(clock(25000, 25000), None).unwrap();
+    let mut view = state
+        .detached_query(clock(25000, 25000), &mut || false)
+        .unwrap();
+    let result = view.query_fields(&query, &keys, &mut || false).unwrap();
+    assert!(result.inventory.is_none() && result.gpu_current.is_none());
+    assert_eq!(result.fields[0].1.points[0].mean, Some(25.0));
+}
+
 fn gpu_frame(state: &mut CollectorState, clock: Clock, gpu: &str) -> MachineMetricsResponse {
     use treer_protocol::*;
     let mut sample = frame(state, clock);

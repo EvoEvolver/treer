@@ -845,3 +845,23 @@ change supplies no native enumeration, caller authorization, runtime adapter,
 or guarantee that production callers use that boundary. Unknown-enumeration
 status categories, GPU response assembly and exact Core/Web integration remain
 open.
+
+## GPU current projection checkpoint (inert)
+
+The decode-once multi-field query now returns three GPU current projections
+per descriptor in its known current/range union, independently of requested
+history keys. An absent historical descriptor gets `device_absent` with null
+value, acquisition time and age, even if an old field value remains cached.
+Presence from the fresh enumeration instead selects that field's captured
+current projection, preserving per-field stale/failure/time semantics; a newly
+enumerated device with no field acquisition gets canonical `warming_up`.
+Unknown current enumeration yields no GPU current projection set, never a
+fabricated `device_absent` or empty successful device set. This does not mutate
+the field cache or replace original acquisitions in historical buckets.
+
+The projection set is capped by the existing 32-device union limit (96 entries)
+and checks cancellation per device. It does not yet assemble aligned GPU history
+series or a complete GPU wire response, define an unknown-enumeration wire
+policy, or enable any runtime path. Tests retain a real historical utilization
+sample across removal, reappearance with stale fields, a newly warming device,
+and failed enumeration; metadata and buckets remain from the same detached view.
