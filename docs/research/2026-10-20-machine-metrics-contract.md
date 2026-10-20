@@ -314,3 +314,13 @@ assembler. Original per-field identities still need a bounded history encoding;
 the outer frame tick cannot replace them. Paired acquisitions, removed-GPU
 inventory, per-range epoch/partial flags, journal integration, singleton IPC,
 authorization and routes remain unfinished. No runtime capability is enabled.
+
+The future collector must stamp each acquisition completion using its own
+wall/monotonic clock pair, never a helper-provided timestamp or earlier dispatch
+time. `reset_diagnostics()` exposes the instance's authoritative epoch as its
+reset count and one fixed cause (history clock, field clock, acquisition clock).
+Repeated diagnostic reads do not advance clocks, epochs or acquisition ticks.
+This makes conservative reset loops observable to a future health adapter
+without exposing sample content; no logging, endpoint or UI is wired yet.
+An assembler must also preserve `Snapshot.reset` when deciding partial buckets,
+including when a subsequent frame admission fails.

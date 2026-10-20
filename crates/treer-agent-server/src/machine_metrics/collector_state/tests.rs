@@ -27,11 +27,25 @@ fn record(state: &mut CollectorState, clock: Clock, value: f64) -> bool {
 #[test]
 fn history_discontinuity_clears_fields_and_reacquisition_keeps_identity_distinct() {
     let mut state = state();
+    assert_eq!(
+        state.reset_diagnostics(),
+        ResetDiagnostics {
+            count: 0,
+            last_cause: None
+        }
+    );
     record(&mut state, clock(0, 0), 12.0);
     let original = state.snapshot(clock(5_000, 5_000)).unwrap();
     let reset = state.snapshot(clock(10_000, 1)).unwrap();
     assert!(reset.reset);
     assert_eq!(reset.epoch, 1);
+    assert_eq!(
+        state.reset_diagnostics(),
+        ResetDiagnostics {
+            count: 1,
+            last_cause: Some(ResetCause::HistoryClock),
+        }
+    );
     assert!(reset.fields.is_empty());
     assert_eq!(state.history.record_count(), 0);
     record(&mut state, clock(10_000, 1), 25.0);
@@ -62,6 +76,33 @@ fn cumulative_cache_drift_clears_both_sides_even_when_each_history_step_is_small
     assert!(snapshot.fields.is_empty());
     assert_eq!(state.history.record_count(), 0);
     assert!(state.history.truncated());
+    assert_eq!(
+        state.reset_diagnostics(),
+        ResetDiagnostics {
+            count: 1,
+            last_cause: Some(ResetCause::FieldClock),
+        }
+    );
+}
+
+#[test]
+fn repeated_conflicting_completions_are_visible_without_diagnostic_read_side_effects() {
+    let mut state = state();
+    record(&mut state, clock(0, 0), 12.0);
+    for count in 1..=3 {
+        // Simulates a buggy caller reusing an earlier completion timestamp.
+        assert!(record(&mut state, clock(0, 0), 25.0));
+        let expected = ResetDiagnostics {
+            count,
+            last_cause: Some(ResetCause::AcquisitionClock),
+        };
+        assert_eq!(state.reset_diagnostics(), expected);
+        assert_eq!(state.reset_diagnostics(), expected);
+        let snapshot = state.snapshot(clock(0, 0)).unwrap();
+        assert_eq!(snapshot.epoch, count);
+        assert!(!snapshot.reset);
+        assert_eq!(snapshot.fields[0].observation.tick, count);
+    }
 }
 
 fn frame(state: &mut CollectorState, clock: Clock) -> MachineMetricsResponse {

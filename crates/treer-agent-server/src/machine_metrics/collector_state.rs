@@ -13,6 +13,21 @@ pub enum StateError {
     FrameMismatch,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetCause {
+    HistoryClock,
+    FieldClock,
+    AcquisitionClock,
+}
+
+/// Fixed, content-free diagnostics for a future collector health surface.
+/// Scoped to this state instance, not persisted or advertised over an API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResetDiagnostics {
+    pub count: u64,
+    pub last_cause: Option<ResetCause>,
+}
+
 pub struct Snapshot {
     pub epoch: u64,
     pub reset: bool,
@@ -26,6 +41,7 @@ pub struct CollectorState {
     history: History,
     cache: FieldCache,
     epoch: u64,
+    last_reset_cause: Option<ResetCause>,
 }
 
 impl CollectorState {
@@ -34,6 +50,7 @@ impl CollectorState {
             history: History::new(server_id, limits).map_err(StateError::History)?,
             cache: FieldCache::new(0),
             epoch: 0,
+            last_reset_cause: None,
         })
     }
 
@@ -47,13 +64,24 @@ impl CollectorState {
             .start_epoch(self.history.epoch())
             .map_err(StateError::Cache)?;
         self.epoch = self.history.epoch();
+        self.last_reset_cause = Some(ResetCause::HistoryClock);
         Ok(true)
     }
 
-    fn invalidate(&mut self, clock: Clock) -> Result<(), StateError> {
+    fn invalidate(&mut self, clock: Clock, cause: ResetCause) -> Result<(), StateError> {
         self.history.invalidate(clock);
         self.synchronize(clock)?;
+        self.last_reset_cause = Some(cause);
         Ok(())
+    }
+
+    /// Reading diagnostics does not maintain clocks or create observations.
+    /// The authoritative epoch already counts successful resets without wrap.
+    pub fn reset_diagnostics(&self) -> ResetDiagnostics {
+        ResetDiagnostics {
+            count: self.epoch,
+            last_cause: self.last_reset_cause,
+        }
     }
 
     /// Also the maintenance entry point for ticks with no completed capture.
@@ -63,7 +91,7 @@ impl CollectorState {
         let fields = match self.cache.snapshot(clock) {
             Ok(fields) => fields,
             Err(CacheError::ClockReversed) => {
-                self.invalidate(clock)?;
+                self.invalidate(clock, ResetCause::FieldClock)?;
                 reset = true;
                 Vec::new()
             }
@@ -78,6 +106,8 @@ impl CollectorState {
 
     /// Only real completed acquisitions/attempts may enter here. A conflicting
     /// acquisition clock clears both sides before accepting that new capture.
+    /// Stamp completion with the collector's own clock, never a helper clock or
+    /// the acquisition's earlier dispatch time. Repeated resets are diagnosable.
     pub fn record(
         &mut self,
         clock: Clock,
@@ -89,7 +119,7 @@ impl CollectorState {
         let mut reset = self.snapshot(clock)?.reset;
         match self.cache.record(clock, kind, gpu_id, status, value) {
             Err(CacheError::ClockReversed) => {
-                self.invalidate(clock)?;
+                self.invalidate(clock, ResetCause::AcquisitionClock)?;
                 reset = true;
                 self.cache
                     .record(clock, kind, gpu_id, status, value)
