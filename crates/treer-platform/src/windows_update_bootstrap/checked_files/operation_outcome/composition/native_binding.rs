@@ -161,6 +161,17 @@ impl<'a> BoundStored<'a> {
         sink: &mut Sink,
         after_read: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<()> {
+        self.consume_matched_digest(expected, sink, |_| after_read())
+    }
+
+    // Only plain digest data from the first matched read reaches this private
+    // test hook. The sink still receives no bytes, path, token or capability.
+    fn consume_matched_digest(
+        &self,
+        expected: &Binding,
+        sink: &mut Sink,
+        after_match: impl FnOnce([u8; 32]) -> io::Result<()>,
+    ) -> io::Result<()> {
         if self.spent.replace(true) {
             return Err(denied());
         }
@@ -172,13 +183,72 @@ impl<'a> BoundStored<'a> {
         if !context_record::matches_expected(&bytes, &expected) {
             return Err(denied());
         }
-        after_read()?;
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        after_match(digest)?;
+        self.binding.check(self.composition)?;
+        let reread = self.pin.read()?;
+        if <[u8; 32]>::from(Sha256::digest(&reread)) != digest {
+            return Err(denied());
+        }
         self.binding.check(self.composition)?;
         if sink.refuse {
             return Err(denied());
         }
         sink.accepted += 1;
         Ok(())
+    }
+}
+
+#[test]
+fn native_operation_matched_digest_handoff_and_spent_failure() {
+    for operation in [Operation::MoveOld, Operation::Publish] {
+        for refuse in [false, true] {
+            let fixture = Fixture::new(operation);
+            let binding = Binding::before_acquisition(&fixture, 1).unwrap();
+            let context = fixture.context();
+            let composition = Composition::new(
+                &context,
+                &fixture.attempt,
+                &fixture.source,
+                &fixture.target,
+                context.intent,
+            )
+            .unwrap();
+            let Captured::Failure(failure) = composition.acquisition.capture(|_| Ok(())) else {
+                panic!("native collision required");
+            };
+            let expected = binding.with_failure(&failure).unwrap().encode().unwrap();
+            let expected_digest: [u8; 32] = Sha256::digest(&expected).into();
+            let stored = BoundStored::store(&composition, &binding, &failure).unwrap();
+            let calls = Cell::new(0);
+            let mut sink = Sink::default();
+            let result = stored.consume_matched_digest(&binding, &mut sink, |digest| {
+                calls.set(calls.get() + 1);
+                assert_eq!(digest, expected_digest);
+                assert!(stored.spent.get());
+                if refuse {
+                    return Err(denied());
+                }
+                Ok(())
+            });
+            assert_eq!(calls.get(), 1);
+            assert_eq!(result.is_ok(), !refuse);
+            assert_eq!(sink.accepted, usize::from(!refuse));
+            assert!(stored
+                .consume_matched_digest(&binding, &mut sink, |_| panic!("spent"))
+                .is_err());
+            assert_eq!(sink.accepted, usize::from(!refuse));
+            assert_eq!(stored.pin.read().unwrap(), expected);
+            assert!(!fixture.attempt.path.join("consume.intent").exists());
+            eprintln!(
+                "context_digest_fixture operation={} hook_refused={} digest_match=1 hook_calls=1 spent=1 sink={}",
+                if operation == Operation::MoveOld { "MoveOld" } else { "Publish" },
+                u8::from(refuse),
+                sink.accepted
+            );
+            drop(stored);
+            cleanup(fixture);
+        }
     }
 }
 

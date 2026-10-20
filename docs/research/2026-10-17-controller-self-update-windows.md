@@ -1727,6 +1727,26 @@ no decision/evidence file. Existing replacement and ACL-loss controls remain
 required in the exact-SHA hosted suite. This implements the data-only accessor
 precondition of 6491, not the decision composition or its remaining matrix.
 
+The subsequent preparatory digest handoff keeps the existing no-argument
+`consume` hook as a wrapper around a private `consume_matched_digest`. After
+spending the latch and precisely matching the first bounded context read, it
+hashes those very bytes once and passes only that plain digest to the private
+hook. After the hook, binding checks enclose a second pinned context read whose
+digest must equal the first. The second read never feeds the original handoff
+digest. The sink still receives no data or capability, and no decision is built.
+
+The native digest control covers move-old and publish with successful and
+refusing hooks. Expected digest bytes come from the independent fixture binding
+plus retained actual failure encoding, not another evidence read. It requires
+one hook call, exact digest equality, an already spent latch at hook entry,
+sink one only after success, unchanged evidence, no decision file, and no hook
+or additional sink visit on retry. All existing mismatch, actual ReadFile-error,
+post-hook slot mutation and ACL-loss controls now run through the same wrapper.
+This is a digest transport prerequisite only: its positive test is not injected
+post-hook evidence corruption/read-failure coverage, and decision composition
+must still retain its own pin and revalidate head/context after that transition.
+Exact-SHA hosted execution remains required.
+
 This adds no durable consume-plus-head transaction, external deletion/replay
 fence, independently committed production expectations, authenticated health,
 real installation lock or real supervisor lifetime. A fresh process remains
