@@ -7,6 +7,7 @@ use crate::windows_update_bootstrap::checked_files::{
 
 mod custody_fault;
 mod decision_data;
+mod decision_pin;
 
 fn different_file_id(original: [u8; 16], source: [u8; 16]) -> [u8; 16] {
     // Three valid candidates cannot all equal the two excluded identities.

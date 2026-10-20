@@ -1778,6 +1778,54 @@ failures. No fixture result grants restart recovery, replay/CAS, a production
 supervisor lifetime, Controller adapter, installation mutation or W4 authority.
 Exact-SHA dual-Windows raw logs are required before accepting the implementation.
 
+##### First decision-pin composition implementation (partial, native pending)
+
+The first implementation covers only the accept, refuse and caught-panic rows
+for both collision operations. A private FixtureLock::pin_decision adapter
+creates a new Stage and transitions to ReadPin. Stage and raw handles remain
+private; ReadPin/validate have checked-files visibility, into_read_pin only
+parent-module visibility, and decision_data only retained-head visibility.
+No path, parsed record, identity or replacement bytes enter the adapter.
+scripts/check-windows-decision-fixture.mjs gates this source boundary and the
+top-level Windows-test-only cfg; it is a narrow source check, not a Rust parser.
+A separate Windows non-test library check must still pass.
+
+The first independently expected context and head bytes supply the decision
+expectation, assembled manually to exactly 177 bytes. The matched hook compares
+decision_data against those bytes before CREATE_NEW, validates the returned pin
+and retained head, and returns the owned pin through consume_with_guard. The
+actual sink's test observer probes GENERIC_WRITE and DELETE opens plus a real
+rename to an absent fixture-owned name: all must fail with sharing violation32.
+The observer also records WRITE_DAC without changing the ACL. WRITE_DAC may
+succeed despite sharing denial; ACL mutation exclusion is explicitly unproven,
+and no attribute-write or replace-existing-target denial is claimed here.
+The observer's path is fixture instrumentation, not a sink argument/capability.
+
+After return or caught panic both write/delete opens must succeed, complete
+bytes and full file identity must match, the decision must remain, the guard
+drop counter is one, spent retry must not enter its hook, and another exclusive
+creation must refuse. The refused-sink path never claims an in-sink probe ran.
+Each row uses a fresh fixture; cleanup happens after preservation assertions
+and guard release and surfaces every removal failure.
+
+The new native_operation_decision_pin_sink_lifetime_and_single_use test joins
+the operation and ordinary groups, not the four-test retained-head filter.
+Expected counts are operation25, ordinary101 passed/four ignored. Each group
+must emit exactly six decision_pin_fixture markers, one per operation and row
+accept/refuse/panic. Fixed fields are row, operation, injected (0/1/1), write_open,
+delete_open, rename (32/na/32), write_dac (actual result/na/actual result),
+post_write=0, post_delete=0, sink (1/0/1), drops=1, spent=1,
+decision=complete, acl=unchanged. Exactly two additional labelled injected
+decision-sink panic messages per group are expected, not test failures.
+Native hosted raw evidence remains required; cross compilation proves no
+Windows file-sharing result. The six remaining matrix rows, independent
+per-field controls composed with creation, decision content-integrity faults,
+guarded reread/checkpoint observation and production/replay/activation holds
+remain open. In particular the existing transition gap is after the writer is
+closed; its validator compares creation-time full volume/file identity and exact
+bytes. This partial composition does not inject replacement or same-identity
+content changes during that gap.
+
 The first preparatory code slice only reorders `BoundStored::consume`: spend,
 binding check, evidence read, exact expected-context comparison, callback,
 post-callback binding check, sink. Its existing ten foreign-binding controls

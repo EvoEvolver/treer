@@ -6,7 +6,7 @@ use crate::windows_update_bootstrap::checked_files::consume_record;
 const SYNTHETIC_LIFETIME: [u8; 32] = [0x6a; 32];
 
 impl Retained<'_> {
-    fn decision_data(
+    pub(super) fn decision_data(
         &self,
         stored: &BoundStored<'_>,
         matched_digest: MatchedDigest,

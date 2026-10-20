@@ -3,6 +3,16 @@ use super::*;
 
 mod read_pin;
 
+impl<'a> FixtureLock<'a> {
+    // Initial exclusive creation only. No path/parsed-record recovery API.
+    pub(in crate::windows_update_bootstrap::checked_files) fn pin_decision(
+        &'a self,
+        bytes: &[u8],
+    ) -> io::Result<read_pin::ReadPin<'a>> {
+        Stage::create(self, bytes, false)?.into_read_pin(|| Ok(()))
+    }
+}
+
 struct Stage<'a> {
     ownership: &'a FixtureLock<'a>,
     file: File,

@@ -1,7 +1,7 @@
 //! Cooperative close/reopen transition; no path-to-authority constructor.
 use super::*;
 
-struct ReadPin<'a>(Stage<'a>);
+pub(in crate::windows_update_bootstrap::checked_files) struct ReadPin<'a>(Stage<'a>);
 
 fn open_read(path: &Path) -> io::Result<File> {
     OpenOptions::new()
@@ -12,7 +12,7 @@ fn open_read(path: &Path) -> io::Result<File> {
 }
 
 impl<'a> Stage<'a> {
-    fn into_read_pin(
+    pub(super) fn into_read_pin(
         self,
         after_close: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<ReadPin<'a>> {
@@ -42,7 +42,7 @@ impl<'a> Stage<'a> {
 }
 
 impl ReadPin<'_> {
-    fn validate(&self) -> io::Result<()> {
+    pub(in crate::windows_update_bootstrap::checked_files) fn validate(&self) -> io::Result<()> {
         self.0.validate()?;
         let owner = crate::windows::current_user_sid().map_err(|_| denied())?;
         let path =
