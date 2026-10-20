@@ -1267,6 +1267,45 @@ durable revision mechanism; no detection of invisible intervening writes is
 claimed here. Native same/child-process exclusion and release still require
 exact-commit hosted 2022/2025 execution; cross-target lint is compilation only.
 
+The lock-only slice `c31c36d2` passed hosted run 39347200600 on both Server
+2022 and 2025: actual same-process/child sharing errors 32, reopen result 0,
+15 operation fixtures and 74 ordinary tests passed, four ignored. Core read
+the raw log in 6259. This supplies no head or recovered-operation authority.
+
+#### Fixed committed-head codec, fixture v1
+
+Before adding a writer, fix the head format independently of the outcome
+codec. It is exactly 181 bytes, with little-endian integer fields:
+
+| Offset | Bytes | Meaning |
+| --- | --- | --- |
+| 0 | 8 | ASCII `TRHEAD01`, including the only supported version |
+| 8 | 2 | Total length, exactly 181 |
+| 10 | 32 | Attempt-directory binding, neither all zero nor all ones |
+| 42 | 1 | Component: 1 Controller, 2 CLI |
+| 43 | 1 | Image role: 1 old, 2 new |
+| 44 | 1 | Operation: 1 move-old, 2 publish; only role/operation 1/1 or 2/2 |
+| 45 | 8 | Nonzero intent revision |
+| 53 | 64 | Expected source image |
+| 117 | 64 | Expected occupied target image |
+
+Each image contains volume serial u64, file ID 16 bytes, length u64 and SHA-256
+32 bytes, in that order. Volume and file ID reject zero/all-ones sentinels;
+length is 1 through the shared 256 MiB cap. The two full object identities must
+differ. Hash bytes have no reserved sentinel. This first negative fixture
+describes an occupied target, not an authenticated absence claim. There is no
+predecessor, failure status, timestamp, path or free-form field in the head.
+No outcome codec bytes are accepted as a head, or vice versa.
+
+The codec-only slice checks literal golden bytes, every truncation, trailing
+data, unsupported framing/selectors, invalid lengths/identities and exact
+expected-field comparison. Parsing grants no trust: attempt binding and image
+expectations still require independent setup, live custody and native checks.
+It adds no head publication, retained handle, head hash in the acquisition,
+reopen authority, durable consumption or production caller. Subsequent writer
+and retained-pin slices must prevent write/delete sharing for the whole interval
+and prove actual competing-write refusal before using a head as a predecessor.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
