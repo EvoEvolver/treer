@@ -1,4 +1,6 @@
 import { ProviderCliInstaller } from "@/components/provider-cli-installer"
+import { ControllerUpdater } from "@/components/controller-updater"
+import type { ControllerUpdateClient } from "@/lib/controller-update"
 import { agentPath } from "@/lib/workload-path"
 import { EmptyState, MachineRecovery, Status } from "@/components/control-plane-ui"
 import { Button } from "@/components/ui/button"
@@ -20,7 +22,7 @@ import {
 import { useState } from "react"
 import { statusLabel, t, intlLocale } from "@/i18n"
 
-export function MachineOverviewView({ machine, agents, services, virtualHosts, traffic, machines, workspaceId, onOpenAgent, onClose, onCopy }: { machine?: Machine; agents: Agent[]; services: MachineService[]; virtualHosts: VirtualNetworkHost[]; traffic: MachineTrafficRecord[]; machines: Machine[]; workspaceId?: string | null; onOpenAgent: (agentId: string) => void; onClose: () => void; onCopy: (value: string) => void }) {
+export function MachineOverviewView({ machine, agents, services, virtualHosts, traffic, machines, workspaceId, controllerUpdateClient, onOpenAgent, onClose, onCopy }: { machine?: Machine; agents: Agent[]; services: MachineService[]; virtualHosts: VirtualNetworkHost[]; traffic: MachineTrafficRecord[]; machines: Machine[]; workspaceId?: string | null; controllerUpdateClient?: ControllerUpdateClient; onOpenAgent: (agentId: string) => void; onClose: () => void; onCopy: (value: string) => void }) {
   const [localHealth, setLocalHealth] = useState<Record<string, "healthy" | "unreachable">>({})
   const outBytes = traffic.filter((t) => (t.source_type ?? "machine") === "machine" && t.source_server_id === machine?.server_id).reduce((sum, t) => sum + t.payload_bytes, 0)
   const inBytes = traffic.filter((t) => (t.destination_type ?? "machine") === "machine" && t.destination_server_id === machine?.server_id).reduce((sum, t) => sum + t.payload_bytes, 0)
@@ -60,7 +62,7 @@ export function MachineOverviewView({ machine, agents, services, virtualHosts, t
       <Button variant="outline" className="shrink-0" onClick={onClose}>{t("org.close")}</Button>
     </div>
 
-    {workspaceId && <div className="mb-6"><ProviderCliInstaller key={`${workspaceId}/${machine.server_id}`} workspaceId={workspaceId} machine={machine} /></div>}
+    {workspaceId && <div className="mb-6 flex flex-wrap items-start gap-3"><ProviderCliInstaller key={`${workspaceId}/${machine.server_id}`} workspaceId={workspaceId} machine={machine} />{controllerUpdateClient && <div><ControllerUpdater key={`${workspaceId}/${machine.server_id}`} machineId={machine.server_id} client={controllerUpdateClient} /></div>}</div>}
     <div className="grid gap-10 md:grid-cols-2">
       <section className="space-y-3 rounded-md border p-4">
         <h2 className="text-sm font-semibold">{t("machine.build")}</h2>

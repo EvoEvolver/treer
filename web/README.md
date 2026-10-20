@@ -847,3 +847,41 @@ See the operator guide for temporary-file visibility, expiry and server quotas.
 Iframe appearance hints are included in the initial URL. Exact-origin theme
 messages start after that iframe loads, and continue on later theme changes;
 new iframe instances wait for their own load event.
+
+### Controller update UI preparation (#222)
+
+`controller-updater.tsx` reuses the provider installer's prepare, explicit
+one-use confirmation and read-only observation interaction, plus the existing
+Dialog/Button controls. The optional `controllerUpdateClient` slot places it
+beside Install agent CLIs in the Machine action area. No production caller
+supplies that client yet: this is synthetic UI preparation, not enabled browser
+update support. The existing installer requests and execution remain separate.
+
+`lib/controller-update.ts` defines presentation models, not shared wire models
+or a new operation API. The eventual adapter must validate the Core #222
+contract and scope every response to the current user/workspace/machine. It
+must discover durable operations before capability gating, retain the selected
+operation UUID from preview, and perform GET-only recovery after a lost confirm
+response or refresh. Map `accepted` to an in-progress presentation, keep receipt
+phase and observation availability separate, and use a clearly labelled Build
+SHA fallback when no current-version label is available. Catalog targets must
+come from the server, with all four identity hashes bound to the preview; no
+browser-supplied commands, paths or URLs are supported by this component.
+
+The component consumes its in-memory token before dispatch, prevents a second
+submit, and stores no token or operation data in browser storage. Closing clears
+an unused confirmation and stops observation; it never cancels a durable job.
+Reopening only reads status. Automatic checks stop after at most 300 reads at
+2-second intervals; manual Check status starts another bounded observation
+window, never another dispatch. A polling failure preserves any recorded result.
+Verified success requires a complete receipt, target identity and healthy
+result. Verified rollback requires the original restored identity and health;
+core health, reconnect and missing receipts alone cannot prove completion.
+
+Before production wiring, implement and review strict shared models, scoped
+no-store/redirect-refusing HTTP projection, capability and trusted-catalog
+checks, fixed typed refusal mapping and native #111 restart-safe reconciliation.
+The client interface must not be backed by a fake successful production adapter.
+Local synthetic Chromium/Firefox/WebKit tests cover component states and the
+existing installer parsers; they do not establish HTTP/Policy/transaction,
+native platform, deployed-browser acceptance or a complete author gate.
