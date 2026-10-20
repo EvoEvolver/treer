@@ -361,8 +361,8 @@ mod tests {
         protocol::{Envelope, Sender, SenderKind},
         store::{Limits, Store},
     };
-    const URL: &str = "https://hub.example/";
-    fn setup(store: &mut Store) {
+    pub(super) const URL: &str = "https://hub.example/";
+    pub(super) fn setup(store: &mut Store) {
         store.register_paused("ag_email", 1, "ag_internal").unwrap();
         Queue::new(store)
             .unwrap()
@@ -383,7 +383,7 @@ mod tests {
     fn intent(q: &mut Queue<'_>, n: i64) -> Intent {
         intent_at(q, n, n * 61)
     }
-    fn intent_at(q: &mut Queue<'_>, n: i64, now: i64) -> Intent {
+    pub(super) fn intent_at(q: &mut Queue<'_>, n: i64, now: i64) -> Intent {
         q.admit(
             "ag_email",
             1,
@@ -666,7 +666,7 @@ mod tests {
         assert!(q.proxy_delivery_status("ag_email").is_err());
     }
     #[cfg(feature = "hub")]
-    fn fake_core(path: &std::path::Path, succeeds: bool) -> crate::core::Core {
+    pub(super) fn fake_core(path: &std::path::Path, succeeds: bool) -> crate::core::Core {
         use std::os::unix::fs::PermissionsExt;
         let exe = path.join("fake-treer");
         let source = if succeeds {
@@ -1367,3 +1367,7 @@ print(json.dumps({{'access_token':'synthetic.app.signature','token_type':'Bearer
         ));
     }
 }
+
+#[cfg(all(test, feature = "hub"))]
+#[path = "email_crash_tests.rs"]
+mod crash_tests;

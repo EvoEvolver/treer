@@ -187,9 +187,32 @@ response is withheld, proving the network wait retains neither the Store mutex
 nor a SQLite write lock. Both fake threads must finish within a bounded test
 wait before joining; this is not a production shutdown deadline.
 
-This is a transport/storage harness, not an assembled Proxy-mode Workers stop
-or an OS process-kill test: the stop flag is controlled by the test. Real-send
-runtime wiring, process supervision, restart ownership and crash rehearsal remain
+That stop-flag test is a transport/storage harness, not an assembled Proxy-mode
+Workers stop: the stop flag is controlled by the test.
+
+A separate Unix process-death test now kills and reaps its exact child at four
+real storage/transport boundaries. A SQLite UPDATE hook holds the reservation
+transaction before COMMIT; a second case holds after reservation COMMIT but
+before POST. The other two cases consume one exact frozen loopback POST and
+return synthetic acceptance, then hold inside the completion transaction before
+COMMIT or after successful COMMIT. Hooks retain the real Store commit hook.
+Before SIGKILL, the parent independently reads the exact intent and its journal
+and reservation state; a ready file alone is not evidence of COMMIT. The child
+must remain alive until killed and exit with SIGKILL, with bounded parent waits
+and cleanup restricted to that owned child.
+
+Reopening the private Store through the actual startup lease leaves the first
+case prepared and eligible for a fresh local reservation with identical bytes
+(no POST). Both committed-dispatching cases become uncertain and retain their
+reservation, including the case where HTTP never began. Committed acceptance
+stays accepted with a completed intent and released reservation. The latter
+three refuse a new begin/claim even after unpause and lease expiry. The retained
+listener verifies zero POSTs in the first two cases, exactly one in the last
+two, and no additional connection through recovery and claim checks.
+
+This proves hermetic process-death containment at these boundaries, not
+assembled worker restart ownership or a production shutdown deadline. Real-send
+runtime wiring, process supervision and end-to-end worker crash rehearsal remain
 activation blockers. The loopback fake does not establish provider delivery.
 
 
