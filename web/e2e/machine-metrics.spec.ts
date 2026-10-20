@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { fixture, gotoWorkspace } from './fixtures/workspace-tabs'
 import { metricsFixture } from './fixtures/machine-metrics'
 import type { MetricsRequest, MachineMetrics } from '../src/lib/machine-metrics'
@@ -165,7 +166,9 @@ test('fractional age uses exact UTC ordering before flooring milliseconds', asyn
 
 test('shared exact nanosecond span vectors accept source counts and reject decremented counts', async ({ page }) => {
   await page.goto('/')
-  const vectors = JSON.parse(readFileSync(new URL('../../docs/fixtures/machine-metrics-span-vectors.json', import.meta.url), 'utf8')) as {
+  const raw = readFileSync(new URL('../../docs/fixtures/machine-metrics-span-vectors.json', import.meta.url))
+  expect(createHash('sha256').update(raw).digest('hex')).toBe('851cdd7bfb7362ac4c5755a73f9442a577552751228b7ed39c935f150df6ed9b')
+  const vectors = JSON.parse(raw.toString('utf8')) as {
     from: string; sample_interval_ms: number;
     vectors: { name: string; span_ns: string; max_points: number; bucket_width_ms: number; expected_counts: number[] }[];
   }
