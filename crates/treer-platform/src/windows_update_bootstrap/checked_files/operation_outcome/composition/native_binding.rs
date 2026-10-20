@@ -2,6 +2,8 @@
 use super::super::context_record::{self, Image, Record};
 use super::*;
 
+mod retained_head;
+
 fn file_id(file: &File) -> io::Result<(u64, [u8; 16])> {
     let mut info: FILE_ID_INFO = unsafe { mem::zeroed() };
     check(unsafe {

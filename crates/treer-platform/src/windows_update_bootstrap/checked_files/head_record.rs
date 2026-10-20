@@ -5,22 +5,22 @@ const MAGIC: &[u8; 8] = b"TRHEAD01";
 const LENGTH: usize = 181;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Image {
-    volume: u64,
-    file: [u8; 16],
-    size: u64,
-    hash: [u8; 32],
+pub(super) struct Image {
+    pub(super) volume: u64,
+    pub(super) file: [u8; 16],
+    pub(super) size: u64,
+    pub(super) hash: [u8; 32],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Head {
-    attempt: [u8; 32],
-    component: u8,
-    role: u8,
-    operation: u8,
-    revision: u64,
-    source: Image,
-    target: Image,
+pub(super) struct Head {
+    pub(super) attempt: [u8; 32],
+    pub(super) component: u8,
+    pub(super) role: u8,
+    pub(super) operation: u8,
+    pub(super) revision: u64,
+    pub(super) source: Image,
+    pub(super) target: Image,
 }
 
 fn identifier<const N: usize>(value: &[u8; N]) -> bool {
@@ -42,7 +42,7 @@ impl Head {
             && (self.source.volume, self.source.file) != (self.target.volume, self.target.file)
     }
 
-    fn encode(&self) -> Option<Vec<u8>> {
+    pub(super) fn encode(&self) -> Option<Vec<u8>> {
         if !self.valid() {
             return None;
         }

@@ -1341,6 +1341,35 @@ the operation, bind the committed head digest into context, and refuse foreign
 attempts, same-byte/different-object substitutions and head advance. Neither a
 reopened lock nor a parsed record can rebuild that authority after process death.
 
+#### Partial retained-head/context composition
+
+The cooperative publication/pin slice `98d47e50` passed hosted run
+39351238820 on Server 2022/2025: two pin tests with actual write/delete
+sharing violations 32 and released write-open 0, plus 79 ordinary tests and
+four ignored. Core 6321 and security 6322 independently read the raw logs.
+
+The next test-only composition builds the 181-byte expected head from the
+independently captured native attempt-directory binding, full source/target
+identities, hashes, sizes and fixed intent before native failure acquisition.
+It publishes under the live fixture lock and derives the context predecessor
+SHA-256 from the retained pin only after exact expected-byte and same-attempt
+checks. The pin remains borrowed through evidence storage and consumption;
+the wrapper checks it before evidence read and again after that read, before
+the existing single-use fixture counter may advance. A failed precheck spends
+the evidence too. No decoded record, digest or reopened path constructs a pin.
+
+Two new native tests exercise both move-old/publish occupied-target failures,
+the retained digest in the existing strict context/evidence codec, single use,
+foreign-attempt refusal, and independent revision/component/hash/object-field
+mismatch refusal before evidence creation. These tests require a new exact-SHA
+hosted run; Windows cross-compilation alone does not establish their execution.
+The expected-field mismatch cases do not simulate an actual file replacement
+or a committed head advance. Same-bytes/new-object replacement, head advancement
+and a fresh-process diagnose-only rehearsal remain separate acceptance work.
+The older operation fixtures still explicitly use their synthetic predecessor;
+this partial fixture adds no production adapter, recovery or durable consume.
+The cooperative publish-to-pin gap and leader-held W4 boundary remain unchanged.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 

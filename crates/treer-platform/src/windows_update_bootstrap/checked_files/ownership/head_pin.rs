@@ -1,7 +1,7 @@
 //! Cooperative publication and read custody only, not acquisition authority.
 use super::*;
 
-struct HeadPin<'a> {
+pub(in crate::windows_update_bootstrap::checked_files) struct HeadPin<'a> {
     ownership: &'a FixtureLock<'a>,
     file: File,
     object: (u64, [u8; 16]),
@@ -34,7 +34,10 @@ fn read_head(mut file: &File) -> io::Result<Vec<u8>> {
 impl<'a> FixtureLock<'a> {
     // The fixture publishes only an initial head, while holding live ownership.
     // It cannot reopen a path to reconstruct a HeadPin or recovered authority.
-    fn publish_head(&'a self, bytes: &[u8]) -> io::Result<HeadPin<'a>> {
+    pub(in crate::windows_update_bootstrap::checked_files) fn publish_head(
+        &'a self,
+        bytes: &[u8],
+    ) -> io::Result<HeadPin<'a>> {
         self.validate()?;
         if !head_record::valid_bytes(bytes) {
             return Err(denied());
@@ -62,6 +65,20 @@ impl<'a> FixtureLock<'a> {
 }
 
 impl HeadPin<'_> {
+    // Independent expectations are fixed before native acquisition. This
+    // returns data only, and cannot reconstruct a pin from a file or digest.
+    pub(in crate::windows_update_bootstrap::checked_files) fn digest_for(
+        &self,
+        attempt: &Attempt,
+        expected: &[u8],
+    ) -> io::Result<[u8; 32]> {
+        self.validate()?;
+        if !ptr::eq(self.ownership.attempt, attempt) || self.bytes != expected {
+            return Err(denied());
+        }
+        Ok(Sha256::digest(&self.bytes).into())
+    }
+
     fn validate(&self) -> io::Result<()> {
         self.ownership.validate()?;
         let owner = crate::windows::current_user_sid().map_err(|_| denied())?;
