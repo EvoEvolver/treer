@@ -71,6 +71,7 @@ pub struct History {
     last_clock: Option<Clock>,
     epoch: u64,
     next_tick: u64,
+    exhausted: bool,
     truncated: bool,
 }
 
@@ -93,6 +94,7 @@ impl History {
             last_clock: None,
             epoch: 0,
             next_tick: 0,
+            exhausted: false,
             truncated: false,
         })
     }
@@ -106,8 +108,24 @@ impl History {
     fn reset_epoch(&mut self) {
         self.records.clear();
         self.bytes = 0;
-        self.epoch = self.epoch.wrapping_add(1);
+        match self.epoch.checked_add(1) {
+            Some(epoch) => self.epoch = epoch,
+            None => self.exhausted = true,
+        }
         self.truncated = true;
+    }
+
+    pub(super) fn invalidate(&mut self, clock: Clock) {
+        self.reset_epoch();
+        self.last_clock = Some(clock);
+    }
+
+    pub(super) fn ensure_live(&self) -> Result<(), HistoryError> {
+        if self.exhausted {
+            Err(HistoryError::SequenceExhausted)
+        } else {
+            Ok(())
+        }
     }
 
     /// Invoke on every collector tick and before append/query, independent of
@@ -146,6 +164,7 @@ impl History {
         sample: &MachineMetricsResponse,
     ) -> Result<(), HistoryError> {
         self.maintain(clock);
+        self.ensure_live()?;
         // The caller must project an actual collected frame, not aggregate it
         // from a chart query or timestamp it when a viewer happens to ask.
         let query = MachineMetricsQuery {

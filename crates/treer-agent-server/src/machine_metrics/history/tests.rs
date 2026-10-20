@@ -225,3 +225,20 @@ fn frame_ticks_are_append_owned_and_survive_eviction_and_epoch_reset() {
     assert_eq!(history.record_count(), 1);
     assert_eq!(history.staged_frames(later).next().unwrap().tick, 2);
 }
+#[test]
+fn epoch_exhaustion_clears_history_and_permanently_refuses_append() {
+    let mut history = History::new("fixture-machine".into(), Limits::default()).unwrap();
+    history.push(clock(0), &sample(clock(0))).unwrap();
+    assert_eq!(history.record_count(), 1);
+    history.epoch = u64::MAX;
+    history.invalidate(clock(0));
+    assert_eq!(history.epoch(), u64::MAX);
+    assert_eq!(history.record_count(), 0);
+    assert_eq!(history.ensure_live(), Err(HistoryError::SequenceExhausted));
+    assert_eq!(
+        history.push(clock(0), &sample(clock(0))),
+        Err(HistoryError::SequenceExhausted)
+    );
+    history.maintain(clock(5000));
+    assert_eq!(history.ensure_live(), Err(HistoryError::SequenceExhausted));
+}

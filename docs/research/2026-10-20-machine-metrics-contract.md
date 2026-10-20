@@ -293,3 +293,24 @@ paired RAM/VRAM refreshes still need consistent batch assembly. The History
 frame format does not yet carry these per-field identities. Its adapter must
 preserve them through serialization and deduplicate cached references before
 aggregation. This cache adds no sampler, timer, journal, IPC, API or capability.
+
+## Coordinated collector epoch checkpoint (not connected)
+
+`machine_metrics::collector_state` privately owns a History and FieldCache;
+History's epoch is authoritative for this state object. Every maintenance,
+acquisition and frame admission first synchronizes that epoch. History clock
+discontinuity clears the cache; cumulative cache-clock disagreement also clears
+History and advances the same epoch. An empty snapshot after uncertainty means
+warming_up/no observation, never permission to reuse an earlier field. Only a
+new completed capture can populate the new epoch. Acquisition ticks remain
+increasing across resets. Epoch exhaustion clears history and permanently
+refuses operations rather than wrapping to an old identity.
+
+Frame admission compares every current field against that clock's cache
+projection, allowing canonical empty warming_up fields when absent. It refuses
+caller-invented or pre-reset values before staging, then runs the existing full
+frame validator. This is an inert state boundary, not a sampler or response
+assembler. Original per-field identities still need a bounded history encoding;
+the outer frame tick cannot replace them. Paired acquisitions, removed-GPU
+inventory, per-range epoch/partial flags, journal integration, singleton IPC,
+authorization and routes remain unfinished. No runtime capability is enabled.
