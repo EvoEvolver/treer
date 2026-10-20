@@ -70,6 +70,14 @@ and source inspection before activation. OS-generated privileged crash dumps
 are outside an application no-logging guarantee; do not configure automatic
 Treer metric reply dumps or attach heap dumps to diagnostics.
 
+HTTP mapping for consumers: invalid range/query 400; Policy refusal 403;
+offline 503; unsupported 501; disabled 409; busy 429 with Retry-After: 5;
+timeout 504; invalid upstream response 502. Non-member/wrong-workspace remains
+the existing uniform 404, not a new metrics-specific disclosure. A disabled
+collector notice says collection is disabled by the machine owner for this
+installation and all same-account enrollments. No browser enable toggle is
+authorized without a separate machine-owner setting operation.
+
 Bounds: two queries/source machine, four pending/Proxy machine, one pending
 per principal/machine. Coalesce identical in-flight source queries only, no
 completed-query history cache on Proxy. Ten-second overall timeout. Source
@@ -78,6 +86,12 @@ records TOTAL across all series, coarsening all series identically further if
 needed to stay <=1 MiB encoded. No partial response at the byte limit: bounded
 failure if even the metadata/current values cannot fit. No response advertises
 or activates a capability until the entire source/query path exists.
+
+Each caller independently passes membership, workspace/machine binding and
+Policy before joining coalesced work; coalescing is never an authorization
+cache. Canceling one subscriber must not cancel another's live subscription;
+cancel underlying work when no subscribers remain, subject to transport/source
+deadlines. The per-principal cap still applies to coalesced subscribers.
 
 `MachineMetricsResponse.series` contains four system series plus three per GPU
 (max 100). `kind` fixes unit: utilization percent 0..100, RAM/VRAM bytes >=0.
@@ -97,6 +111,18 @@ newer CPU/RAM timestamp. `stale_after_ms` is 15,000: older valid observations
 have status stale, value null, and retain acquisition time/age for the UI label.
 Failure/unsupported readings have value null, with time of that attempt when
 known. Absence of any observation has null time/age. New CPU baseline is warming_up.
+
+`age_ms` is exactly floor((generated_at - sampled_at) / 1 millisecond), never
+relative to query acceptance or browser wall time. The receiver must account
+for transport delay when displaying freshness; Web conservatively adds measured
+request elapsed time to accepted source age, then advances with monotonic
+elapsed time since acceptance. This may label a borderline field stale slightly
+early, but never freezes it at its arrival age. Failed refresh does not reset
+the age anchor. Hidden/resumed tabs recompute before showing values; if elapsed
+time cannot be trusted across suspension, show stale until a fresh response.
+The current value is hidden once effective age exceeds 15 seconds; successful
+new data alone resets its anchor. No reliance on source/browser wall-clock
+agreement or generated_at as a replacement sample timestamp.
 
 All series share identical ascending half-open bucket boundaries covering
 the resolved request range. Empty history: points=[] for every series (no fake
@@ -137,6 +163,17 @@ Executable JSON examples for all six cases are emitted to stdout by
 reads no machine data and stores nothing. Its tests round-trip all cases through
 the bounded parser and reject independently mutated binding/time/value/count/
 device/capacity inputs, over-limit frames and truncated JSON.
+The removed_gpu case intentionally has gpu_status=no_device, present=false and
+retained historical series. Every nonempty example currently has one bucket;
+partial_gap has a single partial bucket, whose plotted statistic is the bucket
+mean, not a fabricated raw reading at first/last_sample_at. Render it with a
+marked point/table value while breaking continuity.
+
+Rust and browser validators should consume the same emitted fixture documents.
+Web can capture the synthetic stdout in its own test assets (no live data) and
+apply the same independent invalid mutations as the Rust example tests. Keep
+schema/expectation changes synchronized on #220/#221 rather than relaxing one
+validator to accept a response rejected by the other.
 
 | Case | Per-series current | Selected-range points | Required presentation |
 | --- | --- | --- | --- |
