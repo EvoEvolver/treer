@@ -1,10 +1,10 @@
 //! Inert accounting primitive, not allocator interception or runtime admission.
-//! All users must share one machine-owned instance; independently constructed
-//! ledgers are NOT a global ceiling. Callers must charge full allocation bounds.
+//! Production handles share one process-wide machine ledger. Callers must
+//! charge full allocation bounds; existing allocation stages are not wired yet.
 use std::ops::Deref;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc,
+    Arc, OnceLock,
 };
 
 pub const AGGREGATE_BYTES: usize = 32 * 1024 * 1024;
@@ -21,11 +21,28 @@ struct State {
     assembling: AtomicBool,
 }
 
+static MACHINE_BUDGET: OnceLock<MemoryBudget> = OnceLock::new();
+
 #[derive(Clone)]
 pub struct MemoryBudget(Arc<State>);
 
-impl Default for MemoryBudget {
-    fn default() -> Self {
+impl MemoryBudget {
+    /// All machine metrics owners in this Controller process obtain clones of
+    /// this ledger. No public constructor or Default creates an independent one.
+    pub fn machine() -> Self {
+        MACHINE_BUDGET
+            .get_or_init(|| {
+                Self(Arc::new(State {
+                    charged: AtomicUsize::new(0),
+                    assembling: AtomicBool::new(false),
+                }))
+            })
+            .clone()
+    }
+
+    // Independent fixtures must not race with each other on the singleton.
+    #[cfg(test)]
+    fn isolated() -> Self {
         Self(Arc::new(State {
             charged: AtomicUsize::new(0),
             assembling: AtomicBool::new(false),
@@ -145,7 +162,7 @@ mod tests {
 
     #[test]
     fn shared_budget_refuses_before_builder_and_returns_after_last_owner() {
-        let budget = MemoryBudget::default();
+        let budget = MemoryBudget::isolated();
         let full = Arc::new(build(&budget, AGGREGATE_BYTES));
         assert!(matches!(
             budget.clone().try_build(1, || -> Result<(), ()> {
@@ -170,7 +187,7 @@ mod tests {
 
     #[test]
     fn failed_and_panicking_stages_restore_baseline_and_drop_value_before_credit() {
-        let budget = MemoryBudget::default();
+        let budget = MemoryBudget::isolated();
         let baseline = build(&budget, 128);
         let failed = budget
             .try_build(1024, || Err::<(), _>("injected stage error"))
@@ -200,7 +217,7 @@ mod tests {
 
     #[test]
     fn revocation_never_reclaims_live_worker_or_response_slot() {
-        let budget = MemoryBudget::default();
+        let budget = MemoryBudget::isolated();
         let owner = budget.try_assembly().unwrap();
         let worker = owner.clone();
         let response = owner.clone();
@@ -227,7 +244,7 @@ mod tests {
 
     #[test]
     fn concurrent_handles_share_one_counter() {
-        let budget = MemoryBudget::default();
+        let budget = MemoryBudget::isolated();
         let ready = Arc::new(Barrier::new(5));
         let release = Arc::new(Barrier::new(5));
         let workers: Vec<_> = (0..4)
@@ -258,7 +275,7 @@ mod tests {
 
     #[test]
     fn concurrent_handles_admit_one_assembly_and_unwind_releases_it() {
-        let budget = MemoryBudget::default();
+        let budget = MemoryBudget::isolated();
         let start = Arc::new(Barrier::new(4));
         let finish = Arc::new(Barrier::new(4));
         let admitted = Arc::new(AtomicUsize::new(0));
@@ -289,5 +306,36 @@ mod tests {
         })
         .is_err());
         assert!(budget.try_assembly().is_ok());
+    }
+
+    #[test]
+    fn independently_obtained_machine_handles_share_credit_and_revoked_slot() {
+        let budget = MemoryBudget::machine();
+        let slot = budget.try_assembly().unwrap();
+        let full = build(&budget, AGGREGATE_BYTES);
+        slot.revoke();
+        let worker_slot = slot.clone();
+        std::thread::spawn(move || {
+            let independently_obtained = MemoryBudget::machine();
+            assert!(Arc::ptr_eq(&budget.0, &independently_obtained.0));
+            assert!(worker_slot.is_revoked());
+            assert!(matches!(
+                independently_obtained.try_assembly(),
+                Err(BudgetError::AssemblyBusy)
+            ));
+            assert!(matches!(
+                independently_obtained.try_build(1, || -> Result<(), ()> {
+                    panic!("second accessor bypassed aggregate credit")
+                }),
+                Err(BudgetError::Exhausted)
+            ));
+        })
+        .join()
+        .unwrap();
+        drop(full);
+        drop(slot);
+        let next = MemoryBudget::machine();
+        assert_eq!(next.charged_bytes(), 0);
+        assert!(!next.try_assembly().unwrap().is_revoked());
     }
 }

@@ -1134,7 +1134,10 @@ native performance and deployed/browser #221 acceptance remain pending.
 ### Shared credit and assembly ownership primitive (inert model)
 
 memory_budget::MemoryBudget provides a shared Arc-backed atomic ledger with a
-32 MiB reservation ceiling. Cloned handles share the counter and one assembly
+32 MiB reservation ceiling. Its only production accessor, MemoryBudget::machine,
+returns clones of one private process-wide OnceLock-backed ledger; there is no
+public constructor or Default implementation. Independent ledgers exist only
+in private cfg(test) fixtures. Cloned handles share the counter and one assembly
 slot. try_build reserves a nonzero bounded credit BEFORE invoking its fallible
 builder; exhausted/invalid requests cannot enter that builder. A failed builder
 or unwind drops its reservation. Successful Charged<T> owns both the result and
@@ -1154,12 +1157,15 @@ Tests cover exhausted/invalid requests before builder entry, full-budget credit
 retained by a cloned response owner, builder error/panic restoration to a live
 baseline, value-before-credit destruction, revoked worker/response lifetimes,
 four concurrent handles sharing the full aggregate reservation, four competing
-assembly callers admitting exactly one, and slot release on unwind. These are
+assembly callers admitting exactly one, slot release on unwind, and independent
+machine accessor calls across threads sharing exhausted credit and a revoked
+but still-owned slot. These are
 primitive tests, not faults injected into an actual decode/encode pipeline.
 
-This is NOT global runtime memory enforcement: separately constructed budgets
-remain independent; the future machine singleton must supply the same instance
-to all histories/workers/outputs. Charged byte amounts are caller-supplied bounds,
+This is NOT global runtime memory enforcement: all histories/workers/outputs
+must still be wired to the process-wide accessor. This does not coordinate
+multiple Controller processes or charge other processes' native scratch.
+Charged byte amounts are caller-supplied bounds,
 not allocator measurements. Builders must not allocate beyond their reservation
 or let failed/async allocations escape it. The ledger's Arc/slot bookkeeping is
 not yet charged either. No existing ring/index/decoder/encoder uses this ledger.
