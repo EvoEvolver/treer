@@ -13,6 +13,164 @@ fn state() -> CollectorState {
 }
 
 #[test]
+fn multi_field_query_caps_combined_buckets_and_validates_before_reduction() {
+    use crate::machine_metrics::field_query::FieldKey;
+    let mut state = state();
+    let now = clock(86_400_000, 86_400_000);
+    let mut view = state.detached_query(now, &mut || false).unwrap();
+    let query = MachineMetricsQuery {
+        from: clock(0, 0).wall,
+        to: now.wall,
+        max_points: 720,
+    };
+    let mut fields: Vec<_> = [
+        MachineMetricKind::CpuUtilization,
+        MachineMetricKind::RamUsed,
+        MachineMetricKind::RamAvailable,
+        MachineMetricKind::RamTotal,
+    ]
+    .into_iter()
+    .map(|kind| FieldKey { kind, gpu_id: None })
+    .collect();
+    for gpu in 0..32 {
+        for kind in [
+            MachineMetricKind::GpuUtilization,
+            MachineMetricKind::GpuMemoryUsed,
+            MachineMetricKind::GpuMemoryTotal,
+        ] {
+            fields.push(FieldKey {
+                kind,
+                gpu_id: Some(format!("{gpu:064x}")),
+            });
+        }
+    }
+    let result = view.query_fields(&query, &fields, &mut || false).unwrap();
+    assert_eq!(result.fields.len(), 100);
+    assert_eq!(
+        result
+            .fields
+            .iter()
+            .map(|(_, buckets)| buckets.points.len())
+            .sum::<usize>(),
+        7200
+    );
+    assert!(result
+        .fields
+        .iter()
+        .all(|(_, buckets)| buckets.points.len() == 72
+            && buckets.points.last().unwrap().to == query.to));
+    let invalid = MachineMetricsQuery {
+        max_points: 721,
+        ..query
+    };
+    assert!(matches!(
+        view.query_fields(&invalid, &fields, &mut || false),
+        Err(FieldQueryError::Aggregation(
+            crate::machine_metrics::aggregation::AggregationError::InvalidQuery
+        ))
+    ));
+    fields.push(FieldKey {
+        kind: MachineMetricKind::CpuUtilization,
+        gpu_id: None,
+    });
+    assert!(matches!(
+        view.query_fields(&invalid, &fields, &mut || false),
+        Err(FieldQueryError::InvalidFields)
+    ));
+}
+
+#[test]
+fn multi_field_query_deduplicates_and_rejects_limits_without_partial_results() {
+    use crate::machine_metrics::field_query::FieldKey;
+    let mut state = state();
+    record(&mut state, clock(0, 0), 12.0);
+    state
+        .record_ram(clock(0, 0), MachineMetricStatus::Ok, Some((100, 70)))
+        .unwrap();
+    for ms in [0, 5_000, 10_000] {
+        let sample = frame(&mut state, clock(ms, ms as u64));
+        state.append_frame(clock(ms, ms as u64), &sample).unwrap();
+    }
+    let now = clock(15_000, 15_000);
+    let query = MachineMetricsQuery {
+        from: clock(0, 0).wall,
+        to: now.wall,
+        max_points: 3,
+    };
+    let fields: Vec<_> = [
+        MachineMetricKind::RamUsed,
+        MachineMetricKind::CpuUtilization,
+        MachineMetricKind::RamTotal,
+    ]
+    .into_iter()
+    .map(|kind| FieldKey { kind, gpu_id: None })
+    .collect();
+    let mut view = state.detached_query(now, &mut || false).unwrap();
+    let mut calls = 0;
+    let result = view
+        .query_fields(&query, &fields, &mut || {
+            calls += 1;
+            false
+        })
+        .unwrap();
+    assert_eq!(result.epoch, 0);
+    assert_eq!(
+        result.fields.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+        fields.iter().collect::<Vec<_>>()
+    );
+    for ((key, buckets), expected) in result.fields.iter().zip([30.0, 12.0, 100.0]) {
+        assert_eq!(buckets.points[0].mean, Some(expected));
+        assert!(buckets.points[1..]
+            .iter()
+            .all(|bucket| bucket.valid_count == 0));
+        let single = view
+            .query_field(&query, key.kind, None, &mut || false)
+            .unwrap();
+        assert_eq!(buckets.points, single.buckets.points);
+    }
+    assert!(matches!(
+        view.query_fields_bounded(&query, &fields, &mut || false, 2),
+        Err(FieldQueryError::IndexLimit)
+    ));
+    assert!(view
+        .query_fields_bounded(&query, &fields, &mut || false, 3)
+        .is_ok());
+    assert!(matches!(
+        view.query_fields(&query, &[fields[0].clone(), fields[0].clone()], &mut || {
+            false
+        }),
+        Err(FieldQueryError::InvalidFields)
+    ));
+    assert!(matches!(
+        view.query_fields(&query, &[], &mut || false),
+        Err(FieldQueryError::InvalidFields)
+    ));
+    for stop_at in 1..=calls {
+        let mut calls = 0;
+        assert!(matches!(
+            view.query_fields(&query, &fields, &mut || {
+                calls += 1;
+                calls == stop_at
+            }),
+            Err(FieldQueryError::Aggregation(
+                crate::machine_metrics::aggregation::AggregationError::Cancelled
+            ))
+        ));
+    }
+    let mut keys = fields;
+    keys.push(FieldKey {
+        kind: MachineMetricKind::GpuUtilization,
+        gpu_id: Some("a".repeat(64)),
+    });
+    let missing = view.query_fields(&query, &keys, &mut || false).unwrap();
+    assert!(missing.fields[3]
+        .1
+        .points
+        .iter()
+        .all(|bucket| bucket.mean.is_none() && bucket.partial));
+}
+
+#[test]
 fn detached_query_releases_collector_borrow_and_bounds_retained_views() {
     let mut state = state();
     record(&mut state, clock(0, 0), 12.0);

@@ -1,4 +1,4 @@
-//! Single-field staging reader. Not the public multi-series query assembler.
+//! Bounded staging readers. Not the public response or runtime query route.
 use super::{
     aggregation::{self, AggregationError, Buckets, Observation},
     field_cache::{field_unit, CacheError},
@@ -8,12 +8,17 @@ use super::{
 use std::collections::HashMap;
 use treer_protocol::{MachineMetricKind, MachineMetricsQuery};
 
+mod multi;
+pub use multi::{FieldKey, MultiFieldHistory, MAX_INDEX_ACQUISITIONS};
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum FieldQueryError {
     History(HistoryError),
     Cache(CacheError),
     Aggregation(AggregationError),
     ConflictingAcquisition,
+    InvalidFields,
+    IndexLimit,
 }
 
 pub struct FieldHistory {

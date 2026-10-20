@@ -542,3 +542,43 @@ resets, proves the view still returns its original data/epoch, refuses a second
 view even after cancellation, then proves drop and panic release admission and
 the next view sees the cleared new epoch. Decode-once multi-series assembly,
 response budgets, deadline/Policy/IPC/journal and native collection remain open.
+
+## Decode-once multi-field staging checkpoint (not connected)
+
+The detached view can now answer 1 to 100 unique typed field keys in request
+order. It validates the original query before reducing max_points, then caps
+each series at min(requested, floor(7200 / requested-series-count)); all fields
+therefore share a bucket width and the aggregate output has at most 7,200
+buckets. Missing keys retain empty partial buckets. This is a staging result,
+not a MachineMetricsResponse: current values, inventory union, per-range
+truncation, metadata and the final 1 MiB encoded-response cap are not assembled.
+
+Each retained frame is decoded and validated once for all requested keys.
+Original acquisition identity (epoch, tick) indexes both field position and full
+observation. Identical cached references deduplicate; either a different field
+or changed observation under the same identity refuses the entire query.
+Requested acquisitions outside the range also participate in that conflict
+check. Invalid frames refuse the whole query even if they have no requested
+field. Only original observations, never stale current projections, enter the
+existing aggregation/coalescing path. Unrequested fields are frame-validated
+but are not cross-frame indexed by this helper.
+
+The temporary index is bounded at 262,144 unique acquisitions across all
+requested fields, with at most 17,280 per field. A cap hit returns IndexLimit,
+not partial statistics, eviction or an automatic retry. This deliberate staging
+limit may refuse dense full-day/many-GPU data even when the serialized ring
+fits; it is not a guarantee every maximum-range/maximum-device request succeeds.
+Admission remains one detached view per History instance. The index hash table,
+per-field observation vectors (at most the same total entries) and aggregation
+scratch allocations have bounded element counts, not a measured RSS ceiling;
+hash-table growth/transfer temporarily overlaps allocations. Runtime memory
+measurements and a defensible process-wide byte budget remain activation work.
+
+Cancellation is checked during decode, indexing, redistribution and each field
+aggregation, and no partial multi-field result escapes. Tests compare requested
+RAM/CPU results to independent single-field reads, preserve cached gaps and
+missing-GPU output, refuse duplicate/empty/oversized key sets, exercise exact
+index-cap boundaries and every reachable cancellation checkpoint, reject
+conflicting/corrupt frames, and verify 100 series produce 7,200 full-day buckets
+while an invalid original max_points cannot become valid through reduction.
+No sampler, timer, advertised capability, journal, IPC or public route is added.

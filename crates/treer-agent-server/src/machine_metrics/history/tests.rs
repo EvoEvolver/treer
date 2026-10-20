@@ -75,6 +75,25 @@ fn field_query_refuses_conflicting_cached_identity_and_corrupt_staging_bytes() {
         ),
         Err(FieldQueryError::ConflictingAcquisition)
     ));
+    {
+        use crate::machine_metrics::field_query::{DetachedFieldQuery, FieldKey};
+        let mut view = DetachedFieldQuery {
+            history: history.detached_snapshot(clock(10_000)).unwrap(),
+            clock: clock(10_000),
+            reset: false,
+        };
+        assert!(matches!(
+            view.query_fields(
+                &query,
+                &[FieldKey {
+                    kind: MachineMetricKind::CpuUtilization,
+                    gpu_id: None
+                }],
+                &mut || false
+            ),
+            Err(FieldQueryError::ConflictingAcquisition)
+        ));
+    }
     history.records[1].bytes = b"invalid".to_vec().into();
     assert!(matches!(
         aggregate_field(
@@ -87,6 +106,25 @@ fn field_query_refuses_conflicting_cached_identity_and_corrupt_staging_bytes() {
         ),
         Err(FieldQueryError::History(HistoryError::InvalidSample))
     ));
+    {
+        use crate::machine_metrics::field_query::{DetachedFieldQuery, FieldKey};
+        let mut view = DetachedFieldQuery {
+            history: history.detached_snapshot(clock(10_000)).unwrap(),
+            clock: clock(10_000),
+            reset: false,
+        };
+        assert!(matches!(
+            view.query_fields(
+                &query,
+                &[FieldKey {
+                    kind: MachineMetricKind::CpuUtilization,
+                    gpu_id: None
+                }],
+                &mut || false
+            ),
+            Err(FieldQueryError::History(HistoryError::InvalidSample))
+        ));
+    }
 }
 
 fn clock(ms: u64) -> Clock {
