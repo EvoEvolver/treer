@@ -212,10 +212,7 @@ impl<'a> BoundStored<'a> {
             return Err(denied());
         }
         self.binding.check(self.composition)?;
-        if sink.refuse {
-            return Err(denied());
-        }
-        sink.accepted += 1;
+        sink.accept()?;
         // Explicitly retain custody until after the synchronous sink completes.
         drop(guard);
         Ok(())
@@ -224,14 +221,20 @@ impl<'a> BoundStored<'a> {
 
 #[test]
 fn native_operation_guard_released_after_acceptance_or_refusal() {
-    struct Guard<'a>(&'a Cell<usize>);
+    struct Guard<'a> {
+        drops: &'a Cell<usize>,
+        accepted: &'a Cell<usize>,
+        accepted_at_drop: &'a Cell<usize>,
+    }
     impl Drop for Guard<'_> {
         fn drop(&mut self) {
-            self.0.set(self.0.get() + 1);
+            self.accepted_at_drop.set(self.accepted.get());
+            self.drops.set(self.drops.get() + 1);
         }
     }
     for operation in [Operation::MoveOld, Operation::Publish] {
-        for refuse in [false, true] {
+        for scenario in 0..3 {
+            let refuse = scenario == 1;
             let fixture = Fixture::new(operation);
             let binding = Binding::before_acquisition(&fixture, 1).unwrap();
             let context = fixture.context();
@@ -247,28 +250,51 @@ fn native_operation_guard_released_after_acceptance_or_refusal() {
                 panic!("native collision required");
             };
             let stored = BoundStored::store(&composition, &binding, &failure).unwrap();
-            let drops = Cell::new(0);
+            let drops = std::rc::Rc::new(Cell::new(0));
+            let accepted = std::rc::Rc::new(Cell::new(0));
+            let accepted_at_drop = Cell::new(usize::MAX);
+            let observe_drops = drops.clone();
+            let observe_accepted = accepted.clone();
             let mut sink = Sink {
                 accepted: 0,
                 refuse,
+                on_accept: Some(Box::new(move |count| {
+                    // This executes inside the real private sink, not its hook.
+                    assert_eq!(observe_drops.get(), 0);
+                    observe_accepted.set(count);
+                    assert_ne!(scenario, 2, "injected sink panic");
+                })),
             };
-            let result = stored.consume_with_guard(&binding, &mut sink, |_| {
-                assert!(stored.spent.get());
-                assert_eq!(drops.get(), 0);
-                Ok(Guard(&drops))
-            });
-            assert_eq!(result.is_ok(), !refuse);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                stored.consume_with_guard(&binding, &mut sink, |_| {
+                    assert!(stored.spent.get());
+                    assert_eq!(drops.get(), 0);
+                    Ok(Guard {
+                        drops: &drops,
+                        accepted: &accepted,
+                        accepted_at_drop: &accepted_at_drop,
+                    })
+                })
+            }));
+            assert_eq!(result.is_err(), scenario == 2);
+            if let Ok(result) = result {
+                assert_eq!(result.is_ok(), !refuse);
+            }
             assert_eq!(sink.accepted, usize::from(!refuse));
             assert_eq!(drops.get(), 1);
+            assert_eq!(accepted_at_drop.get(), usize::from(!refuse));
+            assert!(stored.spent.get());
             assert!(stored
                 .consume_with_guard::<Guard<'_>>(&binding, &mut sink, |_| panic!("spent"))
                 .is_err());
             assert_eq!(drops.get(), 1);
             assert!(!fixture.attempt.path.join("consume.intent").exists());
             eprintln!(
-                "guard_fixture refused={} drops=1 spent=1 decision=0 sink={}",
+                "guard_fixture refused={} drops=1 spent=1 decision=0 sink={} observed_at_drop={} panic={}",
                 u8::from(refuse),
-                sink.accepted
+                sink.accepted,
+                accepted_at_drop.get(),
+                u8::from(scenario == 2)
             );
             drop(stored);
             cleanup(fixture);
@@ -383,6 +409,7 @@ fn native_operation_bound_context_actual_evidence_read_failure() {
         let mut sink = Sink {
             accepted: 0,
             refuse: false,
+            ..Sink::default()
         };
         assert!(stored
             .consume(&binding, &mut sink, || panic!("read must fail first"))
@@ -442,6 +469,7 @@ fn native_operation_bound_context_custody_and_single_use() {
             let mut sink = Sink {
                 accepted: 0,
                 refuse: scenario == 1,
+                ..Sink::default()
             };
             let hook_ran = Cell::new(false);
             let result = stored.consume(&expected, &mut sink, || {

@@ -140,6 +140,20 @@ impl<'a> Verifier<'a> {
 struct Sink {
     accepted: usize,
     refuse: bool,
+    on_accept: Option<Box<dyn FnMut(usize)>>,
+}
+
+impl Sink {
+    fn accept(&mut self) -> io::Result<()> {
+        if self.refuse {
+            return Err(denied());
+        }
+        self.accepted += 1;
+        if let Some(observe) = &mut self.on_accept {
+            observe(self.accepted);
+        }
+        Ok(())
+    }
 }
 
 impl Accepted<'_> {

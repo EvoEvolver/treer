@@ -1624,7 +1624,16 @@ both collision operations and sink acceptance/refusal, asserting one guard drop,
 spent retry refusal and no decision file. This is a lifetime seam only: it does
 not create a decision, validate a decision pin or prove native write/delete
 exclusion inside the sink. Those assertions remain for the composed fixture.
-Exact-SHA hosted execution of this new fixture remains pending.
+Security review 6861 correctly identified that the original drop count alone
+would also pass if the guard were dropped before the sink. The successor adds
+an observer inside the actual private sink: it asserts the guard is still alive
+and mirrors the accepted count; the guard records that count when dropped.
+Acceptance must record one, refusal zero. An injected sink panic is caught and
+must also release the guard exactly once, record one, and preserve spent retry
+refusal. Each collision operation now covers these three paths. This proves
+sink-time lifetime only; explicit second-read/binding-failure observation and
+digest-mismatch fault coverage remain open for the subsequent composition.
+Exact-SHA hosted execution of this successor fixture remains pending.
 
 The same-bytes gap replacement fixture `b279e51d` passed hosted run
 39367207855 on Server 2022/2025: read-pin three, ordinary 93 passed/four ignored
