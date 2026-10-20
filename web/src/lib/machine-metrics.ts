@@ -20,14 +20,19 @@ const text = (v: unknown, cap: number): string => typeof v === 'string' && new T
 const number = (v: unknown, max = Number.MAX_SAFE_INTEGER): number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= max ? v : fail()
 const integer = (v: unknown, max = Number.MAX_SAFE_INTEGER): number => Number.isSafeInteger(number(v, max)) ? v as number : fail()
 const enumeration = <T extends string>(v: unknown, values: readonly T[]): T => typeof v === 'string' && values.includes(v as T) ? v as T : fail()
-const stamp = (v: unknown): string => { const s = text(v, 40); return /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/.test(s) && Number.isFinite(Date.parse(s)) ? s : fail() }
+const stamp = (v: unknown): string => { const s = text(v, 40); return /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/.test(s) && Number.isFinite(Date.parse(s)) && new Date(Date.parse(s)).toISOString().slice(0, 19) === s.slice(0, 19) ? s : fail() }
 const optionalStamp = (v: unknown) => v === null ? null : stamp(v)
 const status = (v: unknown) => enumeration(v, metricStatuses)
+// Date.parse truncates fractions: subtracting two truncated dates can add a millisecond.
+// Validation uses exact UTC nanoseconds; UI formatting can still use Date.
+const time = (v: string): bigint => BigInt(Date.parse(v.slice(0, 19) + 'Z')) * 1000000n + BigInt((v.match(/\.(\d+)/)?.[1] ?? '').padEnd(9, '0'))
+const ms = (later: string, earlier: string): number => Number((time(later) - time(earlier)) / 1000000n)
+const minTime = (a: bigint, b: bigint) => a < b ? a : b
 export interface MetricsRequest { serverId: string; from: string; to: string; maxPoints: number }
 
 export function parseMachineMetrics(input: unknown, request: MetricsRequest, receivedAt = Date.now()): MachineMetrics {
   const r = object(input), from = stamp(r.from), to = stamp(r.to), generated = stamp(r.generated_at)
-  if (r.schema !== 'machine.metrics.v1' || r.server_id !== request.serverId || Date.parse(from) !== Date.parse(request.from) || Date.parse(to) !== Date.parse(request.to) || Date.parse(to) <= Date.parse(from) || Date.parse(to) - Date.parse(from) > 86400000 || Date.parse(generated) < Date.parse(to) || Date.parse(generated) > receivedAt + 15000 || r.scope !== 'os_visible_machine') fail()
+  if (r.schema !== 'machine.metrics.v1' || r.server_id !== request.serverId || time(from) !== time(request.from) || time(to) !== time(request.to) || time(to) <= time(from) || time(to) - time(from) > 86400000000000n || time(generated) < time(to) || time(generated) > BigInt(Math.trunc(receivedAt + 15000)) * 1000000n || r.scope !== 'os_visible_machine') fail()
   const sampleInterval = integer(r.sample_interval_ms), bucketWidth = integer(r.bucket_width_ms), staleAfter = integer(r.stale_after_ms)
   if (sampleInterval !== 5000 || bucketWidth < sampleInterval || bucketWidth > 86400000 || staleAfter !== 15000) fail()
   const gpus = array(r.gpus, 32).map(v => { const g = object(v), id = text(g.id, 128); if (!/^[a-f0-9]{64}$/.test(id)) fail(); return { id, name: text(g.name, 128) || fail(), present: bool(g.present) } })
@@ -40,21 +45,21 @@ export function parseMachineMetrics(input: unknown, request: MetricsRequest, rec
     const unit = enumeration(s.unit, ['percent', 'bytes'] as const); if ((unit === 'percent') !== kind.endsWith('utilization')) fail()
     const value = (v: unknown) => v === null ? null : number(v, unit === 'percent' ? 100 : Number.MAX_SAFE_INTEGER)
     const c = object(s.current), state = status(c.status), sampled = optionalStamp(c.sampled_at), age = c.age_ms === null ? null : integer(c.age_ms), currentValue = value(c.value)
-    if ((sampled === null) !== (age === null) || (sampled !== null && Date.parse(sampled) > Date.parse(generated)) || (state === 'ok' ? currentValue === null || age === null || age > staleAfter : currentValue !== null)) fail()
-    if ((sampled !== null && age !== Date.parse(generated) - Date.parse(sampled)) || (state === 'stale' && (age === null || age <= staleAfter)) || (currentValue !== null && unit === 'bytes' && !Number.isSafeInteger(currentValue)) || (gpuId && !gpus.find(g => g.id === gpuId)!.present && state !== 'device_absent')) fail()
+    if ((sampled === null) !== (age === null) || (sampled !== null && time(sampled) > time(generated)) || (state === 'ok' ? currentValue === null || age === null || age > staleAfter : currentValue !== null)) fail()
+    if ((sampled !== null && age !== ms(generated, sampled)) || (state === 'stale' && (age === null || age <= staleAfter)) || (currentValue !== null && unit === 'bytes' && !Number.isSafeInteger(currentValue)) || (gpuId && !gpus.find(g => g.id === gpuId)!.present && state !== 'device_absent')) fail()
     const points = array(s.points, Math.min(720, request.maxPoints)).map(v => {
       const b = object(v), a = stamp(b.from), z = stamp(b.to), expected = integer(b.expected_count), valid = integer(b.valid_count), partial = bool(b.partial)
-      if (Date.parse(a) < Date.parse(from) || Date.parse(z) > Date.parse(to) || Date.parse(a) >= Date.parse(z) || valid > expected || expected !== Math.ceil((Date.parse(z) - Date.parse(a)) / sampleInterval) || Date.parse(z) !== Math.min(Date.parse(a) + bucketWidth, Date.parse(to))) fail()
+      if (time(a) < time(from) || time(z) > time(to) || time(a) >= time(z) || valid > expected || ms(z, a) <= 0 || expected !== Math.ceil(ms(z, a) / sampleInterval) || time(z) !== minTime(time(a) + BigInt(bucketWidth) * 1000000n, time(to))) fail()
       const seen = new Set<MetricStatus>(); let observed = 0, ok = 0
       const counts = array(b.status_counts, metricStatuses.length).map(v => { const c = object(v), st = status(c.status), n = integer(c.count); if (!n || seen.has(st)) fail(); seen.add(st); observed += n; if (st === 'ok') ok = n; return { status: st, count: n } })
       if (observed > expected || ok !== valid || (!partial && (valid !== expected || !valid))) fail()
       const first = optionalStamp(b.first_sample_at), last = optionalStamp(b.last_sample_at), mean = value(b.mean), min = value(b.min), max = value(b.max)
-      if (valid ? first === null || last === null || mean === null || min === null || max === null || min > mean || mean > max || Date.parse(first) < Date.parse(a) || Date.parse(last) >= Date.parse(z) || Date.parse(first) > Date.parse(last) : first !== null || last !== null || mean !== null || min !== null || max !== null) fail()
+      if (valid ? first === null || last === null || mean === null || min === null || max === null || min > mean || mean > max || time(first) < time(a) || time(last) >= time(z) || time(first) > time(last) : first !== null || last !== null || mean !== null || min !== null || max !== null) fail()
       return { from: a, to: z, expected_count: expected, valid_count: valid, status_counts: counts, first_sample_at: first, last_sample_at: last, mean, min, max, partial }
     })
     total += points.length; if (total > 7200) fail()
-    const ownBounds = points.map((p, i) => { if (i && Date.parse(points[i - 1].to) !== Date.parse(p.from)) fail(); return p.from + '/' + p.to })
-    if (points.length && (Date.parse(points[0].from) !== Date.parse(from) || Date.parse(points.at(-1)!.to) !== Date.parse(to))) fail()
+    const ownBounds = points.map((p, i) => { if (i && time(points[i - 1].to) !== time(p.from)) fail(); return time(p.from) + '/' + time(p.to) })
+    if (points.length && (time(points[0].from) !== time(from) || time(points.at(-1)!.to) !== time(to))) fail()
     if (bounds && (bounds.length !== ownBounds.length || bounds.some((b, i) => b !== ownBounds[i]))) fail(); bounds = ownBounds
     return { kind, gpu_id: gpuId, unit, current: { status: state, value: currentValue, sampled_at: sampled, age_ms: age }, points }
   })
@@ -65,12 +70,12 @@ export function parseMachineMetrics(input: unknown, request: MetricsRequest, rec
   for (const gpuId of [null, ...ids]) {
     const paired = series.filter(s => s.gpu_id === gpuId && (gpuId ? s.kind !== 'gpu_utilization' : s.kind !== 'cpu_utilization'))
     const total = paired.find(s => s.kind.endsWith('total'))!, used = paired.find(s => s.kind.endsWith('used'))!
-    if (total.current.value !== null && used.current.value !== null && (total.current.sampled_at !== used.current.sampled_at || used.current.value > total.current.value)) fail()
+    if (total.current.value !== null && used.current.value !== null && (time(total.current.sampled_at!) !== time(used.current.sampled_at!) || used.current.value > total.current.value)) fail()
     const available = paired.find(s => s.kind === 'ram_available')
-    if (available?.current.value !== null && available?.current.value !== undefined && total.current.value !== null && (available.current.sampled_at !== total.current.sampled_at || available.current.value > total.current.value || (used.current.value !== null && used.current.value !== total.current.value - available.current.value))) fail()
+    if (available?.current.value !== null && available?.current.value !== undefined && total.current.value !== null && (time(available.current.sampled_at!) !== time(total.current.sampled_at!) || available.current.value > total.current.value || (used.current.value !== null && used.current.value !== total.current.value - available.current.value))) fail()
   }
   const retained = optionalStamp(r.retained_from);
-  for (const s of series) for (const p of s.points) if (p.first_sample_at !== null && (retained === null || Date.parse(p.first_sample_at) < Date.parse(retained) || Date.parse(generated) - Date.parse(p.first_sample_at) > 86400000)) fail(); if (retained !== null && (Date.parse(retained) > Date.parse(generated) || Date.parse(generated) - Date.parse(retained) > 86400000)) fail()
+  for (const s of series) for (const p of s.points) if (p.first_sample_at !== null && (retained === null || time(p.first_sample_at) < time(retained) || time(generated) - time(p.first_sample_at) > 86400000000000n)) fail(); if (retained !== null && (time(retained) > time(generated) || time(generated) - time(retained) > 86400000000000n)) fail()
   return { schema: 'machine.metrics.v1', server_id: request.serverId, from, to, generated_at: generated, retained_from: retained, truncated: bool(r.truncated), sample_interval_ms: sampleInterval, bucket_width_ms: bucketWidth, stale_after_ms: staleAfter, logical_cpus: r.logical_cpus === null ? null : integer(r.logical_cpus, 65535) || fail(), memory_method: enumeration(r.memory_method, ['linux_mem_available', 'macos_available_estimate', 'windows_physical_available', 'unavailable'] as const), scope: 'os_visible_machine', gpus, inventory_truncated: bool(r.inventory_truncated), gpu_status: status(r.gpu_status), series }
 }
 

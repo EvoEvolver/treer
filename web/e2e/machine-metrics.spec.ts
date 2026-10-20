@@ -141,3 +141,22 @@ test('IEC memory units and long values table remain accurate and keyboard scroll
   await expect(panel(page).locator('p').filter({ hasText: /^8\.00 GiB$/ })).toBeVisible()
   await expect(panel(page).getByRole('figure').nth(1).getByRole('table')).toContainText('8.00 GiB')
 })
+
+
+test('fractional age uses exact UTC ordering before flooring milliseconds', async ({ page }) => {
+  await setup(page)
+  const request = { serverId: 'local', from: '2026-10-20T12:25:00Z', to: '2026-10-20T12:40:00Z', maxPoints: 360 }
+  const body = metricsFixture(request)
+  body.generated_at = '2026-10-20T12:40:00.000100Z'
+  body.series[0].current.sampled_at = '2026-10-20T12:39:59.999900Z'
+  body.series[0].current.age_ms = 0
+  const result = await page.evaluate(async ({ body, request }) => {
+    const path = '/src/lib/machine-metrics.ts'; const { parseMachineMetrics } = await import(/* @vite-ignore */ path)
+    const received = Date.parse(body.generated_at)
+    const valid = parseMachineMetrics(body, request, received).series[0].current.age_ms
+    body.series[0].current.sampled_at = '2026-10-20T12:40:00.000300Z'
+    let refused = false; try { parseMachineMetrics(body, request, received) } catch { refused = true }
+    return { valid, refused }
+  }, { body, request })
+  expect(result).toEqual({ valid: 0, refused: true })
+})

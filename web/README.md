@@ -860,7 +860,7 @@ buckets interrupt lines; isolated observations remain marked. Arrow keys, tap
 selection and expandable bounded values tables expose the same data.
 
 The client bounds raw response bytes to 1 MiB before JSON parsing, validates the
-selected machine/range, finite values, fixed enums, sample age, shared ascending
+selected machine/range, finite values, fixed enums, nanosecond UTC ordering with floored millisecond sample age, shared ascending
 buckets, coverage counts and GPU/series/point caps, and projects only known
 fields. GPU names are bounded plain text; raw OS errors are never displayed.
 Queries use credentials and no-store with redirects refused; responses must
