@@ -230,4 +230,25 @@ recovery or periodic cleanup: no timer,
 collector startup, journal, IPC or public query invokes this module yet. The
 future disk adapter must separately bound metadata and temporary files, validate
 corruption and permissions, and reconcile clock epochs before exposing history.
-Serialized-byte bounds are not a process RSS claim. Aggregation remains pending.
+Serialized-byte bounds are not a process RSS claim. Response assembly remains pending.
+
+## Local bucket arithmetic checkpoint (not connected)
+
+`machine_metrics::aggregation` builds uniform buckets locally from at most
+17,280 actual field acquisitions, including out-of-range inputs in that budget.
+Width rounds up to a 5-second multiple and at most query.max_points buckets are
+returned. Windows are half-open; only valid observations contribute to
+mean/min/max and first/last sample times. Failures have separate observed counts;
+missing slots stay absent, never synthetic zero. Any missing or invalid slot
+marks the bucket partial. Unordered input is allowed, but duplicate 5-second
+slots are refused. The adapter must deduplicate repeated cached acquisitions
+before aggregation rather than count one acquisition repeatedly.
+
+This primitive currently requires a positive integral-millisecond range span,
+including when both endpoints carry the same submillisecond offset. The wire
+model accepts more general fractional spans; their expected-count rounding must
+be reconciled before exposing this primitive through a route. It does not yet
+assemble responses: the caller still owes total-series/serialized response
+budgets, per-range retention/truncation, removed-GPU inventory union, fresh
+per-field current values, epoch handling and final shared-response validation.
+No collection task, ring reader, IPC, routing or persistence calls it yet.
