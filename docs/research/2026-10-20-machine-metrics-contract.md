@@ -865,3 +865,12 @@ series or a complete GPU wire response, define an unknown-enumeration wire
 policy, or enable any runtime path. Tests retain a real historical utilization
 sample across removal, reappearance with stale fields, a newly warming device,
 and failed enumeration; metadata and buckets remain from the same detached view.
+
+The shared response validator now enforces presence in both directions for
+every GPU field: absent descriptors require `device_absent`, and present
+descriptors forbid that status. Bounded serialized-response tests exercise
+both valid descriptor/status combinations and each of the three GPU kinds in
+both inconsistent directions. This tightens acceptance without changing wire
+fields. Frozen Web fe324023 predates this converse rule; Web must implement and
+verify the same rejection before a Core/Web union can be accepted. Its existing
+component evidence remains valid for its recorded commit and earlier rules.

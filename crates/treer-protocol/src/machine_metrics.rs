@@ -228,6 +228,98 @@ mod tests {
     }
 
     #[test]
+    fn machine_metrics_gpu_presence_and_absent_status_must_agree() {
+        let now = DateTime::from_timestamp(1_792_500_000, 0).unwrap();
+        let query = MachineMetricsQuery {
+            from: now - chrono::Duration::seconds(5),
+            to: now,
+            max_points: 1,
+        };
+        let id = "a".repeat(64);
+        let kinds = [
+            MachineMetricKind::CpuUtilization,
+            MachineMetricKind::RamUsed,
+            MachineMetricKind::RamAvailable,
+            MachineMetricKind::RamTotal,
+            MachineMetricKind::GpuUtilization,
+            MachineMetricKind::GpuMemoryUsed,
+            MachineMetricKind::GpuMemoryTotal,
+        ];
+        let mut response = MachineMetricsResponse {
+            schema: CAPABILITY_MACHINE_METRICS.into(),
+            server_id: "machine".into(),
+            generated_at: now,
+            from: query.from,
+            to: now,
+            retained_from: None,
+            truncated: false,
+            sample_interval_ms: 5000,
+            bucket_width_ms: 5000,
+            stale_after_ms: 15000,
+            logical_cpus: None,
+            memory_method: MachineMemoryMethod::Unavailable,
+            scope: "os_visible_machine".into(),
+            gpus: vec![MachineMetricsGpu {
+                id: id.clone(),
+                name: "Test GPU".into(),
+                present: true,
+            }],
+            inventory_truncated: false,
+            gpu_status: MachineMetricStatus::Ok,
+            series: kinds
+                .into_iter()
+                .enumerate()
+                .map(|(index, kind)| MachineMetricSeries {
+                    kind,
+                    gpu_id: (index >= 4).then(|| id.clone()),
+                    unit: if matches!(
+                        kind,
+                        MachineMetricKind::CpuUtilization | MachineMetricKind::GpuUtilization
+                    ) {
+                        MachineMetricUnit::Percent
+                    } else {
+                        MachineMetricUnit::Bytes
+                    },
+                    current: MachineMetricCurrent {
+                        status: MachineMetricStatus::WarmingUp,
+                        value: None,
+                        sampled_at: None,
+                        age_ms: None,
+                    },
+                    points: vec![],
+                })
+                .collect(),
+        };
+        let valid = |response: &MachineMetricsResponse| {
+            MachineMetricsResponse::parse_bounded(
+                &serde_json::to_vec(response).unwrap(),
+                &query,
+                "machine",
+                now,
+            )
+            .is_ok()
+        };
+        assert!(valid(&response));
+        // Every GPU kind must enforce the converse, not only utilization.
+        for index in 4..7 {
+            response.series[index].current.status = MachineMetricStatus::DeviceAbsent;
+            assert!(!valid(&response));
+            response.series[index].current.status = MachineMetricStatus::WarmingUp;
+        }
+        response.gpus[0].present = false;
+        response.gpu_status = MachineMetricStatus::NoDevice;
+        for series in &mut response.series[4..] {
+            series.current.status = MachineMetricStatus::DeviceAbsent;
+        }
+        assert!(valid(&response));
+        for index in 4..7 {
+            response.series[index].current.status = MachineMetricStatus::WarmingUp;
+            assert!(!valid(&response));
+            response.series[index].current.status = MachineMetricStatus::DeviceAbsent;
+        }
+    }
+
+    #[test]
     fn machine_metrics_status_has_no_arbitrary_error_text() {
         assert_eq!(
             serde_json::to_value(MachineMetricStatus::DeviceAbsent).unwrap(),

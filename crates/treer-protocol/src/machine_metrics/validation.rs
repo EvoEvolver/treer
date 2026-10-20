@@ -140,7 +140,7 @@ impl MachineMetricsResponse {
             series.current.validate(self.generated_at, series.unit)?;
             if let Some(id) = series.gpu_id.as_deref() {
                 let present = self.gpus.iter().find(|gpu| gpu.id == id).unwrap().present;
-                require(present || series.current.status == MachineMetricStatus::DeviceAbsent)?;
+                require(present != (series.current.status == MachineMetricStatus::DeviceAbsent))?;
             }
             require(series.points.len() <= usize::from(query.max_points))?;
             total += series.points.len();
