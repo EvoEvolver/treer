@@ -194,4 +194,35 @@ mod tests {
             );
         }
     }
+
+    #[cfg(feature = "metrics-allocation-measurement")]
+    #[test]
+    fn exact_index_measured_live_heap_peak() {
+        // The measurement crate counts the current thread only. Keep this
+        // workload synchronous; run this exact test in its own test process.
+        assert_eq!(
+            (MAX_INDEX_ACQUISITIONS, MAX_RECORDS, MAX_CANDIDATE_FIELDS),
+            (262_144, 17_280, 4096)
+        );
+        for field_count in [32, MAX_CANDIDATE_FIELDS] {
+            let measured = allocation_counter::measure(|| {
+                let mut index = AcquisitionIndex::new(MAX_INDEX_ACQUISITIONS);
+                for tick in 0..MAX_INDEX_ACQUISITIONS {
+                    index
+                        .insert(&key(tick % field_count), observation(tick as u64))
+                        .unwrap();
+                }
+                let fields: Vec<_> = (0..field_count.min(100)).map(key).collect();
+                let selected = index.into_selected(&fields, &mut || false).unwrap();
+                assert_eq!(selected.len(), fields.len());
+                std::hint::black_box(&selected);
+                drop(selected);
+            });
+            assert_eq!(measured.bytes_current, 0);
+            assert_eq!(measured.count_current, 0);
+            // Regression ceiling for this prerequisite, not a runtime promise.
+            assert!(measured.bytes_max < 64 * 1024 * 1024);
+            println!("candidate_index_measured fields={field_count} peak_live_bytes={} total_allocated_bytes={} final_live_bytes={}", measured.bytes_max, measured.bytes_total, measured.bytes_current);
+        }
+    }
 }

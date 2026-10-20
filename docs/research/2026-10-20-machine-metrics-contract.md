@@ -1024,3 +1024,47 @@ per-field exhaustion, 4096-field churn refusal, cancelled regrouping, and the
 32-field/max-churn capacity measurements. The automatic single-decode discovery
 algorithm, unknown-current pre-scan refusal and its decode counter are still
 unimplemented. Existing explicit-plan queries retain their prior field filter.
+
+### Measured index allocation peak (opt-in test only)
+
+The metrics-allocation-measurement feature enables a synchronous index test
+using the pinned development-only allocation-counter 0.8.1. It is referenced
+only inside the test module; no measurement allocator is linked by normal
+Controller builds. Repository unsafe-code prohibition remains intact.
+The [counter's documented measurement scope](https://docs.rs/allocation-counter/0.8.1/allocation_counter/fn.measure.html)
+is the calling thread. Its bytes count allocation Layout sizes, including
+overlapping live allocations; allocator bookkeeping/rounding, stack and RSS
+are not counted. The workload starts and drops every tracked allocation inside
+the measured closure, with no spawned work and no opt-out sections.
+
+Reproduce in an isolated test invocation:
+
+```sh
+cargo test -p treer-agent-server --bin treer-agent-server --features metrics-allocation-measurement exact_index_measured_live_heap_peak -- --nocapture --test-threads=1
+```
+
+Local 64-bit macOS debug results at 262144 acquisitions:
+
+| Candidate fields | Peak live allocation bytes | Total allocation bytes | Final live bytes |
+| --- | ---: | ---: | ---: |
+| 32 | 57414552 | 120599888 | 0 |
+| 4096 | 58040408 | 109392840 | 0 |
+
+These measurements include index/key/counter growth, transient temporary key
+strings, hash-table growth overlap, selected-key construction and consuming
+regrouping (up to 100 selected fields). The peak exceeds the earlier capacity
+estimate: map growth holds old and new tables concurrently. The test asserts
+zero final allocations and a 64 MiB peak regression ceiling for this workload,
+not an enforced runtime byte limit. The larger measured case leaves 9068456
+bytes below that ceiling on this build; compiler/allocator/platform changes
+require a fresh measurement rather than treating that margin as portable.
+
+One detached view per History allows this index to coexist with up to 64 MiB
+of retained payload: those two measured/retained contributions alone can reach
+125149272 bytes (about 119.4 MiB), excluding decoded frames, snapshot metadata,
+encoder/output and allocator overhead. This admission is per History instance,
+not global, so several state instances may multiply the footprint. The test
+does NOT decode a frame, populate a complete ring, aggregate buckets or encode
+an automatic response. Combined peak measurement with a decoded frame and the
+eventual complete assembler remains open before runtime routes; these results
+close only the index/regroup measurement gap, not the entire memory review.

@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Opt-in test measurement only; the allocator dependency is never runtime.
+metrics-allocation-measurement = []
+
+[dev-dependencies]
+allocation-counter = "=0.8.1"
+
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
