@@ -121,3 +121,23 @@ test('visibility pauses refresh and offline inventory removes previous readings'
   await expect(panel(page).locator('svg')).toHaveCount(0)
   const stopped = s.queries(); await page.clock.fastForward(180000); expect(s.queries()).toBe(stopped)
 })
+
+
+test('IEC memory units and long values table remain accurate and keyboard scrollable', async ({ page }) => {
+  await setup(page, 'many')
+  await expect(panel(page).locator('p').filter({ hasText: /^8\.00 GiB$/ })).toBeVisible()
+  const chart = panel(page).getByRole('figure', { name: 'RAM used', exact: true })
+  await expect(chart.locator('svg')).toContainText('8.00 GiB')
+  await chart.getByRole('img').focus(); await page.keyboard.press('Home')
+  await expect(chart.locator('[aria-live]')).toContainText('8.00 GiB')
+  await chart.getByText('View sampled values', { exact: true }).click()
+  const region = chart.getByRole('region')
+  await region.focus(); await expect(region).toBeFocused()
+  await page.keyboard.press('End')
+  await expect.poll(() => region.evaluate(e => e.scrollTop)).toBeGreaterThan(0)
+  await expect(region.getByRole('row').last()).toBeInViewport()
+  await expect(region.getByRole('table')).toContainText('8.00 GiB')
+  await page.evaluate(async () => { const path = '/src/i18n/index.ts'; const module = await import(/* @vite-ignore */ path); module.setLocale('zh', false) })
+  await expect(panel(page).locator('p').filter({ hasText: /^8\.00 GiB$/ })).toBeVisible()
+  await expect(panel(page).getByRole('figure').nth(1).getByRole('table')).toContainText('8.00 GiB')
+})

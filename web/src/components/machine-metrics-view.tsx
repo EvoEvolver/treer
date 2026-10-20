@@ -1,11 +1,16 @@
 import { useState } from 'react'
 import { t, intlLocale } from '@/i18n'
-import { formatBytes } from '@/lib/control-plane'
 import type { Machine } from '@/lib/api'
 import type { MetricKind, MetricSeries, MetricsRange } from '@/lib/machine-metrics'
 import { Button } from './ui/button'
 import { MachineMetricChart, metricTime } from './machine-metric-chart'
 import { useMachineMetrics } from './use-machine-metrics'
+function formatMetricBytes(value: number) {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB']
+  const power = value > 0 ? Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024))) : 0
+  const scale = Math.max(0, power)
+  return (value / 1024 ** scale).toLocaleString(intlLocale(), { minimumFractionDigits: scale ? 2 : 0, maximumFractionDigits: 2 }) + ' ' + units[scale]
+}
 export function MachineMetricsView({ machine, workspaceId }: { machine: Machine; workspaceId: string }) {
   const [range, setRange] = useState<MetricsRange>(15)
   const [ramKind, setRamKind] = useState<'ram_used' | 'ram_available' | 'ram_total'>('ram_used')
@@ -13,7 +18,7 @@ export function MachineMetricsView({ machine, workspaceId }: { machine: Machine;
   const state = useMachineMetrics(workspaceId, machine.server_id, machine.status === 'online', Boolean(machine.capabilities?.includes('machine.metrics.v1')), range)
   const data = state.data
   const find = (kind: MetricKind, gpuId: string | null = null) => data!.series.find(s => s.kind === kind && s.gpu_id === gpuId)!
-  const format = (series: MetricSeries, v: number) => series.unit === 'percent' ? v.toLocaleString(intlLocale(), { maximumFractionDigits: 1 }) + '%' : formatBytes(v)
+  const format = (series: MetricSeries, v: number) => series.unit === 'percent' ? v.toLocaleString(intlLocale(), { maximumFractionDigits: 1 }) + '%' : formatMetricBytes(v)
   const reading = (series: MetricSeries) => {
     const c = series.current, stale = c.status === 'ok' && (c.age_ms ?? 0) + state.elapsed > (data?.stale_after_ms ?? 15000)
     return { value: c.status === 'ok' && !stale && c.value !== null ? format(series, c.value) : '—', reason: stale ? 'stale' as const : c.status }
