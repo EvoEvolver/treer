@@ -2,15 +2,19 @@
 //! it does not collect hardware samples or expose a query route.
 use super::{
     field_cache::{CacheError, FieldCache, FieldSnapshot, FieldUpdate},
+    field_query::{self, FieldHistory, FieldQueryError},
     history::{Clock, History, HistoryError, Limits},
 };
-use treer_protocol::{MachineMetricKind, MachineMetricStatus, MachineMetricsResponse};
+use treer_protocol::{
+    MachineMetricKind, MachineMetricStatus, MachineMetricsQuery, MachineMetricsResponse,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum StateError {
     History(HistoryError),
     Cache(CacheError),
     FrameMismatch,
+    Query(FieldQueryError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +50,25 @@ pub struct CollectorState {
 }
 
 impl CollectorState {
+    /// Reads cached acquisitions only; never performs native acquisition.
+    /// This single-field adapter is not a multi-series/public response.
+    pub fn query_field(
+        &mut self,
+        clock: Clock,
+        query: &MachineMetricsQuery,
+        kind: MachineMetricKind,
+        gpu_id: Option<&str>,
+    ) -> Result<FieldHistory, StateError> {
+        let snapshot = self.snapshot(clock)?;
+        let buckets = field_query::aggregate_field(&mut self.history, clock, query, kind, gpu_id)
+            .map_err(StateError::Query)?;
+        Ok(FieldHistory {
+            epoch: snapshot.epoch,
+            reset: snapshot.reset,
+            buckets,
+        })
+    }
+
     pub fn new(server_id: String, limits: Limits) -> Result<Self, StateError> {
         Ok(Self {
             history: History::new(server_id, limits).map_err(StateError::History)?,

@@ -1,6 +1,64 @@
 use super::*;
 use treer_protocol::*;
 
+#[test]
+fn field_query_refuses_conflicting_cached_identity_and_corrupt_staging_bytes() {
+    use crate::machine_metrics::{
+        field_cache::FieldCache,
+        field_query::{aggregate_field, FieldQueryError},
+    };
+    let mut history = History::new("fixture-machine".into(), Limits::default()).unwrap();
+    let mut cache = FieldCache::new(0);
+    cache
+        .record(
+            clock(0),
+            MachineMetricKind::CpuUtilization,
+            None,
+            MachineMetricStatus::Ok,
+            Some(12.0),
+        )
+        .unwrap();
+    for ms in [0, 5000] {
+        let fields = cache.snapshot(clock(ms)).unwrap();
+        let mut value = sample(clock(ms));
+        value.series[0].current = fields[0].current.clone();
+        history
+            .push_with_fields(clock(ms), &value, &fields)
+            .unwrap();
+    }
+    let mut changed =
+        StoredFrame::decode(&history.records[1].bytes, "fixture-machine", clock(5000), 0).unwrap();
+    changed.fields[0].observation.value = Some(99.0);
+    changed.frame.series[0].current.value = Some(99.0);
+    history.records[1].bytes = serde_json::to_vec(&changed).unwrap();
+    let query = MachineMetricsQuery {
+        from: clock(0).wall,
+        to: clock(10_000).wall,
+        max_points: 2,
+    };
+    assert!(matches!(
+        aggregate_field(
+            &mut history,
+            clock(10_000),
+            &query,
+            MachineMetricKind::CpuUtilization,
+            None
+        ),
+        Err(FieldQueryError::ConflictingAcquisition)
+    ));
+    history.records[1].bytes = b"invalid".to_vec();
+    assert!(matches!(
+        aggregate_field(
+            &mut history,
+            clock(10_000),
+            &query,
+            MachineMetricKind::CpuUtilization,
+            None
+        ),
+        Err(FieldQueryError::History(HistoryError::InvalidSample))
+    ));
+}
+
 fn clock(ms: u64) -> Clock {
     Clock {
         wall: DateTime::from_timestamp(1_792_500_000, 0).unwrap()

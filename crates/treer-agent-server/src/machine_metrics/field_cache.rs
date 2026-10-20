@@ -110,30 +110,7 @@ impl FieldCache {
         status: MachineMetricStatus,
         value: Option<f64>,
     ) -> Result<(), CacheError> {
-        let gpu = matches!(
-            kind,
-            MachineMetricKind::GpuUtilization
-                | MachineMetricKind::GpuMemoryUsed
-                | MachineMetricKind::GpuMemoryTotal
-        );
-        if gpu != gpu_id.is_some()
-            || gpu_id.is_some_and(|id| {
-                id.len() != 64
-                    || !id
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            })
-        {
-            return Err(CacheError::InvalidField);
-        }
-        let unit = if matches!(
-            kind,
-            MachineMetricKind::CpuUtilization | MachineMetricKind::GpuUtilization
-        ) {
-            MachineMetricUnit::Percent
-        } else {
-            MachineMetricUnit::Bytes
-        };
+        let unit = field_unit(kind, gpu_id)?;
         // Stale is a read-time projection, never a fresh acquisition.
         let valid = match (status, value) {
             (MachineMetricStatus::Ok, Some(v)) => {
@@ -237,6 +214,39 @@ impl FieldCache {
         });
         Ok(before - self.fields.len())
     }
+}
+
+/// Pure key validation shared with history readers; allocates no identity.
+pub(super) fn field_unit(
+    kind: MachineMetricKind,
+    gpu_id: Option<&str>,
+) -> Result<MachineMetricUnit, CacheError> {
+    let gpu = matches!(
+        kind,
+        MachineMetricKind::GpuUtilization
+            | MachineMetricKind::GpuMemoryUsed
+            | MachineMetricKind::GpuMemoryTotal
+    );
+    if gpu != gpu_id.is_some()
+        || gpu_id.is_some_and(|id| {
+            id.len() != 64
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    {
+        return Err(CacheError::InvalidField);
+    }
+    Ok(
+        if matches!(
+            kind,
+            MachineMetricKind::CpuUtilization | MachineMetricKind::GpuUtilization
+        ) {
+            MachineMetricUnit::Percent
+        } else {
+            MachineMetricUnit::Bytes
+        },
+    )
 }
 
 #[cfg(test)]

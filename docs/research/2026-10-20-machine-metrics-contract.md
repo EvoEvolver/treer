@@ -268,7 +268,8 @@ be reconciled before exposing this primitive through a route. It does not yet
 assemble responses: the caller still owes total-series/serialized response
 budgets, per-range retention/truncation, removed-GPU inventory union, fresh
 per-field current values, epoch handling and final shared-response validation.
-No collection task, ring reader, IPC, routing or persistence calls it yet.
+The single-field staging reader below now calls it after identity deduplication.
+No collection task, IPC, routing or persistence calls it yet.
 
 ## Field acquisition state checkpoint (not connected)
 
@@ -291,7 +292,7 @@ This is state arithmetic, not proof of actual hardware sampling. The future
 collector must call record only after real acquisition and coordinate epochs;
 actual RAM/VRAM collection must use the atomic batch helpers described below. The History
 frame format now carries these per-field identities through the local staging
-envelope described below. A query adapter must still deduplicate cached
+envelope described below. The single-field reader deduplicates cached
 references before aggregation. This cache adds no sampler, timer, journal,
 IPC, API or capability.
 
@@ -374,7 +375,7 @@ before those records become available to a reader.
 
 The format is internal in-memory staging, not a public metrics response,
 authenticated integrity proof, restart/boot identity, checksum or file recovery
-format. No filesystem journal, query deduplication/assembly, collection task or
+format. No filesystem journal, complete response assembly, collection task or
 route is enabled by this increment.
 
 ## Expired current-field retirement checkpoint (not connected)
@@ -433,3 +434,34 @@ uses the same transaction path. Future RAM/NVML adapters must use these grouped
 entry points for memory readings and stamp the collector's completion clock;
 these helpers do not prove simultaneous native hardware reads, collect memory,
 manage GPU inventory or start a timer. No runtime/API is enabled.
+
+## Single-field history reader checkpoint (not connected)
+
+`CollectorState::query_field` connects the in-memory history ring to bucket
+aggregation for one typed field key. State maintenance synchronizes epochs,
+retires expired current fields and prunes history before any decode. The reader
+validates the field key and query, then decodes each retained frame using that
+record's own clock and epoch. It never decodes an older frame against query
+now and never samples hardware or inserts observations into history.
+
+For the requested key, original (epoch, tick) identities deduplicate repeated
+cached references. An identical repeated acquisition contributes once at its
+original timestamp; if the same identity has a different timestamp, status or
+value, the whole field query fails. Corrupt or invalid staging frames also
+refuse the entire query rather than return partial statistics as complete.
+Only original observations reach aggregation: stale current projections cannot
+replace their historical successes, failed attempts retain their own status,
+and cached frames cannot fill gaps or increase status counts. Empty/missing
+fields produce empty partial buckets. Repeated reads create no identities.
+
+The reader visits at most the ring's 17,280 records/64 MiB serialized envelope
+budget, bounds each decode at 64 KiB and keeps at most 17,280 unique requested
+acquisitions. Its result carries the current epoch and whether maintenance
+reset it. This is an internal single-field result, not the public response;
+per-range truncation/epoch flags, removed-GPU inventory and overall series,
+bucket and output-byte budgets remain the full assembler's responsibility.
+The eventual multi-series assembler must decode once for all requested fields,
+not run this whole-ring scan separately for every series. Cancellation, query
+concurrency/deadlines, performance measurements, journal, source service,
+authenticated forwarding and public routes are not implemented here. The
+existing integral-millisecond-span aggregation restriction still applies.

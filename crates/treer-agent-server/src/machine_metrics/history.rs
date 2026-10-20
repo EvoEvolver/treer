@@ -75,6 +75,10 @@ pub struct History {
 }
 
 impl History {
+    pub(super) fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
     pub fn new(server_id: String, limits: Limits) -> Result<Self, HistoryError> {
         if server_id.is_empty()
             || server_id.len() > 128

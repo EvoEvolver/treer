@@ -13,6 +13,116 @@ fn state() -> CollectorState {
 }
 
 #[test]
+fn field_query_counts_real_acquisitions_once_and_keeps_cached_slots_empty() {
+    use treer_protocol::MachineMetricsQuery;
+    let mut state = state();
+    record(&mut state, clock(0, 0), 12.0);
+    for ms in [0, 5_000, 10_000] {
+        let sample = frame(&mut state, clock(ms, ms as u64));
+        state.append_frame(clock(ms, ms as u64), &sample).unwrap();
+    }
+    state
+        .record(
+            clock(15_000, 15_000),
+            MachineMetricKind::CpuUtilization,
+            None,
+            MachineMetricStatus::TimedOut,
+            None,
+        )
+        .unwrap();
+    let sample = frame(&mut state, clock(15_000, 15_000));
+    state.append_frame(clock(15_000, 15_000), &sample).unwrap();
+    let query = MachineMetricsQuery {
+        from: clock(0, 0).wall,
+        to: clock(20_000, 20_000).wall,
+        max_points: 4,
+    };
+    let result = state
+        .query_field(
+            clock(20_000, 20_000),
+            &query,
+            MachineMetricKind::CpuUtilization,
+            None,
+        )
+        .unwrap();
+    assert_eq!(result.epoch, 0);
+    assert!(!result.reset);
+    let points = result.buckets.points;
+    assert_eq!(points.len(), 4);
+    assert_eq!(points[0].valid_count, 1);
+    assert_eq!(points[0].mean, Some(12.0));
+    assert!(points[1..3].iter().all(|p| p.valid_count == 0
+        && p.status_counts.is_empty()
+        && p.mean.is_none()
+        && p.partial));
+    assert_eq!(points[3].valid_count, 0);
+    assert_eq!(
+        points[3].status_counts[0].status,
+        MachineMetricStatus::TimedOut
+    );
+    assert_eq!(points[3].status_counts[0].count, 1);
+    let again = state
+        .query_field(
+            clock(20_000, 20_000),
+            &query,
+            MachineMetricKind::CpuUtilization,
+            None,
+        )
+        .unwrap();
+    assert_eq!(again.buckets.points, points);
+    let missing = state
+        .query_field(
+            clock(20_000, 20_000),
+            &query,
+            MachineMetricKind::RamTotal,
+            None,
+        )
+        .unwrap();
+    assert!(missing
+        .buckets
+        .points
+        .iter()
+        .all(|p| p.mean.is_none() && p.status_counts.is_empty()));
+    let capture = state.snapshot(clock(20_000, 20_000)).unwrap();
+    assert_eq!(capture.fields[0].observation.tick, 1);
+    let invalid = MachineMetricsQuery {
+        max_points: 0,
+        ..query
+    };
+    assert!(state
+        .query_field(
+            clock(20_000, 20_000),
+            &invalid,
+            MachineMetricKind::CpuUtilization,
+            None
+        )
+        .is_err());
+    assert!(state
+        .query_field(
+            clock(20_000, 20_000),
+            &query,
+            MachineMetricKind::GpuUtilization,
+            None
+        )
+        .is_err());
+    let after_reset = state
+        .query_field(
+            clock(25_000, 1),
+            &query,
+            MachineMetricKind::CpuUtilization,
+            None,
+        )
+        .unwrap();
+    assert!(after_reset.reset);
+    assert_eq!(after_reset.epoch, 1);
+    assert!(after_reset
+        .buckets
+        .points
+        .iter()
+        .all(|p| p.mean.is_none() && p.status_counts.is_empty()));
+}
+
+#[test]
 fn ram_batch_keeps_capacity_arithmetic_time_and_failure_status_consistent() {
     let mut state = state();
     state
