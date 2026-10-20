@@ -214,6 +214,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         actor: &str,
         now: i64,
     ) -> Result<(), Error> {
+        self.ensure_not_terminal_held(id)?;
         let view = self.view(id)?;
         if !view.paused || view.revision != revision {
             return Err(Error::Revision);

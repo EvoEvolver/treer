@@ -748,7 +748,7 @@ provenance and remains at-least-once after confirmed-acked pruning.
 This is still an intermediate no-ACK result: the completion stage returns an
 error after the local mismatch COMMIT, keeping the delivery unacknowledged. No
 runtime worker invokes this stage, and no receipt-mode activation is implied.
-A two-connection local contention test verifies serialized Inserted/Replay with
+A two-connection local test verifies serialized Inserted/Replay with
 one persisted row and counter increment; this is not real Core ACK rehearsal.
 The recorded-discard outcome and exact confirmed-ACK marker, owner recovery and
 bounded mailbox scheduling remain
@@ -758,3 +758,17 @@ release review; a pre-v2 binary must not interpret or clear recovery holds.
 The owner binding view overlays the durable hold reason, so a later metadata
 readback or ordinary pause cannot hide that recovery requirement. The unpause
 trigger remains the enforcement boundary even if a caller bypasses the view.
+
+Ordinary management cannot repair a terminal disposition hold: resume/preview,
+create/replacement, target changes and logical deletion refuse it. The settings
+API returns HTTP 409 with the fixed `binding_held` error for held resume and
+delete requests, rather than a storage error. Pausing remains permitted for
+containment, without hiding the visible hold reason. The physical-delete FK
+alone cannot protect logical retirement, so management checks the hold before
+writing a retirement tombstone. Audited recovery after confirmed ACK is still
+unimplemented; do not edit the database to bypass the hold. Rollback to a
+pre-v2 binary is unsupported once holds exist.
+
+The local two-connection test checks the serialized Inserted/Replay result;
+its pre-BEGIN thread signal is not proof that SQLite actually waited for a
+write lock. Deterministic contention coverage requires a lock-wait handshake.

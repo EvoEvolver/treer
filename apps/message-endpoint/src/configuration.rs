@@ -240,6 +240,7 @@ pub enum Failure {
     Invalid,
     InvalidPreview(&'static str),
     Conflict,
+    Held,
     Unavailable,
     Expired,
     Forbidden,
@@ -255,6 +256,7 @@ fn map_hub(error: crate::hub::Error) -> Failure {
     #[cfg(test)]
     eprintln!("test-only configuration hub rejection: {error}");
     match error {
+        crate::hub::Error::BindingHeld => Failure::Held,
         crate::hub::Error::Revision | crate::hub::Error::Binding => Failure::Conflict,
         _ => Failure::Unavailable,
     }
@@ -351,6 +353,11 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
             generation,
             recipient,
         } => {
+            shared
+                .lock()
+                .map_err(|_| Failure::Unavailable)?
+                .ensure_not_terminal_held(&endpoint_id)
+                .map_err(map_hub)?;
             let (preview, _) = preview(directory, workspace, &endpoint_id, generation, &recipient)?;
             check_owner(owner)?;
             Ok(Outcome::Preview { preview })
@@ -375,6 +382,11 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
             {
                 return Err(Failure::Invalid);
             }
+            shared
+                .lock()
+                .map_err(|_| Failure::Unavailable)?
+                .ensure_not_terminal_held(&endpoint_id)
+                .map_err(map_hub)?;
             let fingerprint=format!("{:x}",Sha256::digest(serde_json::to_vec(&serde_json::json!({"endpoint":endpoint_id,"generation":generation,"recipient":recipient,"expected":expected})).map_err(|_|Failure::Invalid)?));
             if let Some(key) = &idempotency_key {
                 use rusqlite::OptionalExtension;
@@ -407,6 +419,8 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
             }
             let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
             let now = check_owner(owner)?;
+            hub.ensure_not_terminal_held(&endpoint_id)
+                .map_err(map_hub)?;
             if let Some(key) = idempotency_key.as_deref() {
                 // A concurrent identical request may have committed while the
                 // Core metadata preview ran outside the hub mutex.
@@ -536,6 +550,8 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
             }
             let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
             let now = check_owner(owner)?;
+            hub.ensure_not_terminal_held(&endpoint_id)
+                .map_err(map_hub)?;
             hub.bind_email_audited(&endpoint_id, revision, contact, owner.id(), now)
                 .map_err(|_| Failure::Conflict)?;
             saved(&hub, &endpoint_id)
@@ -551,6 +567,8 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
             }
             let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
             let now = check_owner(owner)?;
+            hub.ensure_not_terminal_held(&endpoint_id)
+                .map_err(map_hub)?;
             let view = hub.view(&endpoint_id).map_err(map_hub)?;
             if view.revision != revision || !view.paused {
                 return Err(Failure::Conflict);

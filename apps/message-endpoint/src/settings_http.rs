@@ -787,6 +787,7 @@ async fn configuration_request_inner(
             Err(crate::configuration::Failure::Conflict) => {
                 fixed(StatusCode::CONFLICT, "configuration_conflict")
             }
+            Err(crate::configuration::Failure::Held) => fixed(StatusCode::CONFLICT, "binding_held"),
             Err(crate::configuration::Failure::Unavailable) => {
                 fixed(StatusCode::SERVICE_UNAVAILABLE, "configuration_unavailable")
             }
@@ -1078,6 +1079,69 @@ mod tests {
             json!({"active":true,"claims":{"sub":"user_owner","principal_kind":"human","workspace_id":"ws_test","service_id":"svc_hub","exp":2000}}),
             json!({"principals":[{"id":"user_owner","kind":"human","role":"owner"}]}),
         ]
+    }
+    #[test]
+    fn authenticated_management_api_returns_fixed_held_error_without_core_io() {
+        let (hub, _) = crate::recovery::tests::fixture(
+            crate::store::Store::memory(Default::default()).unwrap(),
+        );
+        hub.store
+            .db
+            .execute(
+                "INSERT INTO telegram_terminal_holds(endpoint,full) VALUES('ag_endpoint',1)",
+                [],
+            )
+            .unwrap();
+        let shared = Arc::new(Mutex::new(hub));
+        let mut replies = verified();
+        replies[0]["claims"]["exp"] = json!(4_000_000_000i64);
+        let mut all_replies = replies.clone();
+        all_replies.extend(replies);
+        let (base, join) = proxy(all_replies);
+        let state = shared.clone();
+        let settings = Arc::new(
+            app(&base).with_configuration(Arc::new(move |owner, command| {
+                crate::configuration::execute(
+                    &state,
+                    &crate::recovery::tests::NoIo,
+                    "ws_test",
+                    owner,
+                    command,
+                )
+            })),
+        );
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            for command in [
+                json!({"action":"preview_resume","endpoint_id":"ag_endpoint"}),
+                json!({"action":"delete","endpoint_id":"ag_endpoint","revision":4,"confirm":true}),
+            ] {
+                let body = command.to_string();
+                let request = axum::http::Request::builder()
+                    .uri("/api/configuration").method(Method::POST)
+                    .header("host", "hub.example")
+                    .header("origin", "https://hub.example")
+                    .header("x-endpoint-request", "1")
+                    .header("x-treer-identity-token", TOKEN)
+                    .header("content-type", "application/json")
+                    .header("content-length", body.len())
+                    .body(Body::from(body)).unwrap();
+                let response = handle(State(settings.clone()), ConnectInfo("127.0.0.1:1234".parse().unwrap()), request).await;
+                assert_eq!(response.status(), StatusCode::CONFLICT);
+                let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), json!({"error":{"code":"binding_held","message":"binding_held"}}));
+            }
+        });
+        join.join().unwrap();
+        let h = shared.lock().unwrap();
+        assert!(h.view("ag_endpoint").unwrap().paused);
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT COUNT(*) FROM hub_retired_bindings", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
     #[test]
     fn rejected_flood_is_bounded_without_taking_busy_hub_mutex() {

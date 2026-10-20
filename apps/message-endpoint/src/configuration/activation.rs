@@ -222,6 +222,7 @@ fn observe<M: Mailbox + Directory, D: Directory>(
         hub.store
             .recheck_private_storage()
             .map_err(|_| Failure::Unavailable)?;
+        hub.ensure_not_terminal_held(id).map_err(map_hub)?;
         let v = hub.view(id).map_err(map_hub)?;
         if !v.paused {
             return Err(conflict("not_paused"));
@@ -245,6 +246,7 @@ fn observe<M: Mailbox + Directory, D: Directory>(
     {
         let hub = shared.lock().map_err(|_| Failure::Unavailable)?;
         check_owner(owner)?;
+        hub.ensure_not_terminal_held(id).map_err(map_hub)?;
         let v = hub.view(id).map_err(map_hub)?;
         if !v.paused
             || v.revision != revision
@@ -360,6 +362,8 @@ pub(super) fn resume<M: Mailbox + Directory, D: Directory>(
     })).map_err(|_|Failure::Invalid)?;
     let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
     let now = check_owner(owner)?;
+    hub.ensure_not_terminal_held(&endpoint_id)
+        .map_err(map_hub)?;
     let view = hub.view(&endpoint_id).map_err(map_hub)?;
     if !view.paused
         || view.revision != current.revision
@@ -918,6 +922,82 @@ mod tests {
         ));
         assert!(s.lock().unwrap().view("ag_endpoint").unwrap().paused);
         assert!(s.lock().unwrap().owner_audit(None, 25).unwrap().is_empty());
+    }
+    #[test]
+    fn terminal_hold_refuses_preview_stale_resume_delete_and_target_replacement() {
+        let (s, d, o, a) = setup();
+        let r = request(&s, &d, &o, &a);
+        let revision = s.lock().unwrap().view("ag_endpoint").unwrap().revision;
+        s.lock()
+            .unwrap()
+            .store
+            .db
+            .execute(
+                "INSERT INTO telegram_terminal_holds(endpoint,conflict) VALUES('ag_endpoint',1)",
+                [],
+            )
+            .unwrap();
+        // No Core call is allowed before the fixed hold result.
+        d.unavailable
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            preview_resume(&s, &d, "ws_test", &o, "ag_endpoint", &a),
+            Err(Failure::Held)
+        ));
+        assert!(matches!(
+            resume(&s, &d, "ws_test", &o, r, &a),
+            Err(Failure::Held)
+        ));
+        assert!(matches!(
+            execute(
+                &s,
+                &d,
+                "ws_test",
+                &o,
+                Command::Delete {
+                    endpoint_id: "ag_endpoint".into(),
+                    revision,
+                    confirm: true,
+                }
+            ),
+            Err(Failure::Held)
+        ));
+        let h = s.lock().unwrap();
+        assert_eq!(h.view("ag_endpoint").unwrap().revision, revision);
+        assert_eq!(
+            h.view("ag_endpoint").unwrap().reason,
+            "terminal_receipt_conflict"
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT COUNT(*) FROM hub_retired_bindings", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(h.owner_audit(None, 25).unwrap().is_empty());
+        drop(h);
+        assert!(matches!(
+            execute(
+                &s,
+                &d,
+                "ws_test",
+                &o,
+                Command::BindTelegram {
+                    endpoint_id: "ag_endpoint".into(),
+                    revision,
+                    confirm: true,
+                    target: Target {
+                        account_id: "bot_replacement".into(),
+                        chat_id: 12,
+                        topic_id: None,
+                        allowed_senders: vec![9]
+                    },
+                }
+            ),
+            Err(Failure::Held)
+        ));
     }
     #[test]
     fn resume_rechecks_live_pins_and_atomically_records_owner_declarations() {

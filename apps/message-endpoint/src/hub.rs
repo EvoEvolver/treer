@@ -24,6 +24,8 @@ pub enum Error {
     Core(#[from] crate::core::Error),
     #[error("hub_binding_unavailable")]
     Binding,
+    #[error("hub_binding_held")]
+    BindingHeld,
     #[error("hub_cli_integrity_failed")]
     Integrity,
     #[error("hub_revision_conflict")]
@@ -251,6 +253,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         {
             return Err(Error::Binding);
         }
+        self.ensure_not_terminal_held(&binding.endpoint_id)?;
         let definition = serde_json::to_string(&binding).map_err(|_| Error::Binding)?;
         let tx = self.store.db.transaction()?;
         #[cfg(feature="hub")]
@@ -281,6 +284,19 @@ impl<M: Mailbox + Directory> Hub<M> {
         crate::owner_actions::record(&tx, audit, "create_binding", &binding.endpoint_id, 0)?;
         tx.commit()?;
         Ok(())
+    }
+    /// Ordinary management cannot recover a terminal disposition hold.
+    pub(crate) fn ensure_not_terminal_held(&self, id: &str) -> Result<(), Error> {
+        let held: bool = self.store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM telegram_terminal_holds WHERE endpoint=?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if held {
+            Err(Error::BindingHeld)
+        } else {
+            Ok(())
+        }
     }
     pub fn view(&self, id: &str) -> Result<View, Error> {
         #[cfg(feature = "hub")]
@@ -461,6 +477,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         audit: Option<&crate::owner_actions::AuditContext<'_>>,
         discard_held: bool,
     ) -> Result<(), Error> {
+        self.ensure_not_terminal_held(id)?;
         self.hold_schema()?;
         if self.blocked()? {
             return Err(Error::FailureBudget);

@@ -151,6 +151,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         target: Target,
         audit: Option<&crate::owner_actions::AuditContext<'_>>,
     ) -> Result<(), Error> {
+        self.ensure_not_terminal_held(endpoint)?;
         let view = self.view(endpoint)?;
         if !view.paused || view.revision != revision || !target.validate() {
             return Err(Error::Invalid);

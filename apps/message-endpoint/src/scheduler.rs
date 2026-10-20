@@ -215,7 +215,7 @@ fn hub_failure(error: crate::hub::Error) -> u64 {
         crate::hub::Error::Integrity | crate::hub::Error::Core(crate::core::Error::Integrity) => 10,
         crate::hub::Error::Storage(_) => 3,
         crate::hub::Error::Core(_) => 1,
-        crate::hub::Error::Binding => 4,
+        crate::hub::Error::Binding | crate::hub::Error::BindingHeld => 4,
         crate::hub::Error::FailureBudget => 5,
         crate::hub::Error::Revision => 8,
         crate::hub::Error::RefetchRateLimited => 9,

@@ -278,6 +278,8 @@ impl<M: crate::relay::Mailbox + crate::hub::Directory> crate::hub::Hub<M> {
         actor: &str,
         now: i64,
     ) -> Result<(), Error> {
+        self.ensure_not_terminal_held(endpoint)
+            .map_err(|_| Error::Denied)?;
         let contact = contact.normalized()?;
         let view = self.view(endpoint).map_err(|_| Error::Denied)?;
         if !view.paused || view.revision != revision {
