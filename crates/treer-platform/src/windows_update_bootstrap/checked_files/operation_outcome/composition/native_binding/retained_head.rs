@@ -7,6 +7,14 @@ use crate::windows_update_bootstrap::checked_files::{
 
 mod custody_fault;
 
+fn different_file_id(original: [u8; 16], source: [u8; 16]) -> [u8; 16] {
+    // Three valid candidates cannot all equal the two excluded identities.
+    [[1; 16], [2; 16], [3; 16]]
+        .into_iter()
+        .find(|candidate| *candidate != original && *candidate != source)
+        .unwrap()
+}
+
 fn expected_head(binding: &Binding) -> Vec<u8> {
     let image = |value: &Image| head_record::Image {
         volume: value.volume,
@@ -138,7 +146,10 @@ fn native_operation_retained_head_refuses_foreign_attempt_and_context() {
             0 => changed.0.revision += 1,
             1 => changed.0.component = 2,
             2 => changed.0.source.hash[0] ^= 1,
-            _ => changed.0.target.file[0] ^= 1,
+            _ => {
+                changed.0.target.file =
+                    different_file_id(independent.0.target.file, independent.0.source.file);
+            }
         }
         assert!(head
             .digest_for(&fixture.attempt, &expected_head(&changed))
@@ -151,4 +162,45 @@ fn native_operation_retained_head_refuses_foreign_attempt_and_context() {
     std::fs::remove_file(fixture.attempt.path.join("fixture.lock")).unwrap();
     cleanup(fixture);
     cleanup(foreign);
+}
+
+#[test]
+fn native_operation_retained_head_file_id_mutation_stays_encodable() {
+    // Deterministic counterexample: the old single-bit mutation makes two
+    // different, valid IDs equal. No assumption about the NTFS allocator.
+    let mut source = [0; 16];
+    source[0] = 1;
+    source[6] = 42;
+    let mut target = source;
+    target[0] ^= 1;
+    let image = |file| head_record::Image {
+        volume: 9,
+        file,
+        size: 17,
+        hash: [4; 32],
+    };
+    let mut head = head_record::Head {
+        attempt: [0x11; 32],
+        component: 1,
+        role: 1,
+        operation: 1,
+        revision: 7,
+        source: image(source),
+        target: image(target),
+    };
+    assert!(head.encode().is_some());
+    head.target.file[0] ^= 1;
+    assert_eq!(head.target.file, head.source.file);
+    assert!(head.encode().is_none());
+    for (original, source) in [(target, source), ([1; 16], [2; 16]), ([2; 16], [3; 16])] {
+        let changed = different_file_id(original, source);
+        assert_ne!(changed, original);
+        assert_ne!(changed, source);
+        assert_ne!(changed, [0; 16]);
+        assert_ne!(changed, [u8::MAX; 16]);
+        head.source.file = source;
+        head.target.file = changed;
+        assert!(head.encode().is_some());
+    }
+    eprintln!("head_mismatch_fixture old_mutation_collision=1 old_encode_refused=1 distinct_candidate_valid=1");
 }

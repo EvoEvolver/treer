@@ -1691,6 +1691,26 @@ No decision is written and no new accessor, digest handoff, sink capability or
 production API exists in this preparatory slice. Exact-SHA hosted evidence is
 still required to accept its reordered native controls.
 
+Hosted run 39369508646 on `8d480b6d` is a non-pass: Server 2022's focused
+retained-head mismatch test panicked when `expected_head().encode()` returned
+`None`, although the later operation/full-library runs and Server 2025 passed.
+The logs did not record the failing file IDs or mutation index. Source inspection
+found an allocator-dependent invalid test input: XORing target file-ID byte zero
+can make it equal the source ID (or a reserved sentinel), so the codec correctly
+refuses it before the intended live-head mismatch check. This is a deterministic
+counterexample to that mutation strategy, not proof of the exact IDs in the
+failed hosted invocation. Later passing runs do not erase the focused failure.
+
+The corrected fixture chooses among three valid fixed IDs, excluding both
+original target and source IDs. It changes only the target-ID field while
+guaranteeing the expected head remains syntactically valid; codec validation is
+unchanged. A pure-data regression constructs adjacent valid IDs, proves the old
+XOR makes them equal and unencodable, then checks the distinct-ID selector,
+including pairs that exclude its first two candidates. Both the native mismatch
+fixture and this deterministic regression require exact-SHA hosted validation
+before accepting the successor. The original callback-order controls, actual
+ReadFile and ACL-loss coverage remain required.
+
 This adds no durable consume-plus-head transaction, external deletion/replay
 fence, independently committed production expectations, authenticated health,
 real installation lock or real supervisor lifetime. A fresh process remains
