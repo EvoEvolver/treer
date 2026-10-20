@@ -27,6 +27,8 @@ pub struct MultiFieldHistory {
     /// Range acquisitions only; sorted opaque ids, presence deliberately false.
     /// This is historical inventory, not the current/range response union.
     pub retained_gpus: Vec<MachineMetricsGpu>,
+    /// An overlapping frame omitted inventory, even if current is unknown.
+    pub historical_inventory_incomplete: bool,
     /// None means current enumeration is unknown, NOT an empty union.
     pub inventory: Option<MergedInventory>,
 }
@@ -113,7 +115,11 @@ impl DetachedFieldQuery {
                 })
                 .filter_map(|field| field.gpu_id.as_deref())
                 .collect();
-            if !range_ids.is_empty() {
+            if stored
+                .fields
+                .iter()
+                .any(|field| field.observation.at >= query.from && field.observation.at < query.to)
+            {
                 incomplete_inventory |= stored.frame.inventory_truncated;
             }
             for gpu in &stored.frame.gpus {
@@ -174,6 +180,7 @@ impl DetachedFieldQuery {
             fields: output,
             has_gpu_inventory,
             retained_gpus: retained_gpus.into_values().collect(),
+            historical_inventory_incomplete: incomplete_inventory,
             inventory,
         })
     }

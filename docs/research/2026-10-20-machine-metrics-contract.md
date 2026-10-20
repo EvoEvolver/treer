@@ -753,10 +753,14 @@ when the historical range contains no observations for them. Output stays
 sorted by opaque id. The combined range-plus-current id count is checked against
 32 before cloning the output: overlap counts once, a new 33rd device refuses
 the whole query. Nothing is trimmed and no inventory_truncated flag is invented.
-If any frame carrying an in-range GPU acquisition declares inventory_truncated,
+If any frame carrying any in-range acquisition declares inventory_truncated,
 a known-current union refuses with IncompleteInventory; this helper cannot
 claim that such a historical inventory is complete. Unknown-current queries
-may still return bounded history and inventory=None, without a completeness claim.
+may still return bounded history and inventory=None, but preserve the separate
+historical_inventory_incomplete bit. A later response assembler must propagate
+that bit or refuse; unknown current cannot erase historical incompleteness.
+The overlap rule includes frames with only CPU/RAM acquisitions in range,
+because their omitted GPU descriptors cannot be reconstructed from that frame.
 
 Tests distinguish historical and current names for the same id, preserve a
 current-only device outside its historical acquisition range, retain an absent

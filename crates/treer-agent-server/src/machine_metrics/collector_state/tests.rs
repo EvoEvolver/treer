@@ -1027,6 +1027,9 @@ fn gpu_frame(state: &mut CollectorState, clock: Clock, gpu: &str) -> MachineMetr
     });
     sample.gpu_status = MachineMetricStatus::Ok;
     for field in state.snapshot(clock).unwrap().fields {
+        if field.gpu_id.is_none() {
+            continue;
+        }
         sample.series.push(MachineMetricSeries {
             kind: field.kind,
             gpu_id: field.gpu_id,
@@ -1143,6 +1146,69 @@ fn retained_gpu_inventory_uses_acquisition_range_not_cached_frame_time() {
         .unwrap()
         .inventory
         .is_none());
+}
+
+#[test]
+fn incomplete_inventory_survives_unknown_current_and_system_only_overlap() {
+    use crate::machine_metrics::field_query::{FieldKey, FieldQueryError};
+    for cpu_only in [false, true] {
+        let mut state = state();
+        let gpu = "a".repeat(64);
+        state
+            .record(
+                clock(0, 0),
+                MachineMetricKind::GpuUtilization,
+                Some(&gpu),
+                MachineMetricStatus::Ok,
+                Some(25.0),
+            )
+            .unwrap();
+        state
+            .record_vram(clock(0, 0), &gpu, MachineMetricStatus::Ok, Some((100, 60)))
+            .unwrap();
+        record(&mut state, clock(5000, 5000), 12.0);
+        let mut sample = gpu_frame(&mut state, clock(5000, 5000), &gpu);
+        sample.inventory_truncated = true;
+        state.append_frame(clock(5000, 5000), &sample).unwrap();
+        let keys = [FieldKey {
+            kind: MachineMetricKind::CpuUtilization,
+            gpu_id: None,
+        }];
+        let query = MachineMetricsQuery {
+            from: clock(if cpu_only { 5000 } else { 0 }, 0).wall,
+            to: clock(if cpu_only { 6000 } else { 1000 }, 0).wall,
+            max_points: 1,
+        };
+        let mut view = state
+            .detached_query(clock(10000, 10000), &mut || false)
+            .unwrap();
+        let result = view.query_fields(&query, &keys, &mut || false).unwrap();
+        assert!(result.inventory.is_none());
+        assert!(result.historical_inventory_incomplete);
+        assert_eq!(result.retained_gpus.is_empty(), cpu_only);
+        let excluded = MachineMetricsQuery {
+            from: clock(6000, 6000).wall,
+            to: clock(7000, 7000).wall,
+            max_points: 1,
+        };
+        assert!(
+            !view
+                .query_fields(&excluded, &keys, &mut || false)
+                .unwrap()
+                .historical_inventory_incomplete
+        );
+        drop(view);
+        state
+            .record_inventory(clock(10000, 10000), Some(&[]))
+            .unwrap();
+        let mut view = state
+            .detached_query(clock(10000, 10000), &mut || false)
+            .unwrap();
+        assert!(matches!(
+            view.query_fields(&query, &keys, &mut || false),
+            Err(FieldQueryError::IncompleteInventory)
+        ));
+    }
 }
 
 fn record(state: &mut CollectorState, clock: Clock, value: f64) -> bool {
