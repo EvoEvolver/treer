@@ -1945,6 +1945,44 @@ is expected. Earlier markers remain unchanged; exact-SHA dual-Windows logs
 are still required. Partial decisions, gap replacement, post-transition evidence
 custody and all remaining integrity/production/W4 gaps stay open.
 
+##### Post-transition evidence ACL loss (native pending)
+
+native_operation_decision_pin_refuses_post_transition_evidence_acl_loss covers
+the evidence-custody matrix row for MoveOld and Publish. Starting with real
+matching collision evidence and retained head custody, the matched hook creates
+the 177-byte decision, validates its restrictive pin, rechecks retained custody
+and records exact decision bytes/full identity. Live write/delete opens must
+both fail with sharing violation 32 before injection. Only then does the existing
+scoped AclFault clear protection on reason.evidence. The hook returns the actual
+decision pin plus an observed drop guard to the consumer, rather than returning
+an injected refusal itself.
+
+The consumer must refuse its second evidence read. A hook-return flag proves
+decision validation and ACL mutation succeeded; operation binding and retained
+head checks independently pass after refusal. The captured evidence read trace
+must report validated=false/read_calls=0 before restoration or any successful
+reread overwrites it. This attributes the refusal to second-read custody
+validation, not an earlier binding failure, digest mismatch or native ReadFile
+error. The decision guard drops exactly once, no sink is entered, and evidence
+is spent. Restore the original protected ACL explicitly, verify evidence, head
+and decision bytes/full identities unchanged, prove released decision write and
+delete opens succeed, and refuse a spent retry without reentering its hook.
+Recreation with the complete valid decision bytes must still fail with native
+ERROR_FILE_EXISTS (80); cleanup removes only fixture-owned paths after all
+guards close. No public visibility or source-boundary exports are added.
+
+Expected counts become operation30 and ordinary106 passed/four ignored, with
+the retained-head filter unchanged at four. Each operation/ordinary group per
+OS adds exactly two decision_evidence_acl_fixture rows (MoveOld/Publish):
+injected=1, pin_validated=1, binding=ok, retained=ok, validated=0, reads=0,
+drops=1, sink=0, spent=1, bytes=177 (measured), head_identity=unchanged,
+evidence_identity=unchanged, decision_identity=unchanged, post_write=0,
+post_delete=0, retry=refused and recreate_win32=80. No new caught panic is
+expected; earlier markers remain unchanged. Exact-SHA Server 2022/2025 raw
+evidence is required before accepting this row. Gap replacement, live-existing
+handles, guarded integrity/checkpoint/actual second-ReadFile tests, replay/CAS,
+recovery, production lifetime, Controller integration and W4 remain open.
+
 The first preparatory code slice only reorders `BoundStored::consume`: spend,
 binding check, evidence read, exact expected-context comparison, callback,
 post-callback binding check, sink. Its existing ten foreign-binding controls

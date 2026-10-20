@@ -1,6 +1,8 @@
 //! Actual private-fixture ACL custody loss, before/after evidence read.
 use super::*;
 
+mod decision_evidence;
+
 struct AclFault {
     file: File,
     descriptor: SecurityAllocation,
