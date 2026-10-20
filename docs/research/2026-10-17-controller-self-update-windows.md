@@ -1857,6 +1857,32 @@ files, post-create refusal, transition-gap replacement, post-transition head
 and evidence custody failures, and the other production/activation holds are
 still open.
 
+##### Injected post-create refusal composition (native pending)
+
+The separate native_operation_decision_pin_preserves_post_create_refusal test
+adds the failure-after-creation row for both operations. Its matched hook
+creates the decision, validates the restrictive read pin, rechecks the retained
+head/binding, and snapshots the measured 177 bytes and full file identity.
+Before injecting a labelled refusal, native write/delete access probes must
+both return sharing violation 32. The hook returns an injected error with the
+pin still local; scope exit releases it without returning a guard to the sink.
+An explicit flag proves all preceding operations succeeded before refusal.
+This is not an OS write/sync failure, process death or guarded reread test.
+
+The sink must never run, evidence must be spent, retries must never enter the
+hook, and subsequent exclusive creation must refuse the occupied slot. The
+test checks decision identity/bytes and evidence bytes unchanged, followed by
+successful released write/delete probes, before removing owned fixture files.
+Expected operation count becomes 27 and ordinary count 103 passed/four ignored;
+the retained-head filter stays four. Each operation and ordinary group on each
+OS must add exactly two decision_post_create_fixture rows, one per operation,
+with injected=1, validated=1, live_write=32, live_delete=32, post_write=0,
+post_delete=0, sink=0, spent=1, bytes=177 (measured), identity=unchanged,
+retry=refused. No new panic messages are expected. The prior complete-decision
+and sink-path rows remain unchanged. Exact-SHA dual-Windows native evidence is
+required; partial decisions, transition replacement, head/evidence custody
+faults and all other integrity/production/activation gaps remain open.
+
 The first preparatory code slice only reorders `BoundStored::consume`: spend,
 binding check, evidence read, exact expected-context comparison, callback,
 post-callback binding check, sink. Its existing ten foreign-binding controls

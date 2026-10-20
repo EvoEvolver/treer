@@ -1,6 +1,7 @@
 //! Partial native composition, never production authority.
 use super::*;
 
+mod post_create;
 mod preexisting;
 
 fn open_result(path: &Path, access: u32) -> u32 {
