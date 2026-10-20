@@ -54,8 +54,9 @@ impl AclFault {
     }
 
     fn protection(&self, protected: bool) -> io::Result<()> {
-        // Reapply the original non-null owner/SYSTEM ACL. Never install a
-        // null/world ACL; the negative condition is the protection flag only.
+        // Reapply the original non-null owner/SYSTEM ACL, never a null/world
+        // DACL. Clearing protection may transiently inherit parent ACEs;
+        // this fault is confined to the synthetic private fixture object.
         let _keep_descriptor_alive = &self.descriptor;
         let result = unsafe {
             SetSecurityInfo(

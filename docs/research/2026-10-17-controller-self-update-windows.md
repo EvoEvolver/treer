@@ -1418,7 +1418,11 @@ disposable head while its restrictive read pin remains live. A separately
 opened `READ_CONTROL | WRITE_DAC` handle retains the original non-null private
 owner/SYSTEM ACL. `SetSecurityInfo` reapplies that ACL while clearing its
 protection flag, and `GetSecurityDescriptorControl` verifies the actual flag.
-No null or world ACL is installed; data-writer/deleter exclusion is unchanged.
+The supplied ACL is never null or world-granting, but clearing protection can
+transiently inherit additional ACEs from the parent directory and broaden access.
+This fault is confined to the synthetic object created in the private fixture
+directory, and restoration is explicitly checked; it is not safe as a generic
+operation on an existing installation. Data-writer/deleter sharing exclusion is unchanged.
 Owner security-metadata override is a test fault, not a newly claimed adversary
 boundary or a production security repair operation.
 
