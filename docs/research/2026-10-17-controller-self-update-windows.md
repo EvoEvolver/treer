@@ -1306,6 +1306,41 @@ reopen authority, durable consumption or production caller. Subsequent writer
 and retained-pin slices must prevent write/delete sharing for the whole interval
 and prove actual competing-write refusal before using a head as a predecessor.
 
+The codec `9d897d1b` passed exact hosted run 39349608192 on both Server
+2022/2025: three codec tests and 77 ordinary tests, four ignored, with prior
+regressions preserved. Core 6308 and security 6306 read the raw logs; security
+also accepted the static format as inert data. Digest bytes remain unrestricted
+data: a real composition must independently compute and compare SHA-256, not
+treat a digest sentinel policy as proof of provenance.
+
+#### Cooperative initial publication and retained read sharing
+
+The next private native fixture borrows its `FixtureLock` for the entire
+`HeadPin` lifetime. Only that live lock can call initial publication; a missing
+ownership argument cannot be constructed from a path or record. It validates
+lock/directory custody before and after the existing fixed record replacement
+helper, then retains the exact full identity and validated bytes through the
+transition from the helper's delete-sharing reader to a `FILE_SHARE_READ`-only
+handle. It checks the protected ACL, regular single-link allowed attributes,
+non-inheritance, fixed `receipt.json` path and full identity/bytes of both the
+retained and current-name reader on each validation. Existing initial records
+refuse rather than replacing or clearing them.
+
+Tests require actual sharing violation 32 for write and delete access requested
+by permissively sharing second openers, a successful read opener, and successful
+write/delete opens after the retained pin closes. Invalid codec bytes must
+refuse before creating a record; a second initial publication must preserve the
+original full identity/bytes and create no staged record. These native assertions
+require exact-commit hosted 2022/2025 evidence; cross-compilation is not execution.
+
+This slice uses synthetic codec fixture values only. It establishes storage
+custody, not that encoded image/attempt fields match independently acquired
+native objects. No fresh-process constructor or acquisition consumes a HeadPin.
+The next composition must derive actual attempt and image expectations before
+the operation, bind the committed head digest into context, and refuse foreign
+attempts, same-byte/different-object substitutions and head advance. Neither a
+reopened lock nor a parsed record can rebuild that authority after process death.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 

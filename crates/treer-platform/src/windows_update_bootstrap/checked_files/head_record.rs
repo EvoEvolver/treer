@@ -98,6 +98,15 @@ fn parse(mut input: &[u8]) -> Option<Head> {
     (input.is_empty() && head.valid()).then_some(head)
 }
 
+// Syntactic check for the next disposable storage fixture, not authorization.
+pub(super) fn valid_bytes(bytes: &[u8]) -> bool {
+    parse(bytes).is_some()
+}
+
+pub(super) fn fixture_bytes() -> Vec<u8> {
+    fixture().encode().unwrap()
+}
+
 // Exact data equality is necessary, but never supplies independent expectations.
 fn matches_expected(bytes: &[u8], expected: &Head) -> bool {
     parse(bytes).as_ref() == Some(expected)

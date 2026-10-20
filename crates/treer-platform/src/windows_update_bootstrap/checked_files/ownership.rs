@@ -1,6 +1,8 @@
 //! Disposable cooperative fixture ownership, never installation authority.
 use super::*;
 
+mod head_pin;
+
 struct FixtureLock<'a> {
     attempt: &'a Attempt,
     file: File,
@@ -27,7 +29,8 @@ fn full_identity(file: &File) -> io::Result<(u64, [u8; 16])> {
 impl<'a> FixtureLock<'a> {
     // Creation mode is selected only by the private fixture, never record data.
     // OPEN_EXISTING after a close establishes custody only, not recovered head
-    // or failure authority. No public caller or head writer consumes this yet.
+    // or failure authority. Only the private initial head fixture consumes it;
+    // reacquiring ownership never reconstructs a HeadPin or operation context.
     fn acquire(attempt: &'a Attempt, create: bool) -> io::Result<Self> {
         let owner = crate::windows::current_user_sid().map_err(|_| denied())?;
         let path = evidence_file::directory(attempt, &owner)?.join("fixture.lock");
