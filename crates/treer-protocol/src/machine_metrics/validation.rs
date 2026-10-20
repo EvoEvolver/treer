@@ -59,6 +59,20 @@ impl MachineMetricsResponse {
         server_id: &str,
         received_at: DateTime<Utc>,
     ) -> Result<()> {
+        self.validate_model(query, server_id, received_at)?;
+        // Count with a hard stop instead of allocating the complete encoding.
+        serde_json::to_writer(SizeCounter(0), self).map_err(|_| MachineMetricsValidationError)
+    }
+
+    /// Logical wire invariants only, excluding serialized size. Source encoders
+    /// must additionally cap writes before publishing any bytes. Transport
+    /// consumers should use validate/parse_bounded for the complete contract.
+    pub fn validate_model(
+        &self,
+        query: &MachineMetricsQuery,
+        server_id: &str,
+        received_at: DateTime<Utc>,
+    ) -> Result<()> {
         require(query.valid_at(received_at))?;
         require(
             self.schema == CAPABILITY_MACHINE_METRICS
@@ -219,13 +233,23 @@ impl MachineMetricsResponse {
                 Some(&gpu.id),
             )?;
         }
-        // Range/point caps alone are not a serialized-byte bound.
-        require(
-            serde_json::to_vec(self)
-                .map_err(|_| MachineMetricsValidationError)?
-                .len()
-                <= MACHINE_METRICS_MAX_RESPONSE_BYTES,
-        )
+        Ok(())
+    }
+}
+
+struct SizeCounter(usize);
+
+impl std::io::Write for SizeCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > MACHINE_METRICS_MAX_RESPONSE_BYTES - self.0 {
+            return Err(std::io::Error::other("machine_metrics_response_too_large"));
+        }
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 

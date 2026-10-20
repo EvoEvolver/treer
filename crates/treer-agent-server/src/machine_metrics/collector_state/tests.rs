@@ -13,6 +13,133 @@ fn state() -> CollectorState {
 }
 
 #[test]
+fn response_encoding_validates_and_discards_every_cancelled_partial_buffer() {
+    use crate::machine_metrics::response_encoding::{encode_bounded, EncodingError};
+    let mut state = state();
+    record(&mut state, clock(0, 0), 12.0);
+    let response = frame(&mut state, clock(5_000, 5_000));
+    let query = MachineMetricsQuery {
+        from: response.from,
+        to: response.to,
+        max_points: 1,
+    };
+    let mut checks = 0;
+    let bytes = encode_bounded(
+        &response,
+        &query,
+        "machine",
+        response.generated_at,
+        &mut || {
+            checks += 1;
+            false
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        MachineMetricsResponse::parse_bounded(&bytes, &query, "machine", response.generated_at)
+            .unwrap(),
+        response
+    );
+    assert_eq!(bytes, serde_json::to_vec(&response).unwrap());
+    assert!(checks > 10);
+    for stop_at in [1, 2, checks / 2, checks] {
+        let mut calls = 0;
+        assert_eq!(
+            encode_bounded(
+                &response,
+                &query,
+                "machine",
+                response.generated_at,
+                &mut || {
+                    calls += 1;
+                    calls == stop_at
+                }
+            ),
+            Err(EncodingError::Cancelled)
+        );
+    }
+    assert_eq!(
+        encode_bounded(
+            &response,
+            &query,
+            "another-machine",
+            response.generated_at,
+            &mut || false
+        ),
+        Err(EncodingError::InvalidResponse)
+    );
+    let mut bad = response;
+    bad.series[0].current.value = Some(f64::NAN);
+    assert_eq!(
+        encode_bounded(&bad, &query, "machine", bad.generated_at, &mut || false),
+        Err(EncodingError::InvalidResponse)
+    );
+}
+
+#[test]
+fn valid_model_exceeding_encoded_cap_is_refused_as_a_whole() {
+    use crate::machine_metrics::response_encoding::{encode_bounded, EncodingError};
+    use treer_protocol::{MachineMetricBucket, MachineMetricStatusCount};
+    let mut state = state();
+    let now = clock(86_400_000, 86_400_000);
+    let mut response = frame(&mut state, now);
+    response.from = clock(0, 0).wall;
+    response.bucket_width_ms = 120_000;
+    let query = MachineMetricsQuery {
+        from: response.from,
+        to: now.wall,
+        max_points: 720,
+    };
+    // A semantically valid, status-rich maximum-point system response. The
+    // source must refuse it rather than trim fields/buckets after assembly.
+    for series in &mut response.series {
+        for index in 0..720 {
+            let from = query.from + Duration::seconds(index * 120);
+            series.points.push(MachineMetricBucket {
+                from,
+                to: from + Duration::seconds(120),
+                expected_count: 24,
+                valid_count: 0,
+                status_counts: [
+                    MachineMetricStatus::WarmingUp,
+                    MachineMetricStatus::NoDevice,
+                    MachineMetricStatus::DriverUnavailable,
+                    MachineMetricStatus::UnsupportedPlatform,
+                    MachineMetricStatus::UnsupportedMetric,
+                    MachineMetricStatus::CollectionFailed,
+                    MachineMetricStatus::TimedOut,
+                    MachineMetricStatus::Stale,
+                    MachineMetricStatus::DeviceAbsent,
+                    MachineMetricStatus::Disabled,
+                ]
+                .into_iter()
+                .map(|status| MachineMetricStatusCount { status, count: 1 })
+                .collect(),
+                first_sample_at: None,
+                last_sample_at: None,
+                mean: None,
+                min: None,
+                max: None,
+                partial: true,
+            });
+        }
+    }
+    response
+        .validate_model(&query, "machine", now.wall)
+        .unwrap();
+    assert!(response.validate(&query, "machine", now.wall).is_err());
+    // The unbounded serializer is used only as a test oracle, not by the encoder.
+    assert!(
+        serde_json::to_vec(&response).unwrap().len()
+            > treer_protocol::MACHINE_METRICS_MAX_RESPONSE_BYTES
+    );
+    assert_eq!(
+        encode_bounded(&response, &query, "machine", now.wall, &mut || false),
+        Err(EncodingError::TooLarge)
+    );
+}
+
+#[test]
 fn multi_field_query_caps_combined_buckets_and_validates_before_reduction() {
     use crate::machine_metrics::field_query::FieldKey;
     let mut state = state();

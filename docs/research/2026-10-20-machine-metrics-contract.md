@@ -582,3 +582,42 @@ index-cap boundaries and every reachable cancellation checkpoint, reject
 conflicting/corrupt frames, and verify 100 series produce 7,200 full-day buckets
 while an invalid original max_points cannot become valid through reduction.
 No sampler, timer, advertised capability, journal, IPC or public route is added.
+
+## Bounded response encoding checkpoint (not connected)
+
+`response_encoding::encode_bounded` validates an assembled typed response with
+the shared wire validator against the original query, machine identity and
+source clock before serialization. It then serializes directly into a private
+1 MiB-capacity buffer through a capped writer. Every append checks remaining
+space before extending; a valid model whose encoding exceeds 1 MiB returns
+TooLarge and drops the entire partial buffer. It never serializes an unlimited
+temporary Vec and never trims fields, buckets or metadata to make output fit.
+Only a successful complete Vec may reach a future transport.
+
+The shared validator previously encoded an unlimited temporary Vec just to
+measure its length. Full `validate` now counts serialized writes with an
+allocation-free size counter that stops before crossing 1 MiB; its accepted
+wire contract is unchanged. New `validate_model` checks only logical invariants
+and explicitly omits the encoded-size check. It is for source encoders that
+enforce a write cap themselves, not a replacement for `validate` or
+`parse_bounded` at a transport trust boundary. The source encoder uses that
+model check to avoid serializing twice and report TooLarge distinctly.
+
+The caller-owned cancellation predicate is checked before validation, during
+each serializer write and again at completion. Cancellation and invalid-model,
+size and serialization failures have fixed content-free internal categories;
+no partial bytes are returned. These are not public API status mappings yet.
+Validation itself is not preemptible; its model dimensions are bounded by the
+existing shared validator. The output buffer allocates 1 MiB after validation,
+independently of actual response size. This cap excludes the already assembled
+model, index, snapshots and allocator overhead, so the process-wide memory
+budget and lifetime/deadline owner remain required before runtime activation.
+
+Tests verify exact byte-cap acceptance and one-byte-over refusal before append,
+successful encoding round-trips through the shared bounded parser, invalid
+machine/value refusal, cancellation before/during/final serialization returning
+no bytes, and a valid status-rich 2,880-bucket model whose JSON exceeds 1 MiB
+being rejected as a whole. Its oversized JSON is built only by the test oracle.
+The complete response assembler, GPU inventory, per-range metadata, original
+fractional-span mismatch, source sampling/journal, Policy/IPC/routes, real
+deadline/disconnect and stale-epoch publication checks remain unfinished.
