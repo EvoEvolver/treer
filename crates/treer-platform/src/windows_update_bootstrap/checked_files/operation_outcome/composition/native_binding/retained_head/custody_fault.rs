@@ -111,6 +111,73 @@ impl Drop for AclFault {
 }
 
 #[test]
+fn native_operation_guard_reread_acl_failure_spends_and_drops_once() {
+    struct Guard<'a>(&'a Cell<usize>);
+    impl Drop for Guard<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    for operation in [Operation::MoveOld, Operation::Publish] {
+        let fixture = Fixture::new(operation);
+        let binding = Binding::before_acquisition(&fixture, 1).unwrap();
+        let context = fixture.context();
+        let composition = Composition::new(
+            &context,
+            &fixture.attempt,
+            &fixture.source,
+            &fixture.target,
+            context.intent,
+        )
+        .unwrap();
+        let Captured::Failure(failure) = composition.acquisition.capture(|_| Ok(())) else {
+            panic!("native collision required");
+        };
+        let stored = BoundStored::store(&composition, &binding, &failure).unwrap();
+        let original = stored.pin.read().unwrap();
+        let fault = AclFault::prepare(&fixture.attempt.path.join("reason.evidence")).unwrap();
+        let drops = Cell::new(0);
+        let injected = Cell::new(false);
+        let mut sink = Sink {
+            on_accept: Some(Box::new(|_| panic!("custody fault must precede sink"))),
+            ..Sink::default()
+        };
+        assert!(stored
+            .consume_with_guard(&binding, &mut sink, |_| {
+                assert!(stored.spent.get());
+                let guard = Guard(&drops);
+                fault.protection(false)?;
+                assert_eq!(drops.get(), 0);
+                injected.set(true);
+                Ok(guard)
+            })
+            .is_err());
+        assert!(injected.get());
+        assert_eq!(drops.get(), 1);
+        assert!(stored.spent.get());
+        assert_eq!(sink.accepted, 0);
+        // The unchanged operation binding passes; the reread actually reached
+        // evidence custody validation and refused before ReadFile, not at the
+        // post-hook binding check. This is NOT a native ReadFile error test.
+        binding.check(&composition).unwrap();
+        let trace = stored.pin.read_trace();
+        assert!(!trace.validated);
+        assert_eq!(trace.read_calls, 0);
+        fault.protection(true).unwrap();
+        assert_eq!(stored.pin.read().unwrap(), original);
+        assert!(stored
+            .consume_with_guard::<Guard<'_>>(&binding, &mut sink, |_| panic!("spent"))
+            .is_err());
+        assert_eq!(drops.get(), 1);
+        assert!(!fixture.attempt.path.join("consume.intent").exists());
+        eprintln!("guard_reread_acl_fault operation={} injected=1 validated=0 reads=0 drops=1 spent=1 decision=0 sink=0", if operation == Operation::MoveOld { "MoveOld" } else { "Publish" });
+        drop(fault);
+        drop(stored);
+        cleanup(fixture);
+    }
+}
+
+#[test]
 fn native_operation_retained_head_acl_loss_spends_consumption() {
     for operation in [Operation::MoveOld, Operation::Publish] {
         for after_read in [false, true] {

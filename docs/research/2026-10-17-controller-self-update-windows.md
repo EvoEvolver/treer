@@ -1635,6 +1635,25 @@ sink-time lifetime only; explicit second-read/binding-failure observation and
 digest-mismatch fault coverage remain open for the subsequent composition.
 Exact-SHA hosted execution of this successor fixture remains pending.
 
+The subsequent binding-failure fixture moves the actual occupied target to the
+operation's spare slot inside the matched-context hook, retains an owned guard,
+and proves the live binding now refuses while that guard is still alive. The
+consumer must refuse with zero sink visits, exactly one guard drop, spent retry
+refusal, unchanged pinned evidence and no decision file, for both operations.
+A flag proves the native rename and failed binding check were reached. This
+adds the post-hook binding-failure path; it does not yet observe the guard
+inside the consumer's second read/check, inject a reread failure or create a
+decision pin. Exact-SHA hosted execution remains required for this new test.
+
+A second fixture uses the existing scoped ACL fault on reason.evidence after
+the first matched read. The operation binding still passes, while the second
+pin read refuses at custody validation (validated=false, read_calls=0). Both
+collision operations must release the returned guard once, keep the spent
+latch, refuse sink/retry and preserve original bytes after protected ACL
+restoration. This is native ACL loss, not a native ReadFile error or a digest
+mismatch injection. Guard observation inside that reread remains open, as do
+the digest-mismatch path and actual decision-pin composition.
+
 The same-bytes gap replacement fixture `b279e51d` passed hosted run
 39367207855 on Server 2022/2025: read-pin three, ordinary 93 passed/four ignored
 (Core 6479 and security 6475 independently read raw logs). The next slice should

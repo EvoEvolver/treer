@@ -303,6 +303,83 @@ fn native_operation_guard_released_after_acceptance_or_refusal() {
 }
 
 #[test]
+fn native_operation_guard_binding_failure_spends_and_drops_once() {
+    struct Guard<'a>(&'a Cell<usize>);
+    impl Drop for Guard<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    for operation in [Operation::MoveOld, Operation::Publish] {
+        let fixture = Fixture::new(operation);
+        let binding = Binding::before_acquisition(&fixture, 1).unwrap();
+        let context = fixture.context();
+        let composition = Composition::new(
+            &context,
+            &fixture.attempt,
+            &fixture.source,
+            &fixture.target,
+            context.intent,
+        )
+        .unwrap();
+        let Captured::Failure(failure) = composition.acquisition.capture(|_| Ok(())) else {
+            panic!("native collision required");
+        };
+        let stored = BoundStored::store(&composition, &binding, &failure).unwrap();
+        let original = stored.pin.read().unwrap();
+        let drops = Cell::new(0);
+        let injected = Cell::new(false);
+        let mut sink = Sink {
+            on_accept: Some(Box::new(|_| panic!("binding fault must precede sink"))),
+            ..Sink::default()
+        };
+        assert!(stored
+            .consume_with_guard(&binding, &mut sink, |_| {
+                assert!(stored.spent.get());
+                assert_eq!(drops.get(), 0);
+                let guard = Guard(&drops);
+                let spare = if operation == Operation::MoveOld {
+                    Slot::Candidate
+                } else {
+                    Slot::Backup
+                };
+                fixture.attempt.rename_checked(
+                    &fixture.target,
+                    operation.slots().1,
+                    spare,
+                    context.target.hash,
+                )?;
+                // Prove an actual slot mutation, not an injected error return.
+                assert!(binding.check(&composition).is_err());
+                injected.set(true);
+                assert_eq!(drops.get(), 0);
+                Ok(guard)
+            })
+            .is_err());
+        assert!(injected.get());
+        assert_eq!(drops.get(), 1);
+        assert!(stored.spent.get());
+        assert_eq!(sink.accepted, 0);
+        assert!(stored
+            .consume_with_guard::<Guard<'_>>(&binding, &mut sink, |_| panic!("spent"))
+            .is_err());
+        assert_eq!(drops.get(), 1);
+        assert_eq!(stored.pin.read().unwrap(), original);
+        assert!(!fixture.attempt.path.join("consume.intent").exists());
+        eprintln!(
+            "guard_binding_fault operation={} injected=1 drops=1 spent=1 decision=0 sink=0",
+            if operation == Operation::MoveOld {
+                "MoveOld"
+            } else {
+                "Publish"
+            }
+        );
+        drop(stored);
+        cleanup(fixture);
+    }
+}
+
+#[test]
 fn native_operation_matched_digest_handoff_and_spent_failure() {
     for operation in [Operation::MoveOld, Operation::Publish] {
         for refuse in [false, true] {
