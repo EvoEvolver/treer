@@ -1528,6 +1528,24 @@ review the private native decision writer, interrupted-stage fixtures and
 read-back/write-sharing tests separately. The existing native head fixture
 results cannot stand in for that evidence. W4 remains leader-held.
 
+The first codec implementation is private `checked_files::consume_record`,
+inherited `cfg(all(windows, test))` only. Its fields and strict 177-byte framing
+follow the amended contract accepted in security 6408. It has no writer, path,
+file handle, supervisor acquisition, public conversion or consumed token.
+The fixture lifetime/attempt values are explicitly synthetic. The three tests
+compare an independent literal hex vector, mutate every encoded byte against
+the independent expected record, reject copied installation/attempt bindings,
+all truncations and appended data, old length 145, unsupported domain/version
+tags, sentinel identifiers and invalid selector/revision/status fields. They
+also retain unrestricted digest data and maximum nonzero revision/status.
+
+The same standalone Rust test file can execute as pure codec logic on the
+development host; passing that harness does not establish Windows file sharing,
+ACL, flush durability or production integration. Exact-SHA hosted Windows
+library testing remains separate evidence. The native exclusive writer and its
+interruption cases are still unimplemented, as are external deletion/replay
+protection and atomic consume/head publication.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 

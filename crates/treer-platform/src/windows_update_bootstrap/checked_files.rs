@@ -5,6 +5,7 @@ use super::*;
 use std::io::{Seek, SeekFrom, Write};
 use windows_sys::Win32::System::WindowsProgramming::FS_PERSISTENT_ACLS;
 
+mod consume_record;
 mod evidence_file;
 mod head_record;
 mod operation_outcome;
