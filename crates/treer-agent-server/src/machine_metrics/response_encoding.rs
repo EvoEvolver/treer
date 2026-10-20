@@ -1,9 +1,70 @@
 //! Source-side encoding boundary. No route, transport or partial publication.
+use super::memory_budget::{Assembly, BudgetError, Charged};
 use chrono::{DateTime, Utc};
 use std::io::{self, Write};
 use treer_protocol::{
     MachineMetricsQuery, MachineMetricsResponse, MACHINE_METRICS_MAX_RESPONSE_BYTES,
 };
+
+/// The capped Vec and a replacement exact-length allocation may coexist while
+/// compacting. Keep both payload allowances charged until the output is freed.
+/// This excludes allocator metadata and the already-built typed input model.
+pub const ENCODING_RESERVATION_BYTES: usize = 2 * MACHINE_METRICS_MAX_RESPONSE_BYTES;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ChargedEncodingError {
+    Budget(BudgetError),
+    Encoding(EncodingError),
+}
+
+/// Complete output for a future transport. No byte extraction or Clone API:
+/// share the owner through Arc, keeping credit and the assembly until last drop.
+/// Fields drop in order: bytes, then credit, then the assembly guard.
+pub struct ChargedResponse {
+    bytes: Charged<Box<[u8]>>,
+    _assembly: Assembly,
+}
+
+impl ChargedResponse {
+    /// Borrow for transport writes. Any copied buffer needs its own reservation.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// Inert charged encoding boundary; not yet used by the response assemblers.
+/// Input-model/query memory must already be charged by its owning stage. The
+/// caller still owns final epoch/auth checks and bounded transport admission.
+pub fn encode_charged(
+    assembly: Assembly,
+    response: &MachineMetricsResponse,
+    query: &MachineMetricsQuery,
+    server_id: &str,
+    now: DateTime<Utc>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ChargedResponse, ChargedEncodingError> {
+    if assembly.is_revoked() {
+        return Err(ChargedEncodingError::Encoding(EncodingError::Cancelled));
+    }
+    let bytes = assembly
+        .try_build(ENCODING_RESERVATION_BYTES, || {
+            let mut cancelled = || assembly.is_revoked() || cancelled();
+            let bytes =
+                encode_bounded(response, query, server_id, now, &mut cancelled)?.into_boxed_slice();
+            // Compaction may move the buffer. Never hand out an output that was
+            // cancelled/revoked during that final allocation.
+            if cancelled() {
+                return Err(EncodingError::Cancelled);
+            }
+            Ok(bytes)
+        })
+        .map_err(ChargedEncodingError::Budget)?
+        .map_err(ChargedEncodingError::Encoding)?;
+    Ok(ChargedResponse {
+        bytes,
+        _assembly: assembly,
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncodingError {

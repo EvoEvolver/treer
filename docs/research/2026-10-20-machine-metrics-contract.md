@@ -1176,3 +1176,55 @@ runtime acceptance, every allocation boundary needs a concrete precharged bound
 and every release path needs composed fault tests; an arbitrary credit number
 around a Vec constructor is not evidence of a hard heap ceiling. Disk integrity,
 streaming discovery and complete-query measurements remain open as above.
+
+### Charged encoded-output owner (inert boundary)
+
+response_encoding::encode_charged accepts an Assembly owner and borrows an
+already-built typed response. It reserves 2 * MACHINE_METRICS_MAX_RESPONSE_BYTES
+on that assembly's own ledger BEFORE invoking the encoder. The two wire-cap
+allowances conservatively cover coexistence of the capped Vec and replacement
+exact-length allocation during compaction. The complete allowance stays charged
+until the output drops, even when the actual response is smaller. Input-model
+memory, allocator overhead, Arc bookkeeping and any transport copies are separate
+obligations; this is not a combined-query or RSS ceiling.
+
+Successful ChargedResponse has private fields and exposes only as_bytes(). It
+owns Charged<Box<[u8]>> followed by the Assembly, so bytes release before credit
+and credit before the slot. There is no extraction or Clone API; a future
+transport may share an Arc<ChargedResponse> and borrow chunks, keeping both
+resources until its last owner drops. Deliberate borrowed-byte copies still
+require their own reservation. Cancellation and revocation are checked during
+serialization and after compaction. Failures and unwind drop the partial output
+before returning credit; any other assembly owner continues to hold the slot.
+Final epoch/authorization checks, bounded queue admission and worker termination
+remain the caller's responsibility.
+
+This new entry point is not yet used by assemble_system_response or
+assemble_captured_response: those inert staging paths still return their legacy
+SystemResponse with plain bytes and are not runtime-budgeted. The remaining
+query stages must first acquire concrete measured bounds and retain their
+ownership across the composed pipeline. Unit tests use private isolated ledgers;
+only the existing singleton test calls MemoryBudget::machine, avoiding global
+test contention. A process that forgets an owner fails closed; a fixed unavailable
+category and operator health signal are still required at runtime admission.
+
+Tests cover exhaustion before encoder entry, complete wire equality and shared
+parser acceptance, a partially read Arc-owned output after revocation, invalid
+model and wire-cap failures, cancellation before/during encoding and after
+compaction, mid-encoding revocation, and callback unwind restoring a live
+baseline. With metrics-allocation-measurement enabled, an isolated synchronous
+test encodes a four-series 24-hour/720-point response and refuses a status-rich
+variant of the same geometry. Measured live requested-allocation peaks were
+1,749,402 bytes (successful output) and 1,048,698 bytes (whole-response refusal),
+both below the 2,097,152-byte reservation; final bytes and allocation counts were
+zero. The typed input and test oracle are built outside the measured closure;
+the assembly allocation has a live owner outside it. Thus these numbers include
+encoder temporaries and compaction, but not the input model, assembly bookkeeping,
+other query stages, concurrent collection, allocator metadata or RSS.
+
+Reproduce with CARGO_TARGET_DIR set to a private build cache:
+`cargo test -p treer-agent-server --bin treer-agent-server --features
+metrics-allocation-measurement
+charged_encoding_measured_live_heap_stays_within_payload_reservation --
+--nocapture --test-threads=1`. This is partial stage evidence, not aggregate
+32 MiB or incremental 16 MiB acceptance.

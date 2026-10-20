@@ -140,6 +140,16 @@ impl Drop for AssemblyState {
 pub struct Assembly(Arc<AssemblyState>);
 
 impl Assembly {
+    /// Keep a stage on the same ledger as its assembly; callers cannot pair a
+    /// guard with a different budget. This does not authorize work/publication.
+    pub(super) fn try_build<T, E>(
+        &self,
+        bytes: usize,
+        build: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Result<Charged<T>, E>, BudgetError> {
+        MemoryBudget(self.0.state.clone()).try_build(bytes, build)
+    }
+
     pub fn revoke(&self) {
         self.0.revoked.store(true, Ordering::Release);
     }
@@ -147,6 +157,9 @@ impl Assembly {
         self.0.revoked.load(Ordering::Acquire)
     }
 }
+
+#[cfg(test)]
+mod response_tests;
 
 #[cfg(test)]
 mod tests {
