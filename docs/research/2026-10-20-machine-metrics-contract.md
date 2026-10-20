@@ -1130,3 +1130,43 @@ blocking heartbeat. Keep advisory measurement opt-in and isolated in CI/release.
 Machine-local disk-only history, no central/browser persistence and no metric
 body logging remain required. Any API/refusal change needs Web/security review;
 native performance and deployed/browser #221 acceptance remain pending.
+
+### Shared credit and assembly ownership primitive (inert model)
+
+memory_budget::MemoryBudget provides a shared Arc-backed atomic ledger with a
+32 MiB reservation ceiling. Cloned handles share the counter and one assembly
+slot. try_build reserves a nonzero bounded credit BEFORE invoking its fallible
+builder; exhausted/invalid requests cannot enter that builder. A failed builder
+or unwind drops its reservation. Successful Charged<T> owns both the result and
+its credit, exposes only a borrowed view, and drops the value before returning
+credit. Retaining it through an Arc retains credit until the final owner drops.
+There is no credit reset, forced reclaim or uncharged-value extraction API.
+
+Assembly handles are cloneable ownership guards with shared revocation state.
+Deadline/cancellation code may revoke them but revocation does not return the
+slot. All worker and response owners must retain a guard until their resources
+actually release; only the last guard's drop admits another assembly. A fresh
+assembly starts unrevoked. A lost/forgotten owner therefore makes the ledger or
+slot unavailable rather than allowing excess reservations or overlapping work.
+A deadline alone proves neither worker termination nor buffer deallocation.
+
+Tests cover exhausted/invalid requests before builder entry, full-budget credit
+retained by a cloned response owner, builder error/panic restoration to a live
+baseline, value-before-credit destruction, revoked worker/response lifetimes,
+four concurrent handles sharing the full aggregate reservation, four competing
+assembly callers admitting exactly one, and slot release on unwind. These are
+primitive tests, not faults injected into an actual decode/encode pipeline.
+
+This is NOT global runtime memory enforcement: separately constructed budgets
+remain independent; the future machine singleton must supply the same instance
+to all histories/workers/outputs. Charged byte amounts are caller-supplied bounds,
+not allocator measurements. Builders must not allocate beyond their reservation
+or let failed/async allocations escape it. The ledger's Arc/slot bookkeeping is
+not yet charged either. No existing ring/index/decoder/encoder uses this ledger.
+The 8 MiB steady and 16 MiB incremental categories, allocation-growth charging,
+allocator/RSS margin, per-principal/global queue fairness, deadlines, actual
+worker shutdown and publication authorization remain unimplemented. Before
+runtime acceptance, every allocation boundary needs a concrete precharged bound
+and every release path needs composed fault tests; an arbitrary credit number
+around a Vec constructor is not evidence of a hard heap ceiling. Disk integrity,
+streaming discovery and complete-query measurements remain open as above.

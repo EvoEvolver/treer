@@ -6,5 +6,6 @@ pub mod field_cache;
 pub mod field_query;
 pub mod gpu_inventory;
 pub mod history;
+pub mod memory_budget;
 pub mod response_encoding;
 pub mod stored_frame;
