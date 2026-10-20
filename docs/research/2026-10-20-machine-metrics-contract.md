@@ -791,11 +791,25 @@ width and expected-count list, accept bounded serialized responses and reject
 a decremented final expected_count in every case. The protocol's bounded
 machine_metrics_expected_samples helper is the single Rust nanosecond ceiling
 rule for aggregation width/counts and response validation, preventing internal
-rounding drift. Web's parser change uses BigInt arithmetic; Core inspected that
-source change but has not run a browser/full Web gate. Its reported offline
-checks are not browser compatibility evidence, and the exclusive Release window
-must be respected. Union/activation remains pending that evidence and the other
-source/runtime holds.
+rounding drift. Web's parser change uses BigInt arithmetic. Both Core e43efab9
+and the final frozen Web successor fe324023 assert the same file digest before
+parsing it.
+
+The Web freeze is now backed by author-run execution evidence: the full 769-test
+gate passed on production-parser commit 0427fbef, and the final test-only digest
+assertion delta at fe324023 passed all 75 focused checks across Chromium,
+Firefox and WebKit. The full 769-test gate was not rerun on fe324023. Core read
+the logs and independently verified all 81 evidence hashes; UI approved the
+final presentation, and Release retained that scoped freeze (Issues #221 events
+6980, 6982 and 6983, and the subsequent Release intake). These are component
+results, not exact Core/Web union or live-runtime acceptance, and Core did not
+rerun the browser gate. Evidence lives under
+.treer/reviews/web221-fractional/; no generated artifacts belong in the commit.
+Retain fe324023 for later integration. GPU series and DeviceAbsent assembly,
+runtime authorization/routes, deadline/disconnect/global admission, stale-epoch
+publication and native acquisition remain open; exact union checks and deployed
+browser acceptance must follow those changes. Existing release holds and the
+exclusive Release window remain in force.
 
 Tests distinguish historical and current names for the same id, preserve a
 current-only device outside its historical acquisition range, retain an absent
@@ -805,7 +819,8 @@ device succeeds; a distinct current device refuses, as does incomplete history.
 This is metadata only: it does not yet aggregate the three GPU fields for the
 resulting union or assemble their DeviceAbsent current projections. The current
 system-only wire helper remains conservative and still refuses retained GPUs.
-Append-frame enumeration binding and runtime activation holds remain unchanged.
+The captured-inventory staging boundary below supplies enumeration binding;
+runtime activation holds remain unchanged.
 
 ## Captured-inventory staging boundary (inert)
 
