@@ -730,3 +730,11 @@ clearing actual retained history and fields. Current/range inventory union,
 historical DeviceAbsent projection and full GPU wire assembly remain pending;
 append_frame is not yet bound to this new enumeration cache. Runtime, helper,
 deadline, authorization and publication holds remain unchanged.
+
+Following security review 6911, enumeration time equality is a distinct
+DuplicateCapture refusal: either equal wall time or equal monotonic time, with
+neither clock reversed, preserves the previous capture, epoch, CPU/RAM fields
+and history. This includes duplicate failed attempts, which cannot turn an old
+successful capture into a newly timed failure. True reversal still invalidates
+the shared epoch. Integration tests exercise both clocks tied, each clock tied
+alone and successful/failed duplicate inputs, with actual retained CPU history.

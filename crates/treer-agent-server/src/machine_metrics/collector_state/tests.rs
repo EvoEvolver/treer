@@ -166,6 +166,39 @@ fn invalid_inventory_preserves_capture_and_inventory_drift_resets_epoch() {
 }
 
 #[test]
+fn duplicate_inventory_clock_refuses_without_reset_or_history_loss() {
+    use crate::machine_metrics::gpu_inventory::InventoryError;
+    use treer_protocol::MachineMetricsGpu;
+    for tied in [clock(5000, 5000), clock(5000, 5001), clock(5001, 5000)] {
+        for failure in [false, true] {
+            let mut state = state();
+            record(&mut state, clock(0, 0), 12.0);
+            let sample = frame(&mut state, clock(0, 0));
+            state.append_frame(clock(0, 0), &sample).unwrap();
+            let gpu = MachineMetricsGpu {
+                id: "a".repeat(64),
+                name: "original".into(),
+                present: true,
+            };
+            state
+                .record_inventory(clock(5000, 5000), Some(std::slice::from_ref(&gpu)))
+                .unwrap();
+            assert_eq!(
+                state.record_inventory(tied, if failure { None } else { Some(&[]) }),
+                Err(StateError::Inventory(InventoryError::DuplicateCapture))
+            );
+            let snapshot = state.snapshot(tied).unwrap();
+            assert_eq!(snapshot.epoch, 0);
+            assert!(!snapshot.reset);
+            assert_eq!(snapshot.inventory.unwrap().gpus, vec![gpu]);
+            assert_eq!(snapshot.fields[0].current.value, Some(12.0));
+            assert_eq!(state.history.record_count(), 1);
+            assert_eq!(state.reset_diagnostics().count, 0);
+        }
+    }
+}
+
+#[test]
 fn system_response_preserves_stale_current_and_marks_known_history_loss() {
     let mut state = CollectorState::new(
         "machine".into(),

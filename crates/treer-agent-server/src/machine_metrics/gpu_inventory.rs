@@ -7,6 +7,7 @@ use treer_protocol::{MachineMetricsGpu, MACHINE_METRICS_MAX_GPUS, MACHINE_METRIC
 #[derive(Debug, PartialEq, Eq)]
 pub enum InventoryError {
     InvalidCapture,
+    DuplicateCapture,
     ClockReversed,
 }
 
@@ -48,9 +49,17 @@ impl InventoryCache {
         }
         if self
             .clock
-            .is_some_and(|old| clock.wall <= old.wall || clock.monotonic_ms <= old.monotonic_ms)
+            .is_some_and(|old| clock.wall < old.wall || clock.monotonic_ms < old.monotonic_ms)
         {
             return Err(InventoryError::ClockReversed);
+        }
+        if self
+            .clock
+            .is_some_and(|old| clock.wall == old.wall || clock.monotonic_ms == old.monotonic_ms)
+        {
+            // A duplicate or low-resolution tie establishes no new capture,
+            // but does not imply clock uncertainty or discard other history.
+            return Err(InventoryError::DuplicateCapture);
         }
         let mut capture = gpus.map(<[_]>::to_vec);
         if let Some(gpus) = &mut capture {
