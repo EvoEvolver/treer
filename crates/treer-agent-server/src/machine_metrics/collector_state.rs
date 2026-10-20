@@ -347,18 +347,6 @@ impl CollectorState {
         self.append_snapshot(clock, frame, snapshot)
     }
 
-    /// Model-only staging: binds fields but not caller-provided GPU inventory.
-    /// Runtime integration must use the captured-inventory boundary above.
-    /// Original acquisition identities are serialized inside each frame.
-    pub fn append_frame(
-        &mut self,
-        clock: Clock,
-        frame: &MachineMetricsResponse,
-    ) -> Result<bool, StateError> {
-        let snapshot = self.snapshot(clock)?;
-        self.append_snapshot(clock, frame, snapshot)
-    }
-
     fn append_snapshot(
         &mut self,
         clock: Clock,

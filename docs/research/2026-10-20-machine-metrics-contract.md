@@ -821,9 +821,11 @@ reset the collector on clock uncertainty.
 
 This entry point is for current capture staging, not historical/current union
 responses: historical names and absent descriptors do not belong in its current
-enumeration list. The older `append_frame` remains an explicitly model-only
-field-bound staging helper for synthetic history/query tests and does not bind
-enumeration. Future runtime integration must use the captured boundary; this
+enumeration list. The older `append_frame` is now a private method defined only
+inside the cfg(test) collector test module, for synthetic history/query tests;
+it is absent from non-test builds and inaccessible to sibling request modules
+even in a test build. It does not bind enumeration. Future runtime integration
+must use the captured boundary; this
 change supplies no native enumeration, caller authorization, runtime adapter,
 or guarantee that production callers use that boundary. Unknown-enumeration
 status categories, GPU response assembly and exact Core/Web integration remain

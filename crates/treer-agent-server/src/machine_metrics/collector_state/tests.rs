@@ -1,6 +1,19 @@
 use super::*;
 use chrono::{Duration, TimeZone, Utc};
 
+impl CollectorState {
+    /// Synthetic history staging only; absent from non-test builds and private
+    /// to this test module, so callers must use append_captured_frame.
+    fn append_frame(
+        &mut self,
+        clock: Clock,
+        frame: &MachineMetricsResponse,
+    ) -> Result<bool, StateError> {
+        let snapshot = self.snapshot(clock)?;
+        self.append_snapshot(clock, frame, snapshot)
+    }
+}
+
 fn clock(wall_ms: i64, monotonic_ms: u64) -> Clock {
     Clock {
         wall: Utc.timestamp_opt(1_800_000_000, 0).unwrap() + Duration::milliseconds(wall_ms),
