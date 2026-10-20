@@ -895,6 +895,9 @@ series set. All keys share aligned buckets and the total bucket budget. GPU
 currents come solely from the union projection (including absent devices);
 system currents come from the captured cache or canonical warming state.
 Collector/platform metadata supplies no GPU status or presence.
+Wire series use a fixed order regardless of the supplied plan: CPU utilization,
+RAM used/available/total, then GPUs by opaque id with utilization/used/total.
+Reversed and rotated plans for a two-GPU snapshot must encode identical bytes.
 
 This first policy refuses unknown current enumeration in full and refuses a
 known-current query whose overlapping historical inventory was incomplete.

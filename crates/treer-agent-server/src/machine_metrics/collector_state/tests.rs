@@ -1108,6 +1108,92 @@ fn vram_batch_is_atomic_and_independent_of_utilization_failure() {
 }
 
 #[test]
+fn captured_response_series_order_is_independent_of_field_plan() {
+    use crate::machine_metrics::field_query::{CapturedMetadata, FieldKey};
+    let mut state = state();
+    let gpus: Vec<_> = ["b", "a"]
+        .into_iter()
+        .map(|id| treer_protocol::MachineMetricsGpu {
+            id: id.repeat(64),
+            name: id.into(),
+            present: true,
+        })
+        .collect();
+    state.record_inventory(clock(0, 0), Some(&gpus)).unwrap();
+    let mut keys: Vec<_> = [
+        MachineMetricKind::CpuUtilization,
+        MachineMetricKind::RamUsed,
+        MachineMetricKind::RamAvailable,
+        MachineMetricKind::RamTotal,
+    ]
+    .into_iter()
+    .map(|kind| FieldKey { kind, gpu_id: None })
+    .collect();
+    for id in ["a", "b"] {
+        for kind in [
+            MachineMetricKind::GpuUtilization,
+            MachineMetricKind::GpuMemoryUsed,
+            MachineMetricKind::GpuMemoryTotal,
+        ] {
+            keys.push(FieldKey {
+                kind,
+                gpu_id: Some(id.repeat(64)),
+            });
+        }
+    }
+    let expected = keys.clone();
+    let query = MachineMetricsQuery {
+        from: clock(0, 0).wall,
+        to: clock(1000, 1000).wall,
+        max_points: 1,
+    };
+    let mut view = state
+        .detached_query(clock(1000, 1000), &mut || false)
+        .unwrap();
+    let mut baseline = None;
+    for variant in 0..3 {
+        if variant == 1 {
+            keys.reverse();
+        }
+        if variant == 2 {
+            keys.rotate_left(3);
+        }
+        let result = view
+            .assemble_captured_response(
+                &query,
+                CapturedMetadata {
+                    logical_cpus: Some(8),
+                    memory_method: treer_protocol::MachineMemoryMethod::LinuxMemAvailable,
+                },
+                &keys,
+                &mut || false,
+            )
+            .unwrap();
+        let parsed = MachineMetricsResponse::parse_bounded(
+            &result.bytes,
+            &query,
+            "machine",
+            clock(1000, 1000).wall,
+        )
+        .unwrap();
+        let actual: Vec<_> = parsed
+            .series
+            .iter()
+            .map(|s| FieldKey {
+                kind: s.kind,
+                gpu_id: s.gpu_id.clone(),
+            })
+            .collect();
+        assert_eq!(actual, expected);
+        if let Some(bytes) = &baseline {
+            assert_eq!(&result.bytes, bytes);
+        } else {
+            baseline = Some(result.bytes);
+        }
+    }
+}
+
+#[test]
 fn captured_response_requires_complete_gpu_series_and_known_complete_inventory() {
     use crate::machine_metrics::field_query::{CapturedMetadata, CapturedResponseError, FieldKey};
     for incomplete in [false, true] {

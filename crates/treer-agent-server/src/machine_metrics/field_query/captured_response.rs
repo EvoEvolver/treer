@@ -61,7 +61,16 @@ impl DetachedFieldQuery {
         let truncated = self.history.truncated();
         let bucket_width_ms = history.fields[0].1.width_ms;
         let mut series = Vec::with_capacity(required.len());
-        for (key, mut buckets) in history.fields {
+        // Required keys are system-first, then sorted GPU id and utilization,
+        // used, total, as produced by the captured GPU projection. The caller's
+        // plan controls neither the wire order nor its byte representation.
+        let mut remaining = history.fields;
+        for key in required {
+            let position = remaining
+                .iter()
+                .position(|(actual, _)| *actual == key)
+                .ok_or(CapturedResponseError::IncompleteSeries)?;
+            let (_, mut buckets) = remaining.swap_remove(position);
             aggregation::check_cancelled(cancelled).map_err(|error| {
                 CapturedResponseError::Query(FieldQueryError::Aggregation(error))
             })?;
