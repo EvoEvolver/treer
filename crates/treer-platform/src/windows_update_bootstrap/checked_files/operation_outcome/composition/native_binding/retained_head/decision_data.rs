@@ -9,7 +9,7 @@ impl Retained<'_> {
     fn decision_data(
         &self,
         stored: &BoundStored<'_>,
-        matched_digest: [u8; 32],
+        matched_digest: MatchedDigest,
     ) -> io::Result<consume_record::Record> {
         self.check(stored.composition)?;
         let ((head_volume, head_file), head_hash) = self
@@ -22,7 +22,7 @@ impl Retained<'_> {
             head_volume,
             head_file,
             head_hash,
-            evidence_hash: matched_digest,
+            evidence_hash: matched_digest.bytes(),
             component: context.component,
             role: context.role,
             operation: context.operation,
@@ -95,7 +95,7 @@ fn native_operation_retained_decision_data_and_field_refusals() {
             let result = stored.consume_matched_digest(&retained.binding, &mut sink, |matched| {
                 hook_ran.set(true);
                 assert!(stored.spent.get());
-                assert_eq!(matched, digest);
+                assert_eq!(matched.bytes(), digest);
                 let decision = retained.decision_data(&stored, matched)?;
                 assert_eq!(decision.encode().unwrap(), original);
                 if !consume_record::matches_expected(&wire, &decision) {

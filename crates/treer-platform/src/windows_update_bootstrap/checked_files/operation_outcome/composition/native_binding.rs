@@ -4,6 +4,16 @@ use super::*;
 
 mod retained_head;
 
+// Private test-only provenance data, not authority or an unforgeable token.
+// Deliberately no conversion from arbitrary digest arrays at call sites.
+struct MatchedDigest([u8; 32]);
+
+impl MatchedDigest {
+    fn bytes(&self) -> [u8; 32] {
+        self.0
+    }
+}
+
 fn file_id(file: &File) -> io::Result<(u64, [u8; 16])> {
     let mut info: FILE_ID_INFO = unsafe { mem::zeroed() };
     check(unsafe {
@@ -164,13 +174,13 @@ impl<'a> BoundStored<'a> {
         self.consume_matched_digest(expected, sink, |_| after_read())
     }
 
-    // Only plain digest data from the first matched read reaches this private
+    // Only typed digest data from the first matched read reaches this private
     // test hook. The sink still receives no bytes, path, token or capability.
     fn consume_matched_digest(
         &self,
         expected: &Binding,
         sink: &mut Sink,
-        after_match: impl FnOnce([u8; 32]) -> io::Result<()>,
+        after_match: impl FnOnce(MatchedDigest) -> io::Result<()>,
     ) -> io::Result<()> {
         if self.spent.replace(true) {
             return Err(denied());
@@ -184,7 +194,7 @@ impl<'a> BoundStored<'a> {
             return Err(denied());
         }
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        after_match(digest)?;
+        after_match(MatchedDigest(digest))?;
         self.binding.check(self.composition)?;
         let reread = self.pin.read()?;
         if <[u8; 32]>::from(Sha256::digest(&reread)) != digest {
@@ -224,7 +234,7 @@ fn native_operation_matched_digest_handoff_and_spent_failure() {
             let mut sink = Sink::default();
             let result = stored.consume_matched_digest(&binding, &mut sink, |digest| {
                 calls.set(calls.get() + 1);
-                assert_eq!(digest, expected_digest);
+                assert_eq!(digest.bytes(), expected_digest);
                 assert!(stored.spent.get());
                 if refuse {
                     return Err(denied());

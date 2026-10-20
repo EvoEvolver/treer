@@ -1766,6 +1766,16 @@ as malformed as well as unequal. This is a data-comparison matrix, not proof
 of decision publication, restrictive decision custody or mismatch rejection by
 a real writer adapter. Exact-SHA hosted native execution remains required.
 
+The digest handoff now uses a private, non-Clone `MatchedDigest` newtype rather
+than accepting an arbitrary digest array in the decision-data helper. The first
+successfully matched context read constructs it, and the hook moves it into
+decision-data assembly; only its plain bytes enter the record. There is no
+general array conversion. This prevents accidental raw-array substitution at
+that call boundary, not deliberate construction by code inside the private
+module tree. It grants no authority, binds no production lifetime, creates no
+decision file and changes neither native fixture counts nor marker semantics.
+Exact-SHA hosted execution is still required for this typed handoff increment.
+
 This adds no durable consume-plus-head transaction, external deletion/replay
 fence, independently committed production expectations, authenticated health,
 real installation lock or real supervisor lifetime. A fresh process remains
