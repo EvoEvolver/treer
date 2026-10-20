@@ -11,6 +11,8 @@ fn query(seconds: i64, max_points: u16) -> MachineMetricsQuery {
 
 fn reading(query: &MachineMetricsQuery, seconds: i64, value: Option<f64>) -> Observation {
     Observation {
+        epoch: 0,
+        tick: seconds.div_euclid(5) as u64,
         at: query.from + Duration::seconds(seconds),
         status: if value.is_some() {
             MachineMetricStatus::Ok
@@ -95,7 +97,7 @@ fn repeated_slots_and_invalid_measurements_are_refused() {
             MachineMetricUnit::Percent,
             [reading(&q, 0, Some(10.0)), reading(&q, 1, Some(10.0))]
         ),
-        Err(AggregationError::DuplicateSlot)
+        Err(AggregationError::DuplicateAcquisition)
     ));
     for value in [f64::NAN, f64::INFINITY, -1.0, 100.1] {
         assert!(matches!(
@@ -215,4 +217,87 @@ fn generated_boundaries_pass_shared_wire_validation() {
         response.validate(&q, "fixture-machine", q.to).unwrap();
         assert!(response.series[0].points.len() <= usize::from(max_points));
     }
+}
+
+#[test]
+fn jittered_distinct_acquisitions_do_not_fail_when_query_origin_moves() {
+    let q = query(10, 1);
+    let first = Observation {
+        epoch: 4,
+        tick: 10,
+        at: q.from + Duration::milliseconds(1),
+        status: MachineMetricStatus::Ok,
+        value: Some(10.0),
+    };
+    let second = Observation {
+        epoch: 4,
+        tick: 11,
+        at: q.from + Duration::milliseconds(4999),
+        status: MachineMetricStatus::Ok,
+        value: Some(20.0),
+    };
+    let third = Observation {
+        epoch: 4,
+        tick: 12,
+        at: q.from + Duration::milliseconds(5001),
+        status: MachineMetricStatus::Ok,
+        value: Some(30.0),
+    };
+    for shift in [0, -1, 1] {
+        let mut shifted = q.clone();
+        shifted.from += Duration::milliseconds(shift);
+        shifted.to += Duration::milliseconds(shift);
+        let forward = aggregate(
+            &shifted,
+            shifted.to,
+            MachineMetricUnit::Percent,
+            [first, second, third],
+        )
+        .unwrap();
+        let reversed = aggregate(
+            &shifted,
+            shifted.to,
+            MachineMetricUnit::Percent,
+            [third, second, first],
+        )
+        .unwrap();
+        assert_eq!(forward.points, reversed.points);
+        assert_eq!(forward.points[0].valid_count, 2);
+        assert_eq!(forward.points[0].expected_count, 2);
+    }
+    let latest_failure = Observation {
+        status: MachineMetricStatus::TimedOut,
+        value: None,
+        ..second
+    };
+    let result = aggregate(
+        &q,
+        q.to,
+        MachineMetricUnit::Percent,
+        [third, latest_failure, first],
+    )
+    .unwrap();
+    assert_eq!(result.points[0].valid_count, 1);
+    assert_eq!(result.points[0].mean, Some(30.0));
+    assert!(result.points[0].partial);
+    assert!(result.points[0]
+        .status_counts
+        .iter()
+        .any(|v| v.status == MachineMetricStatus::TimedOut));
+    let bad_old = Observation {
+        value: Some(f64::NAN),
+        ..first
+    };
+    assert!(matches!(
+        aggregate(&q, q.to, MachineMetricUnit::Percent, [bad_old, second]),
+        Err(AggregationError::InvalidObservation)
+    ));
+    let same_identity = Observation {
+        at: third.at,
+        ..first
+    };
+    assert!(matches!(
+        aggregate(&q, q.to, MachineMetricUnit::Percent, [first, same_identity]),
+        Err(AggregationError::DuplicateAcquisition)
+    ));
 }

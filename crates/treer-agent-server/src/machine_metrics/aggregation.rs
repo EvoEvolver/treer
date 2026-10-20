@@ -10,6 +10,9 @@ use treer_protocol::{
 /// The adapter must deduplicate by acquisition before calling this function.
 #[derive(Clone, Copy)]
 pub struct Observation {
+    /// Collector-owned acquisition identity, independent of caller query bounds.
+    pub epoch: u64,
+    pub tick: u64,
     pub at: DateTime<Utc>,
     pub status: MachineMetricStatus,
     pub value: Option<f64>,
@@ -20,7 +23,7 @@ pub enum AggregationError {
     InvalidQuery,
     InvalidObservation,
     TooManyObservations,
-    DuplicateSlot,
+    DuplicateAcquisition,
 }
 
 pub struct Buckets {
@@ -30,8 +33,9 @@ pub struct Buckets {
 
 /// Caller must reduce max_points further for the response's total-series budget.
 /// At most 17,280 input observations are visited, including out-of-range ones.
-/// A repeated 5 s slot is refused rather than inflating counts or averaging a
-/// cached reading twice. Missing slots stay missing and break continuity.
+/// True duplicate acquisition identities are refused. Jittered acquisitions in
+/// one 5 s slot coalesce to the latest observation (including a later failure).
+/// Missing slots stay missing and break continuity.
 pub fn aggregate(
     query: &MachineMetricsQuery,
     now: DateTime<Utc>,
@@ -75,7 +79,8 @@ pub fn aggregate(
         });
         start = end;
     }
-    let mut slots = HashSet::new();
+    let mut identities = HashSet::new();
+    let mut slots: HashMap<u64, Observation> = HashMap::new();
     let mut statuses: Vec<HashMap<MachineMetricStatus, u32>> =
         (0..points.len()).map(|_| HashMap::new()).collect();
     for (count, observation) in observations.into_iter().enumerate() {
@@ -90,9 +95,44 @@ pub fn aggregate(
             .signed_duration_since(query.from)
             .num_milliseconds() as u64;
         let slot = offset / interval;
-        if !slots.insert(slot) {
-            return Err(AggregationError::DuplicateSlot);
+        if !identities.insert((observation.epoch, observation.tick)) {
+            return Err(AggregationError::DuplicateAcquisition);
         }
+        // Validate even an older observation that will be coalesced away.
+        let valid = match (observation.status, observation.value) {
+            (MachineMetricStatus::Ok, Some(value)) => {
+                value.is_finite()
+                    && value >= 0.0
+                    && match unit {
+                        MachineMetricUnit::Percent => value <= 100.0,
+                        MachineMetricUnit::Bytes => {
+                            value <= 9_007_199_254_740_991.0 && value.fract() == 0.0
+                        }
+                    }
+            }
+            (status, None) => status != MachineMetricStatus::Ok,
+            _ => false,
+        };
+        if !valid {
+            return Err(AggregationError::InvalidObservation);
+        }
+        let key = |v: &Observation| (v.at, v.epoch, v.tick);
+        slots
+            .entry(slot)
+            .and_modify(|old| {
+                if key(&observation) > key(old) {
+                    *old = observation;
+                }
+            })
+            .or_insert(observation);
+    }
+    let mut selected: Vec<_> = slots.into_values().collect();
+    selected.sort_by_key(|v| (v.at, v.epoch, v.tick));
+    for observation in selected {
+        let offset = observation
+            .at
+            .signed_duration_since(query.from)
+            .num_milliseconds() as u64;
         let index = (offset / width_ms) as usize;
         let bucket = &mut points[index];
         match (observation.status, observation.value) {

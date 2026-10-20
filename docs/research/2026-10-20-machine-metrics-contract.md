@@ -240,9 +240,14 @@ Width rounds up to a 5-second multiple and at most query.max_points buckets are
 returned. Windows are half-open; only valid observations contribute to
 mean/min/max and first/last sample times. Failures have separate observed counts;
 missing slots stay absent, never synthetic zero. Any missing or invalid slot
-marks the bucket partial. Unordered input is allowed, but duplicate 5-second
-slots are refused. The adapter must deduplicate repeated cached acquisitions
-before aggregation rather than count one acquisition repeatedly.
+marks the bucket partial. Unordered input is allowed. True duplicate
+collector-owned (epoch, tick) acquisition identities are refused independently
+of query origin. Distinct jittered acquisitions within one query-relative
+5-second slot coalesce to the latest timestamp (ties by epoch/tick), including
+a later failure; they do not fail the query or inflate counts. Statistics and
+status counts describe these selected slot observations, not every raw reading.
+The adapter must deduplicate repeated cached acquisitions before aggregation
+rather than assign new identities and count one acquisition repeatedly.
 
 This primitive currently requires a positive integral-millisecond range span,
 including when both endpoints carry the same submillisecond offset. The wire
