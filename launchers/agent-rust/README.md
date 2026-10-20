@@ -128,8 +128,10 @@ exception. Completed command output survives an omitted/empty same-ID output;
 nonempty output may only remain equal or append.
 Terminal file changes similarly keep empty omissions and require an unchanged
 prefix for nonempty extension. Terminal tool-call JSON detail retains omitted
-fields/empty values; nonempty arrays cannot shrink, strings may only append,
-and incompatible values refuse. The reconciliation moves owned detail values
+fields/empty values. Only dynamicToolCall.contentItems and mcpToolCall.result
+may extend recursively (nonempty arrays cannot shrink, strings may append).
+All other existing invocation metadata must remain equal; conflicts refuse.
+The reconciliation moves owned detail values
 rather than deep-cloning every recursive level. Receipt-owned late user echoes
 replace the native payload at the original receipt slot, preserving order.
 The merged candidate passes

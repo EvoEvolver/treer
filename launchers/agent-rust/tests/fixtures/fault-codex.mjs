@@ -48,7 +48,7 @@ for await(const line of readline.createInterface({input:process.stdin})) {
       const user={id:'native-user',type:'userMessage',content:[{type:'text',text:request.params.input[0].text}]};
       let tool={id:'synthetic-command',type:'commandExecution',command:'synthetic public-file checksum',status:'completed',aggregatedOutput:'synthetic bytes=42 sha256=fixture-only'};
       if(finalMode.startsWith('final-file-'))tool={id:tool.id,type:'fileChange',status:'completed',changes:[{path:'synthetic.txt',kind:'update',diff:'first diff'},{path:'other.txt',kind:'add',diff:'second diff'}]};
-      if(finalMode.startsWith('final-tool-'))tool={id:tool.id,type:'dynamicToolCall',tool:'synthetic-tool',status:'completed',output:[{text:'first result'},{text:'second result'}]};
+      if(finalMode.startsWith('final-tool-'))tool={id:tool.id,type:'dynamicToolCall',tool:'synthetic-tool',namespace:'fixture',arguments:{input:'sealed'},durationMs:1,status:'completed',contentItems:[{type:'inputText',text:'first result'},{type:'inputText',text:'second result'}]};
       const answer={id:'synthetic-answer',type:'agentMessage',text:'synthetic answer'};
       if(finalMode==='final-bound')tool.aggregatedOutput='x'.repeat(9*1024*1024);
       turn.items=[user];emit('turn/started',{turn});
@@ -79,10 +79,14 @@ for await(const line of readline.createInterface({input:process.stdin})) {
         }
         if(finalMode==='final-bound')turn.items=[user,{...answer,text:'y'.repeat(9*1024*1024)}];
         if(finalMode.startsWith('final-file-')||finalMode.startsWith('final-tool-')) {
-          const field=tool.type==='fileChange'?'changes':'output';
+          const field=tool.type==='fileChange'?'changes':'contentItems';
           const change=finalMode.split('-').at(-1);
-          const values=change==='empty'?[]:change==='shrink'?tool[field].slice(0,1):change==='conflict'?[{...tool[field][0],...(field==='changes'?{diff:'conflict'}:{text:'conflict'})},tool[field][1]]:[...tool[field],field==='changes'?{path:'third.txt',kind:'add',diff:'third diff'}:{text:'third result'}];
+          const values=change==='empty'?[]:change==='shrink'?tool[field].slice(0,1):change==='conflict'?[{...tool[field][0],...(field==='changes'?{diff:'conflict'}:{text:'conflict'})},tool[field][1]]:['name','argument','duration','path'].includes(change)?tool[field]:[...tool[field],field==='changes'?{path:'third.txt',kind:'add',diff:'third diff'}:{type:'inputText',text:'third result'}];
           turn.items=[user,{...tool,[field]:values},answer];
+          if(change==='name')turn.items[1].tool+='-extra';
+          if(change==='argument')turn.items[1].arguments={input:'sealed-extra'};
+          if(change==='duration')turn.items[1].durationMs=2;
+          if(change==='path')turn.items[1].changes=[{...tool.changes[0],path:'synthetic.txt-extra'},tool.changes[1]];
         }
         if(finalMode==='final-other-turn')turn.id='other-final-turn';
         if(!observer) {

@@ -1029,13 +1029,13 @@ test('Rust journal restart never replays an uncertain turn and preserves queued 
 
 const faultEnv=mode=>({CODEX_BIN:process.execPath,RUST_SPIKE_CODEX_ARGS:JSON.stringify([resolve(import.meta.dirname,'fixtures/fault-codex.mjs')]),RUST_SPIKE_FAULT:mode});
 const providerCalls=async s=>(await readFile(join(s.root,'provider.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
-for(const kind of ['file','tool'])for(const change of ['empty','extend','shrink','conflict'])for(const observer of [false,true])test(`Rust terminal ${kind} detail survives summary or refuses ${change} (${observer?'observer':'event'})`,{skip:useNode,timeout:20000},async t=>{
+for(const kind of ['file','tool'])for(const change of ['empty','extend','shrink','conflict',...(kind==='tool'?['name','argument','duration']:['path'])])for(const observer of [false,true])test(`Rust terminal ${kind} detail survives summary or refuses ${change} (${observer?'observer':'event'})`,{skip:useNode,timeout:20000},async t=>{
   const s=await fixture(t,faultEnv(`final-${observer?'observer-':''}${kind}-${change}`));
   const receipt=await s.post({text:'synthetic tool detail',operation_id:'typed-final'}).then(r=>r.json());
   const read=()=>fetch(s.base+'/api/state').then(r=>r.json());
   const live=await until(read,x=>x.thread.turns.some(t=>t.items.some(i=>i.id==='synthetic-command'&&i.status==='completed')));
   const old=live.thread.turns.flatMap(t=>t.items).find(i=>i.id==='synthetic-command');
-  const failure=['shrink','conflict'].includes(change);
+  const failure=['shrink','conflict','name','argument','duration','path'].includes(change);
   const state=await until(read,x=>failure?x.runtime.state==='blocked':x.thread.turns.some(t=>t.status==='completed'));
   const tools=state.thread.turns.flatMap(t=>t.items).filter(i=>i.id==='synthetic-command');
   assert.equal(tools.length,1);const item=tools[0];assert.equal(item.status,'completed');
@@ -1047,8 +1047,8 @@ for(const kind of ['file','tool'])for(const change of ['empty','extend','shrink'
     assert.equal(journal.records.find(r=>r.operation==='typed-final').submission.state,'running');
   } else {
     assert.equal(result.submission.state,'done');assert.equal(state.runtime.state,'idle');
-    const detail=kind==='file'?item.changes:JSON.parse(item.detailText).output;
-    const prior=kind==='file'?old.changes:JSON.parse(old.detailText).output;
+    const detail=kind==='file'?item.changes:JSON.parse(item.detailText).contentItems;
+    const prior=kind==='file'?old.changes:JSON.parse(old.detailText).contentItems;
     assert.deepEqual(detail.slice(0,2),prior);assert.equal(detail.length,change==='extend'?3:2);
   }
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);

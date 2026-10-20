@@ -137,6 +137,36 @@ fn retained_tool_detail(old: Value, next: Value) -> Result<Value, InvalidFinalSn
     }
 }
 
+fn retained_tool_envelope(old: Value, next: Value) -> Result<Value, InvalidFinalSnapshot> {
+    // Only these public 0.162.1 result fields may grow. Invocation fields,
+    // including type/tool/server/namespace/arguments/input/status/error and
+    // unknown metadata, never inherit output-prefix semantics.
+    let output_field = match old["type"].as_str() {
+        Some("dynamicToolCall") => "contentItems",
+        Some("mcpToolCall") => "result",
+        _ => "",
+    };
+    let (Value::Object(mut old), Value::Object(next)) = (old, next) else { return Err(InvalidFinalSnapshot); };
+    for (key, value) in next {
+        let empty = value.is_null() || value.as_str() == Some("")
+            || value.as_array().is_some_and(Vec::is_empty)
+            || value.as_object().is_some_and(serde_json::Map::is_empty);
+        if let Some(prior) = old.remove(&key) {
+            let merged = if key == output_field {
+                retained_tool_detail(prior, value)?
+            } else if empty || prior == value {
+                prior
+            } else if prior.is_null() {
+                value
+            } else { return Err(InvalidFinalSnapshot); };
+            old.insert(key, merged);
+        } else {
+            old.insert(key, value);
+        }
+    }
+    Ok(Value::Object(old))
+}
+
 fn item_positions(items: &[Value]) -> Result<std::collections::HashMap<String, usize>, InvalidFinalSnapshot> {
     let mut ids = std::collections::HashMap::new();
     for (n, item) in items.iter().enumerate() {
@@ -214,7 +244,7 @@ pub fn retain_final_items(old: &Value, next: &mut Value) -> Result<(usize, usize
             if terminal(&prior["status"]) && prior["kind"] == "toolCall" {
                 let old: Value = serde_json::from_str(prior["detailText"].as_str().ok_or(InvalidFinalSnapshot)?).map_err(|_| InvalidFinalSnapshot)?;
                 let new: Value = serde_json::from_str(updated["detailText"].as_str().ok_or(InvalidFinalSnapshot)?).map_err(|_| InvalidFinalSnapshot)?;
-                let detail = retained_tool_detail(old, new)?;
+                let detail = retained_tool_envelope(old, new)?;
                 updated["text"] = prior["text"].clone();
                 updated["detailText"] = json!(detail.to_string());
             }
@@ -283,6 +313,20 @@ mod tests {
             assert!(final_turn(&json!({"id":"t","status":"completed","items":[{"id":id,"type":"agentMessage"}]})).is_err());
         }
         assert!(final_turn(&json!({"id":"t","status":"completed","items":[{"type":"agentMessage"}]})).is_err());
+    }
+    #[test]
+    fn terminal_invocation_metadata_is_immutable_but_named_results_extend() {
+        let old=json!({"id":"tool","type":"mcpToolCall","tool":"fixed","server":"fixture","status":"completed","arguments":{"input":"sealed"},"result":{"content":[{"type":"text","text":"one"}]}});
+        let mut next=old.clone();next["result"]["content"].as_array_mut().unwrap().push(json!({"type":"text","text":"two"}));
+        let merged=retained_tool_envelope(old.clone(),next).unwrap();
+        assert_eq!(merged["result"]["content"].as_array().unwrap().len(),2);
+        for field in ["type","tool","server","arguments"] {
+            let mut changed=old.clone();
+            changed[field]=if field=="arguments"{json!({"input":"sealed-extra"})}else{json!(format!("{}-extra",old[field].as_str().unwrap()))};
+            assert!(retained_tool_envelope(old.clone(),changed).is_err());
+        }
+        let sparse=json!({"id":"tool","type":"mcpToolCall","tool":"","status":"completed","result":null});
+        assert_eq!(retained_tool_envelope(old.clone(),sparse).unwrap(),old);
     }
     #[test]
     fn invalid_turn_identity_is_preserved_for_admission_rejection() {

@@ -27,6 +27,15 @@ identity refuses final reconciliation while preserving the observed projection.
 A legitimate repeated identical message under a different id, or a missing id
 in a summary, can therefore pause the queue with the fixed conflicting-final
 error; do not bypass that availability refusal or replay automatically.
+Only dynamicToolCall.contentItems and mcpToolCall.result are extendable result
+fields. Other existing nonempty terminal tool metadata (type, tool, namespace,
+server, arguments/input, status/error, duration and unknown fields) must remain
+equal; omitted/empty summary metadata retains the previous value. A changed
+duration therefore deliberately pauses just like a changed tool name, rather
+than silently accepting contradictory terminal detail. File path/kind entries
+stay immutable within the retained prefix. Protection of same-ID detail applies
+after item termination; an in-progress item's incoming payload still follows
+the existing replacement behavior. This is not a new partial-output archive.
 
 ## Preparation and stop boundary
 
