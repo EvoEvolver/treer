@@ -1,3 +1,4 @@
+import { MachineMetricsView } from "@/components/machine-metrics-view"
 import { ProviderCliInstaller } from "@/components/provider-cli-installer"
 import { agentPath } from "@/lib/workload-path"
 import { EmptyState, MachineRecovery, Status } from "@/components/control-plane-ui"
@@ -60,6 +61,7 @@ export function MachineOverviewView({ machine, agents, services, virtualHosts, t
       <Button variant="outline" className="shrink-0" onClick={onClose}>{t("org.close")}</Button>
     </div>
 
+    {workspaceId && <MachineMetricsView key={`${workspaceId}/${machine.server_id}`} machine={machine} workspaceId={workspaceId} />}
     {workspaceId && <div className="mb-6"><ProviderCliInstaller key={`${workspaceId}/${machine.server_id}`} workspaceId={workspaceId} machine={machine} /></div>}
     <div className="grid gap-10 md:grid-cols-2">
       <section className="space-y-3 rounded-md border p-4">

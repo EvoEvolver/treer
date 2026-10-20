@@ -847,3 +847,32 @@ See the operator guide for temporary-file visibility, expiry and server quotas.
 Iframe appearance hints are included in the initial URL. Exact-origin theme
 messages start after that iframe loads, and continue on later theme changes;
 new iframe instances wait for their own load event.
+
+### Machine hardware metrics (#221)
+
+The Machine detail view consumes the shared `machine.metrics.v1` series contract
+(3f1b84d8 / 5dbf2da1), gated by the Controller capability. It displays separate
+per-field current timestamps and history bucket means, whole-machine CPU,
+RAM used/available/total history selection, and independent NVIDIA device
+utilization and VRAM used/total. Unknown, stale, removed-device, missing-driver,
+unsupported, offline and denied states never become zero readings. Partial
+buckets interrupt lines; isolated observations remain marked. Arrow keys, tap
+selection and expandable bounded values tables expose the same data.
+
+The client bounds raw response bytes to 1 MiB before JSON parsing, validates the
+selected machine/range, finite values, fixed enums, sample age, shared ascending
+buckets, coverage counts and GPU/series/point caps, and projects only known
+fields. GPU names are bounded plain text; raw OS errors are never displayed.
+Queries use credentials and no-store with redirects refused; responses must
+carry no-store. Data stays in one current component view, without storage or
+service-worker caching. Machine/range/identity changes, offline state and leaving
+the page clear old readings and cancel requests. Logout unmounts the metrics
+view before waiting for its network request. Hidden tabs pause queries; a 10s
+deadline, serial 15s+jitter refresh, exponential backoff and a three-failure stop
+bound client load. Refresh only reads the machine's existing samples.
+
+This Web consumer does not activate collection or grant metrics access. Core
+owns collector/privacy/retention/Policy enforcement and source aggregation.
+Local browser fixtures prove presentation and request behavior, not native
+collector overhead, hardware compatibility or deployed endpoint acceptance.
+The parent #220 remains open until those results and release acceptance exist.

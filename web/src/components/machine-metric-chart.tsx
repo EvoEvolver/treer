@@ -1,0 +1,30 @@
+import { useEffect, useId, useRef, useState } from 'react'
+import { intlLocale, t } from '@/i18n'
+import type { MetricSeries } from '@/lib/machine-metrics'
+export const metricTime = (value: string) => new Date(value).toLocaleString(intlLocale(), { timeZone: 'UTC', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) + ' UTC'
+export function MachineMetricChart({ series, title, format }: { series: MetricSeries; title: string; format: (v: number) => string }) {
+  const id = useId(), svg = useRef<SVGSVGElement>(null)
+  const [width, setWidth] = useState(480), [chosen, setChosen] = useState<number | null>(null)
+  useEffect(() => { if (!svg.current) return; const observer = new ResizeObserver(([e]) => setWidth(Math.max(220, e.contentRect.width))); observer.observe(svg.current); return () => observer.disconnect() }, [])
+  const points = series.points, selected = chosen === null ? -1 : Math.min(chosen, points.length - 1), sample = points[selected]
+  const peak = series.unit === 'percent' ? 100 : Math.max(1, ...points.map(p => p.max ?? 0))
+  const left = 62, right = width - 8, top = 16, bottom = 132
+  const first = points[0], last = points.at(-1), start = first ? Date.parse(first.from) : 0, duration = last ? Date.parse(last.to) - start : 1
+  const x = (i: number) => left + ((Date.parse(points[i].from) + Date.parse(points[i].to)) / 2 - start) / duration * (right - left)
+  const y = (v: number) => bottom - v / peak * (bottom - top)
+  const paths: string[] = []; let path = ''
+  points.forEach((p, i) => { if (p.mean === null || p.partial) { if (path) paths.push(path); path = ''; return } path += `${path ? ' L' : 'M'}${x(i)},${y(p.mean)}` }); if (path) paths.push(path)
+  const describe = (i: number) => { const p = points[i]; return `${metricTime(p.from)} – ${metricTime(p.to)} · ${p.mean === null ? t('metrics.no_samples') : format(p.mean)} · ${t('metrics.coverage', { valid: p.valid_count, expected: p.expected_count })}${p.partial ? ' · ' + t('metrics.partial') : ''}` }
+  return <figure className="min-w-0" aria-label={title}>
+    <svg ref={svg} role="img" tabIndex={points.length ? 0 : undefined} aria-labelledby={`${id}-title ${id}-desc`} viewBox={`0 0 ${width} 164`} className="block h-[164px] w-full rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" onKeyDown={e => { if (!points.length || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return; e.preventDefault(); const index = e.key === 'Home' ? 0 : e.key === 'End' ? points.length - 1 : Math.max(0, Math.min(points.length - 1, (selected < 0 ? 0 : selected) + (e.key === 'ArrowLeft' ? -1 : 1))); setChosen(index) }} onClick={e => { if (!points.length) return; const rect = e.currentTarget.getBoundingClientRect(), position = (e.clientX - rect.left) / rect.width * width; let closest = 0; for (let i = 1; i < points.length; i++) if (Math.abs(x(i) - position) < Math.abs(x(closest) - position)) closest = i; setChosen(closest) }}>
+      <title id={`${id}-title`}>{title}</title><desc id={`${id}-desc`}>{t('metrics.chart_description')}</desc>
+      {[0, .5, 1].map(f => <g key={f}><path d={`M${left},${y(peak * f)}H${right}`} className="stroke-border" strokeDasharray="3 4" /><text x={left - 6} y={y(peak * f) + 4} textAnchor="end" className="fill-muted-foreground text-[10px]">{format(peak * f)}</text></g>)}
+      {paths.map((d, i) => <path key={i} data-metric-line d={d} fill="none" strokeWidth="2" className="stroke-primary" />)}
+      {points.map((p, i) => p.mean === null ? null : <circle key={p.from} data-partial={p.partial} cx={x(i)} cy={y(p.mean)} r={selected === i ? 4 : p.partial ? 3 : 1.8} className={p.partial ? 'fill-background stroke-primary' : 'fill-primary stroke-primary'} strokeWidth={p.partial ? 2 : 1} />)}
+      {first && last && <><text x={left} y={158} className="fill-muted-foreground text-[10px]">{new Date(first.from).toLocaleString(intlLocale(), { timeZone: 'UTC', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })}</text><text x={right} y={158} textAnchor="end" className="fill-muted-foreground text-[10px]">{new Date(last.to).toLocaleString(intlLocale(), { timeZone: 'UTC', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })} UTC</text></>}
+    </svg>
+    {!points.length && <p className="text-xs text-muted-foreground">{t('metrics.no_samples')}</p>}
+    <p className="mt-2 min-h-10 text-[11px] leading-5 text-muted-foreground" aria-live="polite">{sample ? describe(selected) : t('metrics.select_hint')}</p>
+    <details className="mt-2 border-t pt-2"><summary className="flex min-h-11 cursor-pointer items-center rounded-sm text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring">{t('metrics.view_values')}</summary><div className="max-h-64 overflow-auto"><table className="w-full text-left text-[11px] tabular-nums"><caption className="sr-only">{title} · UTC · {t('metrics.bucket_mean')}</caption><thead><tr><th className="p-2">UTC</th><th className="p-2">{t('metrics.bucket_mean')}</th><th className="p-2">{t('metrics.coverage_title')}</th></tr></thead><tbody>{points.map(p => <tr key={p.from} className="border-t"><th scope="row" className="p-2 font-normal">{metricTime(p.from)} – {metricTime(p.to)}</th><td className="p-2">{p.mean === null ? '—' : format(p.mean)}<br />{p.partial ? t('metrics.partial') : ''}</td><td className="p-2">{p.valid_count}/{p.expected_count}<br />{p.status_counts.filter(c => c.status !== 'ok' && c.count).map(c => `${t(`metrics.status.${c.status}`)}: ${c.count}`).join(' · ')}</td></tr>)}</tbody></table></div></details>
+  </figure>
+}

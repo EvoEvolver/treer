@@ -1,0 +1,16 @@
+import type { MetricsRequest, MachineMetrics, MetricKind, MetricSeries } from '../../src/lib/machine-metrics'
+export function metricsFixture(request: MetricsRequest, mode = 'normal'): MachineMetrics {
+  const end = Date.parse(request.to), start = Date.parse(request.from), width = (end - start) / 8
+  const gpuIds = mode === 'no-gpu' || mode === 'driver' || mode === 'empty' ? [] : ['a'.repeat(64), 'b'.repeat(64)]
+  const kinds: MetricKind[] = ['cpu_utilization', 'ram_used', 'ram_available', 'ram_total', 'gpu_utilization', 'gpu_memory_used', 'gpu_memory_total']
+  const value = (kind: MetricKind) => ({ cpu_utilization: 23.4, ram_used: 8 * 2 ** 30, ram_available: 24 * 2 ** 30, ram_total: 32 * 2 ** 30, gpu_utilization: 72, gpu_memory_used: 10 * 2 ** 30, gpu_memory_total: 24 * 2 ** 30 })[kind]
+  const create = (kind: MetricKind, gpu_id: string | null): MetricSeries => {
+    const stale = mode === 'stale' && kind === 'gpu_utilization', failed = mode === 'failed-field' && gpu_id === 'b'.repeat(64) && kind === 'gpu_utilization', removed = mode === 'removed' && gpu_id === 'b'.repeat(64)
+    const state = stale ? 'stale' : failed ? 'collection_failed' : removed ? 'device_absent' : mode === 'empty' ? 'warming_up' : 'ok'
+    return { kind, gpu_id, unit: kind.endsWith('utilization') ? 'percent' : 'bytes', current: { status: state, value: state === 'ok' ? value(kind) : null, sampled_at: mode === 'empty' ? null : new Date(end - (stale ? 20000 : 2000)).toISOString(), age_ms: mode === 'empty' ? null : stale ? 20000 : 2000 }, points: mode === 'empty' ? [] : Array.from({ length: 8 }, (_, i) => {
+      const a = start + i * width, z = a + width, expected = Math.round(width / 5000), missing = i === 3, partial = i === 4
+      return { from: new Date(a).toISOString(), to: new Date(z).toISOString(), expected_count: expected, valid_count: missing ? 0 : partial ? expected - 1 : expected, status_counts: missing ? [] : [{ status: 'ok', count: partial ? expected - 1 : expected }], first_sample_at: missing ? null : new Date(a + 1000).toISOString(), last_sample_at: missing ? null : new Date(z - 1000).toISOString(), mean: missing ? null : kind === 'cpu_utilization' ? 10 : value(kind), min: missing ? null : kind === 'cpu_utilization' ? 10 : value(kind), max: missing ? null : kind === 'cpu_utilization' ? 10 : value(kind), partial: missing || partial }
+    }) }
+  }
+  return { schema: 'machine.metrics.v1', server_id: request.serverId, generated_at: request.to, from: request.from, to: request.to, retained_from: mode === 'empty' ? null : request.from, truncated: false, sample_interval_ms: 5000, bucket_width_ms: width, stale_after_ms: 15000, logical_cpus: 16, memory_method: 'linux_mem_available', scope: 'os_visible_machine', gpus: gpuIds.map(id => ({ id, name: id === 'a'.repeat(64) ? 'NVIDIA RTX 4090' : '<img src=x onerror=alert(1)> very long untrusted GPU model '.repeat(2), present: !(mode === 'removed' && id === 'b'.repeat(64)) })), inventory_truncated: false, gpu_status: mode === 'driver' ? 'driver_unavailable' : gpuIds.length ? 'ok' : 'no_device', series: [...kinds.slice(0, 4).map(k => create(k, null)), ...gpuIds.flatMap(id => kinds.slice(4).map(k => create(k, id)))] }
+}
