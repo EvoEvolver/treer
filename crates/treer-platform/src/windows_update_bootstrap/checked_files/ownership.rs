@@ -1,6 +1,7 @@
 //! Disposable cooperative fixture ownership, never installation authority.
 use super::*;
 
+mod consume_stage;
 pub(super) mod head_pin;
 
 pub(super) struct FixtureLock<'a> {

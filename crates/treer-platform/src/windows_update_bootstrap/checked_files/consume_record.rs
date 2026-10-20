@@ -88,6 +88,14 @@ fn matches_expected(bytes: &[u8], expected: &Record) -> bool {
     parse(bytes).as_ref() == Some(expected)
 }
 
+pub(super) fn valid_bytes(bytes: &[u8]) -> bool {
+    parse(bytes).is_some()
+}
+
+pub(super) fn fixture_bytes() -> Vec<u8> {
+    fixture().encode().unwrap()
+}
+
 fn fixture() -> Record {
     Record {
         lifetime: [0x11; 32], // Synthetic, never supervisor ownership.

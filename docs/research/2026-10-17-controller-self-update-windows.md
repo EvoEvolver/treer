@@ -1546,6 +1546,34 @@ library testing remains separate evidence. The native exclusive writer and its
 interruption cases are still unimplemented, as are external deletion/replay
 protection and atomic consume/head publication.
 
+The codec `dd5bfd86` passed hosted run 39361643226 on Server 2022/2025:
+consume codec 3 and ordinary library 88 tests passed, four ignored, with prior
+native regressions preserved (Core 6416, security 6417, raw logs read).
+
+The first private writer slice is exclusive staging only. It borrows the live
+disposable `FixtureLock`, validates the strict codec before touching a file,
+creates `consume.intent` with an explicit private owner/SYSTEM DACL,
+non-inheritable read/write handle and read sharing only, writes/syncs the bytes,
+then verifies ACL, regular single-link attributes, full identity, fixed path,
+non-inheritance and bounded exact read-back while retaining the writer. It
+returns only that private staging guard, not a continuation or consumed token.
+Complete existing files refuse both before and after closing the writer.
+
+The two new native tests require actual sharing violation 32 for permissively
+sharing write/delete probes, compatible read success, and released access 0.
+An injected interruption after writing/syncing exactly 17 bytes closes its
+writer and leaves the same partial object and bytes intact; exclusive creation
+must refuse both immediately and after fixture-lock reacquisition. This is an
+injected return, not process death or a real write/sync failure. Tests delete
+only their exact disposable files after assertions; writer errors never clean
+up or overwrite decision evidence. Native Windows execution remains required.
+
+This does not implement the writer-to-restrictive-read-pin transition, prevent
+writes after guard closure, validate independently committed production fields,
+bind a real supervisor lifetime, dispatch a continuation or persist once-only
+consumption across deletion/replay/power loss. Those remain separate reviewed
+slices; an exclusively created file alone grants none of those guarantees.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
