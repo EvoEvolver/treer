@@ -669,3 +669,28 @@ missing RAM warming_up, mark known capacity loss, reject invalid metadata and
 cancellation, and refuse both current GPU fields and retired-but-retained GPU
 inventory. GPU union, per-range loss flags, fractional spans, platform sampling,
 journal/source singleton/IPC/Policy/routes and measured overhead remain open.
+
+## Historical GPU inventory discovery checkpoint (not connected)
+
+The existing multi-field decode pass now also returns historical descriptors
+for GPUs with an original field acquisition in the explicit half-open query
+range. Cached frame append times do not decide range membership. Discovery
+includes GPU fields even when the requested aggregation keys are system-only;
+the existing all-retained `has_gpu_inventory` refusal flag remains separate.
+Descriptors come only from already validated StoredFrames, never query input.
+
+The historical map is bounded to 32 opaque ids, sorted by id on output. A new
+33rd id refuses the entire query with the fixed internal InventoryLimit category;
+there is no eviction, partial response or silent reassignment of identity. Later
+retained frames may update display text for an existing id. Every returned
+historical descriptor has present=false: historical data cannot establish that
+the GPU is currently present. Cancellation is checked while scanning descriptors.
+This bounded map is additional query memory, not a process-wide RSS guarantee.
+
+Tests cover repeated cached references, original acquisition versus frame time,
+range exclusion, system-only requested keys, latest retained display text,
+sorted ids, 32-id acceptance and overflow refusal without altering the map.
+Current inventory capture/union, inventory_truncated propagation and full GPU
+response assembly remain unfinished. The system-only wire helper still refuses
+all retained GPUs, including ones outside the requested range; this change does
+not relax that guard or advertise the capability.

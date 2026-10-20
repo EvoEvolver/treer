@@ -864,6 +864,56 @@ fn gpu_frame(state: &mut CollectorState, clock: Clock, gpu: &str) -> MachineMetr
     sample
 }
 
+#[test]
+fn retained_gpu_inventory_uses_acquisition_range_not_cached_frame_time() {
+    use crate::machine_metrics::field_query::FieldKey;
+    let mut state = state();
+    let gpu = "a".repeat(64);
+    state
+        .record(
+            clock(0, 0),
+            MachineMetricKind::GpuUtilization,
+            Some(&gpu),
+            MachineMetricStatus::Ok,
+            Some(25.0),
+        )
+        .unwrap();
+    state
+        .record_vram(clock(0, 0), &gpu, MachineMetricStatus::Ok, Some((100, 60)))
+        .unwrap();
+    for ms in [0, 5000] {
+        let mut sample = gpu_frame(&mut state, clock(ms, ms as u64), &gpu);
+        if ms == 5000 {
+            sample.gpus[0].name = "Later label".into();
+        }
+        state.append_frame(clock(ms, ms as u64), &sample).unwrap();
+    }
+    let mut view = state
+        .detached_query(clock(5000, 5000), &mut || false)
+        .unwrap();
+    // Inventory discovery must also work when only system fields were requested.
+    let keys = [FieldKey {
+        kind: MachineMetricKind::CpuUtilization,
+        gpu_id: None,
+    }];
+    let mut query = MachineMetricsQuery {
+        from: clock(0, 0).wall,
+        to: clock(1000, 1000).wall,
+        max_points: 1,
+    };
+    let result = view.query_fields(&query, &keys, &mut || false).unwrap();
+    assert!(result.has_gpu_inventory);
+    assert_eq!(result.retained_gpus.len(), 1);
+    assert_eq!(result.retained_gpus[0].id, gpu);
+    assert_eq!(result.retained_gpus[0].name, "Later label");
+    assert!(!result.retained_gpus[0].present);
+    query.from = clock(1, 1).wall;
+    query.to = clock(5000, 5000).wall;
+    let excluded = view.query_fields(&query, &keys, &mut || false).unwrap();
+    assert!(excluded.has_gpu_inventory);
+    assert!(excluded.retained_gpus.is_empty());
+}
+
 fn record(state: &mut CollectorState, clock: Clock, value: f64) -> bool {
     state
         .record(

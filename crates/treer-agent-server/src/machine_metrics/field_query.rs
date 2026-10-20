@@ -21,6 +21,7 @@ pub enum FieldQueryError {
     ConflictingAcquisition,
     InvalidFields,
     IndexLimit,
+    InventoryLimit,
 }
 
 pub struct FieldHistory {
