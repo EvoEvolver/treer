@@ -1317,24 +1317,50 @@ capability hint that changes no authorization decision) receives a version-2
 version and the echoed hash, and the page then calls the check on its own
 origin; a `204` means a live embed session for this origin is already in the
 frame's partition, so the page loads the UI and posts `reused` with the same
-hash and no code is minted; any other answer makes it post `mint` and the
-handoff runs as before. The page honours one probe, only from its parent at
+hash and no code is minted; an empty `200` means normally unavailable and
+makes it post `mint`, so the handoff runs as before. For mixed-version
+compatibility the initial probe also treats this exact endpoint's legacy `401`
+as unavailable. Every other status (including `403`, `404`, `429`, `5xx` and
+manual redirects) or transport failure stops with the existing hash-bound
+failure notice, without minting or navigating. Only `204` means ready, never
+`response.ok` or any other `2xx`. After redemption, every result other than
+exactly `204` still fails closed. The page honours one probe, only from its
+parent at
 the configured Console origin and with its own hash; the Console runs a
 one-way state machine bound to the first hash and never mints twice. The check
 answers `204` only under the full request-path gate: session live for this
 host and kind, current membership, and the interface Policy pair for this
-Agent evaluated without recording a decision; every other state is the same
-`401` as "no session" with no reason, so the check reveals nothing the UI
-request would not, and no party caches a positive answer. The check honours
+Agent evaluated without recording a decision. All ordinary unavailable states
+return the same empty `200`, with identical response headers and no reason,
+cookie, CORS grant, mint or session refresh. Token, membership, target lookup
+and Policy evaluation failures retain error statuses rather than being treated
+as ordinary absence. Both normal outcomes and errors are `no-store`; neither
+positive nor negative availability is cached. The check introduces no new
+authority or denial-reason disclosure. The check honours
 the embed cookie only under the same request-context rule as the UI request
 (exactly one `Sec-Fetch-Site: same-origin`), so a foreign context holding the
-cookie gets the same `401` and the check is no authorization oracle. Reuse changes no
+cookie gets the same empty `200` and the check is no authorization oracle.
+GET and HEAD share these status/body semantics; unsupported methods and outer
+hostname routing retain their existing errors. Cookie interpretation matches
+the protected UI: the first matching cookie in the first Cookie header is
+selected, including when duplicate names occur. This change does not tighten
+that parser; every selected token must still pass the full gate. Reuse changes no
 binding, expiry or revocation: the same cookie is presented, logout and
 membership removal end it, and the UI request and the socket re-check apply
 the gate again. Handshake and UI responses carry no `Server-Timing`; load-time
 measurement is a development-only, fixture-only runner on the Console side.
-Agent UI. Embed
-sessions are separate rows from standalone sessions: the token of one never
+Already-running older bootstrap HTML may still mint after any initial non-204
+or transport failure; it never treats the new `200` as ready. `no-store` does
+not replace running JavaScript. On new initial-probe operational failures the
+Console keeps its existing recovery UX: the hash-bound failure invokes a fixed
+Proxy fallback-permission probe, then offers a manual compatibility choice,
+refuses it, or reports unavailable; opening a new tab remains available. There
+is no dedicated retry button and no automatic weaker-origin UI navigation.
+No aggregate availability counters are added: ordinary unavailable probes no
+longer create the old `401` signal in browser/access logs, while operational
+faults retain error statuses. This status contract does not establish clean
+browser acceptance or explain unrelated request failures.
+Embed sessions are separate rows from standalone sessions: the token of one never
 authenticates through the other cookie. The request context is decided before
 any credential is read: for an ordinary request the embed cookie grants authority
 only with exactly one `Sec-Fetch-Site: same-origin`; for an upgrade it

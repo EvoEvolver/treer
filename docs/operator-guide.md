@@ -1059,14 +1059,34 @@ probe carrying the same hash, and the page asks `GET /.treer/embed/check` on
 its own origin whether a live embed session for this Agent is already in the
 browser's partition: on `204` it loads the Agent UI at once and tells the
 Console `{treer_embed: "reused", version: 2, nonce_hash}`, so no code is
-minted; otherwise it posts `mint` with the same hash and the normal handoff
-runs. The check answers `204` only when the session is live for this host and
+minted; an empty `200` means normally unavailable, so it posts `mint` with
+the same hash and the normal handoff runs. The initial probe also accepts the
+legacy `401` as unavailable for compatibility. Every other status (including
+`403`, `404`, `429`, `5xx` or manual redirects) and transport failure stops
+without minting; after code redemption only exactly `204` permits navigation.
+The check answers `204` only when the session is live for this host and
 kind, the user is still a workspace member and the interface Policy pair still
 allows the user for this Agent (evaluated without recording a decision), and
-`401` with no reason otherwise, so a reused session never loads a UI the
-request path would refuse. Without the hint the page sends the two-field
+an identical empty `200` with no reason for ordinary unavailable states.
+Database/internal lookup and Policy evaluation failures remain errors, never
+normal absence or readiness. Both normal results and errors are `no-store`;
+there is no session refresh or positive/negative caching. GET and HEAD share
+the contract; `response.ok` is not readiness. The UI still independently
+rechecks authority, including a revocation after the availability response.
+Without the hint the page sends the two-field
 `ready` and an old Console mints as before; the hint is stripped before the
-Agent UI is loaded. Handshake responses carry no timing headers.
+Agent UI is loaded. Already-running older bootstrap HTML may still mint after
+any initial non-204 or transport failure, but never regards `200` as ready;
+`no-store` does not replace running documents.
+
+A transient initial `429` or `5xx` now shows the existing failure notice
+instead of silently attempting mint. The hash-bound failure still triggers the
+fixed Proxy fallback-permission probe, then a manual compatibility choice,
+refusal or unavailable notice, with open-in-new-tab available. There is no
+built-in retry button or automatic weaker-origin navigation; a person can
+reload or remount. Ordinary unavailability no longer produces the old `401`
+log signal; optional aggregate counters are deferred, while operational faults
+retain error statuses. Handshake responses carry no timing headers.
 `TREER_AGENT_EMBED_FALLBACK=refuse` (`--agent-embed-fallback refuse`) closes
 that fallback: the tunnel answers `503 embedded_ui_requires_isolated_origin`
 and the Console offers "open in new tab" only. Every Console host (Proxy `app_dist`, Worker, nginx) must send the same

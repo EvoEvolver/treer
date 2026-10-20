@@ -1562,6 +1562,56 @@ impl AuthStore {
         token: &str,
         embed: bool,
     ) -> Result<Option<String>, AuthFailure> {
+        let Some((user_id, workspace_id)) = self
+            .ingress_session_identity(hostname, token, embed)
+            .await?
+        else {
+            return Ok(None);
+        };
+        // Preserve non-check callers' existing denial/error behavior.
+        if self
+            .require_workspace_member(&workspace_id, &user_id)
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
+        Ok(Some(user_id))
+    }
+
+    /// Availability distinguishes an established denial from failed evaluation.
+    /// Other ingress authentication callers retain their existing semantics.
+    pub(crate) async fn authenticate_embed_session_for_check(
+        &self,
+        hostname: &str,
+        token: &str,
+    ) -> Result<Option<String>, AuthFailure> {
+        let Some((user_id, workspace_id)) =
+            self.ingress_session_identity(hostname, token, true).await?
+        else {
+            return Ok(None);
+        };
+        match self.require_workspace_member(&workspace_id, &user_id).await {
+            Ok(()) => Ok(Some(user_id)),
+            Err(error)
+                if matches!(
+                    error.code(),
+                    "workspace_access_denied" | "workspace_not_found"
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The common host/kind/expiry/token predicate; it never grants membership.
+    async fn ingress_session_identity(
+        &self,
+        hostname: &str,
+        token: &str,
+        embed: bool,
+    ) -> Result<Option<(String, String)>, AuthFailure> {
         let row = sqlx::query(
             "SELECT s.user_id, i.workspace_id FROM ingress_sessions s \
              JOIN service_ingresses i ON i.ingress_id = s.ingress_id \
@@ -1578,14 +1628,7 @@ impl AuthStore {
         let Some(row) = row else { return Ok(None) };
         let user_id: String = row.get("user_id");
         let workspace_id: String = row.get("workspace_id");
-        if self
-            .require_workspace_member(&workspace_id, &user_id)
-            .await
-            .is_err()
-        {
-            return Ok(None);
-        }
-        Ok(Some(user_id))
+        Ok(Some((user_id, workspace_id)))
     }
 
     pub async fn create_app_oauth_code(

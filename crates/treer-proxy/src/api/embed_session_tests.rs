@@ -435,17 +435,17 @@ async fn embed_code_redeems_once_on_its_agent_origin_with_the_right_nonce() {
     );
     assert_eq!(
         check(&fixture, &config, AGENT_HOST, None).await,
-        StatusCode::UNAUTHORIZED
+        StatusCode::OK
     );
     assert_eq!(
         check(&fixture, &config, UNKNOWN_HOST, Some(&pair)).await,
-        StatusCode::UNAUTHORIZED
+        StatusCode::OK
     );
     // An embed token presented through the standalone cookie is nobody.
     let standalone_name = pair.replace("__Host-treer_ingress_embed=", "__Host-treer_ingress=");
     assert_eq!(
         check(&fixture, &config, AGENT_HOST, Some(&standalone_name)).await,
-        StatusCode::UNAUTHORIZED
+        StatusCode::OK
     );
     // Expiry is enforced at redeem time.
     let (code, nonce) = minted_code(&fixture, &config, "member").await;
@@ -999,7 +999,7 @@ async fn embed_capability_is_advertised_only_where_embed_sessions_can_work() {
 }
 
 /// #198: the check behind session reuse answers 204 only under the full
-/// request-path gate (same 401 otherwise), and the bootstrap speaks the
+/// request-path gate (same empty 200 otherwise), and the bootstrap speaks the
 /// version-2 handshake only when the Console hints `reuse=1`.
 #[tokio::test]
 async fn embed_check_applies_the_interface_gate_and_reuse_hint_selects_the_v2_handshake() {
@@ -1025,7 +1025,7 @@ async fn embed_check_applies_the_interface_gate_and_reuse_hint_selects_the_v2_ha
     assert_eq!(redeemed.status(), StatusCode::NO_CONTENT);
     assert!(redeemed.headers().get("server-timing").is_none());
 
-    // The check: 204 with a live session and an allowing Policy; the same 401
+    // The check: 204 with a live session and an allowing Policy; the same empty 200
     // as "no session" when the interface gate denies, when there is no cookie,
     // and when membership is gone. Never a reason, never a body.
     let check_with = |policy: PolicyEngine, cookie: Option<String>| {
@@ -1052,18 +1052,13 @@ async fn embed_check_applies_the_interface_gate_and_reuse_hint_selects_the_v2_ha
     assert_eq!(ok.status(), StatusCode::NO_CONTENT);
     assert_eq!(ok.headers()[header::CACHE_CONTROL], "no-store");
     assert!(ok.headers().get("server-timing").is_none());
-    let refused = (
-        StatusCode::UNAUTHORIZED,
-        "ingress_authentication_required".to_string(),
-    );
-    assert_eq!(
-        error_of(check_with(deny(), Some(cookie.clone())).await).await,
-        refused
-    );
-    assert_eq!(error_of(check_with(allow(), None).await).await, refused);
-    // The cookie counts only in the same-origin context the UI request
-    // requires (security 5580): every other Fetch Metadata shape, including a
-    // duplicated header, is the same 401 even with a live session.
+    assert_unavailable(
+        check_with(deny(), Some(cookie.clone())).await.unwrap(),
+        None,
+    )
+    .await;
+    assert_unavailable(check_with(allow(), None).await.unwrap(), None).await;
+    // Cookie context remains the same as the protected UI request.
     for sites in [
         vec!["cross-site"],
         vec!["same-site"],
@@ -1078,20 +1073,18 @@ async fn embed_check_applies_the_interface_gate_and_reuse_hint_selects_the_v2_ha
         for site in &sites {
             request = request.header("sec-fetch-site", *site);
         }
-        assert_eq!(
-            error_of(
-                send(
-                    &fixture,
-                    allow(),
-                    &config,
-                    request.body(Body::empty()).unwrap()
-                )
-                .await
+        assert_unavailable(
+            send(
+                &fixture,
+                allow(),
+                &config,
+                request.body(Body::empty()).unwrap(),
             )
-            .await,
-            refused,
-            "{sites:?}"
-        );
+            .await
+            .unwrap(),
+            None,
+        )
+        .await;
     }
     // One cause at a time, each on its own session: Policy deny (above),
     // expiry, server-side logout, membership removal.
@@ -1101,10 +1094,7 @@ async fn embed_check_applies_the_interface_gate_and_reuse_hint_selects_the_v2_ha
         .execute(&fixture.auth.pool())
         .await
         .unwrap();
-    assert_eq!(
-        error_of(check_with(allow(), Some(expired)).await).await,
-        refused
-    );
+    assert_unavailable(check_with(allow(), Some(expired)).await.unwrap(), None).await;
     let logged_out = establish_embed_session(&fixture, &config, "owner").await;
     assert_eq!(
         check_with(allow(), Some(logged_out.clone()))
@@ -1114,18 +1104,12 @@ async fn embed_check_applies_the_interface_gate_and_reuse_hint_selects_the_v2_ha
         StatusCode::NO_CONTENT
     );
     fixture.auth.logout("tok-owner").await.unwrap();
-    assert_eq!(
-        error_of(check_with(allow(), Some(logged_out)).await).await,
-        refused
-    );
+    assert_unavailable(check_with(allow(), Some(logged_out)).await.unwrap(), None).await;
     sqlx::query("DELETE FROM organization_members WHERE user_id = 'member'")
         .execute(&fixture.auth.pool())
         .await
         .unwrap();
-    assert_eq!(
-        error_of(check_with(allow(), Some(cookie)).await).await,
-        refused
-    );
+    assert_unavailable(check_with(allow(), Some(cookie)).await.unwrap(), None).await;
 
     // The bootstrap: `reuse=1` exactly selects the version-2 ready and enables
     // the probe handling; anything else keeps the two-field ready. The hint
@@ -1183,4 +1167,443 @@ async fn embed_check_applies_the_interface_gate_and_reuse_hint_selects_the_v2_ha
         }
         assert!(!body.contains(AGENT_ID), "{body}");
     }
+}
+
+/// Compare every response header, not only the cache/safety subset.
+async fn assert_unavailable(response: Response, expected: Option<&HeaderMap>) -> HeaderMap {
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
+    assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+    assert!(headers.get(header::SET_COOKIE).is_none());
+    assert!(headers.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+    if let Some(expected) = expected {
+        assert_eq!(&headers, expected);
+    }
+    assert!(axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap()
+        .is_empty());
+    headers
+}
+
+// Dispatch the real check route without an outer hostname lookup. This allows
+// database faults at each inner gate to be exercised independently.
+async fn availability_response(
+    fixture: &Fixture,
+    policy: PolicyEngine,
+    method: &str,
+    headers: HeaderMap,
+) -> Response {
+    let mut request = Request::builder()
+        .method(method)
+        .uri("/.treer/embed/check")
+        .body(Body::empty())
+        .unwrap();
+    *request.headers_mut() = headers;
+    super::network::serve_agent_embed_route(
+        &fixture.state,
+        &fixture.auth,
+        &policy,
+        &config(None),
+        AGENT_HOST,
+        AGENT_ID,
+        &mut request,
+    )
+    .await
+    .unwrap()
+    .unwrap()
+}
+
+fn availability_headers(cookie: Option<&str>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+    if let Some(cookie) = cookie {
+        headers.insert(header::COOKIE, cookie.parse().unwrap());
+    }
+    headers
+}
+
+#[tokio::test]
+async fn embed_availability_normal_negative_get_head_responses_are_identical() {
+    let mut fixture = agent_fixture().await;
+    let config = config(None);
+    let cookie = establish_embed_session(&fixture, &config, "member").await;
+    let expired = establish_embed_session(&fixture, &config, "owner").await;
+    sqlx::query("UPDATE ingress_sessions SET expires_at='2000-01-01T00:00:00Z' WHERE token=$1")
+        .bind(expired.split_once('=').unwrap().1)
+        .execute(&fixture.auth.pool())
+        .await
+        .unwrap();
+    let standalone = establish_session(&fixture, allow(), &config, AGENT_HOST, "tok-owner").await;
+    let standalone_as_embed =
+        standalone.replace("__Host-treer_ingress=", "__Host-treer_ingress_embed=");
+    let sessions_before = ingress_sessions(&fixture).await;
+    let baseline = assert_unavailable(
+        availability_response(&fixture, allow(), "GET", availability_headers(None)).await,
+        None,
+    )
+    .await;
+    for method in ["GET", "HEAD"] {
+        for candidate in [
+            None,
+            Some("garbage"),
+            Some("__Host-treer_ingress_embed=unknown"),
+            Some(expired.as_str()),
+            Some(standalone_as_embed.as_str()),
+        ] {
+            assert_unavailable(
+                availability_response(&fixture, allow(), method, availability_headers(candidate))
+                    .await,
+                Some(&baseline),
+            )
+            .await;
+        }
+        for sites in [
+            vec![],
+            vec!["cross-site"],
+            vec!["same-site"],
+            vec!["none"],
+            vec!["malformed"],
+            vec!["same-origin", "same-origin"],
+        ] {
+            let mut headers = availability_headers(Some(&cookie));
+            headers.remove("sec-fetch-site");
+            for site in sites {
+                headers.append("sec-fetch-site", site.parse().unwrap());
+            }
+            assert_unavailable(
+                availability_response(&fixture, allow(), method, headers).await,
+                Some(&baseline),
+            )
+            .await;
+        }
+        assert_unavailable(
+            availability_response(
+                &fixture,
+                deny(),
+                method,
+                availability_headers(Some(&cookie)),
+            )
+            .await,
+            Some(&baseline),
+        )
+        .await;
+    }
+    // A missing durable target and missing/ambiguous live resolution take the
+    // same normal response, while unknown resolution failures are unit-tested.
+    sqlx::query("UPDATE agent_credentials SET revoked_at='2000-01-01T00:00:00Z' WHERE agent_id=$1")
+        .bind(AGENT_ID)
+        .execute(&fixture.auth.pool())
+        .await
+        .unwrap();
+    for method in ["GET", "HEAD"] {
+        assert_unavailable(
+            availability_response(
+                &fixture,
+                allow(),
+                method,
+                availability_headers(Some(&cookie)),
+            )
+            .await,
+            Some(&baseline),
+        )
+        .await;
+    }
+    sqlx::query("UPDATE agent_credentials SET revoked_at=NULL WHERE agent_id=$1")
+        .bind(AGENT_ID)
+        .execute(&fixture.auth.pool())
+        .await
+        .unwrap();
+    let original_state = fixture.state.clone();
+    let original_agent = fixture
+        .state
+        .resolve_agent("default", AGENT_ID)
+        .await
+        .unwrap();
+    fixture.state = AppState::new();
+    for variant in 0..3 {
+        if variant > 0 {
+            fixture.state.ensure_workspace("default", "Default").await;
+            let mut other = original_agent.clone();
+            other.agent_id = format!("other-{variant}");
+            other.name = if variant == 1 {
+                "unrelated".into()
+            } else {
+                AGENT_ID.into()
+            };
+            fixture.state.test_insert_agent(other).await;
+            if variant == 2 {
+                let mut other = original_agent.clone();
+                other.agent_id = "other-3".into();
+                other.name = AGENT_ID.into();
+                fixture.state.test_insert_agent(other).await;
+            }
+        }
+        for method in ["GET", "HEAD"] {
+            assert_unavailable(
+                availability_response(
+                    &fixture,
+                    allow(),
+                    method,
+                    availability_headers(Some(&cookie)),
+                )
+                .await,
+                Some(&baseline),
+            )
+            .await;
+        }
+    }
+    fixture.state = original_state;
+    // Membership gone is a normal denial, not a swallowed database failure.
+    sqlx::query("DELETE FROM organization_members WHERE user_id='member'")
+        .execute(&fixture.auth.pool())
+        .await
+        .unwrap();
+    for method in ["GET", "HEAD"] {
+        assert_unavailable(
+            availability_response(
+                &fixture,
+                allow(),
+                method,
+                availability_headers(Some(&cookie)),
+            )
+            .await,
+            Some(&baseline),
+        )
+        .await;
+    }
+    assert_eq!(ingress_sessions(&fixture).await, sessions_before);
+}
+
+#[tokio::test]
+async fn embed_availability_dependency_faults_stay_errors_and_legacy_auth_is_unchanged() {
+    for fault in ["token", "member_role", "member_exists", "target", "policy"] {
+        let fixture = agent_fixture().await;
+        let config = config(None);
+        let cookie = establish_embed_session(&fixture, &config, "member").await;
+        let token = cookie.split_once('=').unwrap().1;
+        let standalone =
+            establish_session(&fixture, allow(), &config, AGENT_HOST, "tok-owner").await;
+        let standalone_token = standalone.split_once('=').unwrap().1;
+        let pool = fixture.auth.pool();
+        let mut policy = allow();
+        match fault {
+            "token" => {
+                sqlx::query("ALTER TABLE ingress_sessions RENAME TO fault_ingress_sessions")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            "member_role" => {
+                sqlx::query(
+                    "ALTER TABLE organization_members RENAME TO fault_organization_members",
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            "member_exists" => {
+                // Keep the membership role query working (returning no grant),
+                // then raise in the actual workspace-existence SQL statement.
+                sqlx::query("DELETE FROM organization_members WHERE user_id IN ('owner','member')")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                sqlx::query("ALTER TABLE workspaces RENAME TO fault_workspaces")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                sqlx::query("CREATE FUNCTION fail_existence_query() RETURNS boolean LANGUAGE plpgsql VOLATILE AS $$ BEGIN IF current_query() LIKE 'SELECT EXISTS%' THEN RAISE EXCEPTION 'isolated existence lookup fault'; END IF; RETURN TRUE; END $$").execute(&pool).await.unwrap();
+                sqlx::query("CREATE VIEW workspaces AS SELECT * FROM fault_workspaces WHERE fail_existence_query()").execute(&pool).await.unwrap();
+            }
+            "target" => {
+                sqlx::query("ALTER TABLE agent_credentials RENAME TO fault_agent_credentials")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            "policy" => {
+                let closed = sqlx::postgres::PgPoolOptions::new()
+                    .connect_lazy("postgres://127.0.0.1:1/never_connect")
+                    .unwrap();
+                closed.close().await;
+                policy = PolicyEngine::durable(
+                    treer_proxy::policy_store::WorkspacePolicyStore::new(closed),
+                );
+            }
+            _ => unreachable!(),
+        }
+        for method in ["GET", "HEAD"] {
+            let response = availability_response(
+                &fixture,
+                policy.clone(),
+                method,
+                availability_headers(Some(&cookie)),
+            )
+            .await;
+            assert!(
+                response.status().is_server_error(),
+                "{fault}/{method}: {}",
+                response.status()
+            );
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "no-store",
+                "{fault}"
+            );
+            if method == "GET" {
+                let body = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let error: Value = serde_json::from_slice(&body).unwrap();
+                assert!(error.get("error").is_some(), "{fault}: {error}");
+            }
+        }
+        match fault {
+            "member_role" | "member_exists" => {
+                assert!(
+                    fixture
+                        .auth
+                        .authenticate_embed_session(AGENT_HOST, token)
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "legacy embed {fault}"
+                );
+                assert!(
+                    fixture
+                        .auth
+                        .authenticate_ingress_session(AGENT_HOST, standalone_token)
+                        .await
+                        .unwrap()
+                        .is_none(),
+                    "legacy standalone {fault}"
+                );
+            }
+            "token" => {
+                assert!(fixture
+                    .auth
+                    .authenticate_embed_session(AGENT_HOST, token)
+                    .await
+                    .is_err());
+                assert!(fixture
+                    .auth
+                    .authenticate_ingress_session(AGENT_HOST, standalone_token)
+                    .await
+                    .is_err());
+            }
+            _ => {
+                assert_eq!(
+                    fixture
+                        .auth
+                        .authenticate_embed_session(AGENT_HOST, token)
+                        .await
+                        .unwrap()
+                        .as_deref(),
+                    Some("member")
+                );
+                assert_eq!(
+                    fixture
+                        .auth
+                        .authenticate_ingress_session(AGENT_HOST, standalone_token)
+                        .await
+                        .unwrap()
+                        .as_deref(),
+                    Some("owner")
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn embed_availability_duplicate_cookie_selection_matches_protected_ui_and_revocation_races() {
+    let mut fixture = agent_fixture().await;
+    let config = config(None);
+    let (_heads, _worker) = upstream(
+        fixture.state.clone(),
+        fixture.connection,
+        fixture.rx.take().unwrap(),
+        Upstream::Immediate,
+    );
+    let cookie = establish_embed_session(&fixture, &config, "member").await;
+    let invalid = "__Host-treer_ingress_embed=unknown";
+    for values in [
+        vec![format!("{cookie}; {invalid}")],
+        vec![format!("{invalid}; {cookie}")],
+        vec![cookie.clone(), invalid.to_string()],
+        vec![invalid.to_string(), cookie.clone()],
+    ] {
+        let mut headers = availability_headers(None);
+        for value in &values {
+            headers.append(header::COOKIE, value.parse().unwrap());
+        }
+        let ready = availability_response(&fixture, allow(), "GET", headers.clone())
+            .await
+            .status()
+            == StatusCode::NO_CONTENT;
+        let mut request = Request::builder()
+            .uri("/")
+            .header(header::HOST, AGENT_HOST)
+            .body(Body::empty())
+            .unwrap();
+        *request.headers_mut() = headers;
+        request
+            .headers_mut()
+            .insert(header::HOST, AGENT_HOST.parse().unwrap());
+        let response = send(&fixture, allow(), &config, request).await;
+        let ui_allowed = match response {
+            Ok(r) => r.status().is_success(),
+            Err(e) => {
+                assert_eq!(e.status, StatusCode::UNAUTHORIZED);
+                false
+            }
+        };
+        assert_eq!(ready, ui_allowed, "{values:?}");
+    }
+    // A prior ready result is not cached authority after logout or Policy denial.
+    assert_eq!(
+        availability_response(
+            &fixture,
+            allow(),
+            "GET",
+            availability_headers(Some(&cookie))
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    let denied = send(
+        &fixture,
+        deny(),
+        &config,
+        Request::builder()
+            .uri("/")
+            .header(header::HOST, AGENT_HOST)
+            .header(header::COOKIE, &cookie)
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(error_of(denied).await.0, StatusCode::FORBIDDEN);
+    fixture.auth.logout("tok-member").await.unwrap();
+    let revoked = send(
+        &fixture,
+        allow(),
+        &config,
+        Request::builder()
+            .uri("/")
+            .header(header::HOST, AGENT_HOST)
+            .header(header::COOKIE, &cookie)
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    // Existing unauthenticated UI navigation redirects to sign-in; it does
+    // not load the protected Agent UI after the earlier ready result.
+    assert_eq!(error_of(revoked).await.0, StatusCode::SEE_OTHER);
 }

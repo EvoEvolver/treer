@@ -169,12 +169,18 @@ pub(in crate::api) async fn serve_agent_embed_route(
         // held there would make the gateway's future !Send (Body is !Sync).
         let method = request.method().clone();
         let headers = request.headers().clone();
-        return Some(
-            check_embed_session(
-                state, auth, policy, config, hostname, agent_id, &method, &headers,
-            )
-            .await,
-        );
+        // Endpoint-local response handling: keep operational error status/body,
+        // but do not let either availability outcome or an error be cached.
+        let mut response = match check_embed_session(
+            state, auth, policy, config, hostname, agent_id, &method, &headers,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        };
+        no_store(&mut response);
+        return Some(Ok(response));
     }
     None
 }
@@ -234,8 +240,11 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
         checkSession().then(function (r) {
           if (done) return;
           if (r.status === 204) { clearTimeout(timer); post({ treer_embed: "reused", version: 2, nonce_hash: hash }); navigate(); }
-          else post({ treer_embed: "mint", version: 2, nonce_hash: hash });
-        }).catch(function () { if (!done) post({ treer_embed: "mint", version: 2, nonce_hash: hash }); });
+          // Only a normal unavailable result or a legacy check refusal mints.
+          // response.ok is unsafe here: 200 is unavailable, ONLY 204 is ready.
+          else if (r.status === 200 || r.status === 401) post({ treer_embed: "mint", version: 2, nonce_hash: hash });
+          else { clearTimeout(timer); report("cookies_blocked"); }
+        }).catch(function () { clearTimeout(timer); report("cookies_blocked"); });
       }"#
     } else {
         ""
@@ -358,13 +367,11 @@ async fn open_embed_session(
     Ok(response)
 }
 
-/// `GET /.treer/embed/check`: 204 when the request carries a live embed
-/// session for this host whose user still passes the interface gate for this
-/// Agent, else 401. The bootstrap uses it to prove the partitioned cookie is
-/// actually sent back before loading the Agent UI, and (#198 step 2) to decide
-/// whether an existing session can be reused without a mint, so a 204 must
-/// mean the UI request itself will be authorized: session (host, kind,
-/// expiry), membership, and the Policy pair evaluated without recording.
+/// `GET/HEAD /.treer/embed/check`: ONLY 204 means ready under the full live
+/// host/kind/expiry, cookie-context, membership and interface Policy gate.
+/// Every ordinary negative is an identical empty 200 (never use response.ok
+/// as readiness). Dependency/internal failures remain errors. This read-only,
+/// no-store availability result grants no authority: the UI checks again.
 #[allow(clippy::too_many_arguments)]
 async fn check_embed_session(
     state: &AppState,
@@ -379,42 +386,55 @@ async fn check_embed_session(
     if !matches!(*method, Method::GET | Method::HEAD) {
         return Err(ApiFailure::not_found("route_not_found", "route not found"));
     }
-    let no_session = || {
-        ApiFailure::unauthorized(
-            "ingress_authentication_required",
-            "no embed session for this origin",
-        )
-    };
     // The same cookie-context rule as the UI request (security 5580): the
     // embed cookie counts only for a request that provably comes from the
     // framed document itself (exactly one `Sec-Fetch-Site: same-origin`).
     // The bootstrap's own fetch is same-origin; any other context gets the
-    // same 401 as "no session", so a 204 is never an oracle for a foreign page.
+    // same empty 200 as "no session", so a 204 is never an oracle for a foreign page.
     if !super::ingress::embed_cookie_context(headers, false, config, hostname)? {
-        return Err(no_session());
+        return Ok(embed_check_unavailable());
     }
     let user = match cookie_value(headers, config.embed_cookie_name()) {
-        Some(token) => auth.authenticate_embed_session(hostname, &token).await?,
+        Some(token) => {
+            auth.authenticate_embed_session_for_check(hostname, &token)
+                .await?
+        }
         None => None,
     };
     let Some(user_id) = user else {
-        return Err(no_session());
+        return Ok(embed_check_unavailable());
     };
     // The same answer for "no session" and "no longer allowed": the check
     // reveals nothing the UI request would not.
     let Some((workspace_id, _server_id)) = auth.agent_interface_target(agent_id).await? else {
-        return Err(no_session());
+        return Ok(embed_check_unavailable());
     };
-    let Ok(agent) = state.resolve_agent(&workspace_id, agent_id).await else {
-        return Err(no_session());
+    let agent = match state.resolve_agent(&workspace_id, agent_id).await {
+        Ok(agent) => agent,
+        Err(error) => return embed_check_resolution_failure(error),
     };
     if !interface_gate_allows(policy, &workspace_id, &user_id, &agent).await? {
-        return Err(no_session());
+        return Ok(embed_check_unavailable());
     }
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::NO_CONTENT;
     no_store(&mut response);
     Ok(response)
+}
+
+fn embed_check_unavailable() -> Response {
+    let mut response = Response::new(Body::empty());
+    no_store(&mut response);
+    response
+}
+
+fn embed_check_resolution_failure(error: ProtocolError) -> Result<Response, ApiFailure> {
+    match error.code.as_str() {
+        "workspace_not_found" | "agent_not_found" | "agent_ambiguous" => {
+            Ok(embed_check_unavailable())
+        }
+        _ => Err(error.into()),
+    }
 }
 
 /// Embed-session responses may be framed by the Console origin only; every
@@ -474,4 +494,27 @@ pub(in crate::api) fn require_tunnel_fallback_allowed(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod availability_resolution_tests {
+    use super::*;
+    #[test]
+    fn embed_availability_unknown_resolution_errors_are_not_normalized() {
+        for code in ["workspace_not_found", "agent_not_found", "agent_ambiguous"] {
+            assert_eq!(
+                embed_check_resolution_failure(ProtocolError::new(code, "test"))
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+        let error = embed_check_resolution_failure(ProtocolError::new(
+            "unexpected_resolution_failure",
+            "test",
+        ))
+        .unwrap_err();
+        assert!(error.status.is_server_error());
+        assert_eq!(error.error.code, "unexpected_resolution_failure");
+    }
 }

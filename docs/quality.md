@@ -1,5 +1,23 @@
 # Quality And Maintenance
 
+### Embedded session availability checks
+
+The Proxy embed-session tests use isolated PostgreSQL schemas and a fake local
+machine tunnel. They cover exact `204` readiness versus identical empty `200`
+ordinary negatives for GET/HEAD, all response headers, cookie context, host and
+kind/expiry/revocation, membership and interface Policy gates, and unchanged
+protected-UI authorization after a prior ready result. Duplicate cookie order
+and multiple Cookie headers must select the same authority as the UI path.
+SQL faults at token, membership role/existence and target lookup, a failing
+Policy store, and unknown resolution failures must remain errors with no-store;
+legacy non-check authentication behavior is checked separately. The generated
+bootstrap fixtures must cover v1/v2 exact204 postconditions, new200/legacy401
+initial fallback, non-normal statuses/redirects/transport failure stopping
+without mint, and unchanged source/origin/nonce message guards. These local
+fixtures do not establish deployed three-engine acceptance, current canary
+health, historical restart completion or clean browser diagnostics. No error
+exemption or retrospective change to a failed acceptance report is permitted.
+
 ### Organization invitation consent checks
 
 The PostgreSQL-backed Proxy invitation tests use synthetic invitations in
