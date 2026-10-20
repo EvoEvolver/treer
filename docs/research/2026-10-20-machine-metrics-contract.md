@@ -465,3 +465,20 @@ not run this whole-ring scan separately for every series. Cancellation, query
 concurrency/deadlines, performance measurements, journal, source service,
 authenticated forwarding and public routes are not implemented here. The
 existing integral-millisecond-span aggregation restriction still applies.
+
+Before runtime integration, heavy decoding/validation/aggregation must move
+outside exclusive collector mutation access. The current synchronous reader
+holds that access for its whole scan and is not suitable as a viewer-facing
+implementation. The full assembler must obtain bounded immutable retained
+bytes or an append-maintained field index under a short access window, then do
+the expensive work independently so viewers cannot stall sampling or cleanup.
+Snapshot copies and indexes need explicit aggregate memory budgets as well as
+the existing ring cap; a 64 MiB allowance cannot be multiplied without a bound
+by concurrent viewers.
+
+The runtime query boundary must enforce per-principal and per-machine admission
+caps, the 10-second end-to-end deadline and cancellation, including during the
+decode/aggregation work, before enabling the route. Identity conflicts map to a
+fixed invalid-response error and a content-free diagnostic counter; they must
+not trigger retries or partial-success output. These concurrency, isolation,
+deadline and diagnostic requirements remain unimplemented by this reader.
