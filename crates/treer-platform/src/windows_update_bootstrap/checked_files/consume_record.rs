@@ -3,18 +3,18 @@ const MAGIC: &[u8; 8] = b"TRCONS01";
 const LENGTH: usize = 177;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Record {
-    lifetime: [u8; 32],
-    attempt: [u8; 32],
-    head_volume: u64,
-    head_file: [u8; 16],
-    head_hash: [u8; 32],
-    evidence_hash: [u8; 32],
-    component: u8,
-    role: u8,
-    operation: u8,
-    revision: u64,
-    status: u32,
+pub(super) struct Record {
+    pub(super) lifetime: [u8; 32],
+    pub(super) attempt: [u8; 32],
+    pub(super) head_volume: u64,
+    pub(super) head_file: [u8; 16],
+    pub(super) head_hash: [u8; 32],
+    pub(super) evidence_hash: [u8; 32],
+    pub(super) component: u8,
+    pub(super) role: u8,
+    pub(super) operation: u8,
+    pub(super) revision: u64,
+    pub(super) status: u32,
 }
 
 fn identifier<const N: usize>(value: &[u8; N]) -> bool {
@@ -33,7 +33,7 @@ impl Record {
             && self.status != 0
     }
 
-    fn encode(&self) -> Option<Vec<u8>> {
+    pub(super) fn encode(&self) -> Option<Vec<u8>> {
         if !self.valid() {
             return None;
         }
@@ -84,7 +84,7 @@ fn parse(mut input: &[u8]) -> Option<Record> {
 
 // Exact data comparison only. An independently trusted expectation, actual
 // outcome and live custody are required elsewhere before any continuation.
-fn matches_expected(bytes: &[u8], expected: &Record) -> bool {
+pub(super) fn matches_expected(bytes: &[u8], expected: &Record) -> bool {
     parse(bytes).as_ref() == Some(expected)
 }
 

@@ -1747,6 +1747,25 @@ post-hook evidence corruption/read-failure coverage, and decision composition
 must still retain its own pin and revalidate head/context after that transition.
 Exact-SHA hosted execution remains required.
 
+The next preparatory slice assembles plain consume-record data after the first
+context match. A private retained-head helper validates custody and obtains the
+original full head identity/digest, then combines independent binding fields,
+the retained actual failure status, the first matched context digest and a
+distinct explicitly synthetic lifetime. Consume-record fields and encoding are
+visible only inside the existing Windows test-only checked-files boundary.
+No parsed record becomes a capability and no decision file is published.
+
+One native test covers both operations with twelve fresh fixtures each: one
+exact independently assembled wire expectation and eleven individual changes
+to lifetime, attempt, head volume/file ID/hash, context hash, component, role,
+operation, revision and status. Every mismatch reaches the matched-context hook
+but refuses before the counter sink, spends evidence, preserves context bytes
+and leaves no decision file; a retry cannot run its hook. Selector-only changes
+may violate the codec's role/operation invariant and are intentionally refused
+as malformed as well as unequal. This is a data-comparison matrix, not proof
+of decision publication, restrictive decision custody or mismatch rejection by
+a real writer adapter. Exact-SHA hosted native execution remains required.
+
 This adds no durable consume-plus-head transaction, external deletion/replay
 fence, independently committed production expectations, authenticated health,
 real installation lock or real supervisor lifetime. A fresh process remains
