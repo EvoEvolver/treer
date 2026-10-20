@@ -125,12 +125,6 @@ fn repeated_slots_and_invalid_measurements_are_refused() {
         aggregate(&invalid, q.to, MachineMetricUnit::Percent, []),
         Err(AggregationError::InvalidQuery)
     ));
-    invalid = q.clone();
-    invalid.to += Duration::microseconds(100);
-    assert!(matches!(
-        aggregate(&invalid, invalid.to, MachineMetricUnit::Percent, []),
-        Err(AggregationError::InvalidQuery)
-    ));
 }
 
 #[test]
@@ -158,13 +152,17 @@ fn input_budget_applies_even_to_out_of_range_observations() {
 #[test]
 fn generated_boundaries_pass_shared_wire_validation() {
     use treer_protocol::*;
-    for (seconds, max_points) in [(11, 2), (86400, 720)] {
-        let mut q = query(seconds, max_points);
-        // Fractional timestamps with integral-ms spans retain exact bounds.
-        if seconds == 11 {
-            q.from += Duration::microseconds(100);
-            q.to += Duration::microseconds(100);
-        }
+    for (nanos, max_points) in [
+        (1, 1),
+        (999_999, 1),
+        (5_000_000_001, 1),
+        (5_000_000_001, 2),
+        (11_000_000_001, 2),
+        (86_400_000_000_000, 720),
+    ] {
+        let mut q = query(1, max_points);
+        q.from += Duration::nanoseconds(100_001);
+        q.to = q.from + Duration::nanoseconds(nanos);
         let mut width = 0;
         let series = [
             MachineMetricKind::CpuUtilization,
@@ -195,7 +193,7 @@ fn generated_boundaries_pass_shared_wire_validation() {
             }
         })
         .collect();
-        let response = MachineMetricsResponse {
+        let mut response = MachineMetricsResponse {
             schema: CAPABILITY_MACHINE_METRICS.into(),
             server_id: "fixture-machine".into(),
             generated_at: q.to,
@@ -215,7 +213,26 @@ fn generated_boundaries_pass_shared_wire_validation() {
             series,
         };
         response.validate(&q, "fixture-machine", q.to).unwrap();
+        let wire = serde_json::to_vec(&response).unwrap();
+        MachineMetricsResponse::parse_bounded(&wire, &q, "fixture-machine", q.to).unwrap();
+        let expected = (nanos as u64).div_ceil(5_000_000_000);
+        assert_eq!(
+            response.series[0]
+                .points
+                .iter()
+                .map(|point| u64::from(point.expected_count))
+                .sum::<u64>(),
+            expected
+        );
+        assert_eq!(response.series[0].points.last().unwrap().to, q.to);
         assert!(response.series[0].points.len() <= usize::from(max_points));
+        // A consumer must reject the old floor-to-ms count for a fractional
+        // tail; accepting the source output alone could hide shared rounding.
+        if nanos % 5_000_000_000 == 1 {
+            let last = response.series[0].points.last_mut().unwrap();
+            last.expected_count -= 1;
+            assert!(response.validate(&q, "fixture-machine", q.to).is_err());
+        }
     }
 }
 

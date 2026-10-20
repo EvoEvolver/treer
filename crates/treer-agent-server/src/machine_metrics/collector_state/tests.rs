@@ -1152,64 +1152,69 @@ fn retained_gpu_inventory_uses_acquisition_range_not_cached_frame_time() {
 fn gpu_inventory_and_buckets_share_exact_half_open_acquisition_boundaries() {
     use crate::machine_metrics::field_query::FieldKey;
     let from = clock(1000, 1000).wall;
-    let to = clock(2000, 2000).wall;
-    for (at, included) in [
-        (from - Duration::nanoseconds(1), false),
-        (from, true),
-        (to - Duration::nanoseconds(1), true),
-        (to, false),
+    for to in [
+        clock(2000, 2000).wall,
+        clock(2000, 2000).wall + Duration::nanoseconds(1),
+        from + Duration::nanoseconds(1),
     ] {
-        for truncated in [false, true] {
-            let mut state = state();
-            let gpu = "a".repeat(64);
-            let acquired = Clock {
-                wall: at,
-                monotonic_ms: 1000,
-            };
-            state
-                .record(
-                    acquired,
-                    MachineMetricKind::GpuUtilization,
-                    Some(&gpu),
-                    MachineMetricStatus::Ok,
-                    Some(25.0),
-                )
-                .unwrap();
-            state
-                .record_vram(acquired, &gpu, MachineMetricStatus::Ok, Some((100, 60)))
-                .unwrap();
-            // Append time is outside the query; only original acquisition
-            // time may determine inventory membership and bucket contents.
-            let mut sample = gpu_frame(&mut state, clock(5000, 5000), &gpu);
-            sample.inventory_truncated = truncated;
-            state.append_frame(clock(5000, 5000), &sample).unwrap();
-            let mut view = state
-                .detached_query(clock(5000, 5000), &mut || false)
-                .unwrap();
-            let result = view
-                .query_fields(
-                    &MachineMetricsQuery {
-                        from,
-                        to,
-                        max_points: 1,
-                    },
-                    &[FieldKey {
-                        kind: MachineMetricKind::GpuUtilization,
-                        gpu_id: Some(gpu.clone()),
-                    }],
-                    &mut || false,
-                )
-                .unwrap();
-            assert!(result.inventory.is_none());
-            assert_eq!(result.retained_gpus.len(), usize::from(included));
-            assert_eq!(
-                result.historical_inventory_incomplete,
-                truncated && included
-            );
-            let point = &result.fields[0].1.points[0];
-            assert_eq!(point.valid_count, u32::from(included));
-            assert_eq!(point.first_sample_at, included.then_some(at));
-            assert_eq!(point.last_sample_at, included.then_some(at));
+        for (at, included) in [
+            (from - Duration::nanoseconds(1), false),
+            (from, true),
+            (to - Duration::nanoseconds(1), true),
+            (to, false),
+        ] {
+            for truncated in [false, true] {
+                let mut state = state();
+                let gpu = "a".repeat(64);
+                let acquired = Clock {
+                    wall: at,
+                    monotonic_ms: 1000,
+                };
+                state
+                    .record(
+                        acquired,
+                        MachineMetricKind::GpuUtilization,
+                        Some(&gpu),
+                        MachineMetricStatus::Ok,
+                        Some(25.0),
+                    )
+                    .unwrap();
+                state
+                    .record_vram(acquired, &gpu, MachineMetricStatus::Ok, Some((100, 60)))
+                    .unwrap();
+                // Append time is outside the query; only original acquisition
+                // time may determine inventory membership and bucket contents.
+                let mut sample = gpu_frame(&mut state, clock(5000, 5000), &gpu);
+                sample.inventory_truncated = truncated;
+                state.append_frame(clock(5000, 5000), &sample).unwrap();
+                let mut view = state
+                    .detached_query(clock(5000, 5000), &mut || false)
+                    .unwrap();
+                let result = view
+                    .query_fields(
+                        &MachineMetricsQuery {
+                            from,
+                            to,
+                            max_points: 1,
+                        },
+                        &[FieldKey {
+                            kind: MachineMetricKind::GpuUtilization,
+                            gpu_id: Some(gpu.clone()),
+                        }],
+                        &mut || false,
+                    )
+                    .unwrap();
+                assert!(result.inventory.is_none());
+                assert_eq!(result.retained_gpus.len(), usize::from(included));
+                assert_eq!(
+                    result.historical_inventory_incomplete,
+                    truncated && included
+                );
+                let point = &result.fields[0].1.points[0];
+                assert_eq!(point.valid_count, u32::from(included));
+                assert_eq!(point.first_sample_at, included.then_some(at));
+                assert_eq!(point.last_sample_at, included.then_some(at));
+            }
         }
     }
 }

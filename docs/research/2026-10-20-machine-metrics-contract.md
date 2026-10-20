@@ -261,10 +261,12 @@ status counts describe these selected slot observations, not every raw reading.
 The adapter must deduplicate repeated cached acquisitions before aggregation
 rather than assign new identities and count one acquisition repeatedly.
 
-This primitive currently requires a positive integral-millisecond range span,
-including when both endpoints carry the same submillisecond offset. The wire
-model accepts more general fractional spans; their expected-count rounding must
-be reconciled before exposing this primitive through a route. It does not yet
+The primitive accepts any positive range span allowed by the wire model,
+including a one-nanosecond span. Bucket width remains an integral multiple of
+five seconds, selected with ceiling arithmetic on the exact nanosecond span;
+expected counts also round the exact positive bucket span up to five-second
+slots. A fractional tail is never truncated away or assigned zero expected
+samples. It does not yet
 assemble responses: the caller still owes total-series/serialized response
 budgets, per-range retention/truncation, removed-GPU inventory union, fresh
 per-field current values, epoch handling and final shared-response validation.
@@ -769,8 +771,17 @@ Queries with no original acquisitions in range do not inherit that frame's bit.
 An integration test compares inventory membership, truncation overlap and
 aggregated GPU bucket samples at from-1 ns, from, to-1 ns and to, with the
 cached frame appended outside the range. The same exact half-open predicate
-must govern all three; this test uses a whole-millisecond query span and does
-not remove the aggregation helper's separate fractional-span restriction.
+must govern all three. The test now repeats the edges with a whole-millisecond
+span, a span with a one-nanosecond tail, and a one-nanosecond span. Source
+aggregation and the shared response validator use exact nanosecond ceiling
+arithmetic; generated responses also round-trip through parse_bounded for short
+spans, a fractional tail after five seconds, and the 24-hour limit. These checks
+do not establish browser integration or enable a runtime route.
+The frozen Web validator at 4ecb3a67 still floors bucket spans to milliseconds
+before checking expected_count and rejects submillisecond buckets. A Web
+successor must use the same exact nanosecond ceiling rule and cover these
+vectors before the Core/Web union is eligible for activation; no compatibility
+or browser PASS is claimed by the source-only change.
 
 Tests distinguish historical and current names for the same id, preserve a
 current-only device outside its historical acquisition range, retain an absent

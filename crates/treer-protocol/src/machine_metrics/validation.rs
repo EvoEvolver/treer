@@ -291,9 +291,13 @@ impl MachineMetricCurrent {
 
 impl MachineMetricBucket {
     fn validate(&self, unit: MachineMetricUnit, interval: u64) -> Result<()> {
-        let span = self.to.signed_duration_since(self.from).num_milliseconds();
+        let span = self
+            .to
+            .signed_duration_since(self.from)
+            .num_nanoseconds()
+            .ok_or(MachineMetricsValidationError)?;
         require(span > 0)?;
-        let expected = (span as u64).div_ceil(interval);
+        let expected = (span as u64).div_ceil(interval * 1_000_000);
         require(u64::from(self.expected_count) == expected)?;
         let mut observed = 0u64;
         let mut valid = 0;

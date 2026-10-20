@@ -57,16 +57,18 @@ pub fn aggregate_cancellable(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Buckets, AggregationError> {
     check_cancelled(cancelled)?;
-    let span = query.to.signed_duration_since(query.from);
-    let span_ms = span.num_milliseconds();
-    if !query.valid_at(now) || span_ms < 1 || span != Duration::milliseconds(span_ms) {
+    if !query.valid_at(now) {
         return Err(AggregationError::InvalidQuery);
     }
+    // valid_at bounds the positive span to 24 h, safely within i64 nanos.
+    let span_ns = query
+        .to
+        .signed_duration_since(query.from)
+        .num_nanoseconds()
+        .ok_or(AggregationError::InvalidQuery)? as u64;
     let interval = MACHINE_METRICS_SAMPLE_INTERVAL_MS;
-    let width_ms = (span_ms as u64)
-        .div_ceil(u64::from(query.max_points))
-        .div_ceil(interval)
-        * interval;
+    let interval_ns = interval * 1_000_000;
+    let width_ms = span_ns.div_ceil(u64::from(query.max_points) * interval_ns) * interval;
     let mut points = Vec::new();
     let mut start = query.from;
     while start < query.to {
@@ -75,15 +77,17 @@ pub fn aggregate_cancellable(
             .checked_add_signed(Duration::milliseconds(width_ms as i64))
             .unwrap_or(query.to)
             .min(query.to);
-        let expected = end.signed_duration_since(start).num_milliseconds();
-        // The current wire validator requires a positive whole-ms bucket span.
+        let expected = end
+            .signed_duration_since(start)
+            .num_nanoseconds()
+            .ok_or(AggregationError::InvalidQuery)?;
         if expected < 1 {
             return Err(AggregationError::InvalidQuery);
         }
         points.push(MachineMetricBucket {
             from: start,
             to: end,
-            expected_count: (expected as u64).div_ceil(interval) as u32,
+            expected_count: (expected as u64).div_ceil(interval_ns) as u32,
             valid_count: 0,
             status_counts: Vec::new(),
             first_sample_at: None,
