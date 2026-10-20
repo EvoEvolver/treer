@@ -4,6 +4,8 @@ Status: implementation proposal for Core/security and Web #221. This document
 does not describe shipped behavior. Core owns machine collection, protocol and
 query routing; Web owns charts; UI reviews readability. The parent cannot close
 until the browser acceptance and native measurements are recorded.
+The subsequent [typed contract checkpoint](2026-10-20-machine-metrics-contract.md)
+supersedes the initial JSON sketch, identifier and Policy-default proposals below.
 
 ## Collection and platform contract
 
@@ -36,12 +38,14 @@ and report it in `memory.method` before implementation acceptance. Container
 values are the OS-visible machine scope; do not silently relabel cgroup quota
 as physical-host capacity. Include `scope` metadata and record the test scope.
 
-NVIDIA uses read-only NVML initialization, UUID/name, utilization and framebuffer
+NVIDIA uses read-only NVML initialization, device identity/name, utilization and framebuffer
 memory calls. No nvidia-smi polling, process queries, settings or power controls.
 Load only a reviewed driver/system library location, not cwd or a user-provided
-library path. Keep GPU UUIDs stable across index changes; preserve independent
+library path. Keep opaque GPU keys stable across index changes; preserve independent
 per-field status (WDDM/MIG/driver support can differ by metric). Cap inventory
 at 32 devices, report inventory_truncated rather than silently losing cards.
+Raw UUIDs stay local: derive opaque IDs with an installation-random salt that
+never leaves the machine. Do not expose serials, PCI addresses or driver text.
 Never represent unavailable utilization or memory by 0.
 
 NVML lacks a general interruptible call deadline: a timeout around a Rust
@@ -139,7 +143,7 @@ Proposed JSON shape (names to align with Web before coding):
 }
 ```
 
-Each GPU carries uuid/name and independent utilization/memory status and nullable
+Each GPU carries opaque id/name and independent utilization/memory status and nullable
 values (bytes, 0..100 percent). Closed status vocabulary: ok, warming_up,
 no_device, driver_unavailable, unsupported_platform, unsupported_metric,
 collection_failed, timed_out, stale. Error responses distinguish forbidden,

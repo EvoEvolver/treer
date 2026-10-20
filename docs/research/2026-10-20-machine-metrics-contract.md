@@ -1,0 +1,149 @@
+# Machine metrics typed contract checkpoint (#220 / #221)
+
+Status: draft models in `treer-protocol/src/machine_metrics.rs`, no advertised
+capability, routes, grants, collector or runtime behavior yet. This refines the
+[proposal](2026-10-20-machine-monitoring.md) following security 6602/6606 and UI
+6604/6605. Implementations must validate these invariants before dispatch,
+before serialization and before drawing; serde types alone do not enforce them.
+
+## Authorization and local boundary decisions
+
+Retain existing Policy modes. Proposed `machine.metrics.read` uses
+RESOURCE_MACHINE: human owner/member seed rules may permit visible machines;
+enforce-mode Agent seeds do not add a grant. Monitor or absent Policy permits
+authenticated workspace actions under the existing contract: this proposal
+does not introduce a new deny-default exception or claim no implicit grant in
+those modes. Validate membership then workspace/machine binding then Policy
+then dispatch. Non-members/wrong-workspace machines use the same not-found
+pattern. No route uses `machine.exec` or `machine.file.read` as a shortcut.
+Actual seed changes require security and release review, not this model commit.
+
+Machine metrics deliberately describe aggregate OS-visible load, including
+other workloads on shared hosts. The machine owner must see this notice when
+enabling enrollment metrics; add a machine-local disable switch which stops
+sampling and removes stored history. Disable applies to every same-account
+enrollment sharing that collector. Uninstall/last unenrollment removes history;
+do not remove it while another enrollment still owns collection. This is an
+explicit shared-host property, not per-workspace isolation or per-tenant usage.
+
+One collector per same-account installation uses a machine-private root and OS
+lock; stale owner detection is PID plus birth time, not PID alone. Local reads
+use only an owner-only Unix socket / SID-restricted Windows named pipe, peer
+account verification on every connection, one fixed bounded read command,
+bounded frames/rates and no credentials, arbitrary paths or workspace secrets.
+Use descriptor-anchored no-follow creation/opening for the store; checksums are
+corruption detection, not protection from same-account tampering.
+
+NVML helper uses the Controller's own absolute executable and fixed argv, a
+cleared environment, closed unrelated descriptors/handles, bounded framed stdio
+and discarded stderr. No PATH/LD_LIBRARY_PATH/DYLD inheritance or arbitrary DLL
+search. Only trusted root/SYSTEM-owned non-user-writable system library paths,
+with parent/symlink validation; Windows full path/system32 lookup. Apply owned
+process-group/kill-on-close-job and resource limits; validate helper output as
+untrusted. Slow helper containment must not wait on lifecycle/heartbeat shutdown.
+These are implementation gates, not claims proven by the types.
+
+## Request and response rules
+
+Routes remain as proposed in #220. API `from`/`to` either both omitted (resolve
+to the last 15 minutes through request acceptance) or both explicit RFC3339;
+one omitted fails `machine_metrics_invalid_range`. `max_points` omitted means
+360; parse strictly as integer 1..720. Reject duplicate/unknown parameters.
+Resolved typed query always has all three fields, `from < to <= accepted_at`,
+duration <=24 hours. Controller rechecks range and caps before accessing store.
+
+Fixed query error codes: `machine_metrics_invalid_range`,
+`machine_metrics_invalid_query`, `machine_metrics_forbidden`,
+`machine_metrics_offline`, `machine_metrics_unsupported`,
+`machine_metrics_disabled`, `machine_metrics_busy`,
+`machine_metrics_timeout`, `machine_metrics_invalid_response`.
+No OS/NVML diagnostic text is returned. Reuse existing not-found errors for
+membership/binding failures. No-store applies to failures too. No range or
+result in audit/log/trace payloads; logging and transport body paths need tests
+and source inspection before activation. OS-generated privileged crash dumps
+are outside an application no-logging guarantee; do not configure automatic
+Treer metric reply dumps or attach heap dumps to diagnostics.
+
+Bounds: two queries/source machine, four pending/Proxy machine, one pending
+per principal/machine. Coalesce identical in-flight source queries only, no
+completed-query history cache on Proxy. Ten-second overall timeout. Source
+aggregation must choose at most requested points and at most 7,200 bucket
+records TOTAL across all series, coarsening all series identically further if
+needed to stay <=1 MiB encoded. No partial response at the byte limit: bounded
+failure if even the metadata/current values cannot fit. No response advertises
+or activates a capability until the entire source/query path exists.
+
+`MachineMetricsResponse.series` contains four system series plus three per GPU
+(max 100). `kind` fixes unit: utilization percent 0..100, RAM/VRAM bytes >=0.
+CPU is whole-machine percent, not sum of cores. RAM used = total - available
+from the same sample/method. RAM total is itself a series: capacity changes
+mark the affected bucket partial and break continuity, never divide a historical
+mean by today's total. Likewise GPU memory total accompanies memory used.
+Valid paired samples require 0 <= available/used <= total; the source refuses
+invalid readings, the browser must not silently accept NaN/infinity/range errors.
+Values are JSON finite f64, with bytes <= 2^53-1 for exact browser integers;
+larger values are unavailable, not rounded into a false claim.
+
+Each series has its own `current`: latest actual field observation independent
+of selected history range, without query resampling. `sampled_at` and `age_ms`
+refer to that field's acquisition. GPU helper completions must not inherit a
+newer CPU/RAM timestamp. `stale_after_ms` is 15,000: older valid observations
+have status stale, value null, and retain acquisition time/age for the UI label.
+Failure/unsupported readings have value null, with time of that attempt when
+known. Absence of any observation has null time/age. New CPU baseline is warming_up.
+
+All series share identical ascending half-open bucket boundaries covering
+the resolved request range. Empty history: points=[] for every series (no fake
+empty-day raster), retained_from=null if nothing retained. Otherwise include
+empty intervals as null buckets. `bucket_width_ms` reports actual aggregation,
+not the sampling period. First/last actual sample times lie in [from,to).
+`valid_count` counts ok values; distinct `status_counts` count observed slots,
+including failures, with sum <= expected_count and ok count == valid_count.
+Empty/failed-only buckets have null mean/min/max and null first/last VALID
+sample times; nonempty values require finite min <= mean <= max.
+
+`partial=true` on any missing/failed slot, collection epoch boundary, capacity
+change or sampling discontinuity, even if min/mean/max exist. The browser must
+break the line at partial buckets and may draw an isolated marked observation;
+it must not infer continuous coverage between first/last timestamps. Status
+counts identify observed failure categories; missing_count is expected minus
+their sum. An epoch/clock boundary is partial even if slot counts happen to add
+up. No interpolation or synthetic zeros. `truncated` indicates requested older
+history removed by retention/capacity; `retained_from` identifies the earliest
+available record, not a promise of continuous coverage.
+
+`gpus` is the union of current inventory and selected-range history descriptors,
+with a stable installation-salted opaque id and name <=128 UTF-8 bytes. Raw
+UUID/serial/PCI/driver strings never leave the machine. A removed GPU remains
+with present=false and current device_absent; retained historical series keep
+its old key. Index reuse never reassigns history. Cap union at 32, prioritizing
+current cards then most recently observed historical cards deterministically;
+inventory_truncated=true on overflow. All returned GPU series must reference
+that descriptor list. Source and browser reject duplicate IDs, orphan series,
+duplicate kind/id pairs, >32 descriptors or >100 series. No caller-supplied HTML,
+URLs or state text; model names are plain text and fixed enum labels are UI-owned.
+
+## Synthetic presentation examples
+
+These describe wire states for mocks, not live samples or native validation.
+
+| Case | Per-series current | Selected-range points | Required presentation |
+| --- | --- | --- | --- |
+| Healthy | ok, value=12.5, sampled_at=04:59:58Z, age_ms=2000 | expected=12, valid=12, ok=12, partial=false, mean=10/min=5/max=15 | current12.5 separate from bucket mean10 |
+| Missing interval | same current as healthy | expected=12, valid=6, ok=6, partial=true, mean=10 | break line; six missing slots, never fill0 |
+| GPU utilization failure | collection_failed, value=null, attempt time/age | valid=0, collection_failed=12, partial=true, statistics=null | failure label for utilization; VRAM can remain ok |
+| Removed GPU | device_absent, value=null; descriptor present=false | old GPU key has retained earlier buckets | historical card retained, no new index substitution |
+| New collector | warming_up CPU / no observation=null timestamps | points=[], retained_from=null | no samples; CPU warming label; no zero line |
+| Stale field | stale, value=null, old sampled_at, age_ms=20000 | independent retained points | stale current label; no newer global timestamp substitution |
+
+Web accepts only a fully validated, size-bounded response. Abort/reset on
+machine/range change, unmount, logout/session change or offline; pause hidden
+tabs, serial refresh with jitter/backoff and bounded failures. No localStorage,
+sessionStorage, IndexedDB, service-worker or persistent query cache. GPU names
+are text nodes, status/unit strings come from fixed UI mappings. Screenshots
+and real-browser acceptance cover these states plus refusal/offline/malformed,
+en/zh, light/dark, 390px, keyboard/touch and an accessible bounded values table.
+
+The models do not satisfy helper/IPC, retention, authorization or performance
+acceptance. Native three-platform measurements, actual NVIDIA measurement when
+hardware exists, Web #221 and UI review remain required for parent completion.

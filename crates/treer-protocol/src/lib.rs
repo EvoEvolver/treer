@@ -5,6 +5,8 @@ pub use recovery::*;
 pub mod prompt_delivery;
 pub use prompt_delivery::*;
 pub mod machine_file;
+mod machine_metrics;
+pub use machine_metrics::*;
 mod targets;
 pub use machine_file::*;
 pub use targets::*;
