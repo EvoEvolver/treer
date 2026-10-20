@@ -1615,6 +1615,17 @@ hosted execution; no production locking or replay/CAS claim follows.
 
 #### Next inert composition: bind the decision before the private sink
 
+Preparatory custody-lifetime boundary: the private `BoundStored` matched-context
+hook can now return an owned guard. The consume function retains that guard
+through its second context read, digest/binding checks and synchronous sink,
+then drops it; error returns also drop it while preserving the spent latch.
+Existing unit-returning hooks keep the same behavior. A native fixture covers
+both collision operations and sink acceptance/refusal, asserting one guard drop,
+spent retry refusal and no decision file. This is a lifetime seam only: it does
+not create a decision, validate a decision pin or prove native write/delete
+exclusion inside the sink. Those assertions remain for the composed fixture.
+Exact-SHA hosted execution of this new fixture remains pending.
+
 The same-bytes gap replacement fixture `b279e51d` passed hosted run
 39367207855 on Server 2022/2025: read-pin three, ordinary 93 passed/four ignored
 (Core 6479 and security 6475 independently read raw logs). The next slice should

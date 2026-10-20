@@ -182,6 +182,17 @@ impl<'a> BoundStored<'a> {
         sink: &mut Sink,
         after_match: impl FnOnce(MatchedDigest) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.consume_with_guard(expected, sink, after_match)
+    }
+
+    // The private hook may retain custody across the second evidence read and
+    // synchronous sink. This generic lifetime is not a recovered capability.
+    fn consume_with_guard<G>(
+        &self,
+        expected: &Binding,
+        sink: &mut Sink,
+        after_match: impl FnOnce(MatchedDigest) -> io::Result<G>,
+    ) -> io::Result<()> {
         if self.spent.replace(true) {
             return Err(denied());
         }
@@ -194,7 +205,7 @@ impl<'a> BoundStored<'a> {
             return Err(denied());
         }
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
-        after_match(MatchedDigest(digest))?;
+        let guard = after_match(MatchedDigest(digest))?;
         self.binding.check(self.composition)?;
         let reread = self.pin.read()?;
         if <[u8; 32]>::from(Sha256::digest(&reread)) != digest {
@@ -205,7 +216,63 @@ impl<'a> BoundStored<'a> {
             return Err(denied());
         }
         sink.accepted += 1;
+        // Explicitly retain custody until after the synchronous sink completes.
+        drop(guard);
         Ok(())
+    }
+}
+
+#[test]
+fn native_operation_guard_released_after_acceptance_or_refusal() {
+    struct Guard<'a>(&'a Cell<usize>);
+    impl Drop for Guard<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    for operation in [Operation::MoveOld, Operation::Publish] {
+        for refuse in [false, true] {
+            let fixture = Fixture::new(operation);
+            let binding = Binding::before_acquisition(&fixture, 1).unwrap();
+            let context = fixture.context();
+            let composition = Composition::new(
+                &context,
+                &fixture.attempt,
+                &fixture.source,
+                &fixture.target,
+                context.intent,
+            )
+            .unwrap();
+            let Captured::Failure(failure) = composition.acquisition.capture(|_| Ok(())) else {
+                panic!("native collision required");
+            };
+            let stored = BoundStored::store(&composition, &binding, &failure).unwrap();
+            let drops = Cell::new(0);
+            let mut sink = Sink {
+                accepted: 0,
+                refuse,
+            };
+            let result = stored.consume_with_guard(&binding, &mut sink, |_| {
+                assert!(stored.spent.get());
+                assert_eq!(drops.get(), 0);
+                Ok(Guard(&drops))
+            });
+            assert_eq!(result.is_ok(), !refuse);
+            assert_eq!(sink.accepted, usize::from(!refuse));
+            assert_eq!(drops.get(), 1);
+            assert!(stored
+                .consume_with_guard::<Guard<'_>>(&binding, &mut sink, |_| panic!("spent"))
+                .is_err());
+            assert_eq!(drops.get(), 1);
+            assert!(!fixture.attempt.path.join("consume.intent").exists());
+            eprintln!(
+                "guard_fixture refused={} drops=1 spent=1 decision=0 sink={}",
+                u8::from(refuse),
+                sink.accepted
+            );
+            drop(stored);
+            cleanup(fixture);
+        }
     }
 }
 
