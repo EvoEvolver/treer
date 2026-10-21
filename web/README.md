@@ -970,3 +970,7 @@ A concealed tree actions button ignores pointer events until hover, focus or
 its open state reveals it; coarse pointers always show its 44px target. The
 indentation guide outside a nested row is hierarchy spacing, not part of that
 row's painted target.
+
+Tree menu browser checks reveal concealed actions by hovering the painted row
+before clicking. They never force clicks through the full-row primary link;
+keyboard and coarse-pointer reveal paths retain their independent coverage.
