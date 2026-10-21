@@ -112,14 +112,22 @@ try {
       for (const [label, minutes] of [['15m', 15], ['1h', 60], ['6h', 360], ['24h', 1440]]) {
         stage = `range_${minutes}`
         if (minutes !== 15) { response = responseFor(minutes); await panel.getByRole('button', { name: label, exact: true }).click() }
+        stage = `response_${minutes}`
         const actual = await response
+        stage = `status_${minutes}_${actual.status()}`
         assert.equal(actual.status(), 200)
+        stage = `cache_${minutes}`
         assert.equal(actual.headers()['cache-control'], 'no-store')
         const body = await actual.body(), data = JSON.parse(body.toString())
+        stage = `identity_${minutes}`
         assert.equal(data.server_id, binding.server_id)
+        stage = `schema_${minutes}`
         assert.equal(data.schema, 'machine.metrics.v1')
+        stage = `max_points_${minutes}`
         assert.equal(new URL(actual.url()).searchParams.get('max_points'), '360')
+        stage = `samples_${minutes}`
         assert.ok(data.series.find(s => s.kind === 'cpu_utilization').points.some(p => p.valid_count > 0))
+        stage = `render_${minutes}`
         await panel.getByRole('button', { name: 'Refresh', exact: true }).waitFor({ state: 'visible' })
         await page.waitForFunction(() => !document.querySelector('[data-testid=machine-metrics] button:last-child')?.disabled)
         await panel.getByRole('heading', { name: 'CPU', exact: true }).waitFor()
@@ -127,6 +135,7 @@ try {
         assert.equal(await panel.getByRole('alert').count(), 0)
         // Long native ranges are mostly gaps; partial samples render as dots,
         // deliberately not connected lines across unavailable history.
+        stage = `chart_${minutes}`
         const cpu = panel.getByRole('figure', { name: 'CPU utilization', exact: true })
         assert.ok(await cpu.locator('circle[data-partial]').count() > 0)
         ranges.push({ minutes, status: 200, no_store: true, response_sha256: createHash('sha256').update(body).digest('hex') })
