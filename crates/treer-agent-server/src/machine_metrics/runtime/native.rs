@@ -12,8 +12,8 @@ struct Probe {
     gpus: Vec<Gpu>,
 }
 
-#[derive(Default)]
 pub(super) struct Sampler {
+    image: Option<HelperImage>,
     stalled: Option<std::process::Child>,
     retry_after: Option<Instant>,
     failures: u32,
@@ -34,6 +34,22 @@ impl Drop for Sampler {
     }
 }
 impl Sampler {
+    pub(super) fn new() -> Self {
+        Self {
+            image: if cfg!(target_os = "macos") {
+                None
+            } else {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|path| HelperImage::open(path).ok())
+            },
+            stalled: None,
+            retry_after: None,
+            failures: 0,
+            helper_credit: None,
+        }
+    }
+
     pub(super) fn collect(&mut self, mut sample: Sample, store: &store::Store) -> Sample {
         if cfg!(target_os = "macos") {
             return sample;
@@ -57,7 +73,7 @@ impl Sampler {
                 .ok()
                 .map(Arc::new);
             self.helper_credit.as_ref()?;
-            let executable = std::env::current_exe().ok()?;
+            let executable = self.image.as_ref()?.unchanged_path()?;
             let mut command = Command::new(executable);
             command
                 .arg("metrics-gpu-probe")
@@ -172,6 +188,114 @@ impl Sampler {
         self.failures = self.failures.saturating_add(1).min(5);
         self.retry_after =
             Some(Instant::now() + Duration::from_secs((30_u64 << (self.failures - 1)).min(300)));
+    }
+}
+
+/// Cooperative installation boundary: never re-execute a replaced image or a
+/// job-local activator. This is not protection against a hostile same-account
+/// writer racing the check and spawn. Keep the original handle open so inode
+/// reuse cannot make an atomic replacement appear to be the original image.
+struct HelperImage {
+    path: PathBuf,
+    file: std::fs::File,
+    identity: ImageIdentity,
+}
+
+#[derive(PartialEq, Eq)]
+struct ImageIdentity {
+    length: u64,
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    native: (u64, u64, i64, i64),
+    #[cfg(windows)]
+    native: (u64, u64, u32, u32),
+}
+
+impl ImageIdentity {
+    fn read(file: &std::fs::File) -> std::io::Result<Self> {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        #[cfg(unix)]
+        let native = {
+            use std::os::unix::fs::MetadataExt;
+            (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            )
+        };
+        #[cfg(windows)]
+        let native = treer_platform::transfer_file_identity(file)?;
+        Ok(Self {
+            length: metadata.len(),
+            modified: metadata.modified()?,
+            native,
+        })
+    }
+}
+
+impl HelperImage {
+    fn open(path: PathBuf) -> std::io::Result<Self> {
+        let expected = if cfg!(windows) {
+            "treer-agent-server.exe"
+        } else {
+            "treer-agent-server"
+        };
+        if !path.is_absolute() || path.file_name() != Some(std::ffi::OsStr::new(expected)) {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        let file = std::fs::File::open(&path)?;
+        let identity = ImageIdentity::read(&file)?;
+        Ok(Self {
+            path,
+            file,
+            identity,
+        })
+    }
+
+    fn unchanged_path(&self) -> Option<&std::path::Path> {
+        if ImageIdentity::read(&self.file).ok()? != self.identity {
+            return None;
+        }
+        let current = std::fs::File::open(&self.path).ok()?;
+        (ImageIdentity::read(&current).ok()? == self.identity).then_some(self.path.as_path())
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn helper_refuses_replaced_modified_and_job_local_images() {
+        let directory = super::super::tests::Fixture::new();
+        let name = if cfg!(windows) {
+            "treer-agent-server.exe"
+        } else {
+            "treer-agent-server"
+        };
+        let path = directory.0.join(name);
+        std::fs::write(&path, b"original").unwrap();
+        let pinned = HelperImage::open(path.clone()).unwrap();
+        assert!(pinned.unchanged_path().is_some());
+        std::fs::write(&path, b"changed-image").unwrap();
+        assert!(pinned.unchanged_path().is_none());
+        drop(pinned);
+        let pinned = HelperImage::open(path.clone()).unwrap();
+        // Preserve length and bytes: a different file identity must still fail.
+        let replacement = directory.0.join("replacement");
+        std::fs::write(&replacement, b"changed-image").unwrap();
+        #[cfg(unix)]
+        std::fs::rename(&replacement, &path).unwrap();
+        #[cfg(windows)]
+        treer_platform::publish_transfer_file(&replacement, &path, true).unwrap();
+        assert!(pinned.unchanged_path().is_none());
+        let activator = directory.0.join("activator");
+        std::fs::write(&activator, b"original").unwrap();
+        assert!(HelperImage::open(activator).is_err());
     }
 }
 

@@ -92,6 +92,10 @@ HTTP cancellation sends connection-scoped metrics cancellation. Workers check be
 records and serialization steps. Other command replay semantics are unchanged.
 
 NVML runs in a credential-free, fixed-argv helper before Tokio initialization.
+The collector pins the installed Controller image identity and metadata before
+starting its thread. It refuses helper execution after image replacement or
+modification, and from a job-local activator rather than the installed binary.
+This cooperative update check does not prevent hostile same-account spawn races.
 It owns an inherited salt-file lock, so a surviving helper prevents another
 NVML invocation across parent replacement. Output is capped at 16 KiB; a
 two-second deadline kills the owned helper, retains credit until reaped, and

@@ -101,6 +101,8 @@ impl Metrics {
 
     pub fn start(&self) {
         let weak = Arc::downgrade(&self.store);
+        // Capture before a replacement can be accepted by the running service.
+        let mut gpu_sampler = native::Sampler::new();
         std::thread::spawn(move || {
             let budget = MemoryBudget::machine();
             let mut credit = None;
@@ -109,7 +111,6 @@ impl Metrics {
             let mut owner = None;
             let mut last_clock: Option<(DateTime<Utc>, Instant)> = None;
             let mut next = Instant::now();
-            let mut gpu_sampler = native::Sampler::default();
             loop {
                 let Some(store) = weak.upgrade() else { break };
                 if owner.is_none() {
