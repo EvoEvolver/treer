@@ -29,8 +29,11 @@ if (suppliedSession) {
     assert.equal(response.status,200);return response.json();
   }
   if (!binding.organization_id) {
-    const data=await discover('/api/workspaces');
-    binding.organization_id=data.workspaces.find(w=>w.workspace_id===binding.workspace_id)?.organization_id;
+    const data=await discover('/api/organizations');
+    for (const organization of data.organizations) {
+      const workspaces=await discover('/api/workspaces?'+new URLSearchParams({organization_id:organization.organization_id}));
+      if (workspaces.workspaces.some(w=>w.workspace_id===binding.workspace_id)) { binding.organization_id=organization.organization_id; break; }
+    }
   }
   if (!binding.machine_name) {
     const data=await discover(`/api/workspaces/${binding.workspace_id}/snapshot`);
@@ -41,6 +44,11 @@ if (suppliedSession) {
 assert.match(binding.organization_id, /^[a-zA-Z0-9_-]{1,128}$/)
 assert.equal(typeof binding.machine_name,'string')
 const uiOrigin = 'http://127.0.0.1:19485'
+if (suppliedSession) {
+  const check=await fetch(proxy.origin+'/api/auth/me',{headers:{Cookie:binding.cookie,Origin:uiOrigin},redirect:'error',signal:AbortSignal.timeout(10000)});
+  assert.equal(check.status,200);
+  assert.ok(check.headers.get('access-control-allow-origin')===uiOrigin && check.headers.get('access-control-allow-credentials')==='true','native fixture must allow the exact static UI origin with credentials');
+}
 const html = await readFile(new URL('../dist/index.html', import.meta.url))
 const artifactHash = createHash('sha256').update(html).digest('hex')
 await mkdir(outputPath, { recursive: true, mode: 0o700 })
