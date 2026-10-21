@@ -118,7 +118,10 @@ try {
         assert.equal(actual.status(), 200)
         stage = `cache_${minutes}`
         assert.equal(actual.headers()['cache-control'], 'no-store')
-        const body = await actual.body(), data = JSON.parse(body.toString())
+        stage = `body_${minutes}`
+        const body = await actual.body()
+        stage = `json_${minutes}`
+        const data = JSON.parse(body.toString())
         stage = `identity_${minutes}`
         assert.equal(data.server_id, binding.server_id)
         stage = `schema_${minutes}`

@@ -265,40 +265,6 @@ impl HelperImage {
     }
 }
 
-#[cfg(test)]
-mod image_tests {
-    use super::*;
-
-    #[test]
-    fn helper_refuses_replaced_modified_and_job_local_images() {
-        let directory = super::super::tests::Fixture::new();
-        let name = if cfg!(windows) {
-            "treer-agent-server.exe"
-        } else {
-            "treer-agent-server"
-        };
-        let path = directory.0.join(name);
-        std::fs::write(&path, b"original").unwrap();
-        let pinned = HelperImage::open(path.clone()).unwrap();
-        assert!(pinned.unchanged_path().is_some());
-        std::fs::write(&path, b"changed-image").unwrap();
-        assert!(pinned.unchanged_path().is_none());
-        drop(pinned);
-        let pinned = HelperImage::open(path.clone()).unwrap();
-        // Preserve length and bytes: a different file identity must still fail.
-        let replacement = directory.0.join("replacement");
-        std::fs::write(&replacement, b"changed-image").unwrap();
-        #[cfg(unix)]
-        std::fs::rename(&replacement, &path).unwrap();
-        #[cfg(windows)]
-        treer_platform::publish_transfer_file(&replacement, &path, true).unwrap();
-        assert!(pinned.unchanged_path().is_none());
-        let activator = directory.0.join("activator");
-        std::fs::write(&activator, b"original").unwrap();
-        assert!(HelperImage::open(activator).is_err());
-    }
-}
-
 /// Hidden fixed-argv child. No arbitrary path input; only vetted root-owned
 /// system driver files, never PATH/LD_LIBRARY_PATH/DYLD lookup.
 pub fn gpu_probe() -> anyhow::Result<()> {
@@ -427,4 +393,38 @@ pub fn gpu_probe() -> anyhow::Result<()> {
     serde_json::to_writer(std::io::stdout().lock(), &result)?;
     std::io::stdout().write_all(b"\n")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn helper_refuses_replaced_modified_and_job_local_images() {
+        let directory = super::super::tests::Fixture::new();
+        let name = if cfg!(windows) {
+            "treer-agent-server.exe"
+        } else {
+            "treer-agent-server"
+        };
+        let path = directory.0.join(name);
+        std::fs::write(&path, b"original").unwrap();
+        let pinned = HelperImage::open(path.clone()).unwrap();
+        assert!(pinned.unchanged_path().is_some());
+        std::fs::write(&path, b"changed-image").unwrap();
+        assert!(pinned.unchanged_path().is_none());
+        drop(pinned);
+        let pinned = HelperImage::open(path.clone()).unwrap();
+        // Preserve length and bytes: a different file identity must still fail.
+        let replacement = directory.0.join("replacement");
+        std::fs::write(&replacement, b"changed-image").unwrap();
+        #[cfg(unix)]
+        std::fs::rename(&replacement, &path).unwrap();
+        #[cfg(windows)]
+        treer_platform::publish_transfer_file(&replacement, &path, true).unwrap();
+        assert!(pinned.unchanged_path().is_none());
+        let activator = directory.0.join("activator");
+        std::fs::write(&activator, b"original").unwrap();
+        assert!(HelperImage::open(activator).is_err());
+    }
 }
