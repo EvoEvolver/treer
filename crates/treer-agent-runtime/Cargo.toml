@@ -18,6 +18,9 @@ treer-platform.workspace = true
 treer-host-protocol = { path = "../treer-host-protocol" }
 uuid.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+filedescriptor = "0.8"
+
 [dev-dependencies]
 serde_json.workspace = true
 

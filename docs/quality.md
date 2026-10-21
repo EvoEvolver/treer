@@ -293,6 +293,14 @@ waiting for input, 1 writing or delaying, 2 publishing completion, and 3 leaving
 the writer loop. These diagnostics do not change the five-second reclamation
 bound or replace the actual resource-release assertion; a pass on another OS
 does not resolve a native failure.
+The Linux cancellation diagnostic found all tracked handles released while the
+writer remained in its blocking write. Unix PTY descriptors now use nonblocking
+I/O: partial writes continue only from their unwritten suffix, and backpressure
+checks the same cancellation flag and deadline between attempts. The cloned
+reader treats WouldBlock as temporarily empty, preserving replay. Writer
+destruction is covered by the writer permit and finished flag; a held-destructor
+regression verifies neither is published early. Windows retains its native
+blocking I/O and bounded dedicated-writer isolation.
 
 Run the complete gate on demand or while preparing a release:
 
