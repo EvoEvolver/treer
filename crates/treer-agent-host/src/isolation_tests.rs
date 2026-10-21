@@ -33,6 +33,11 @@ async fn bounded(state: &HostState, request: &HostRequest) -> Result<HostRespons
 }
 
 async fn fixture() -> (Arc<HostState>, PathBuf, mpsc::Receiver<()>) {
+    #[cfg(windows)]
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_test_writer()
+        .try_init();
     let root = std::env::temp_dir().join(format!("treer224-{}", Uuid::new_v4().simple()));
     std::fs::create_dir(&root).unwrap();
     let (restart_controller, restarts) = mpsc::channel(1);

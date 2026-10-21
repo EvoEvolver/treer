@@ -103,6 +103,7 @@ struct HostProcess {
 }
 
 struct InputWrite {
+    bootstrap: bool,
     writes: Vec<HostWrite>,
     deadline: Instant,
     uncertain: Arc<AtomicBool>,
@@ -531,6 +532,7 @@ impl HostRuntime {
                 .ok_or_else(|| RuntimeError::ProcessNotRunning(process_id.to_string()))?;
             input
                 .try_send(InputWrite {
+                    bootstrap: false,
                     writes: writes.to_vec(),
                     deadline: Instant::now() + INPUT_DEADLINE,
                     uncertain: Arc::clone(&process.input_uncertain),
@@ -789,6 +791,9 @@ fn spawn_input_writer(
         };
         while let Ok(write) = input.recv() {
             let started = Instant::now();
+            if write.bootstrap {
+                tracing::debug!(%process_id, phase = "conpty_cursor_write_started", "PTY bootstrap");
+            }
             let result = (|| {
                 for part in &write.writes {
                     let delay_end = Instant::now() + Duration::from_millis(part.delay_ms);
@@ -816,6 +821,10 @@ fn spawn_input_writer(
                 Ok(())
             })();
             let failed = result.is_err();
+            if write.bootstrap {
+                tracing::debug!(%process_id, phase = "conpty_cursor_write_settled", success = !failed,
+                    elapsed_ms = started.elapsed().as_millis() as u64, "PTY bootstrap");
+            }
             if failed || write.uncertain.load(Ordering::Acquire) {
                 warn!(%process_id, phase = "input_writer_settled_unknown", elapsed_ms = started.elapsed().as_millis() as u64,
                     bytes = write.writes.iter().map(|part| part.data.len()).sum::<usize>(), "owned PTY input writer settled; no retry");
@@ -858,16 +867,24 @@ fn spawn_output_reader(
                 let (async_result, _) = tokio::sync::oneshot::channel();
                 if let Ok(input) = process.input.lock() {
                     if let Some(input) = input.as_ref() {
-                        let _ = input.try_send(InputWrite {
-                            writes: vec![HostWrite {
-                                data: b"\x1b[1;1R".to_vec(),
-                                delay_ms: 0,
-                            }],
-                            deadline: Instant::now() + INPUT_DEADLINE,
-                            uncertain: Arc::clone(&process.input_uncertain),
-                            result,
-                            async_result,
-                        });
+                        let queued = input
+                            .try_send(InputWrite {
+                                bootstrap: true,
+                                writes: vec![HostWrite {
+                                    data: b"\x1b[1;1R".to_vec(),
+                                    delay_ms: 0,
+                                }],
+                                deadline: Instant::now() + INPUT_DEADLINE,
+                                uncertain: Arc::clone(&process.input_uncertain),
+                                result,
+                                async_result,
+                            })
+                            .is_ok();
+                        tracing::debug!(
+                            phase = "conpty_cursor_reply_queued",
+                            queued,
+                            "PTY bootstrap"
+                        );
                     }
                 }
             }
