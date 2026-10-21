@@ -17,6 +17,8 @@ const LIMIT: u64 = 64 * 1024;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Catalog {
+    #[serde(skip)]
+    digest: String,
     schema_version: u8,
     pub(crate) revision: u64,
     pub(crate) accept_shared_binaries: bool,
@@ -65,11 +67,11 @@ impl Catalog {
             .read_to_end(&mut bytes)?;
         Self::parse(&bytes)
     }
-    fn parse(bytes: &[u8]) -> Result<Self> {
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() as u64 > LIMIT {
             bail!("controller_update_catalog_invalid");
         }
-        let catalog: Self = serde_json::from_slice(bytes)?;
+        let mut catalog: Self = serde_json::from_slice(bytes)?;
         if catalog.schema_version != 1
             || catalog.revision == 0
             || catalog.revision >= 1 << 53
@@ -106,6 +108,8 @@ impl Catalog {
                 bail!("controller_update_catalog_invalid");
             }
         }
+        use sha2::{Digest, Sha256};
+        catalog.digest = format!("{:x}", Sha256::digest(bytes));
         Ok(catalog)
     }
     pub(crate) fn select(
@@ -164,6 +168,29 @@ impl Catalog {
             bail!("controller_update_target_not_upgrade");
         }
         Ok(entry)
+    }
+
+    pub(crate) fn admission(
+        &self,
+        binding: &DispatchBinding,
+    ) -> Result<crate::self_update::web_admission::Admission> {
+        let current = self
+            .entries
+            .iter()
+            .find(|entry| entry.target.identity == binding.current)
+            .ok_or_else(|| anyhow::anyhow!("controller_update_current_unknown"))?;
+        let target = self.target(binding, current)?;
+        Ok(crate::self_update::web_admission::Admission {
+            schema_version: 1,
+            binding: binding.clone(),
+            catalog_sha256: self.digest.clone(),
+            from_sequence: current.release_sequence,
+            to_sequence: target.release_sequence,
+            sums_sha256: target.sums_sha256.clone(),
+            allow_pinned: target.allow_pinned,
+            allow_artifact_origin: target.allow_artifact_origin,
+            accept_shared_binaries: self.accept_shared_binaries,
+        })
     }
 }
 
@@ -237,6 +264,7 @@ mod tests {
         assert!(catalog.target(&binding, current).is_err());
         binding.plan_digest = binding.expected_plan_digest().unwrap();
         assert!(catalog.target(&binding, current).is_ok());
+        assert!(catalog.admission(&binding).is_ok());
         let good = binding.clone();
         for case in 0..5 {
             let mut changed = good.clone();
@@ -251,6 +279,7 @@ mod tests {
                 }
             }
             changed.plan_digest = changed.expected_plan_digest().unwrap();
+            assert!(catalog.admission(&changed).is_err());
             assert!(catalog
                 .target(
                     &changed,

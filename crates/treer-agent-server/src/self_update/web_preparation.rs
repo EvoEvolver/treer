@@ -106,6 +106,10 @@ pub(super) async fn prepare(binding: DispatchBinding) -> Result<PreparedSubmissi
         updated_at: now.max(binding.created_at),
     };
     let journal = create_bound(&jobs, &receipt, &binding)?;
+    // Preserve the local trust/ordering evidence before any download. The
+    // original worker must revalidate these exact catalog bytes under its SAME
+    // transferred locks before publication; a Proxy plan is not that authority.
+    catalog.admission(&binding)?.persist(&journal)?;
     let checksums = distributor.pinned_checksums(&target.sums_sha256).await?;
     if checksums.digest(Binary::Controller) != receipt.controller_sha256
         || checksums.digest(Binary::Cli) != receipt.cli_sha256

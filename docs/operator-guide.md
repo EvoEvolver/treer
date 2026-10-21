@@ -2592,6 +2592,15 @@ both the Proxy and Controller catalogs and preserve the exact release identities
 and pins required by outstanding operations. Never reuse a revision for changed
 bytes or decrease it. Rotation changes future admission; it does not resume,
 rebind, or authorize retry of an outstanding operation.
+The private job also saves the exact catalog byte digest, revision, original and
+target identities and sequences, SUMS pin and consent flags before downloading.
+After SAME-lock handoff, the original worker reopens the local catalog and
+rechecks this evidence and the installed pair before Core activation. Any byte
+change, including a same-revision edit or rotation during preparation, refuses
+activation and retains the unresolved claim. Finish or explicitly reconcile an
+outstanding operation before rotating; a missing proof in an older job cannot
+be adopted as authorization. These private records contain no download URL,
+filesystem path, credential or child output and are not public receipts.
 
 The Controller owns submission independently of its Proxy websocket. Update
 commands do not block heartbeat or operation queries. Disconnect drops response

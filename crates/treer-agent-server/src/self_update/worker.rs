@@ -106,6 +106,10 @@ impl WorkerResources {
 }
 
 impl OwnedWorker {
+    pub(super) async fn verify_web_admission(&self) -> Result<()> {
+        super::web_admission::verify(&self.journal, &self.selected, self.owned.locks()).await
+    }
+
     /// Recovery is the default after ownership until a complete stage proves
     /// otherwise. Keep this owner alive; status alone cannot release its locks.
     pub fn progress(&self) -> CoreProgress {

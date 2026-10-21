@@ -41,6 +41,7 @@ pub mod selection;
 pub mod startup_backup;
 mod verified_image;
 pub mod web_adapter;
+pub(crate) mod web_admission;
 mod web_preparation;
 mod web_result;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

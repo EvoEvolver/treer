@@ -243,6 +243,9 @@ pub fn run_worker(mut worker: super::worker::OwnedWorker) -> Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async move {
+        // Only after authenticated SAME-lock ownership, before Core may publish
+        // either image or restart a Controller. No receipt can skip this check.
+        worker.verify_web_admission().await?;
         match worker.begin_core()?.run().await {
             super::worker::CoreProgress::LauncherRequired => worker.finish_launcher().await,
             super::worker::CoreProgress::RolledBack => worker.finish_rollback(),
