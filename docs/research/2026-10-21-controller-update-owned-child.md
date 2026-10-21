@@ -94,3 +94,72 @@ TypeScript, a production build and 54 focused browser checks across three
 engines. These browser checks use local HTTP fixtures. None of these results
 is actual enrolled update acceptance, a complete author gate or evidence that
 the remaining service-manager/worker-death acceptance matrix is complete.
+
+## Resumed terminal death coverage and manager fixture
+
+The named test
+`self_update::web_result::tests::sigkill_publication_windows_are_unconfirmed_after_reopen`
+SIGKILLs a real private subprocess at three durable boundaries: Complete receipt
+before whole-outcome publication, synced outcome before active-claim removal,
+and active-claim removal before the release marker. It opens the journal again
+and repeats the real native read-only projection, requiring unconfirmed and
+byte-stable receipt/claim state with no release marker or launcher intent.
+The last window deliberately has no native active file: its absence is not a
+completion witness, and the Proxy's unresolved machine claim must still hold.
+These tests construct a valid synthetic terminal receipt; they do not prove a
+real Core installation, health observation or authenticated SAME-lock transfer.
+The test-only pause points do not exist in production builds.
+
+`scripts/controller-update-manager-fixture.py` supplies a reproducible inert
+Host/Controller/worker topology and exact systemd-user/launchd-user command
+arrays. Preparation creates only an exclusive private temporary directory,
+plan and optional plist; it never installs or invokes a manager. It uses no
+Treer executable, enrollment, credential, network, package install or updater.
+The actual host entry refuses a managed Agent, root, an omitted disposable
+acknowledgment, wrong account, changed script and platform mismatch. Those
+checks are guardrails, not proof an account is disposable.
+
+Prepare on each **existing, independently designated disposable account/VM**:
+
+```sh
+python3 scripts/controller-update-manager-fixture.py prepare \
+  --root /tmp/treer-update-manager-UNIQUE --manager systemd
+# On a disposable macOS account instead: --manager launchd
+```
+
+Use a fresh nonexistent root under the platform's canonical temporary directory
+(on macOS use its actual `TMPDIR` path rather than assuming `/tmp` is canonical).
+The output's `manual_start_argv`, optional `manual_kickstart_argv`,
+`manual_inspect_argv` and `manual_stop_argv` are exact commands for a separately
+explicit manager execution. Preparing them grants no service registration or
+account/VM creation permission. Retain the named unit/label and source digest;
+never operate a general Treer unit or a previous run's label.
+
+Once that disposable manager fixture is explicitly run, wait for `worker.json`
+and `heartbeat`, then exclusively create `replace-controller` inside that root.
+The Host kills and reaps only its retained Controller child's private group and
+observes whether the worker heartbeat advances. `replacement-result.json` names
+this narrow scope. The worker was an actual child of the old Controller and
+starts its own session, but is an inert heartbeat, not the updater worker.
+Record manager PID/birth/session/cgroup evidence independently. A second case
+must stop the **whole fixture unit** and observe its distinct effect: systemd
+control-group termination can kill even a detached-session worker. Do not
+change KillMode/launchd settings just to make survival appear to pass. Each
+case uses a fresh fixture, no replay/adoption, and keeps every failed result.
+
+Normal cleanup requests `stop` and uses only that plan's manager stop argv.
+The inert worker has a 90-second absolute lifetime and cooperative done marker;
+neither elapsed time, heartbeat cessation nor that marker proves full OS
+quiescence/reaping. Independently reconcile exact recorded process identities,
+unit/cgroup/label and remaining fixture duties before removing files. Do not
+kill a saved PID. Manager teardown may prevent finally/Drop from running;
+retain unresolved cleanup rather than inventing success. macOS has no parent-
+death mechanism in the real updater path yet, so this fixture cannot close that
+gap or enable its capability. Windows stays unsupported.
+
+This gives runnable topology diagnostics before a real native acceptance target
+exists. E3/E5 remain open until the actual native worker/image replacement,
+launcher/health/claim outcome and relevant manager lifecycle are exercised on
+that independently isolated target. E1's earlier/mid-install windows still need
+real authenticated worker-kill evidence in addition to the existing cancellation,
+intent, image and handoff tests. No claim that one inert probe closes all gates.

@@ -2823,6 +2823,11 @@ of the old Controller under the actual service manager in a disposable OS
 account or VM on Linux and macOS. A separate session/process group alone does
 not establish survival under systemd control-group termination or launchd
 cleanup. This platform acceptance remains outstanding; capability stays off.
+For an inert, prepare-only systemd/launchd topology fixture and the exact
+disposable-account commands, see the
+[owned-child acceptance procedure](research/2026-10-21-controller-update-owned-child.md#resumed-terminal-death-coverage-and-manager-fixture).
+Preparing that fixture neither registers a service nor proves native update
+survival; do not execute its manager commands on an enrolled machine.
 
 After Core health, the original owned worker directly owns each fixed launcher
 install/status child. It persists exclusive start intent before each spawn,
