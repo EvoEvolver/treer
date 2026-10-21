@@ -559,6 +559,9 @@ mod agent_origin_tests;
 #[path = "api/app_dist_tests.rs"]
 mod app_dist_tests;
 #[cfg(test)]
+#[path = "api/controller_update_tests.rs"]
+mod controller_update_tests;
+#[cfg(test)]
 mod embed_session_tests;
 #[cfg(test)]
 #[path = "api/ingress_protection_tests.rs"]
@@ -566,6 +569,7 @@ mod ingress_protection_tests;
 #[cfg(test)]
 #[path = "api/pins_tests.rs"]
 mod pins_tests;
+
 #[cfg(test)]
 #[path = "api/provider_cli_tests.rs"]
 mod provider_cli_tests;

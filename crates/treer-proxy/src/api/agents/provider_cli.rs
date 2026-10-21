@@ -20,7 +20,7 @@ use crate::auth::{
     ProviderCliOperationRecord, ProviderCliScope,
 };
 
-async fn provider_cli_scope(
+pub(super) async fn provider_cli_scope(
     state: &AppState,
     auth: &AuthStore,
     policy: &PolicyEngine,

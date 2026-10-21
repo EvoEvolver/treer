@@ -397,6 +397,13 @@ pub enum AgentCommand {
     },
     /// Provider CLI installation (#123): recipe table for this machine, exact
     /// recipe check, token-confirmed install dispatch and operation polling.
+    ControllerUpdateInspect {},
+    ControllerUpdateDispatch {
+        binding: crate::controller_update_runtime::DispatchBinding,
+    },
+    ControllerUpdateOperation {
+        operation_id: String,
+    },
     ProviderCliRecipes {},
     ProviderCliCheck {
         recipe: crate::ProviderCliRecipeRef,
@@ -603,6 +610,9 @@ impl AgentCommand {
                 Some(CAPABILITY_AGENT_STARTUP)
             }
             Self::Exec { .. } => Some(CAPABILITY_MACHINE_EXEC),
+            Self::ControllerUpdateInspect {}
+            | Self::ControllerUpdateDispatch { .. }
+            | Self::ControllerUpdateOperation { .. } => Some(crate::controller_update::CAPABILITY),
             Self::ProviderCliRecipes {}
             | Self::ProviderCliCheck { .. }
             | Self::ProviderCliOperation { .. } => {

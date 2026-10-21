@@ -272,6 +272,7 @@ impl AppState {
                     pending.server == key
                         && pending.required_capability.is_some_and(|required| {
                             required == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER
+                                || required == treer_protocol::controller_update::CAPABILITY
                                 || required
                                     == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL
                                 || required
@@ -306,6 +307,11 @@ impl AppState {
             let required = pending.required_capability.unwrap_or("unknown");
             let error = if required == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER {
                 ProtocolError::new("machine_transfer_stale", "Controller connection changed; transfer commands are not replayed, inspect the destination before retrying")
+            } else if required == treer_protocol::controller_update::CAPABILITY {
+                ProtocolError::new(
+                    "controller_update_dispatch_stale",
+                    "Controller connection changed; update commands are never replayed",
+                )
             } else if required == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL
                 || required == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2
             {

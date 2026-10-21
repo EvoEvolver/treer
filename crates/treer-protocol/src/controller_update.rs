@@ -23,6 +23,45 @@ const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
 // Unlike serde's default Option handling, absence is an error; explicit null
 // means unknown. Keep the same strict wire requirement in the browser decoder.
+// Reject a seventeenth collection element while decoding, rather than first
+// allocating a caller-controlled vector and only then running validation.
+fn bounded_items<'de, D: Deserializer<'de>, T: Deserialize<'de>, const N: usize>(
+    d: D,
+) -> Result<Vec<T>, D::Error> {
+    struct Items<T, const N: usize>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>, const N: usize> serde::de::Visitor<'de> for Items<T, N> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "at most {N} items")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            if seq.size_hint().is_some_and(|n| n > N) {
+                return Err(serde::de::Error::custom("collection_too_large"));
+            }
+            let mut result = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(N));
+            while let Some(item) = seq.next_element::<T>()? {
+                if result.len() == N {
+                    return Err(serde::de::Error::custom("collection_too_large"));
+                }
+                result.push(item);
+            }
+            Ok(result)
+        }
+    }
+    d.deserialize_seq(Items::<T, N>(std::marker::PhantomData))
+}
+fn bounded_six<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Vec<T>, D::Error> {
+    bounded_items::<D, T, 6>(d)
+}
+fn bounded_sixteen<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Vec<T>, D::Error> {
+    bounded_items::<D, T, 16>(d)
+}
+
 fn required_option<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     deserializer: D,
 ) -> Result<Option<T>, D::Error> {
@@ -252,6 +291,7 @@ pub struct Catalog {
     pub observed_at: Option<DateTime<Utc>>,
     pub platform: Platform,
     pub catalog_revision: u64,
+    #[serde(deserialize_with = "bounded_sixteen")]
     pub targets: Vec<Target>,
 }
 
@@ -296,6 +336,7 @@ pub struct Preview {
     pub current: Identity,
     pub target: Target,
     pub plan_digest: String,
+    #[serde(deserialize_with = "bounded_six")]
     pub steps: Vec<UpdateStep>,
     pub confirmation_token: String,
     pub expires_at: DateTime<Utc>,
@@ -439,6 +480,7 @@ impl Operation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Discovery {
+    #[serde(deserialize_with = "bounded_sixteen")]
     pub operations: Vec<Operation>,
     pub blocked_by_other_operation: bool,
 }

@@ -377,3 +377,15 @@ fn discovery_has_one_unresolved_claim_and_is_deterministically_newest_first() {
     }
     assert!(list.validate().is_err());
 }
+
+#[test]
+fn collection_limits_are_enforced_during_deserialization() {
+    for n in [16, 17] {
+        let body = json!({"operations":vec![operation();n],"blocked_by_other_operation":false});
+        assert_eq!(serde_json::from_value::<Discovery>(body).is_ok(), n == 16);
+    }
+    for n in [6, 7] {
+        let body = json!({"operation_id":operation().operation_id,"current":identity('a'),"target":target(),"plan_digest":"a".repeat(64),"steps":vec![UpdateStep::VerifyArtifacts;n],"confirmation_token":"a".repeat(64),"expires_at":"2026-10-20T18:00:00Z"});
+        assert_eq!(serde_json::from_value::<Preview>(body).is_ok(), n == 6);
+    }
+}

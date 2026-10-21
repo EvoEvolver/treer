@@ -2486,3 +2486,43 @@ commands run in-process under the signed-in user. Clients choose how to present
 the returned `reply`; no native TTS client is shipped in this repository.
 Vendor LLM keys stay in the Proxy process. This is not the later Voice Live
 confirm-card protocol.
+
+
+## Controller updates from the Console (integration in progress)
+
+The Controller-update HTTP adapter reuses the human-session membership and
+`machine.exec` Policy boundary used by **Install agent CLIs**. Its machine-scoped
+routes are `GET controller-update`, `POST controller-update/prepare`,
+`POST controller-update/confirm`, `GET controller-update/operations`, and
+`GET controller-update/operations/{job_uuid}` under
+`/api/workspaces/{workspace_id}/machines/{server_id}/`. Bodies contain only a
+reviewed target ID or confirmation token. Commands, paths, download URLs and
+trust overrides are not accepted. All responses disable caching.
+
+A preview binds a short-lived token to the user session, machine, installed
+identity, reviewed catalog revision and exact target/plan. Confirmation commits
+the hashed token consumption, exclusive machine claim, operation intent and
+audit before sending one typed Controller command. Repeated confirmation only
+recovers the existing operation; it never dispatches again. Install CLI and
+Controller-update acceptance share the same database transaction lock. An
+unconfirmed/partial/rollback-failed update keeps its claim across restarts;
+refresh and reconnect are read-only recovery, never an automatic retry. A
+terminal success requires the complete native receipt projection, matching
+Controller and CLI identity, and correlated health. A reconnect alone proves
+none of those things. Resolved operations remain discoverable for seven days.
+
+Release catalogs are provisioned by reviewed server-side release tooling in
+`controller_update_catalog_entries`; there is no browser catalog-write route or
+remote `latest` lookup. Explicit release ordering and a persisted per-platform
+revision floor reject unknown ordering, same-release updates and rollback of
+catalog metadata. Provisioning records alone does not enable machine updates.
+
+This adapter does **not** yet advertise `machine.controller-update.v1`. The
+#111 production native submit/recovery entry and its platform acceptance remain
+required before enabling it. Controllers without that entry return a fixed
+unsupported result, and discovery of already persisted operations remains
+available. The adapter must not substitute machine Exec, the legacy updater,
+PowerShell or Python for the missing native entry. Development tests use a fake
+Controller and isolated PostgreSQL; they do not demonstrate a real upgrade or
+native-platform acceptance. See the
+[reviewed wire contract](research/2026-10-20-controller-update-web-contract.md).

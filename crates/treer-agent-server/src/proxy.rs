@@ -1025,6 +1025,17 @@ impl ProxyClient {
                 .await
                 .map(|response| CommandResult::success(command_id.clone(), response))
                 .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            // The typed web path must not fall back to Exec or the legacy
+            // updater before the #111 native entry/recovery gate is available.
+            AgentCommand::ControllerUpdateInspect {}
+            | AgentCommand::ControllerUpdateDispatch { .. }
+            | AgentCommand::ControllerUpdateOperation { .. } => CommandResult::failure(
+                command_id.clone(),
+                ProtocolError::new(
+                    "controller_update_unsupported",
+                    "Native Controller update adapter is unavailable",
+                ),
+            ),
             AgentCommand::ProviderCliRecipes {} => self
                 .runtime
                 .provider_cli()

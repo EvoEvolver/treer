@@ -815,12 +815,16 @@ impl AuthStore {
 }
 mod accounts;
 mod apps;
+mod controller_update;
+#[cfg(test)]
+mod controller_update_tests;
 mod email;
 mod handlers;
 mod machines;
 mod network;
 mod organizations;
 mod pins;
+pub(crate) use controller_update::*;
 mod provider_cli;
 pub(crate) use provider_cli::*;
 mod workload_tree;
