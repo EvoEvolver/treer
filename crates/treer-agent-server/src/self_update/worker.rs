@@ -85,12 +85,16 @@ impl WorkerResources {
                 bail!("update_worker_binding_mismatch");
             }
             let running = RunningActivator::enter(&self.selected, &self.journal)?;
+            #[cfg(test)]
+            tests::bootstrap_checkpoint("running");
             let bootstrap = WorkerBootstrap::connect(
                 &running,
                 &self.journal,
                 &self.selected,
                 &self.job_directory,
             )?;
+            #[cfg(test)]
+            tests::bootstrap_checkpoint("authenticated");
             let owned = bootstrap.take_ownership(&self.journal, &self.selected)?;
             Ok(OwnedWorker {
                 selected: self.selected,
@@ -254,4 +258,5 @@ mod tests {
         );
         assert_eq!(journal.read().unwrap(), prepared);
     }
+    include!("worker/death_tests.rs");
 }

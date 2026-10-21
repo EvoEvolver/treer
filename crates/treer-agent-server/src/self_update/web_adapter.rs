@@ -316,6 +316,20 @@ pub(in crate::self_update) mod tests {
     use std::io::Write;
     use std::os::unix::fs::DirBuilderExt;
 
+    pub(in crate::self_update) fn legacy_fixture_guard(
+        inventory: &super::super::selection::Inventory,
+        controller: &std::path::Path,
+        cli: &std::path::Path,
+        root: &std::path::Path,
+    ) -> Result<LegacyUpdateGuard> {
+        legacy_guard(
+            inventory,
+            &[(controller.to_owned(), "ws_a".into())],
+            cli,
+            root,
+        )
+    }
+
     pub(in crate::self_update) fn bound() -> (Receipt, DispatchBinding) {
         let receipt = super::super::tests::receipt();
         let binding = DispatchBinding {

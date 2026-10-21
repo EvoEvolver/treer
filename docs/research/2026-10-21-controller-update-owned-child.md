@@ -191,3 +191,36 @@ replay, noexec or claim release. Full E1 worker/handoff/claim integration and
 E3/E5 manager/disposable-target acceptance remain open. Linux PDEATHSIG's
 separate actual owner-kill test is not relabeled as a macOS guarantee. All
 synchronization is cfg(test); capability remains OFF.
+
+
+## Authenticated worker-bootstrap and local claim death fixture
+
+The next hermetic layer uses the actual `WorkerResources::open_at(...).enter()`
+path. A private installed-parent copy of the native test executable prepares a
+job-local activator, writes the authenticated parent record, accepts the exact
+connected peer and transfers the SAME installation/enrollment lock descriptions.
+The worker checks its running activator and parent/peer identity through the
+production bootstrap. No `OwnedActivation::fixture` constructs its ownership.
+Only local synthetic enrollment and target metadata are provided; no Core image
+publication or service operation runs.
+
+The submitting test process kills its retained child at three boundaries:
+running-image validation before connecting, authenticated connection before
+transfer, and successful ownership. Before transfer there is no ownership
+record. After transfer, the synced ownership record names the actual worker
+PID/creation identity and the worker demonstrably retains the installation lock
+after the parent's copy closes. After SIGKILL, available kernel locks do not
+release the durable local `web-active.json` claim: the real legacy update guard
+still refuses. Two reopen/read-only discovery passes preserve receipt, claim
+and ownership bytes, project the still-fresh receipt as Updating, and never
+create launcher intent, status or a release marker. Resource discovery itself
+is explicitly not startup/replay authority; it is not passed to `enter()` again.
+The existing bounded-stale projection rule handles later observation silence.
+
+This closes an isolated bootstrap/local-claim test gap, not the entire E1
+matrix: Core publication/Controller replacement, full worker-to-launcher
+composition, Proxy database machine-claim reconciliation and whole health have
+not run in this fixture. Manager/disposable-account acceptance remains open,
+Windows unsupported and capability OFF. The extra bootstrap synchronization and
+legacy-guard accessors exist only under cfg(test); no production replay or
+ownership-adoption entry point is added.
