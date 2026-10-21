@@ -921,7 +921,14 @@ through the real UI and query all four ranges against the actual Proxy, without
 API mocks or capture replay. A transport guard permits only the two loopback
 origins, read requests and login/logout writes. Results retain response hashes,
 fixed stages and numeric status, never credentials, response bodies, screenshots
-or browser state. Each runner-created login is logged out and checked with `/api/auth/me`401;
+or browser state. Chromium may discard its diagnostic CDP response-body copy
+after the production streaming reader consumes it. Only that exact missing-data
+error is recorded as `chromium_cdp_data_missing`, with a null response hash;
+the run still requires HTTP200/no-store, the selected range, the production
+decoder's completed CPU/RAM render, no alert and actual native CPU chart points.
+This does not independently verify raw response bytes for that range. Other body
+errors fail, and no replacement fetch or response substitution is used.
+Each runner-created login is logged out and checked with `/api/auth/me`401;
 unknown cleanup remains a failed result. The fixture owner retains responsibility
 for test workspace/process teardown. This opt-in gate grants no live deployment
 or machine update authority and does not run as part of the synthetic suite.

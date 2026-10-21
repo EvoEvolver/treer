@@ -119,29 +119,35 @@ try {
         stage = `cache_${minutes}`
         assert.equal(actual.headers()['cache-control'], 'no-store')
         stage = `body_${minutes}`
-        const body = await actual.body()
-        stage = `json_${minutes}`
-        const data = JSON.parse(body.toString())
-        stage = `identity_${minutes}`
-        assert.equal(data.server_id, binding.server_id)
-        stage = `schema_${minutes}`
-        assert.equal(data.schema, 'machine.metrics.v1')
-        stage = `max_points_${minutes}`
+        let body, bodyUnavailable = null
+        try { body = await actual.body() } catch (error) {
+          // Chromium can drop CDP's copy after the application consumes/cancels
+          // its ReadableStream. Still require the actual production decoder and
+          // current-range chart below; never substitute another network fetch.
+          if (engine !== 'chromium' || !/No data found for resource with given identifier/.test(String(error?.message ?? ''))) throw error
+          bodyUnavailable = 'chromium_cdp_data_missing'
+        }
+        if (body) {
+          stage = `json_${minutes}`
+          const data = JSON.parse(body.toString())
+          assert.equal(data.server_id, binding.server_id)
+          assert.equal(data.schema, 'machine.metrics.v1')
+          assert.ok(data.series.find(s => s.kind === 'cpu_utilization').points.some(p => p.valid_count > 0))
+        }
         assert.equal(new URL(actual.url()).searchParams.get('max_points'), '360')
-        stage = `samples_${minutes}`
-        assert.ok(data.series.find(s => s.kind === 'cpu_utilization').points.some(p => p.valid_count > 0))
         stage = `render_${minutes}`
         await panel.getByRole('button', { name: 'Refresh', exact: true }).waitFor({ state: 'visible' })
         await page.waitForFunction(() => !document.querySelector('[data-testid=machine-metrics] button:last-child')?.disabled)
         await panel.getByRole('heading', { name: 'CPU', exact: true }).waitFor()
         await panel.getByRole('heading', { name: 'RAM', exact: true }).waitFor()
         assert.equal(await panel.getByRole('alert').count(), 0)
+        assert.equal(await panel.getByRole('button', { name: label, exact: true }).getAttribute('aria-pressed'), 'true')
         // Long native ranges are mostly gaps; partial samples render as dots,
         // deliberately not connected lines across unavailable history.
         stage = `chart_${minutes}`
         const cpu = panel.getByRole('figure', { name: 'CPU utilization', exact: true })
         assert.ok(await cpu.locator('circle[data-partial]').count() > 0)
-        ranges.push({ minutes, status: 200, no_store: true, response_sha256: createHash('sha256').update(body).digest('hex') })
+        ranges.push({ minutes, status: 200, no_store: true, response_sha256: body ? createHash('sha256').update(body).digest('hex') : null, body_unavailable: bodyUnavailable, production_decoder_and_render: true })
       }
       assert.equal(forbidden.length, 0)
       stage = 'complete'
