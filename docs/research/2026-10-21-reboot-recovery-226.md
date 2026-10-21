@@ -11,6 +11,8 @@ that the previous enrollment credential was invalid.
 A nohup Host does not survive an OS reboot. Controller-only restart requires a
 live Host; the CLI now refuses a missing/stale socket with the explicit existing-
 identity `restore --workspace` command, before spawning a restart subprocess.
+An unreachable socket is not proof that the Host stopped: if it is still running,
+the diagnostic directs checking socket access instead of starting another Host.
 It does not start a second Host, rotate credentials or enroll again.
 
 Restore uses one loaded installed configuration for both cold Host startup and

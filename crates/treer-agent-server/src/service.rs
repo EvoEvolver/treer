@@ -1003,10 +1003,11 @@ pub fn restart_controller(workspace: &str) -> Result<()> {
 fn restart_installed_controller(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
     if !host_is_running(&config.host_socket) {
         bail!(
-            "the enrolled machine's Host is not running; restart-controller requires a live Host. \
-             Run `treer-agent-server restore --workspace {}` to start the registered Host and \
+            "the enrolled machine's Host is not reachable; restart-controller requires a live, accessible Host. \
+             If the Host stopped (for example after reboot), run \
+             `treer-agent-server restore --workspace {}` to start the registered Host and \
              request Policy-authorized recovery using the existing machine identity; \
-             no new enrollment key is needed",
+             no new enrollment key is needed. If the Host is still running, check socket access instead",
             config.workspace
         );
     }

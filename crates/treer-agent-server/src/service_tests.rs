@@ -979,7 +979,8 @@ async fn recovery_missing_host_guides_explicit_restore_without_spawning_or_enrol
         let error = restart_installed_controller(&fixture.paths, &fixture.config)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("Host is not running"));
+        assert!(error.contains("Host is not reachable"));
+        assert!(error.contains("check socket access instead"));
         assert!(error.contains("treer-agent-server restore --workspace default"));
         assert!(error.contains("existing machine identity"));
         assert!(fixture.invocations().is_empty());
