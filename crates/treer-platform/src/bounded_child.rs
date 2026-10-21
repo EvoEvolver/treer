@@ -54,8 +54,16 @@ struct Group {
 
 impl Group {
     fn spawn(command: &mut Command) -> io::Result<Self> {
+        Self::spawn_guarded(command, false)
+    }
+
+    fn spawn_guarded(command: &mut Command, parent_death: bool) -> io::Result<Self> {
+        if parent_death {
+            private_child(command);
+        } else {
+            command.process_group(0);
+        }
         let mut child = command
-            .process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -177,6 +185,27 @@ impl Group {
     }
 }
 
+/// Install only async-signal-safe syscalls between fork and exec. Linux binds
+/// PDEATHSIG to the spawning thread: callers must keep that thread alive for
+/// the full child lifetime. The updater uses a single-thread worker runtime.
+#[allow(unsafe_code)]
+fn private_child(command: &mut Command) {
+    let parent = rustix::process::getpid();
+    // SAFETY: no allocation, locks, formatting or non-signal-safe work in the
+    // callback; captured parent PID is only compared, never signalled.
+    unsafe {
+        command.pre_exec(move || {
+            rustix::process::setsid()?;
+            #[cfg(target_os = "linux")]
+            rustix::process::set_parent_process_death_signal(Some(Signal::KILL))?;
+            if rustix::process::getppid() != Some(parent) {
+                return Err(io::Error::from_raw_os_error(3));
+            }
+            Ok(())
+        });
+    }
+}
+
 impl Drop for Group {
     fn drop(&mut self) {
         if self.child.is_some() {
@@ -256,6 +285,25 @@ pub async fn output_quiescent_until(
         .map(QuiescentOutput)
 }
 
+/// Strict owned-child capture with an immediate post-spawn observer, before
+/// reading any output or accepting completion. Observer failure kills/reaps the
+/// owned group and yields NO quiescent witness. An exclusive durable intent must
+/// already exist: a crash before/during this observer never means "not started".
+/// Linux additionally creates a private session and sets SIGKILL on death of
+/// the spawning thread, with the parent-race check before exec. Descendants may
+/// still escape and PDEATHSIG is NOT quiescence proof. macOS uses only the group
+/// cleanup contract; it provides NO parent-death equivalent or acceptance claim.
+pub async fn output_quiescent_observed_until(
+    command: &mut Command,
+    deadline: tokio::time::Instant,
+    limit: usize,
+    observer: impl FnOnce(&Child) -> io::Result<()>,
+) -> io::Result<QuiescentOutput> {
+    capture_observed_until(command, deadline, limit, true, true, observer)
+        .await
+        .map(QuiescentOutput)
+}
+
 async fn capture(
     command: &mut Command,
     timeout: Duration,
@@ -277,13 +325,32 @@ async fn capture_until(
     limit: usize,
     require_quiescent: bool,
 ) -> io::Result<Output> {
+    capture_observed_until(command, deadline, limit, require_quiescent, false, |_| {
+        Ok(())
+    })
+    .await
+}
+
+async fn capture_observed_until(
+    command: &mut Command,
+    deadline: tokio::time::Instant,
+    limit: usize,
+    require_quiescent: bool,
+    parent_death: bool,
+    observer: impl FnOnce(&Child) -> io::Result<()>,
+) -> io::Result<Output> {
     if limit == 0 {
         return Err(io::Error::other("invalid child budget"));
     }
     if tokio::time::Instant::now() >= deadline {
         return Err(io::Error::new(io::ErrorKind::TimedOut, "child deadline"));
     }
-    let mut group = Group::spawn(command)?;
+    let mut group = if parent_death {
+        Group::spawn_guarded(command, true)?
+    } else {
+        Group::spawn(command)?
+    };
+    observer(group.child.as_ref().unwrap())?;
     let mut bytes = Vec::new();
     loop {
         if tokio::time::Instant::now() >= deadline {
@@ -617,5 +684,117 @@ mod tests {
         task.abort();
         assert!(task.await.err().unwrap().is_cancelled());
         no_late_write(&fixture).await;
+    }
+    #[tokio::test]
+    async fn observed_child_is_private_and_observer_failure_has_no_completion_witness() {
+        for accept in [true, false] {
+            let mut command = Command::new("/bin/sleep");
+            command.arg("0.2").env_clear();
+            let mut called = 0;
+            let mut image = None;
+            let result = output_quiescent_observed_until(
+                &mut command,
+                tokio::time::Instant::now() + Duration::from_secs(3),
+                64,
+                |child| {
+                    called += 1;
+                    let observed = crate::process_image::ProcessImage::capture(child.id())?;
+                    observed.verify_private_session()?;
+                    image = Some(observed);
+                    if accept {
+                        Ok(())
+                    } else {
+                        Err(io::Error::other("fixture record refused"))
+                    }
+                },
+            )
+            .await;
+            assert_eq!(called, 1);
+            assert_eq!(result.is_ok(), accept);
+            if let Ok(output) = result {
+                assert!(output.stdout().is_empty());
+            }
+            // Captured creation/image identity cannot turn into a live retry.
+            assert!(image.unwrap().verify_current().is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "owned parent-death subprocess helper, invoked by outer test"]
+    fn parent_death_owner() {
+        let root = std::env::var_os("TREER_TEST_PARENT_DEATH").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30").env_clear();
+        runtime
+            .block_on(output_quiescent_observed_until(
+                &mut command,
+                tokio::time::Instant::now() + Duration::from_secs(40),
+                64,
+                |child| {
+                    std::fs::write(
+                        std::path::Path::new(&root).join("pid"),
+                        child.id().to_string(),
+                    )
+                },
+            ))
+            .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parent_death_signal_kills_child_when_owner_is_killed_without_drop() {
+        let fixture = Fixture::new();
+        let mut parent = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "bounded_child::tests::parent_death_owner",
+                "--ignored",
+            ])
+            .env_clear()
+            .env("TREER_TEST_PARENT_DEATH", &fixture.0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        struct Parent<'a>(&'a mut Child);
+        impl Drop for Parent<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let parent = Parent(&mut parent);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !fixture.0.join("pid").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            assert!(parent.0.try_wait().unwrap().is_none());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let pid = std::fs::read_to_string(fixture.0.join("pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let child = crate::process_image::ProcessImage::capture(pid).unwrap();
+        child.verify_private_session().unwrap();
+        // SIGKILL bypasses the parent's Group::drop. The new session prevents
+        // parent-group cleanup from explaining the observed child death.
+        parent.0.kill().unwrap();
+        parent.0.wait().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while child.verify_current().is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child outlived killed owner"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // This proves direct-child death only, not descendant quiescence or a
+        // safe transaction claim release. No discovered PID is ever signalled.
     }
 }

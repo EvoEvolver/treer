@@ -124,6 +124,7 @@ impl OwnedWorker {
 pub(in crate::self_update) async fn execute(
     invocation: &Invocation<'_>,
 ) -> Result<treer_platform::bounded_child::QuiescentOutput> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
     let receipt: Receipt = invocation.bound_receipt()?;
     let selected = invocation.selected();
     let locks = invocation.owner().locks();
@@ -153,17 +154,42 @@ pub(in crate::self_update) async fn execute(
     // This is lifecycle proof for trusted cooperating installers, not a sandbox:
     // descendants must retain their inherited process group and stay signalable.
     // Failure/cancellation yields no quiescent witness and cannot be a retry.
-    let output = treer_platform::bounded_child::output_quiescent(
+    let mut child_record = None;
+    let output = treer_platform::bounded_child::output_quiescent_observed_until(
         &mut command,
-        std::time::Duration::from_secs(120),
+        deadline,
         4 * 1024 * 1024,
+        |child| {
+            let result = (|| -> Result<_> {
+                intent.verify()?;
+                let image = treer_platform::process_image::ProcessImage::capture(child.id())?;
+                controller.verify_process(&image)?;
+                let record = intent.record_child(image)?;
+                controller.verify()?;
+                cli.verify()?;
+                Ok(record)
+            })();
+            match result {
+                Ok(record) => {
+                    child_record = Some(record);
+                    Ok(())
+                }
+                Err(_) => Err(std::io::Error::other("update_recovery_required")),
+            }
+        },
     )
     .await?;
+    child_record
+        .ok_or_else(|| anyhow::anyhow!("update_recovery_required"))?
+        .verify()?;
     intent.verify()?;
     controller.verify()?;
     cli.verify()?;
     if !output.status().success() {
         bail!("update_launcher_failed");
+    }
+    if tokio::time::Instant::now() >= deadline {
+        bail!("update_recovery_required");
     }
     Ok(output)
 }

@@ -2653,6 +2653,34 @@ or unproven quiescence remains unresolved/partial and never authorizes retry or
 rollback over a possibly running installer. Only strict launcher result matching
 and a final Controller/CLI/Host/workload health check permit whole completion.
 No permit/EOF fixture or reconstructed supervisor marker supplies authority.
+Immediately after spawn, the worker authenticates the owned child's running
+Controller image and records its PID, creation identity, parent identity and
+intent digest through the original journal directory. This exclusive record is
+synced and read back; empty, changed or replaced records refuse completion.
+The interval between durable intent and recorded completion always means an
+installer may have run, including when the child identity record is missing.
+On Linux the child starts a private session and sets `PR_SET_PDEATHSIG(SIGKILL)`
+before exec, checking that its original parent still exists. The private worker
+uses a single-thread runtime because Linux ties this signal to the spawning
+thread. This kills the direct child on worker death; it proves neither descendant
+quiescence nor that an installer made no changes. macOS has no equivalent wired
+here and remains unaccepted. Neither platform may clear its claim on this basis.
+
+An unresolved launcher attempt requires explicit audited local operator
+reconciliation; no automatic recovery or claim-clearing command is provided.
+Preserve the private job, intent, child identity and active claim, and keep new
+updates blocked. Establish the exact recorded process identity using creation
+identity and checked image identity as well as PID; never signal a saved numeric
+PID that may have been reused. Independently prove that identity is gone and
+its process group is quiescent, then verify launcher state with the fixed
+authenticated status recipe and independently recheck Controller/CLI image,
+Host and workload health. A missing or partial child identity requires broader
+independent process inventory or isolated-machine investigation; it is not proof
+that spawn never happened. Record the evidence and obtain an explicit local
+operator disposition before any future claim reconciliation. Do not delete the
+claim, replay install, adopt a copied receipt, or infer success from elapsed time,
+a free lock, exit status or a status response alone. These investigation steps
+do not manufacture the original worker's terminal-success authority.
 The legacy CLI updater now holds the same local installation locks and refuses
 an unresolved native active claim, including corrupt or empty claims. It also
 refuses an ambient CLI path that differs from its saved installed sibling.

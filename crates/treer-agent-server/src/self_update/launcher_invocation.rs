@@ -1672,15 +1672,38 @@ mod tests {
         // Stop after install but before status (0), failed install (23), and
         // cancellation mid-install after durable intent (-1). None can replay
         // install, manufacture a status witness, or advance to Complete.
-        for exit in [0, 23, -1] {
+        for exit in [0, 23, -1, -2, -3, -4] {
             let f = Fixture::standard_config();
-            let finish = if exit == -1 {
-                "exec /bin/sleep 30".into()
-            } else {
-                format!("exit {exit}")
-            };
-            let script = format!("#!/bin/sh\n[ \"$1\" = launcher ] || exit 44\n[ \"$LANG\" = C ] && [ -n \"$TMPDIR\" ] || exit 45\n[ -z \"${{NODE_OPTIONS+x}}${{TREER_MACHINE_TOKEN+x}}${{TREER_WORKLOAD_CREDENTIAL+x}}\" ] || exit 46\nprintf ran >> launch-count\nprintf '{{}}'\n{finish}\n");
-            std::fs::write(f.bin.join(Binary::Controller.name()), &script).unwrap();
+            // A native fixture executable is required: a shebang interpreter
+            // must not pass as the authenticated Controller process image.
+            let source = format!(
+                r#"fn main() {{
+                assert_eq!(std::env::args().nth(1).as_deref(), Some("launcher"));
+                assert_eq!(std::env::var("LANG").unwrap(), "C");
+                assert!(std::env::var_os("TMPDIR").is_some());
+                for key in ["NODE_OPTIONS", "TREER_MACHINE_TOKEN", "TREER_WORKLOAD_CREDENTIAL"] {{
+                    assert!(std::env::var_os(key).is_none());
+                }}
+                use std::io::Write;
+                std::fs::OpenOptions::new().create(true).append(true).open("launch-count")
+                    .unwrap().write_all(b"ran").unwrap();
+                println!("{{{{}}}}");
+                std::thread::sleep(std::time::Duration::from_millis({}));
+                std::process::exit({});
+            }}"#,
+                if exit == -1 { 30000 } else { 500 },
+                exit.max(0)
+            );
+            let source_path = f.path.join("child-fixture.rs");
+            std::fs::write(&source_path, source).unwrap();
+            assert!(std::process::Command::new("rustc")
+                .arg(&source_path)
+                .arg("-o")
+                .arg(f.bin.join(Binary::Controller.name()))
+                .status()
+                .unwrap()
+                .success());
+            let image = std::fs::read(f.bin.join(Binary::Controller.name())).unwrap();
             for name in [Binary::Controller.name(), Binary::Cli.name()] {
                 std::fs::set_permissions(f.bin.join(name), std::fs::Permissions::from_mode(0o700))
                     .unwrap();
@@ -1691,7 +1714,7 @@ mod tests {
             let mut r = receipt();
             r.workspace_id = "ws_a".into();
             r.server_id = "srv_a".into();
-            r.controller_sha256 = format!("{:x}", Sha256::digest(script.as_bytes()));
+            r.controller_sha256 = format!("{:x}", Sha256::digest(&image));
             r.cli_sha256 = format!("{:x}", Sha256::digest(b"cli"));
             r.publications = Publications::new(
                 r.controller_sha256.clone(),
@@ -1733,6 +1756,40 @@ mod tests {
             .unwrap()
             .bind_temporary(&temporary)
             .unwrap();
+            let record_path = f
+                .path
+                .join("jobs")
+                .join(before.job_id.to_string())
+                .join("launcher-install-child.json");
+            if exit == -2 {
+                jobs.open_child(&before.job_id.to_string())
+                    .unwrap()
+                    .create_file("launcher-install-child.json")
+                    .unwrap()
+                    .sync_all()
+                    .unwrap();
+            }
+            let mutator = if matches!(exit, -3 | -4) {
+                let path = record_path.clone();
+                Some(tokio::spawn(async move {
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        while !path.exists() {
+                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                    if exit == -3 {
+                        std::fs::write(path, b"").unwrap();
+                    } else {
+                        let replacement = path.with_extension("replacement");
+                        std::fs::write(&replacement, std::fs::read(&path).unwrap()).unwrap();
+                        std::fs::rename(replacement, path).unwrap();
+                    }
+                }))
+            } else {
+                None
+            };
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 crate::self_update::worker::launcher::execute(&plan),
@@ -1743,11 +1800,30 @@ mod tests {
             } else {
                 assert_eq!(result.unwrap().is_ok(), exit == 0);
             }
-            assert_eq!(std::fs::read(f.bin.join("launch-count")).unwrap(), b"ran");
+            if let Some(mutator) = mutator {
+                mutator.await.unwrap();
+            }
+            let count = std::fs::read(f.bin.join("launch-count")).unwrap_or_default();
+            if exit == -2 {
+                assert!(count.is_empty() || count == b"ran");
+            } else {
+                assert_eq!(count, b"ran");
+            }
+            if !matches!(exit, -2 | -3) {
+                let record: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+                assert!(record["pid"].as_u64().unwrap() > 1);
+                assert!(!record["creation"].as_str().unwrap().is_empty());
+                assert_eq!(record["parent_pid"], std::process::id());
+                assert_eq!(record["controller_sha256"], before.controller_sha256);
+            }
             assert!(crate::self_update::worker::launcher::execute(&plan)
                 .await
                 .is_err());
-            assert_eq!(std::fs::read(f.bin.join("launch-count")).unwrap(), b"ran");
+            assert_eq!(
+                std::fs::read(f.bin.join("launch-count")).unwrap_or_default(),
+                count
+            );
             assert_eq!(journal.read().unwrap(), before);
             assert!(selected.lock().is_err());
         }

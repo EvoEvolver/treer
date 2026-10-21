@@ -13,6 +13,7 @@ use super::{Invocation, Operation, Receipt};
 
 const LIMIT: usize = 64 * 1024;
 
+mod child;
 mod registration;
 pub use registration::RegisteredSupervisor;
 pub(in crate::self_update) use registration::RegistrationGate;
