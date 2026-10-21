@@ -10,7 +10,10 @@ fn blocked_child() {
         .status()
         .unwrap()
         .success());
-    println!("PTY_BACKPRESSURE_READY");
+    // libtest leaves its test-name prefix unterminated. Start a distinct line
+    // and flush explicitly, as the existing native ConPTY child fixture does.
+    println!("\nPTY_BACKPRESSURE_READY");
+    std::io::Write::flush(&mut std::io::stdout()).unwrap();
     std::thread::sleep(Duration::from_secs(45));
 }
 
@@ -80,7 +83,17 @@ async fn spawn_blocked(state: &HostState, id: &str) {
         if String::from_utf8_lossy(&bytes).contains("PTY_BACKPRESSURE_READY") {
             break;
         }
-        assert!(Instant::now() < until, "PTY fixture did not become ready");
+        assert!(
+            Instant::now() < until,
+            "isolated test child did not become ready; running/exit={:?}; fixture-only output={:?}",
+            state
+                .runtime
+                .list()
+                .iter()
+                .map(|p| (&p.process_id, p.running, p.exit_code))
+                .collect::<Vec<_>>(),
+            String::from_utf8_lossy(&bytes[..bytes.len().min(1024)])
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }

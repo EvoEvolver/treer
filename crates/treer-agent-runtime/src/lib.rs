@@ -980,7 +980,7 @@ mod tests {
             .status()
             .unwrap()
             .success());
-        println!("NONREADER_READY");
+        println!("\nNONREADER_READY");
         std::io::stdout().flush().unwrap();
         std::thread::sleep(Duration::from_secs(45));
     }
