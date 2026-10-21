@@ -3752,6 +3752,7 @@ name = "treer-agent-runtime"
 version = "0.1.14"
 dependencies = [
  "chrono",
+ "filedescriptor",
  "portable-pty",
  "serde_json",
  "thiserror 2.0.20",

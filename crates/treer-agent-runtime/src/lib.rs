@@ -436,6 +436,31 @@ impl HostRuntime {
             .master
             .try_clone_reader()
             .map_err(|error| RuntimeError::Terminal(error.to_string()))?;
+        #[cfg(unix)]
+        let writer: Box<dyn Write + Send> = {
+            // Reader and writer clones share this open-file description. Use
+            // nonblocking I/O on both: a full Linux PTY can otherwise retain
+            // its writer in write(2) even after the slave's observed exit.
+            struct BorrowedMaster(filedescriptor::RawFileDescriptor);
+            impl filedescriptor::AsRawFileDescriptor for BorrowedMaster {
+                fn as_raw_file_descriptor(&self) -> filedescriptor::RawFileDescriptor {
+                    self.0
+                }
+            }
+            let fd = pair.master.as_raw_fd().ok_or_else(|| {
+                RuntimeError::Terminal("Unix PTY has no master descriptor".into())
+            })?;
+            // Duplicate while the owning master is alive; no raw ownership
+            // conversion or unsafe code. Unlike portable-pty's Unix writer,
+            // this closes without injecting newline/EOF after cancellation.
+            let mut writer = filedescriptor::FileDescriptor::dup(&BorrowedMaster(fd))
+                .map_err(|error| RuntimeError::Terminal(error.to_string()))?;
+            writer
+                .set_non_blocking(true)
+                .map_err(|error| RuntimeError::Terminal(error.to_string()))?;
+            Box::new(writer)
+        };
+        #[cfg(not(unix))]
         let writer = pair
             .master
             .take_writer()
@@ -828,7 +853,7 @@ impl Drop for SpawnReservation<'_> {
 }
 
 fn spawn_input_writer(
-    mut writer: Box<dyn Write + Send>,
+    writer: Box<dyn Write + Send>,
     input: std_mpsc::Receiver<InputWrite>,
     _permit: OwnedSemaphorePermit,
     finished: Arc<AtomicBool>,
@@ -837,28 +862,34 @@ fn spawn_input_writer(
 ) {
     std::thread::spawn(move || {
         struct WriterLease {
+            writer: Option<Box<dyn Write + Send>>,
             permit: Option<OwnedSemaphorePermit>,
             finished: Arc<AtomicBool>,
         }
         impl Drop for WriterLease {
             fn drop(&mut self) {
+                // The lease covers writer destruction too (portable-pty's
+                // Unix writer destructor attempts an EOF write).
+                drop(self.writer.take());
                 drop(self.permit.take());
                 self.finished.store(true, Ordering::Release);
             }
         }
-        let _lease = WriterLease {
+        let mut lease = WriterLease {
+            writer: Some(writer),
             permit: Some(_permit),
             finished,
         };
         while let Ok(write) = input.recv() {
             #[cfg(test)]
             phase.store(1, Ordering::Release);
+            let writer = lease.writer.as_mut().expect("owned PTY writer").as_mut();
             #[cfg(all(windows, feature = "test-fixtures"))]
             let mut test_writer = write.test_writer;
             #[cfg(all(windows, feature = "test-fixtures"))]
             let writer: &mut dyn Write = match test_writer.as_mut() {
                 Some(test_writer) => test_writer,
-                None => writer.as_mut(),
+                None => writer,
             };
             let started = Instant::now();
             if write.bootstrap {
@@ -879,12 +910,23 @@ fn spawn_input_writer(
                         );
                     }
                     for chunk in part.data.chunks(4096) {
-                        if write.uncertain.load(Ordering::Acquire)
-                            || Instant::now() >= write.deadline
-                        {
-                            return Err("input_unknown".into());
+                        let mut remaining = chunk;
+                        while !remaining.is_empty() {
+                            if write.uncertain.load(Ordering::Acquire)
+                                || Instant::now() >= write.deadline
+                            {
+                                return Err("input_unknown".into());
+                            }
+                            match writer.write(remaining) {
+                                Ok(0) => return Err("PTY input write returned zero".into()),
+                                Ok(count) => remaining = &remaining[count..],
+                                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                    std::thread::sleep(Duration::from_millis(10));
+                                }
+                                Err(error) => return Err(error.to_string()),
+                            }
                         }
-                        writer.write_all(chunk).map_err(|error| error.to_string())?;
                     }
                     writer.flush().map_err(|error| error.to_string())?;
                 }
@@ -927,6 +969,15 @@ fn spawn_output_reader(
             let count = match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => count,
+                #[cfg(unix)]
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if process.stopping.load(Ordering::Acquire) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => {
                     if !process.stopping.load(Ordering::Acquire) {
                         warn!(%error, "process PTY reader failed");
@@ -1078,6 +1129,56 @@ mod tests {
         println!("\nNONREADER_READY");
         std::io::stdout().flush().unwrap();
         std::thread::sleep(Duration::from_secs(45));
+    }
+
+    #[test]
+    fn writer_permit_covers_writer_destruction() {
+        struct HeldDrop {
+            entered: std_mpsc::SyncSender<()>,
+            release: std_mpsc::Receiver<()>,
+        }
+        impl Write for HeldDrop {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl Drop for HeldDrop {
+            fn drop(&mut self) {
+                let _ = self.entered.send(());
+                let _ = self.release.recv();
+            }
+        }
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&slots).try_acquire_owned().unwrap();
+        let finished = Arc::new(AtomicBool::new(false));
+        let (entered, entered_rx) = std_mpsc::sync_channel(1);
+        let (release, release_rx) = std_mpsc::sync_channel(1);
+        let (input, receiver) = std_mpsc::sync_channel(1);
+        spawn_input_writer(
+            Box::new(HeldDrop {
+                entered,
+                release: release_rx,
+            }),
+            receiver,
+            permit,
+            Arc::clone(&finished),
+            Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            "writer-drop-fixture".into(),
+        );
+        drop(input);
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(!finished.load(Ordering::Acquire));
+        assert_eq!(slots.available_permits(), 0);
+        release.send(()).unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        while !finished.load(Ordering::Acquire) {
+            assert!(Instant::now() < until);
+            std::thread::yield_now();
+        }
+        assert_eq!(slots.available_permits(), 1);
     }
 
     #[tokio::test]

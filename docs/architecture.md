@@ -69,9 +69,13 @@ most 2 MiB / 256 parts with less than five seconds of requested delay. Input
 awaits asynchronously for five seconds. Timeout or cancellation returns
 `input_unknown` and permanently refuses further input to that generation;
 later submissions return `input_refused` without another possible side effect.
-remaining chunks are checked before execution. A kernel write already in
-progress may remain blocked. Its dedicated writer retains its slot until it
-actually exits; a process-wide 128-writer limit includes these stuck writers.
+Remaining chunks are checked before execution. Unix PTY descriptors use
+nonblocking I/O: partial writes continue from the unwritten suffix, checking
+the cancellation flag and original deadline between backpressure attempts.
+The shared reader retries temporarily empty reads; closing the Unix writer
+does not inject newline or EOF bytes. Other native kernel writes may remain
+blocked. Each dedicated writer retains its slot through writer destruction;
+a process-wide 128-writer limit includes stuck writers.
 This is bounded isolation, not a promise of immediate kernel cancellation or
 automatic recovery of the affected Agent.
 
