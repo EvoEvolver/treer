@@ -304,6 +304,7 @@ async fn same_connection_sync_stop_and_disconnect_do_not_cancel_or_replay_admitt
     let blocked_input = state.runtime.block_input_for_test("blocked");
     let (mut client, server) = tokio::io::duplex(2 * 1024 * 1024);
     let connection = tokio::spawn(handle_connection(Box::new(server), Arc::clone(&state)));
+    let submitted = Instant::now();
     write_frame(&mut client, &write_request()).await.unwrap();
     admitted(&state, "blocked-write").await;
     write_frame(
@@ -377,7 +378,12 @@ async fn same_connection_sync_stop_and_disconnect_do_not_cancel_or_replay_admitt
     .unwrap();
     #[cfg(windows)]
     blocked_input.release_after_exit();
-    let until = Instant::now() + Duration::from_secs(3);
+    // Observed child exit is not completion of an already blocked kernel
+    // write. Its async result may settle only at the existing 5s input
+    // deadline. Bound settlement by the Host's existing overall deadline
+    // from submission, not the unrelated-operation 3s bound after stop.
+    // The Sync/Stop response bounds above are deliberately unchanged.
+    let until = submitted + OPERATION_TIMEOUT;
     while !state
         .results
         .lock()
@@ -385,7 +391,11 @@ async fn same_connection_sync_stop_and_disconnect_do_not_cancel_or_replay_admitt
         .values
         .contains_key("blocked-write")
     {
-        assert!(Instant::now() < until);
+        assert!(
+            Instant::now() < until,
+            "admitted write did not settle within the Host operation deadline; elapsed={:?}",
+            submitted.elapsed()
+        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(
@@ -395,6 +405,7 @@ async fn same_connection_sync_stop_and_disconnect_do_not_cancel_or_replay_admitt
             .code,
         "input_unknown"
     );
+    assert_eq!(state.operations.available_permits(), 16);
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }

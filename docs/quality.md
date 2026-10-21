@@ -238,7 +238,14 @@ UNKNOWN replay refusal, full mutation admission with an independent control
 lane, and future cancellation. After an owned stop the runtime test waits for
 the actual input writer to exit and its process resources to be released;
 response timeout alone is not resource-reclamation evidence. The tests are
-`treer-agent-host::isolation_tests` and runtime
+also explicit about settlement: observing child exit does not complete a
+pending input receiver. A controlled runtime regression holds that completion
+past three seconds and requires UNKNOWN at the existing five-second input
+deadline. The Host disconnect regression waits for ledger settlement within
+the existing overall operation deadline measured from submission; its separate
+two/three-second Sync/Stop responsiveness assertions remain unchanged.
+The tests are `treer-agent-host::isolation_tests` and runtime
+`observed_exit_does_not_complete_a_pending_input_receiver` /
 `cancelled_async_input_reclaims_writer_after_owned_stop`. The ignored child
 tests are subprocess helpers, not skipped acceptance cases. Native ConPTY
 execution is required separately; cross-compilation does not prove it.
