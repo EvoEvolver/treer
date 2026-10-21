@@ -170,3 +170,12 @@ contrast check, tests, mobile initialization hunk and matching README are added;
 no Apps/Issues/launcher ancestry is imported. The earlier minimal source's
 exclusions and CI/full-gate results remain historically accurate, not successor
 verification. Release owns composition with Core2 and subsequent complete gates.
+
+The successor's focused audit run exposed a WebKit Home-key edge: focusing the
+first bucket and scrolling it into view left the container at its 8px padding
+offset. The follow-up preserves focus without browser scrolling and explicitly
+sets container edges for Home/End; arrow navigation still scrolls the selected
+bucket into view. The existing keyboard regression retains exact Home position
+and now also asserts first/last bucket focus. This is the only audit component
+behavior correction beyond the accepted-source port; the original failed run is
+retained separately from the corrected boundary run.

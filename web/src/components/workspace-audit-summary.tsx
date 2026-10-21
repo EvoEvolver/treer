@@ -93,8 +93,12 @@ export function WorkspaceAuditSummary({ workspaceId, filters, revision, preview,
         const buttons = Array.from(event.currentTarget.querySelectorAll('button'))
         const current = buttons.findIndex((button) => button === document.activeElement)
         const index = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : Math.max(0, Math.min(buttons.length - 1, current + (event.key === 'ArrowRight' ? 1 : -1)))
-        buttons[index]?.focus()
-        buttons[index]?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' })
+        buttons[index]?.focus({ preventScroll: true })
+        // Home/End target the container edges, including its padding. WebKit's
+        // nearest-element scrolling can otherwise leave Home at an 8px offset.
+        if (event.key === 'Home') event.currentTarget.scrollLeft = 0
+        else if (event.key === 'End') event.currentTarget.scrollLeft = event.currentTarget.scrollWidth
+        else buttons[index]?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' })
       }}>
         <div className="flex min-w-full items-end gap-1" style={{ width: Math.max(data.series.length * 48, 240) }}>
           {data.series.map((row, bucketIndex) => {
