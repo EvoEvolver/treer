@@ -1669,9 +1669,17 @@ mod tests {
     async fn direct_owned_child_has_exclusive_intent_and_never_retries_success_or_failure() {
         use sha2::{Digest, Sha256};
         use std::os::unix::fs::PermissionsExt;
-        for exit in [0, 23] {
+        // Stop after install but before status (0), failed install (23), and
+        // cancellation mid-install after durable intent (-1). None can replay
+        // install, manufacture a status witness, or advance to Complete.
+        for exit in [0, 23, -1] {
             let f = Fixture::standard_config();
-            let script = format!("#!/bin/sh\n[ \"$1\" = launcher ] || exit 44\n[ \"$LANG\" = C ] && [ -n \"$TMPDIR\" ] || exit 45\n[ -z \"${{NODE_OPTIONS+x}}${{TREER_MACHINE_TOKEN+x}}${{TREER_WORKLOAD_CREDENTIAL+x}}\" ] || exit 46\nprintf ran >> launch-count\nprintf '{{}}'\nexit {exit}\n");
+            let finish = if exit == -1 {
+                "exec /bin/sleep 30".into()
+            } else {
+                format!("exit {exit}")
+            };
+            let script = format!("#!/bin/sh\n[ \"$1\" = launcher ] || exit 44\n[ \"$LANG\" = C ] && [ -n \"$TMPDIR\" ] || exit 45\n[ -z \"${{NODE_OPTIONS+x}}${{TREER_MACHINE_TOKEN+x}}${{TREER_WORKLOAD_CREDENTIAL+x}}\" ] || exit 46\nprintf ran >> launch-count\nprintf '{{}}'\n{finish}\n");
             std::fs::write(f.bin.join(Binary::Controller.name()), &script).unwrap();
             for name in [Binary::Controller.name(), Binary::Cli.name()] {
                 std::fs::set_permissions(f.bin.join(name), std::fs::Permissions::from_mode(0o700))
@@ -1725,8 +1733,16 @@ mod tests {
             .unwrap()
             .bind_temporary(&temporary)
             .unwrap();
-            let result = crate::self_update::worker::launcher::execute(&plan).await;
-            assert_eq!(result.is_ok(), exit == 0);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                crate::self_update::worker::launcher::execute(&plan),
+            )
+            .await;
+            if exit == -1 {
+                assert!(result.is_err()); // No QuiescentOutput witness exists.
+            } else {
+                assert_eq!(result.unwrap().is_ok(), exit == 0);
+            }
             assert_eq!(std::fs::read(f.bin.join("launch-count")).unwrap(), b"ran");
             assert!(crate::self_update::worker::launcher::execute(&plan)
                 .await

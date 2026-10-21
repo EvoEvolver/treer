@@ -130,7 +130,25 @@ pub(super) fn read(journal: &Journal, workspace: &str, server: &str) -> Result<w
 }
 
 fn project(receipt: &Receipt, binding: &DispatchBinding) -> Result<wire::Operation> {
+    project_at(receipt, binding, chrono::Utc::now())
+}
+
+fn project_at(
+    receipt: &Receipt,
+    binding: &DispatchBinding,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<wire::Operation> {
     check(receipt, binding)?;
+    // Receipt age is not proof of worker death or permission to retry. Refuse
+    // an expired nonterminal observation so Proxy silence reconciliation can
+    // retain Unconfirmed without a conflicting payload at the SAME revision.
+    // Never rewrite/release the durable receipt or claim from a GET.
+    if !receipt.phase.terminal()
+        && now.signed_duration_since(receipt.updated_at)
+            > chrono::Duration::seconds(wire::REPORT_GRACE_SECONDS as i64)
+    {
+        bail!("controller_update_receipt_unconfirmed");
+    }
     let phase = match receipt.phase {
         Phase::Preparing => wire::Phase::Preparing,
         Phase::Prepared => wire::Phase::Prepared,
@@ -363,6 +381,33 @@ pub(in crate::self_update) mod tests {
     }
 
     #[test]
+    fn stale_nonterminal_observation_is_refused_without_rewriting_or_retry_authority() {
+        let (receipt, binding) = bound();
+        let deadline =
+            receipt.updated_at + chrono::Duration::seconds(wire::REPORT_GRACE_SECONDS as i64);
+        assert_eq!(
+            project_at(&receipt, &binding, deadline).unwrap().state,
+            wire::State::Updating
+        );
+        assert_eq!(
+            project_at(
+                &receipt,
+                &binding,
+                deadline + chrono::Duration::milliseconds(1)
+            )
+            .unwrap_err()
+            .to_string(),
+            "controller_update_receipt_unconfirmed"
+        );
+        // A fresh observation is byte-for-byte stable; aging cannot mint a
+        // new receipt revision, health result, or completion/retry authority.
+        assert_eq!(
+            project_at(&receipt, &binding, receipt.updated_at).unwrap(),
+            project_at(&receipt, &binding, deadline).unwrap()
+        );
+    }
+
+    #[test]
     fn mismatched_target_original_images_or_job_cannot_be_projected() {
         let (receipt, binding) = bound();
         for field in 0..5 {
@@ -413,6 +458,15 @@ pub(in crate::self_update) mod tests {
             let receipt: Receipt = serde_json::from_value(data).unwrap();
             receipt.validate().unwrap();
             let op = project(&receipt, &binding).unwrap();
+            assert_eq!(
+                project_at(
+                    &receipt,
+                    &binding,
+                    receipt.updated_at + chrono::Duration::days(1)
+                )
+                .unwrap(),
+                op
+            );
             assert_eq!(op.state, state);
             assert_eq!(op.health, wire::Health::Unknown);
             assert!(op.observed_identity.is_none());

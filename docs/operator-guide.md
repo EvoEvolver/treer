@@ -2584,6 +2584,15 @@ choices; the browser cannot supply them. Only a strictly increasing sequence is
 eligible. Same-release and downgrade overrides are absent. Explicit checksum
 pins are transition acknowledgments, not publisher signatures or freshness.
 
+Provision this file as the service account in its existing private configuration
+directory (0700), with catalog mode 0600. Publish reviewed replacement bytes by
+atomic rename within that same private directory; do not use a shared writable
+directory or weaken permissions. For catalog rotation, increase the revision in
+both the Proxy and Controller catalogs and preserve the exact release identities
+and pins required by outstanding operations. Never reuse a revision for changed
+bytes or decrease it. Rotation changes future admission; it does not resume,
+rebind, or authorize retry of an outstanding operation.
+
 The Controller owns submission independently of its Proxy websocket. Update
 commands do not block heartbeat or operation queries. Disconnect drops response
 waiting only; the original task continues without resubmission. A Controller
@@ -2600,6 +2609,11 @@ owner death and elapsed time do not clear it. Read-only operation lookup works
 from its fixed journal after restart. Capability remains disabled until the
 complete worker/launcher execution and whole-health reconciliation pass native
 acceptance; preparation tests alone do not enable Console updates.
+After the report grace period (600 seconds without receipt progress), a
+nonterminal native receipt is no longer accepted as a fresh Updating observation.
+Proxy discovery retains an unconfirmed result and the active claim. This age
+bound does not prove worker death, release a lock, or authorize another attempt.
+Distinct partial and rollback-failed recovery results remain readable.
 
 The native handoff copies the original installed Controller into the private
 job, starts only that fixed worker with its UUID, and authenticates the running
@@ -2614,6 +2628,11 @@ path as an old Controller helper, and never run ordinary metrics startup in
 the private worker. This integration check is part of native acceptance.
 The worker uses the existing Rust image publication, Host restart, workload
 health and verified rollback transaction; it never restarts the Host.
+Native acceptance must also demonstrate that this worker survives replacement
+of the old Controller under the actual service manager in a disposable OS
+account or VM on Linux and macOS. A separate session/process group alone does
+not establish survival under systemd control-group termination or launchd
+cleanup. This platform acceptance remains outstanding; capability stays off.
 
 After Core health, the original owned worker directly owns each fixed launcher
 install/status child. It persists exclusive start intent before each spawn,
