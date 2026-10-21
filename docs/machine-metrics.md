@@ -116,14 +116,23 @@ Old Controllers return unsupported, offline machines return unavailable.
 
 ## Validation status
 
-The development implementation has exercised actual macOS CPU/RAM sampling,
+The development implementation has exercised actual macOS and Linux CPU/RAM sampling,
 disk reopen and typed source queries. Isolated PostgreSQL route tests cover
 authorization, revoked sessions, invalid source identity, extension filtering
 and slow-reader ownership. Synthetic 24-hour disk inputs with 0/1/8/32 GPUs
 exercise actual assembly/encoding plus overlapping transport/decode/HTTP stages;
-their measured heap peaks are approximately 8.3–8.5 MiB, below the 14 MiB query
+their measured heap peaks are approximately 8.23–8.43 MiB, below the 14 MiB query
 reservation. These GPU inputs are fixtures, not native NVML measurements.
 
-Native Linux/Windows collection, real NVIDIA overhead, full author gate and
-Web #221 real-source browser acceptance remain required before feature freeze.
+The actual local source-to-Proxy chain has been consumed by the production Web
+component in Chromium, Firefox and WebKit for all four ranges without API mocks.
+Chromium's diagnostic response-body copy can be unavailable after the application
+consumes its stream; those cases require the production decoder and completed
+current-range chart, and do not claim an independently retained raw-body hash.
+Workspace Rust tests and Clippy, Web tests and launcher checks have passed in
+the isolated development environment. PostgreSQL tests require a Unicode-aware
+UTF-8 database locale, including the existing Unicode login-budget test.
+
+Native Windows collection and real NVIDIA overhead remain unverified and are
+required before feature freeze; a successful binary build alone is insufficient.
 The development implementation does not authorize deployment or machine update.
