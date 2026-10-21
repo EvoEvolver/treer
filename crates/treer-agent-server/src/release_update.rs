@@ -39,13 +39,23 @@ struct Manifest {
     artifacts: Vec<Artifact>,
 }
 
-#[derive(Deserialize)]
-struct Artifact {
+#[derive(Clone, Deserialize)]
+pub(super) struct Artifact {
     binary: String,
     platform: String,
-    path: String,
-    sha256: String,
-    size: usize,
+    pub(super) path: String,
+    pub(super) sha256: String,
+    pub(super) size: usize,
+}
+
+/// Produced only after both signatures, channel/manifest digest and exact
+/// platform/binary/path bindings have been checked. Consumers may then stream
+/// the objects into private files instead of buffering executable bytes.
+pub(super) struct AuthenticatedRelease {
+    #[cfg(unix)]
+    pub(super) version: String,
+    pub(super) controller: Artifact,
+    pub(super) cli: Artifact,
 }
 
 /// Constructed only after authenticating metadata and matching the binary digest.
@@ -233,13 +243,13 @@ async fn fetch_binary(
     Ok(VerifiedBinary(bytes))
 }
 
-pub(super) async fn download(
+pub(super) async fn authenticate(
     client: &reqwest::Client,
     base: Url,
     channel_name: &str,
     key: &VerifyingKey,
     platform: &str,
-) -> Result<(VerifiedBinary, VerifiedBinary)> {
+) -> Result<AuthenticatedRelease> {
     let base = normalize_base_url(base)?;
     validate_channel_name(channel_name)?;
     let channel_bytes =
@@ -255,9 +265,26 @@ pub(super) async fn download(
         serde_json::from_slice(&manifest_bytes).context("invalid signed release manifest")?;
     let controller = select_artifact(&manifest, &channel, key, platform, "treer-agent-server")?;
     let cli = select_artifact(&manifest, &channel, key, platform, "treer")?;
+    Ok(AuthenticatedRelease {
+        #[cfg(unix)]
+        version: channel.version,
+        controller: controller.clone(),
+        cli: cli.clone(),
+    })
+}
+
+pub(super) async fn download(
+    client: &reqwest::Client,
+    base: Url,
+    channel_name: &str,
+    key: &VerifyingKey,
+    platform: &str,
+) -> Result<(VerifiedBinary, VerifiedBinary)> {
+    let base = normalize_base_url(base)?;
+    let release = authenticate(client, base.clone(), channel_name, key, platform).await?;
     tokio::try_join!(
-        fetch_binary(client, &base, controller),
-        fetch_binary(client, &base, cli)
+        fetch_binary(client, &base, &release.controller),
+        fetch_binary(client, &base, &release.cli)
     )
 }
 

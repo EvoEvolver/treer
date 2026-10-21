@@ -536,6 +536,12 @@ impl AuthStore {
             return Err(invalid_token());
         }
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        super::lock_machine_mutation(&mut transaction, scope.workspace_id, scope.server_id).await?;
+        let update_busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM controller_update_operations WHERE workspace_id=$1 AND server_id=$2 AND holds_slot)")
+            .bind(scope.workspace_id).bind(scope.server_id).fetch_one(&mut *transaction).await.map_err(AuthFailure::database)?;
+        if update_busy {
+            return Err(machine_busy());
+        }
         // A stale active row must not hold the slot forever (no poll required):
         // reconcile in this same transaction, before the busy check.
         self.reconcile_stale_in(&mut transaction, scope).await?;
@@ -793,7 +799,7 @@ impl AuthStore {
         .await
     }
 
-    async fn provider_cli_audit_as(
+    pub(super) async fn provider_cli_audit_as(
         &self,
         transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         workspace_id: &str,

@@ -1071,3 +1071,65 @@ refusal. After UI load all handshake controls are ignored. Tab visibility and
 appearance updates do not run the handshake again; scope/interface changes
 replace the frame and cancel its pending requests as before.
 After a successful `reused` outcome every later control is ignored immediately.
+
+### Controller update browser adapter (#222)
+
+`controller-updater.tsx` reuses the provider installer's prepare, explicit
+one-use confirmation and GET-only observation interaction beside Install agent
+CLIs. `controller-update-client.ts` connects the catalog at the controller-update root, prepare,
+confirm and operation discovery routes under the workspace/machine API. It does
+not introduce installation commands or a separate native updater. Runtime
+mutation requires `machine.controller-update.v1` from both Proxy and Controller;
+capability remains off until the backend/native acceptance is ready.
+
+The browser strictly validates the shared321e contract before mapping to
+`lib/controller-update.ts` presentation models: explicit nulls, bounded lists,
+UUIDs, four identity hashes, exact plan, closed status/phase/health partitions,
+chronology and newest-first discovery. Discovery runs before capability/catalog
+gating, so catalog501 or offline observations retain durable results. Reads are
+no-store, refuse redirects and have a15-second wall timeout and64KiB body cap.
+Current versions without a label explicitly display their build SHA. Receipt
+verification is the server adapter's responsibility; browser structural checks
+never establish native receipt authenticity.
+
+WorkspaceApp supplies an in-memory user/auth epoch. A user/session change,
+workspace/machine switch or logout discards tokens and operation selectors,
+aborts the old HTTP lifetime and ignores late completions. Browser storage is
+not used. Resolved history remains visible while a fresh ready catalog, current
+identity, no unresolved claim and elapsed failure cooldown permit an explicit
+new preview. Partial, unconfirmed and rollback-failed histories never unlock a
+new update; absence after attempted confirm is not proof of non-dispatch.
+Server prepare/confirm still enforce slot, cooldown and session authority.
+
+The component consumes its in-memory token before dispatch, prevents a second
+submit, and stores no token or operation data in browser storage. Closing clears
+an unused confirmation and stops observation; it never cancels a durable job.
+Reopening only reads status. Automatic checks stop after at most 300 reads at
+2-second intervals; manual Check status starts another bounded observation
+window, never another dispatch. A polling failure preserves any recorded result.
+Verified success requires a complete receipt, target identity and healthy
+result. Verified rollback requires the original restored identity and health;
+core health, reconnect and missing receipts alone cannot prove completion.
+
+Before production wiring, implement and review strict shared models, scoped
+no-store/redirect-refusing HTTP projection, capability and trusted-catalog
+checks, fixed typed refusal mapping and native #111 restart-safe reconciliation.
+The client interface must not be backed by a fake successful production adapter.
+Local synthetic Chromium/Firefox/WebKit tests cover component states and the
+existing installer parsers; they do not establish HTTP/Policy/transaction,
+native platform, deployed-browser acceptance or a complete author gate.
+
+Release labels wrap even when all 128 characters form one token. Screenshot
+fixtures disable transitions, assert computed text contrast, and cover waiting,
+recorded success while offline, verified rollback and unconfirmed results.
+Only the short outcome text is a live status; polling timestamps stay outside it.
+Before wiring, also support a separately confirmed next update after the API
+proves the previous claim resolved and a fresh catalog/cooldown permits it;
+the current inert component conservatively blocks while any operation remains.
+Session/user changes must reset the client scope and ignore late responses.
+The strict shared-model successor is `321e006c`; adapter fixtures must follow
+its required nullable keys and conservative outcome rules.
+
+A successful Controller catalog response with `manual_update_required` keeps the
+manual-update guidance and durable operation discovery, just like an unsupported
+catalog status. It never enables preview or confirmation.

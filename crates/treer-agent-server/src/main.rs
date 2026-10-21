@@ -2,6 +2,7 @@ mod agent_interface;
 mod cli_command;
 mod cli_session;
 mod controller;
+mod controller_update;
 mod host_client;
 mod interface_cache;
 mod launcher;
@@ -14,9 +15,20 @@ mod private_state;
 mod provider_cli;
 mod proxy;
 mod release_update;
+#[cfg(unix)]
+pub mod self_update;
 mod service;
 mod startup_store;
 mod tui;
+#[cfg(test)]
+mod windows_update_envelope;
+#[cfg(test)]
+mod windows_update_record;
+// Reuse the inert publication classifier; no platform API or production
+// dependency is exposed while the receipt format remains a test-only draft.
+#[cfg(test)]
+#[path = "../../treer-platform/src/windows_update_layout.rs"]
+mod windows_update_layout_model;
 mod workload_proxy;
 
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -211,6 +223,26 @@ struct ServerArgs {
 }
 
 fn main() -> Result<()> {
+    // Private old-image worker MUST branch before Tokio, normal Controller
+    // startup, metrics helpers or any other threads/forks. Never fall back to
+    // ordinary service execution after malformed or failed worker bootstrap.
+    #[cfg(unix)]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--controller-update-worker"))
+    {
+        let mut arguments = std::env::args_os().skip(2);
+        let selector = arguments
+            .next()
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| anyhow::anyhow!("update_worker_bootstrap_failed"))?;
+        if arguments.next().is_some() {
+            anyhow::bail!("update_worker_bootstrap_failed");
+        }
+        let worker = self_update::web_adapter::enter_worker(&selector)
+            .map_err(|_| anyhow::anyhow!("update_worker_bootstrap_failed"))?;
+        return self_update::web_adapter::run_worker(worker)
+            .map_err(|_| anyhow::anyhow!("update_recovery_required"));
+    }
     // The fixed internal probe needs neither Tokio worker stacks nor any
     // Controller configuration/credentials. Parent provides a private locked
     // salt descriptor as stdin and a cleared environment.

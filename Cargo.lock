@@ -3844,7 +3844,10 @@ dependencies = [
 name = "treer-platform"
 version = "0.1.14"
 dependencies = [
+ "libc",
  "rustix",
+ "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "unicode-normalization",

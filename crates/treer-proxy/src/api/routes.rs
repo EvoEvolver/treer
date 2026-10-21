@@ -568,6 +568,26 @@ pub fn router(
             post(restore_machine_runtime),
         )
         .registered_route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/controller-update",
+            get(controller_update_catalog).layer(middleware::map_response(controller_update_no_store)),
+        )
+        .registered_route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/controller-update/prepare",
+            post(controller_update_prepare).layer(DefaultBodyLimit::max(1024)).layer(middleware::map_response(controller_update_no_store)),
+        )
+        .registered_route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/controller-update/confirm",
+            post(controller_update_confirm).layer(DefaultBodyLimit::max(1024)).layer(middleware::map_response(controller_update_no_store)),
+        )
+        .registered_route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/controller-update/operations",
+            get(controller_update_operations).layer(middleware::map_response(controller_update_no_store)),
+        )
+        .registered_route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/controller-update/operations/{operation_id}",
+            get(controller_update_operation).layer(middleware::map_response(controller_update_no_store)),
+        )
+        .registered_route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/provider-clis/recipes",
             get(provider_cli_recipes),
         )

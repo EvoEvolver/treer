@@ -666,6 +666,35 @@ pub(crate) fn launcher_configs() -> Result<Vec<ServiceConfig>> {
         .collect())
 }
 
+/// Maintenance must resolve installed paths from the saved Host binding, not
+/// ServicePaths::new/current_exe: a detached updater runs a job-local copy.
+#[cfg(unix)]
+pub(crate) fn self_update_inventory() -> Result<crate::self_update::selection::Inventory> {
+    let directory =
+        config_dir().map_err(|_| anyhow::anyhow!("update_config_directory_unavailable"))?;
+    // Worker bootstrap is synchronous and may not fork an ambient PATH helper.
+    let hostname = nix::unistd::gethostname()
+        .ok()
+        .and_then(|name| name.into_string().ok())
+        .ok_or_else(|| anyhow::anyhow!("update_hostname_unavailable"))?;
+    crate::self_update::selection::Inventory::load(&directory, &hostname)
+}
+
+/// Internal worker locator only: opening it must not create/chmod existing
+/// state or accept a caller-supplied receipt directory.
+#[cfg(unix)]
+pub(crate) fn self_update_jobs_directory() -> Result<PathBuf> {
+    Ok(state_dir()
+        .map_err(|_| anyhow::anyhow!("update_state_directory_unavailable"))?
+        .join("self-update")
+        .join("jobs"))
+}
+
+#[cfg(unix)]
+pub(crate) fn controller_update_config_directory() -> Result<PathBuf> {
+    config_dir().map_err(|_| anyhow::anyhow!("controller_update_catalog_unavailable"))
+}
+
 pub fn preflight_registration(workspace: &str, mode: ServiceMode) -> Result<ServiceSelection> {
     validate_workspace(workspace)?;
     require_host_binary(&ServicePaths::new("preflight")?)?;
@@ -1102,6 +1131,14 @@ pub async fn update(
             paths.executable.display()
         )
     })?;
+    #[cfg(unix)]
+    let _native_update_guard = crate::self_update::web_adapter::legacy_update_guard(
+        &services
+            .iter()
+            .map(|(paths, config)| (paths.executable.clone(), config.workspace.clone()))
+            .collect::<Vec<_>>(),
+        &treer_executable,
+    )?;
     let platform = artifact_platform(std::env::consts::OS, std::env::consts::ARCH)?;
     let public_key_path = public_key.unwrap_or(
         config_dir()?

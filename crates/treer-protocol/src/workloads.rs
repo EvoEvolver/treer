@@ -395,6 +395,15 @@ pub enum AgentCommand {
         request: ReplaceAgentStartupRequest,
         revision: u64,
     },
+    /// Controller update (#222): inspect readiness, dispatch an exact prepared
+    /// binding once, and recover the durable operation by ID.
+    ControllerUpdateInspect {},
+    ControllerUpdateDispatch {
+        binding: crate::controller_update_runtime::DispatchBinding,
+    },
+    ControllerUpdateOperation {
+        operation_id: String,
+    },
     /// Provider CLI installation (#123): recipe table for this machine, exact
     /// recipe check, token-confirmed install dispatch and operation polling.
     ProviderCliRecipes {},
@@ -607,6 +616,9 @@ impl AgentCommand {
             }
             Self::Exec { .. } => Some(CAPABILITY_MACHINE_EXEC),
             Self::MachineMetrics { .. } => Some(crate::CAPABILITY_MACHINE_METRICS),
+            Self::ControllerUpdateInspect {}
+            | Self::ControllerUpdateDispatch { .. }
+            | Self::ControllerUpdateOperation { .. } => Some(crate::controller_update::CAPABILITY),
             Self::ProviderCliRecipes {}
             | Self::ProviderCliCheck { .. }
             | Self::ProviderCliOperation { .. } => {

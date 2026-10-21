@@ -48,6 +48,88 @@ delivery. The separate Web scope tests cover same-user session replacement and
 quota/cancellation behavior. These checks do not replace real cookie acceptance
 or cold/warm timing measurements.
 
+### Windows updater parity file fixture
+
+The private Windows-only `windows_update_bootstrap::checked_files` fixture
+creates new current-user/SYSTEM-only attempt directories and candidate files
+with their DACLs at creation. It pins local NTFS directory ancestors and source
+identity, streams at most 256 MiB through a 64 KiB buffer, hashes the copied
+bytes and syncs/read-back checks the same destination handle. Native tests cover
+checksum failure with retained evidence, existing-object and oversize refusal,
+unsafe names/foreign parent writers, independent source offsets, handle
+inheritance and write/rename sharing denial. Cross-compilation does not execute
+these Windows behaviors; hosted Windows results must be recorded separately.
+No installed-state read, publication, service restart or updater command is
+wired by this fixture. A subsequent native rename fixture uses the same verified
+object with read/DELETE access to move between three fixed attempt-local slots,
+never replacing an occupied destination. Two new Windows tests cover identity
+across activation/reverse rollback and second-rename failure with preserved
+candidate/backup and collision refusal. Both new tests failed at the first rename
+on hosted Server 2022/2025 at `ba665a24`; diagnostics at `aa50cd59` identified
+Win32 87 at SetFileInformationByHandle after all verification checks passed.
+The correction uses the pinned directory's final full destination path with a
+NULL RootDirectory. Hosted run 39211335874 on exact `2f71c4ac` passed both rename
+tests and the full platform library (41 passed, zero failed, two ignored) on
+both Server 2022 and 2025; the separate outside-Job owner round trip also passed
+on both. Each step exited zero. The three numeric 183 diagnostics per rename
+run correspond to the three deliberate occupied-target refusals in the collision
+test; test output can interleave. This is disposable-fixture evidence only,
+without a live installed update or real `win_native` run. A separate ignored
+`native_running_image_rename` fixture now launches only a checked disposable test
+copy, confirms kernel PID/image identity and live replies across forward/reverse
+renames, and confirms cleanup using its actual process handle. Its hosted
+Server 2022/2025 run 39213059404 on `723f772d` failed before either live rename
+at CreateProcess, Win32 32 (sharing violation). The correction uses a narrowed,
+verified owner/SYSTEM RX/DELETE DACL on the newly created fixture image across
+the transition from the old write-open object to a separately reopened read-only
+execution pin, then derives checked read/DELETE handles only for each rename.
+It specifically tests that writing is refused during the transition. The
+sharing/ACL boundary received static content review; hosted run 39214676528 on
+exact `07c3d30c` then passed both Server versions: rename tests two passed, full
+lib 41 passed/zero failed/four ignored, separate outside-Job owner round trip
+and running-image rename each one passed, all four step exit codes zero. This
+establishes only the disposable running-image sequence, including liveness and
+owned-child cleanup, without a service, production directory ACL, Host Job
+integration or real `win_native` update. Durable receipt/recovery states
+and production installation remain subsequent work.
+
+The inert receipt parser reuses the platform publication classifier through a
+`cfg(test)` path include in the Controller. Changes or moves to
+`crates/treer-platform/src/windows_update_layout.rs` must also run the focused
+Controller tests, not just the platform library, so the include and serialized
+state mappings are compiled. Use a private Cargo target directory for both:
+`cargo test --locked -p treer-platform windows_update_layout` and
+`cargo test --locked -p treer-agent-server --bin treer-agent-server windows_update_`.
+Keep the include inside `cfg(test)` when reorganizing the source. These checks
+cover draft syntax, pair consistency and separately supplied synthetic layout
+observations; they do not authenticate health, enforce prior-to-next transitions
+or a pair-external replay anchor, or establish production Windows readiness.
+
+### Windows self-update registration model
+
+This historical model is not a prerequisite for the Windows PowerShell-parity
+scope selected in issue #111 comment 5134; that scope makes no boot-freshness
+claim and forbids registry/reboot experiments. The private `cfg(test)` platform module `update_registration` exercises a
+synthetic, fixed-size registration format before native record publication is
+implemented. Focused tests reject malformed headers, truncation/trailing bytes,
+pipe-frame confusion, altered attempt/intent/process/boot identities and invalid
+deadline windows. Independent readers compare the decoded fields with separate
+synthetic observations; the owner retains its original expiry ceiling. The
+version-2 fixture carries a nonzero 16-byte boot identity. A reader must compare
+it with both its independent observation and every local clock sample; a changed
+boot permanently refuses that reader even when ticks still fall in the window.
+This tests rejection of prior-boot records with otherwise matching fields, not
+the authenticity or availability of a Windows boot identity. Native registration
+still requires verified boot identity acquisition and trusted clock samples.
+An injected synthetic source tests boot/tick/boot read ordering and refuses
+empty, mixed or failed samples without retry or fallback. Either deadline reader
+permanently refuses after any acquisition failure; subsequent coherent samples
+cannot renew its budget. These checks model acquisition ordering, not an OS API.
+These tests do not read or write files, acquire OS identity or time, enforce replay
+uniqueness, construct frame bindings, or grant update authority. Native record
+publication, suspended-child registration and real-machine acceptance remain
+separate gates. The byte layout is a fixture model, not a supported disk format.
+
 ### Organization invitation consent checks
 
 The PostgreSQL-backed Proxy invitation tests use synthetic invitations in
