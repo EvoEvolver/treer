@@ -1024,6 +1024,67 @@ Proxy-owned bootstrap page on the Agent origin redeems it for a partitioned
 sends it back before loading the Agent UI. Browsers without partitioned-cookie
 support (older Safari, strict third-party-cookie settings) fail that check and
 the Console falls back to the Proxy-origin tunnel, which the user sees.
+A Console that supports session reuse loads the bootstrap with `?reuse=1`, a
+non-secret capability hint. The page then announces a version-2 `ready`
+(`{treer_embed: "ready", version: 2, nonce_hash}`), the Console answers with a
+probe carrying the same hash, and the page asks `GET /.treer/embed/check` on
+its own origin whether a live embed session for this Agent is already in the
+browser's partition: on `204` it loads the Agent UI at once and tells the
+Console `{treer_embed: "reused", version: 2, nonce_hash}`, so no code is
+minted; an empty `200` means normally unavailable, so it posts `mint` with
+the same hash and the normal handoff runs. The initial probe also accepts the
+legacy `401` as unavailable for compatibility. Every other status (including
+`403`, `404`, `429`, `5xx` or manual redirects) and transport failure stops
+without minting; after code redemption only exactly `204` permits navigation.
+The check answers `204` only when the session is live for this host and
+kind, the user is still a workspace member and the interface Policy pair still
+allows the user for this Agent (evaluated without recording a decision), and
+an identical empty `200` with no reason for ordinary unavailable states.
+Database/internal lookup and Policy evaluation failures remain errors, never
+normal absence or readiness. Both normal results and errors are `no-store`;
+there is no session refresh or positive/negative caching. GET and HEAD share
+the contract; `response.ok` is not readiness. The UI still independently
+rechecks authority, including a revocation after the availability response.
+
+The separate `agent.interface-embed-prewarm.v1` capability allows a compatible
+Console to request `?reuse=1&prewarm=1` for a bounded hidden frame. It uses the
+same status partition: initial `204` finishes without minting, initial empty
+`200` or legacy `401` permits one handoff, and other statuses, manual redirects
+and network failures end quietly. Only `204` after both exchange and check can
+report `warmed`; the hidden page never loads Agent HTML. Foreground click always
+checks again. A cancelled frame is not proof that its session was revoked.
+
+A purpose-bound prewarm code redeems into a ten-minute embed session, compared
+with twelve hours for an ordinary open. The Proxy permits six prewarm mints per
+user per minute in addition to its general thirty-mint budget and eight unused
+code bound. Rate budgets are maintained by the serving Proxy process; they are
+not a distributed counter across replicas or a durable restart quota. Database
+transactions serialize insertion, eviction and rotation for each user/origin.
+At most eight unrotated live sessions remain: oldest unused prewarm rows are
+evicted first; a prewarm exchange cannot evict a normal session. A normal open
+may evict the oldest normal row when no prewarm row remains. This bounds sessions,
+not active-socket liveness, and must not be presented as idle-session detection.
+The first authorized document navigation with an upstream response rotates the
+prewarm session once into a normal session. Its predecessor retains only its
+original expiry for concurrent requests and sits outside the unrotated cap;
+fetches, subresources, upgrades and failed upstream attempts do not rotate it.
+Mint audit events distinguish prewarm from open and contain no code or nonce.
+Local database/browser fixtures do not establish deployed cookie compatibility,
+click latency, mixed-version rollout safety or current canary acceptance.
+Without the hint the page sends the two-field
+`ready` and an old Console mints as before; the hint is stripped before the
+Agent UI is loaded. Already-running older bootstrap HTML may still mint after
+any initial non-204 or transport failure, but never regards `200` as ready;
+`no-store` does not replace running documents.
+
+A transient initial `429` or `5xx` now shows the existing failure notice
+instead of silently attempting mint. The hash-bound failure still triggers the
+fixed Proxy fallback-permission probe, then a manual compatibility choice,
+refusal or unavailable notice, with open-in-new-tab available. There is no
+built-in retry button or automatic weaker-origin navigation; a person can
+reload or remount. Ordinary unavailability no longer produces the old `401`
+log signal; optional aggregate counters are deferred, while operational faults
+retain error statuses. Handshake responses carry no timing headers.
 `TREER_AGENT_EMBED_FALLBACK=refuse` (`--agent-embed-fallback refuse`) closes
 that fallback: the tunnel answers `503 embedded_ui_requires_isolated_origin`
 and the Console offers "open in new tab" only. Every Console host (Proxy `app_dist`, Worker, nginx) must send the same
@@ -1033,6 +1094,19 @@ and the Console times out (incident on 0c5c40ae). Give the Console and the apps
 domain separate registrable domains where possible; see
 [the security model](security.md#embed-sessions) for why. Supported browsers
 for the embedded path: Chrome and Edge 114+, Firefox 141+, Safari 26.2.
+
+WebSockets tunnelled through an Agent origin, a workspace App host or the
+Proxy-origin interface tunnel are re-checked every 30 seconds (plus up to
+5 seconds of jitter): a socket whose session ended (logout, 12-hour expiry) is
+closed with WebSocket code 4401, one whose membership or Agent interface
+permission was revoked with 4403, within about 36 seconds. During a database
+outage the Proxy keeps sockets for three failed checks (about 120 seconds) and
+then closes them with 1011; `tunnel session re-check failed` warnings show the
+retries. Public and Bearer-token upgrades are not re-checked. The Agent or App
+side of the socket is closed as well, so a UI that reconnects after 4401/4403
+gets the ordinary authorize redirect or 401 instead of a new socket. Each
+check is bounded to 5 seconds and runs beside the relay, so a slow database
+delays the verdict, never the bytes.
 
 ## Serving the browser App from the Proxy
 

@@ -573,6 +573,8 @@ mod provider_cli_tests;
 #[path = "api/tests.rs"]
 mod tests;
 #[cfg(test)]
+mod tunnel_revalidation_tests;
+#[cfg(test)]
 #[path = "api/upload_tests.rs"]
 mod upload_tests;
 

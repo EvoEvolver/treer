@@ -664,6 +664,14 @@ CREATE INDEX IF NOT EXISTS ingress_sessions_expiry ON ingress_sessions(expires_a
 ALTER TABLE ingress_browser_auth_codes ADD COLUMN IF NOT EXISTS embed BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE ingress_browser_auth_codes ADD COLUMN IF NOT EXISTS agent_id TEXT;
 ALTER TABLE ingress_sessions ADD COLUMN IF NOT EXISTS embed BOOLEAN NOT NULL DEFAULT FALSE;
+-- Prewarm (#198 step 3): a code minted for a hover redeems into a 10-minute
+-- embed session; the first authorized document request rotates it into a
+-- normal session (the old row is kept until its own expiry, marked rotated).
+ALTER TABLE ingress_browser_auth_codes ADD COLUMN IF NOT EXISTS prewarm BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE ingress_sessions ADD COLUMN IF NOT EXISTS prewarm BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE ingress_sessions ADD COLUMN IF NOT EXISTS rotated BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS ingress_sessions_user_ingress ON ingress_sessions(user_id, ingress_id);
+
 
 CREATE TABLE IF NOT EXISTS app_oauth_codes (
     code_hash TEXT PRIMARY KEY,

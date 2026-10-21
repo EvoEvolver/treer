@@ -293,6 +293,9 @@ pub(in crate::api) async fn proxy_service_ingress(
     }
 
     let mut identity_token = None;
+    // Upgraded sockets authorized by a browser session are re-checked while
+    // they live (#194); public and Bearer upgrades are not.
+    let mut revalidation = None;
     if resolved.ingress.access == ServiceIngressAccess::Workspace && !auth.authentication_disabled()
     {
         if let Some(token) = ingress_bearer_token(request.headers())? {
@@ -310,8 +313,8 @@ pub(in crate::api) async fn proxy_service_ingress(
             identity_token = Some(token.to_string());
         } else {
             let session = cookie_value(request.headers(), config.ingress_cookie_name());
-            let user_id = match session {
-                Some(token) => auth.authenticate_ingress_session(&hostname, &token).await?,
+            let user_id = match &session {
+                Some(token) => auth.authenticate_ingress_session(&hostname, token).await?,
                 None => None,
             };
             let Some(user_id) = user_id else {
@@ -333,6 +336,18 @@ pub(in crate::api) async fn proxy_service_ingress(
                 )
                 .await?,
             );
+            if upgraded {
+                revalidation = session.map(|token| {
+                    UpgradeRevalidation::ingress(
+                        auth.clone(),
+                        &hostname,
+                        &token,
+                        false,
+                        &resolved.ingress.workspace_id,
+                        &user_id,
+                    )
+                });
+            }
         }
     }
 
@@ -390,6 +405,7 @@ pub(in crate::api) async fn proxy_service_ingress(
         "service ingress",
         TrafficClass::ServiceIngress,
         permit.clone(),
+        revalidation,
     );
     let response = match tokio::time::timeout(
         Duration::from_secs(u64::from(limits.response_timeout_secs)),
@@ -481,8 +497,16 @@ async fn proxy_agent_interface_origin(
             "request carries both Content-Length and Transfer-Encoding",
         ));
     }
-    if let Some(served) =
-        serve_agent_embed_route(&auth, &config, &hostname, &agent_id, &mut request).await
+    if let Some(served) = serve_agent_embed_route(
+        &state,
+        &auth,
+        &policy,
+        &config,
+        &hostname,
+        &agent_id,
+        &mut request,
+    )
+    .await
     {
         return served;
     }
@@ -496,20 +520,42 @@ async fn proxy_agent_interface_origin(
         ));
     }
     enforce_ingress_fetch_metadata(&request, &hostname, false)?;
-    // An embed session (#156) is recognised by its own cookie; its token
-    // never authenticates through the standalone cookie or the reverse.
+    // Embed sessions (#156, security 5125/5129): decide the request context
+    // first, then pick credentials. The embed cookie grants authority only
+    // when the request provably comes from the framed document itself:
+    // exactly one `Sec-Fetch-Site: same-origin`, or, for a WebSocket upgrade
+    // only, no Fetch Metadata but exactly one `Origin` byte-equal to this
+    // Agent origin (Chromium sends Origin without Sec-Fetch-* on an iframe's
+    // same-origin handshake). In every other context the embed cookie is
+    // treated as absent and the request takes the standalone path, so a
+    // browser whose Console and apps domain share one site, or that ignores
+    // `Partitioned`, still gets standalone pages and never a 403 for a request
+    // a standalone cookie would authorize.
+    let upgraded = request.headers().contains_key(header::UPGRADE);
+    let embed_context = embed_cookie_context(request.headers(), upgraded, &config, &hostname)?;
     let mut embedded = false;
+    // The cookie that authorized this request, kept only to re-check an
+    // upgraded socket while it lives (#194).
+    let mut session_token = None;
     let user_id = if auth.authentication_disabled() {
         None
     } else {
         let mut user_id = None;
-        if let Some(token) = cookie_value(request.headers(), config.embed_cookie_name()) {
-            user_id = auth.authenticate_embed_session(&hostname, &token).await?;
-            embedded = user_id.is_some();
+        if embed_context {
+            if let Some(token) = cookie_value(request.headers(), config.embed_cookie_name()) {
+                user_id = auth.authenticate_embed_session(&hostname, &token).await?;
+                embedded = user_id.is_some();
+                if embedded {
+                    session_token = Some(token);
+                }
+            }
         }
         if user_id.is_none() {
             if let Some(token) = cookie_value(request.headers(), config.ingress_cookie_name()) {
                 user_id = auth.authenticate_ingress_session(&hostname, &token).await?;
+                if user_id.is_some() {
+                    session_token = Some(token);
+                }
             }
         }
         let Some(user_id) = user_id else {
@@ -523,14 +569,6 @@ async fn proxy_agent_interface_origin(
         };
         Some(user_id)
     };
-    // An embed session (security 4750 P2): a browser that ignores
-    // `Partitioned` keeps the cookie as a plain SameSite=None cookie, so the
-    // framed document's own requests are the only ones admitted: exactly
-    // `Sec-Fetch-Site: same-origin`; missing, none, same-site and cross-site
-    // are refused before the Agent is even resolved.
-    if embedded {
-        require_embed_same_origin(request.headers())?;
-    }
     // Authenticated: existence and authority are decided now, per request.
     let (workspace_id, _server_id) = auth
         .agent_interface_target(&agent_id)
@@ -572,7 +610,32 @@ async fn proxy_agent_interface_origin(
         .map_err(|error| ApiFailure::bad_gateway("invalid_tunnel_uri", &error.to_string()))?;
     *request.version_mut() = Version::HTTP_11;
     let upgraded = request.headers().contains_key(header::UPGRADE);
+    // Prewarm rotation candidate (#198, security 5580 refinement 1 / 5618
+    // item 3): the first authorized document navigation of a prewarm session
+    // gets a normal 12-hour session, but only once the upstream response that
+    // can carry the new cookie exists; only navigations rotate, never
+    // subresources, fetches or upgrades.
+    let rotation_candidate = match &session_token {
+        Some(token) if embedded && !upgraded && is_document_navigation(request.headers()) => {
+            Some(token.clone())
+        }
+        _ => None,
+    };
     sanitize_agent_interface_headers(request.headers_mut(), upgraded, &agent.agent_id, interface)?;
+    let revalidation = match (&user_id, session_token) {
+        (Some(user_id), Some(token)) if upgraded => Some(
+            UpgradeRevalidation::ingress(
+                auth.clone(),
+                &hostname,
+                &token,
+                embedded,
+                &workspace_id,
+                user_id,
+            )
+            .with_agent_gate(policy.clone(), agent.clone()),
+        ),
+        _ => None,
+    };
     let mut response = tunnel_http_request(
         state,
         &workspace_id,
@@ -585,6 +648,7 @@ async fn proxy_agent_interface_origin(
         "Agent interface origin",
         TrafficClass::AgentInterface,
         None,
+        revalidation,
     )
     .await?;
     if response.status() != StatusCode::SWITCHING_PROTOCOLS {
@@ -597,24 +661,97 @@ async fn proxy_agent_interface_origin(
             .or_insert(HeaderValue::from_static("no-referrer"));
         if embedded {
             allow_console_frame_only(headers, &config.console_origin())?;
+            if let Some(token) = rotation_candidate {
+                // The Agent's own Set-Cookie headers were already removed by
+                // sanitize_tunnel_response_headers (embedded responses strip
+                // cookies), so the rotated cookie is the only one here.
+                if let Some(new_token) =
+                    auth.rotate_prewarm_embed_session(&hostname, &token).await?
+                {
+                    headers.insert(
+                        header::SET_COOKIE,
+                        embed_cookie_header(&config, &new_token, 12 * 60 * 60)?,
+                    );
+                }
+            }
         }
     }
     Ok(response)
 }
 
-/// Embed-cookie requests must prove they come from the framed document
-/// itself: one `Sec-Fetch-Site` header equal to `same-origin`. A missing
-/// header is refused too, because without Fetch Metadata the cookie could be
-/// riding a cross-site request in a browser that stored it unpartitioned.
-pub(super) fn require_embed_same_origin(headers: &HeaderMap) -> Result<(), ApiFailure> {
-    let mut sites = headers.get_all("sec-fetch-site").iter();
-    match (sites.next(), sites.next()) {
-        (Some(site), None) if site == "same-origin" => Ok(()),
-        _ => Err(ApiFailure::forbidden(
-            "ingress_request_rejected",
-            "embedded Agent interface requests must come from the embedded document itself",
-        )),
+/// A top-level or frame document navigation (`Sec-Fetch-Mode: navigate` with
+/// `Sec-Fetch-Dest` `document` or `iframe`), as the bootstrap's own
+/// `location.replace` produces; everything else is a subresource.
+fn is_document_navigation(headers: &HeaderMap) -> bool {
+    let one = |name: &str| {
+        let mut values = headers.get_all(name).iter();
+        match (values.next(), values.next()) {
+            (Some(value), None) => value.to_str().ok().map(str::trim),
+            _ => None,
+        }
+    };
+    one("sec-fetch-mode") == Some("navigate")
+        && matches!(one("sec-fetch-dest"), Some("document") | Some("iframe"))
+}
+
+/// Whether a request on an Agent origin may use the embed cookie at all
+/// (security 5125/5129/5165). Ordinary requests: exactly one
+/// `Sec-Fetch-Site: same-origin`, nothing else. Upgrades: exactly one `Origin`
+/// header byte-equal to this Agent origin is required in every case, and
+/// `Sec-Fetch-Site`, when present, must be exactly one `same-origin`; the
+/// header may be absent only on a real WebSocket upgrade (`Upgrade: websocket`
+/// with a `Connection` header containing `upgrade`), because Chromium sends no
+/// Fetch Metadata on an iframe's same-origin handshake. `none`, `same-site`,
+/// `cross-site`, duplicated headers, any other Origin and any other Upgrade
+/// value all answer `false`: the cookie is then ignored, never an error.
+pub(super) fn embed_cookie_context(
+    headers: &HeaderMap,
+    upgraded: bool,
+    config: &IngressConfig,
+    hostname: &str,
+) -> Result<bool, ApiFailure> {
+    let sites: Vec<&HeaderValue> = headers.get_all("sec-fetch-site").iter().collect();
+    let same_origin_site = match sites.as_slice() {
+        [site] => Some(*site == "same-origin"),
+        [] => None,
+        _ => return Ok(false),
+    };
+    if !upgraded {
+        return Ok(same_origin_site == Some(true));
     }
+    let origins: Vec<&HeaderValue> = headers.get_all(header::ORIGIN).iter().collect();
+    let [origin] = origins.as_slice() else {
+        return Ok(false);
+    };
+    let expected = config
+        .url_for_hostname(hostname)?
+        .origin()
+        .ascii_serialization();
+    if origin.as_bytes() != expected.as_bytes() {
+        return Ok(false);
+    }
+    match same_origin_site {
+        Some(ok) => Ok(ok),
+        None => Ok(is_websocket_upgrade(headers)),
+    }
+}
+
+/// `Upgrade: websocket` (case-insensitive) with a `Connection` header whose
+/// comma-separated tokens include `upgrade`; any other upgrade (h2c, a bare
+/// `Upgrade` header) is not a WebSocket handshake.
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    let websocket = headers
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("websocket"));
+    let connection_upgrade = headers.get_all(header::CONNECTION).iter().any(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        })
+    });
+    websocket && connection_upgrade
 }
 
 /// Same-site sibling defence for every ingress host (#143 Phase 2 V4): a

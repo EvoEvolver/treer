@@ -45,6 +45,16 @@ pub(in crate::api) async fn mint_agent_interface_embed(
             "browser_nonce_hash must be a 64-character lowercase hex digest",
         ));
     }
+    let prewarm = match request.purpose.as_deref() {
+        None | Some("open") => false,
+        Some("prewarm") => true,
+        Some(_) => {
+            return Err(ApiFailure::bad_request(
+                "invalid_request",
+                "purpose must be \"open\" or \"prewarm\"",
+            ))
+        }
+    };
     // A signed-in non-member gets the same answer as an unknown id (#164 a).
     auth.require_workspace_member(&workspace_id, &session.user_id)
         .await
@@ -88,6 +98,24 @@ pub(in crate::api) async fn mint_agent_interface_embed(
     // Minting is bounded per user (security 4750 P3-A): the Agent page in the
     // frame can replay 'ready' and have the Console ask again; it gains no
     // authority, so the bound only keeps the table and the traffic finite.
+    // Prewarm mints have their own, authoritative per-user budget (#198,
+    // security 5595): the Console's hover limit is a courtesy, this is the
+    // bound. Checked before the general gate so a refused prewarm does not
+    // consume an ordinary mint.
+    if prewarm
+        && !state.upload_gate().allow(
+            &format!("embed-prewarm:{}", session.user_id),
+            EMBED_PREWARM_MINTS_PER_USER_PER_MINUTE,
+        )
+    {
+        return Err(ApiFailure {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            error: ProtocolError::new(
+                "embed_rate_limited",
+                "too many embed authorizations for this user; retry in a minute",
+            ),
+        });
+    }
     if !state.upload_gate().allow(
         &format!("embed-mint:{}", session.user_id),
         EMBED_MINTS_PER_USER_PER_MINUTE,
@@ -112,8 +140,33 @@ pub(in crate::api) async fn mint_agent_interface_embed(
             &session.user_id,
             &agent.agent_id,
             &request.browser_nonce_hash,
+            prewarm,
         )
         .await?;
+    // Every mint is audited (#198, security 5583 (5)); the action name tells a
+    // hover from an open so a consumer never reads a prewarm as an access.
+    // Best effort: the mint stands even if the audit write fails.
+    if let Err(error) = crate::audit::record_workspace(
+        &auth.pool(),
+        crate::audit::NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind: "user",
+            actor_id: Some(&session.user_id),
+            action: if prewarm {
+                "agent.interface.embed.prewarmed"
+            } else {
+                "agent.interface.embed.minted"
+            },
+            resource_kind: "agent",
+            resource_id: &agent.agent_id,
+            resource_name: None,
+            payload: json!({}),
+        },
+    )
+    .await
+    {
+        tracing::warn!(%error, "embed mint audit write failed");
+    }
     let mut response = Json(json!({
         "code": code,
         "origin": origin.trim_end_matches('/'),
@@ -129,6 +182,11 @@ pub(in crate::api) async fn mint_agent_interface_embed(
 #[derive(Debug, serde::Deserialize)]
 pub(in crate::api) struct EmbedAuthorizationRequest {
     pub browser_nonce_hash: String,
+    /// `"open"` (default) or `"prewarm"` (#198 step 3): a prewarm code
+    /// redeems into a 10-minute session and counts against its own budget. A
+    /// client that lies can only shorten its own session.
+    #[serde(default)]
+    pub purpose: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -138,6 +196,8 @@ struct EmbedSessionRequest {
 }
 
 const EMBED_MINTS_PER_USER_PER_MINUTE: usize = 30;
+/// Prewarm mints per user per minute across every tab and device (#198).
+const EMBED_PREWARM_MINTS_PER_USER_PER_MINUTE: usize = 6;
 const EMBED_OUTSTANDING_CODES_PER_USER: i64 = 8;
 const EMBED_BOOTSTRAP_PATH: &str = "/.treer/embed";
 const EMBED_SESSION_PATH: &str = "/.treer/embed/session";
@@ -149,7 +209,9 @@ const EMBED_BODY_LIMIT: usize = 4 * 1024;
 /// is a fixed page, and session and check answer the same generic failure
 /// for an unknown Agent, a wrong code and a wrong nonce.
 pub(in crate::api) async fn serve_agent_embed_route(
+    state: &AppState,
     auth: &AuthStore,
+    policy: &PolicyEngine,
     config: &IngressConfig,
     hostname: &str,
     agent_id: &str,
@@ -167,9 +229,32 @@ pub(in crate::api) async fn serve_agent_embed_route(
         // held there would make the gateway's future !Send (Body is !Sync).
         let method = request.method().clone();
         let headers = request.headers().clone();
-        return Some(check_embed_session(auth, config, hostname, &method, &headers).await);
+        // Endpoint-local response handling: keep operational error status/body,
+        // but do not let either availability outcome or an error be cached.
+        let mut response = match check_embed_session(
+            state, auth, policy, config, hostname, agent_id, &method, &headers,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        };
+        no_store(&mut response);
+        return Some(Ok(response));
     }
     None
+}
+
+/// `reuse=1` on the bootstrap URL (#198): a non-secret capability hint that
+/// the Console speaks the version-2 handshake (ready, probe, mint or reused).
+/// It changes no authorization decision and is stripped before the Agent UI
+/// is loaded. Exactly `reuse=1`; any other value is the version-1 flow.
+fn bootstrap_flag(request: &Request<Body>, name: &str) -> bool {
+    request
+        .uri()
+        .query()
+        .map(|query| query.split('&').any(|pair| pair == format!("{name}=1")))
+        .unwrap_or(false)
 }
 
 fn no_store(response: &mut Response) {
@@ -202,6 +287,61 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
     let script_nonce = Uuid::new_v4().simple().to_string();
     let console_js = serde_json::to_string(&console)
         .map_err(|error| ApiFailure::internal("encode_error", &error.to_string()))?;
+    // The version-2 handshake is rendered only for a Console that asked for
+    // it (security 5554 condition 2): an old Console's page carries no probe
+    // handling and no v2 message at all.
+    let reuse = bootstrap_flag(request, "reuse");
+    // Prewarm (#198 step 3, security 5583): only together with reuse=1 and
+    // rendered server side, so a page without both flags carries no prewarm
+    // text. Its only effect: the page never navigates; a 204 check ends in
+    // the terminal `warmed`, any failure in the quiet `warm_failed`.
+    let prewarm = reuse && bootstrap_flag(request, "prewarm");
+    let v2_probe = if prewarm {
+        r#"      // Version 2 prewarm: probe, then check or mint, but never navigate.
+      if (!probed && data.treer_embed === "probe" && data.version === 2 && data.nonce_hash === hash && Object.keys(data).length === 3) {
+        probed = true;
+        checkSession().then(function (r) {
+          if (done) return;
+          if (r.status === 204) { clearTimeout(timer); navigate(); }
+          else if (r.status === 200 || r.status === 401) post({ treer_embed: "mint", version: 2, nonce_hash: hash });
+          else { clearTimeout(timer); report("cookies_blocked"); }
+        }).catch(function () { if (!done) { clearTimeout(timer); report("cookies_blocked"); } });
+      }"#
+    } else if reuse {
+        r#"      // Version 2 (#198): the Console answers ready with a probe; this page
+      // decides once, on its own origin, whether a live embed session exists
+      // (the Proxy applies the full request gate) and reports reused or mint.
+      if (!probed && data.treer_embed === "probe" && data.version === 2 && data.nonce_hash === hash && Object.keys(data).length === 3) {
+        probed = true;
+        checkSession().then(function (r) {
+          if (done) return;
+          if (r.status === 204) { clearTimeout(timer); post({ treer_embed: "reused", version: 2, nonce_hash: hash }); navigate(); }
+          else if (r.status === 200 || r.status === 401) post({ treer_embed: "mint", version: 2, nonce_hash: hash });
+          else { clearTimeout(timer); report("cookies_blocked"); }
+        }).catch(function () { if (!done) { clearTimeout(timer); report("cookies_blocked"); } });
+      }"#
+    } else {
+        ""
+    };
+    let announce = if reuse {
+        r#"var probed = false; post({ treer_embed: "ready", version: 2, nonce_hash: hash });"#
+    } else {
+        r#"post({ treer_embed: "ready", nonce_hash: hash });"#
+    };
+    // The terminal step after a verified session: load the UI, or (prewarm)
+    // report `warmed` and stop. The failure report: the hash-bound
+    // `cookies_blocked`, or (prewarm) the quiet `warm_failed`.
+    let finish = if prewarm {
+        r#"done = true; post({ treer_embed: "warmed", version: 2, nonce_hash: hash });"#
+    } else {
+        r#"done = true; window.location.replace(next);"#
+    };
+    let fail_report = if prewarm {
+        r#"var message = { treer_embed: "warm_failed", version: 2, nonce_hash: hash };"#
+    } else {
+        r#"var message = { treer_embed: kind };
+    if (hash) message.nonce_hash = hash;"#
+    };
     let html = format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Treer</title></head><body>
 <script nonce="{script_nonce}">
@@ -210,15 +350,21 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
   var parentWindow = window.parent;
   var done = false;
   var hash = null;
+  var params = new URLSearchParams(window.location.search);
+  params.delete("reuse"); params.delete("prewarm");
+  var next = "/" + (params.toString() ? "?" + params.toString() : "");
+  function post(message) {{ try {{ parentWindow.postMessage(message, CONSOLE); }} catch (e) {{}} }}
   // A failure report carries the nonce hash once it exists: the Agent
   // document that later replaces this page shares window and origin but never
   // learned the hash, so the Console accepts a post-ready failure only with it.
   function report(kind) {{
     if (done) return; done = true;
-    var message = {{ treer_embed: kind }};
-    if (hash) message.nonce_hash = hash;
-    try {{ parentWindow.postMessage(message, CONSOLE); }} catch (e) {{}}
+    {fail_report}
+    post(message);
   }}
+  function fromConsole(event) {{ return !done && event.origin === CONSOLE && event.source === parentWindow && event.data && typeof event.data === "object"; }}
+  function navigate() {{ {finish} }}
+  function checkSession() {{ return fetch("/.treer/embed/check", {{ credentials: "include", redirect: "manual", cache: "no-store" }}); }}
   if (window.top === window || !window.crypto || !window.crypto.subtle) {{ report("cookies_blocked"); return; }}
   var bytes = new Uint8Array(32); window.crypto.getRandomValues(bytes);
   var nonce = Array.prototype.map.call(bytes, function (b) {{ return ("0" + b.toString(16)).slice(-2); }}).join("");
@@ -226,17 +372,20 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
     hash = Array.prototype.map.call(new Uint8Array(digest), function (b) {{ return ("0" + b.toString(16)).slice(-2); }}).join("");
     var timer = setTimeout(function () {{ report("cookies_blocked"); }}, 15000);
     window.addEventListener("message", function (event) {{
-      if (done || event.origin !== CONSOLE || event.source !== parentWindow) return;
+      if (!fromConsole(event)) return;
       var data = event.data;
-      if (!data || data.treer_embed !== "code" || typeof data.code !== "string") return;
-      clearTimeout(timer);
-      fetch("/.treer/embed/session", {{ method: "POST", credentials: "include", redirect: "manual",
-        headers: {{ "content-type": "application/json" }}, body: JSON.stringify({{ code: data.code, nonce: nonce }}) }})
-      .then(function (r) {{ if (r.status !== 204) throw new Error("session"); return fetch("/.treer/embed/check", {{ credentials: "include", redirect: "manual", cache: "no-store" }}); }})
-      .then(function (r) {{ if (r.status !== 204) throw new Error("check"); done = true; window.location.replace("/" + window.location.search); }})
-      .catch(function () {{ report("cookies_blocked"); }});
+      if (data.treer_embed === "code" && typeof data.code === "string") {{
+        clearTimeout(timer);
+        fetch("/.treer/embed/session", {{ method: "POST", credentials: "include", redirect: "manual",
+          headers: {{ "content-type": "application/json" }}, body: JSON.stringify({{ code: data.code, nonce: nonce }}) }})
+        .then(function (r) {{ if (r.status !== 204) throw new Error("session"); return checkSession(); }})
+        .then(function (r) {{ if (r.status !== 204) throw new Error("check"); navigate(); }})
+        .catch(function () {{ report("cookies_blocked"); }});
+        return;
+      }}
+{v2_probe}
     }});
-    parentWindow.postMessage({{ treer_embed: "ready", nonce_hash: hash }}, CONSOLE);
+    {announce}
   }}).catch(function () {{ report("cookies_blocked"); }});
 }})();
 </script></body></html>"#
@@ -287,51 +436,100 @@ async fn open_embed_session(
     if parsed.code.len() > 128 || !auth::valid_ingress_nonce(&parsed.nonce) {
         return Err(auth::invalid_ingress_authorization().into());
     }
-    let token = auth
+    let issued = auth
         .consume_embed_auth_code(hostname, agent_id, &parsed.code, &parsed.nonce)
         .await?;
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::NO_CONTENT;
     response.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_str(&format!(
-            "{}={token}; Path=/; Secure; HttpOnly; SameSite=None; Partitioned; Max-Age={}",
-            config.embed_cookie_name(),
-            12 * 60 * 60,
-        ))
-        .map_err(|error| ApiFailure::internal("cookie_error", &error.to_string()))?,
+        embed_cookie_header(config, &issued.token, issued.max_age_seconds)?,
     );
     no_store(&mut response);
     Ok(response)
 }
 
-/// `GET /.treer/embed/check`: 204 when the request carries a live embed
-/// session for this host, else 401; the bootstrap uses it to prove the
-/// partitioned cookie is actually sent back before loading the Agent UI.
+/// The partitioned embed cookie for `token` with the given lifetime.
+pub(in crate::api) fn embed_cookie_header(
+    config: &IngressConfig,
+    token: &str,
+    max_age_seconds: i64,
+) -> Result<HeaderValue, ApiFailure> {
+    HeaderValue::from_str(&format!(
+        "{}={token}; Path=/; Secure; HttpOnly; SameSite=None; Partitioned; Max-Age={max_age_seconds}",
+        config.embed_cookie_name(),
+    ))
+    .map_err(|error| ApiFailure::internal("cookie_error", &error.to_string()))
+}
+
+/// `GET/HEAD /.treer/embed/check`: ONLY 204 means ready under the full live
+/// host/kind/expiry, cookie-context, membership and interface Policy gate.
+/// Every ordinary negative is an identical empty 200 (never use response.ok
+/// as readiness). Dependency/internal failures remain errors. This read-only,
+/// no-store availability result grants no authority: the UI checks again.
+#[allow(clippy::too_many_arguments)]
 async fn check_embed_session(
+    state: &AppState,
     auth: &AuthStore,
+    policy: &PolicyEngine,
     config: &IngressConfig,
     hostname: &str,
+    agent_id: &str,
     method: &Method,
     headers: &HeaderMap,
 ) -> Result<Response, ApiFailure> {
     if !matches!(*method, Method::GET | Method::HEAD) {
         return Err(ApiFailure::not_found("route_not_found", "route not found"));
     }
+    // The same cookie-context rule as the UI request (security 5580): the
+    // embed cookie counts only for a request that provably comes from the
+    // framed document itself (exactly one `Sec-Fetch-Site: same-origin`).
+    // The bootstrap's own fetch is same-origin; any other context gets the
+    // same empty 200 as "no session", so a 204 is never an oracle for a foreign page.
+    if !super::ingress::embed_cookie_context(headers, false, config, hostname)? {
+        return Ok(embed_check_unavailable());
+    }
     let user = match cookie_value(headers, config.embed_cookie_name()) {
-        Some(token) => auth.authenticate_embed_session(hostname, &token).await?,
+        Some(token) => {
+            auth.authenticate_embed_session_for_check(hostname, &token)
+                .await?
+        }
         None => None,
     };
-    if user.is_none() {
-        return Err(ApiFailure::unauthorized(
-            "ingress_authentication_required",
-            "no embed session for this origin",
-        ));
+    let Some(user_id) = user else {
+        return Ok(embed_check_unavailable());
+    };
+    // The same answer for "no session" and "no longer allowed": the check
+    // reveals nothing the UI request would not.
+    let Some((workspace_id, _server_id)) = auth.agent_interface_target(agent_id).await? else {
+        return Ok(embed_check_unavailable());
+    };
+    let agent = match state.resolve_agent(&workspace_id, agent_id).await {
+        Ok(agent) => agent,
+        Err(error) => return embed_check_resolution_failure(error),
+    };
+    if !interface_gate_allows(policy, &workspace_id, &user_id, &agent).await? {
+        return Ok(embed_check_unavailable());
     }
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::NO_CONTENT;
     no_store(&mut response);
     Ok(response)
+}
+
+fn embed_check_unavailable() -> Response {
+    let mut response = Response::new(Body::empty());
+    no_store(&mut response);
+    response
+}
+
+fn embed_check_resolution_failure(error: ProtocolError) -> Result<Response, ApiFailure> {
+    match error.code.as_str() {
+        "workspace_not_found" | "agent_not_found" | "agent_ambiguous" => {
+            Ok(embed_check_unavailable())
+        }
+        _ => Err(error.into()),
+    }
 }
 
 /// Embed-session responses may be framed by the Console origin only; every
@@ -391,4 +589,27 @@ pub(in crate::api) fn require_tunnel_fallback_allowed(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod availability_resolution_tests {
+    use super::*;
+    #[test]
+    fn embed_availability_unknown_resolution_errors_are_not_normalized() {
+        for code in ["workspace_not_found", "agent_not_found", "agent_ambiguous"] {
+            assert_eq!(
+                embed_check_resolution_failure(ProtocolError::new(code, "test"))
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+        let error = embed_check_resolution_failure(ProtocolError::new(
+            "unexpected_resolution_failure",
+            "test",
+        ))
+        .unwrap_err();
+        assert!(error.status.is_server_error());
+        assert_eq!(error.error.code, "unexpected_resolution_failure");
+    }
 }

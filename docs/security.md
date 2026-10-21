@@ -1305,16 +1305,94 @@ notice and lets the user choose between the shared-origin Proxy tunnel,
 labelled as such, and opening the Agent in a new tab; where the operator set
 `--agent-embed-fallback refuse` only the new tab is offered (the tunnel then
 answers `503 embedded_ui_requires_isolated_origin`). Mint errors and
-timeouts lead to the same notice, never to an automatic downgrade. Codes are never logged. Embed
-sessions are separate rows from standalone sessions: the token of one never
-authenticates through the other cookie. A request that authenticates through
-the embed cookie is served only with exactly one `Sec-Fetch-Site: same-origin`
-header (the framed document's own navigations, fetches and subresources);
-missing, `none`, `same-site` and `cross-site` are refused with
-`403 ingress_request_rejected`. This is what protects a browser that accepts
-third-party cookies but ignores `Partitioned`: it stores the embed cookie as a
-plain `SameSite=None` cookie and the check step passes, yet no cross-site page
-can use it, because such requests never carry `same-origin`. Responses to
+timeouts lead to the same notice, never to an automatic downgrade. Codes are never logged.
+Session reuse (#198): a Console that loads the bootstrap with `?reuse=1` (a
+capability hint that changes no authorization decision) receives a version-2
+`ready` with the nonce hash, answers with a probe that carries only type,
+version and the echoed hash, and the page then calls the check on its own
+origin; a `204` means a live embed session for this origin is already in the
+frame's partition, so the page loads the UI and posts `reused` with the same
+hash and no code is minted; an empty `200` means normally unavailable and
+makes it post `mint`, so the handoff runs as before. For mixed-version
+compatibility the initial probe also treats this exact endpoint's legacy `401`
+as unavailable. Every other status (including `403`, `404`, `429`, `5xx` and
+manual redirects) or transport failure stops with the existing hash-bound
+failure notice, without minting or navigating. Only `204` means ready, never
+`response.ok` or any other `2xx`. After redemption, every result other than
+exactly `204` still fails closed. The page honours one probe, only from its
+parent at
+the configured Console origin and with its own hash; the Console runs a
+one-way state machine bound to the first hash and never mints twice. The check
+answers `204` only under the full request-path gate: session live for this
+host and kind, current membership, and the interface Policy pair for this
+Agent evaluated without recording a decision. All ordinary unavailable states
+return the same empty `200`, with identical response headers and no reason,
+cookie, CORS grant, mint or session refresh. Token, membership, target lookup
+and Policy evaluation failures retain error statuses rather than being treated
+as ordinary absence. Both normal outcomes and errors are `no-store`; neither
+positive nor negative availability is cached. The check introduces no new
+authority or denial-reason disclosure. The check honours
+the embed cookie only under the same request-context rule as the UI request
+(exactly one `Sec-Fetch-Site: same-origin`), so a foreign context holding the
+cookie gets the same empty `200` and the check is no authorization oracle.
+GET and HEAD share these status/body semantics; unsupported methods and outer
+hostname routing retain their existing errors. Cookie interpretation matches
+the protected UI: the first matching cookie in the first Cookie header is
+selected, including when duplicate names occur. This change does not tighten
+that parser; every selected token must still pass the full gate. Reuse changes no
+binding, expiry or revocation: the same cookie is presented, logout and
+membership removal end it, and the UI request and the socket re-check apply
+the gate again. Handshake and UI responses carry no `Server-Timing`; load-time
+measurement is a development-only, fixture-only runner on the Console side.
+Already-running older bootstrap HTML may still mint after any initial non-204
+or transport failure; it never treats the new `200` as ready. `no-store` does
+not replace running JavaScript. On new initial-probe operational failures the
+Console keeps its existing recovery UX: the hash-bound failure invokes a fixed
+Proxy fallback-permission probe, then offers a manual compatibility choice,
+refuses it, or reports unavailable; opening a new tab remains available. There
+is no dedicated retry button and no automatic weaker-origin UI navigation.
+No aggregate availability counters are added: ordinary unavailable probes no
+longer create the old `401` signal in browser/access logs, while operational
+faults retain error statuses. This status contract does not establish clean
+browser acceptance or explain unrelated request failures.
+Embed sessions are separate rows from standalone sessions: the token of one never
+authenticates through the other cookie. The request context is decided before
+any credential is read: for an ordinary request the embed cookie grants authority
+only with exactly one `Sec-Fetch-Site: same-origin`; for an upgrade it
+additionally requires exactly one `Origin` header byte-equal to this Agent
+origin in every case, and `Sec-Fetch-Site` may be absent only on a real WebSocket
+upgrade (`Upgrade: websocket` with `Connection: upgrade`), because Chromium sends
+no Fetch Metadata on an iframe's same-origin handshake. In every other context
+(`none`, `same-site`, `cross-site`, a missing header on an ordinary request,
+duplicated headers, any other or missing `Origin` on an upgrade, any other
+`Upgrade` value) the embed cookie is treated as absent
+and the request takes the standalone path: the standalone cookie if the browser
+sent one, else the authorize redirect for a navigation or
+`401 invalid_ingress_authorization`. An unusable embed cookie therefore never
+turns into a `403` for a request a standalone cookie would authorize, which
+matters because a browser whose Console and apps domain share one site (the
+partition key is the site, not the origin), or that ignores `Partitioned`,
+sends the embed cookie on standalone visits too. The same rule stops a page on
+one Agent origin, framed by the Console, from spending the embed cookie on a
+sibling Agent origin: that request is same-site, so the cookie is ignored.
+A tunnelled WebSocket, standalone or embedded, is authenticated at the upgrade
+and then re-checked by the Proxy every 30 seconds (plus up to 5 seconds of
+per-socket jitter) with the same lookups as the HTTP path: the ingress or
+embed session by hostname, token and kind, current workspace membership, and
+the Agent interface gate evaluated without recording a Policy decision. A gone,
+expired or foreign session closes the socket with code 4401, lost membership or
+a Policy denial with 4403, so Console logout, membership removal, the 12-hour
+expiry and a Policy change end an open socket within about 36 seconds. The same
+re-check covers Console-session sockets on the Proxy-origin interface tunnel
+and ingress-session sockets on workspace App hosts; public and Bearer upgrades
+are not re-checked. The checks run beside the relay, each bounded to 5 seconds,
+so a slow lookup never pauses the socket. Database errors, Policy-store errors
+and timed-out checks keep the socket (nothing new is granted) and are retried;
+after three consecutive failures, about 120 seconds worst case, the socket
+closes with 1011. Any other lookup answer than a matching live session ends the
+socket at once with 4401. The close code is best effort because the
+relay is byte-level; closure within that window, including the Agent-side
+half, is the guarantee. Responses to
 requests carrying the embed cookie get `frame-ancestors` replaced with the
 Console origin and `X-Frame-Options` removed; standalone sessions keep the
 Agent's CSP untouched. Membership is re-checked on every request and Console
@@ -1326,6 +1404,21 @@ Agent's own UI). The isolation gained is separation from the Proxy origin and
 the Console, not from the Agent; the Proxy bounds minting to 30 codes per user
 per minute and 8 outstanding unused codes per user (`429 embed_rate_limited`),
 and the Console answers at most one `ready` per frame navigation.
+
+Purpose-bound prewarm codes and sessions use the same origin/user/Agent and
+nonce checks. Prewarm sessions expire after ten minutes, cannot evict a normal
+session at the eight-row unrotated cap, and never authorize a hidden Agent UI
+navigation. The hidden bootstrap applies the same initial `200`/legacy `401`
+handoff partition and exact post-exchange `204` requirement as foreground reuse;
+other statuses or transport failures end with a hash-bound `warm_failed`.
+An authenticated document request can rotate a prewarm row once only after an
+upstream response exists. Rotation and exchange use the same transactional pair
+lock; the predecessor remains valid only until its original expiry. Rotated
+predecessors are not counted among the eight unrotated rows. These are bounded
+session lifetimes and eviction rules, not live-socket activity or idle tracking.
+The six-per-minute prewarm mint budget is authoritative for a serving Proxy
+process; it does not claim a shared multi-replica or restart-persistent counter.
+Cancelling a browser attempt does not revoke an already exchanged session.
 
 A `Partitioned` cookie is keyed by the top-level **site** (scheme plus
 registrable domain), not the origin. When the Console and the apps domain

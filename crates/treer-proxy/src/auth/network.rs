@@ -1422,6 +1422,7 @@ impl AuthStore {
         user_id: &str,
         agent_id: &str,
         browser_nonce_hash: &str,
+        prewarm: bool,
     ) -> Result<String, AuthFailure> {
         if !valid_ingress_nonce(browser_nonce_hash) {
             return Err(invalid_ingress_authorization());
@@ -1442,8 +1443,8 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?;
         sqlx::query(
-            "INSERT INTO ingress_browser_auth_codes(code, ingress_id, user_id, return_path, expires_at, browser_nonce_hash, embed, agent_id) \
-             VALUES($1, $2, $3, '/', $4, $5, TRUE, $6)",
+            "INSERT INTO ingress_browser_auth_codes(code, ingress_id, user_id, return_path, expires_at, browser_nonce_hash, embed, agent_id, prewarm) \
+             VALUES($1, $2, $3, '/', $4, $5, TRUE, $6, $7)",
         )
         .bind(&code)
         .bind(&ingress.ingress_id)
@@ -1451,6 +1452,7 @@ impl AuthStore {
         .bind((now + Duration::seconds(INGRESS_EMBED_CODE_TTL_SECONDS)).to_rfc3339())
         .bind(browser_nonce_hash)
         .bind(agent_id)
+        .bind(prewarm)
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
@@ -1482,7 +1484,7 @@ impl AuthStore {
         agent_id: &str,
         code: &str,
         browser_nonce: &str,
-    ) -> Result<String, AuthFailure> {
+    ) -> Result<IssuedEmbedSession, AuthFailure> {
         let now = Utc::now();
         let row = sqlx::query(
             "UPDATE ingress_browser_auth_codes c SET used_at = $3 \
@@ -1490,7 +1492,7 @@ impl AuthStore {
              WHERE c.code = $1 AND lower(i.hostname) = lower($2) AND i.enabled = TRUE \
              AND i.ingress_id = c.ingress_id AND c.used_at IS NULL AND c.expires_at > $3 \
              AND c.embed = TRUE AND c.agent_id = $4 \
-             RETURNING c.ingress_id, c.user_id, c.browser_nonce_hash, i.workspace_id",
+             RETURNING c.ingress_id, c.user_id, c.browser_nonce_hash, c.prewarm, i.workspace_id",
         )
         .bind(code)
         .bind(hostname)
@@ -1514,25 +1516,183 @@ impl AuthStore {
         let user_id: String = row.get("user_id");
         self.require_workspace_member(&workspace_id, &user_id)
             .await?;
-        let session_token = format!("ies_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let prewarm: bool = row.get("prewarm");
+        let ingress_id: String = row.get("ingress_id");
+        let mut tx = self.pool.begin().await.map_err(AuthFailure::database)?;
         sqlx::query("DELETE FROM ingress_sessions WHERE expires_at <= $1")
             .bind(now.to_rfc3339())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(AuthFailure::database)?;
+        let token = Self::insert_embed_session(&mut tx, &ingress_id, &user_id, prewarm).await?;
+        tx.commit().await.map_err(AuthFailure::database)?;
+        Ok(IssuedEmbedSession {
+            token,
+            max_age_seconds: if prewarm {
+                INGRESS_PREWARM_SESSION_TTL_SECONDS
+            } else {
+                INGRESS_SESSION_TTL_HOURS * 3600
+            },
+        })
+    }
+
+    /// One embed session row (12 h, or 10 minutes for a prewarm), then the
+    /// per-(user, Agent) cap (#198, security 5580 B / 5618): at most
+    /// [`EMBED_SESSIONS_PER_USER_AGENT`] live embed sessions, counted and
+    /// evicted without rotated rows, which die by their own expiry and are
+    /// bounded by the prewarm mint budget. Eviction takes unrotated prewarm
+    /// rows first (oldest first), then, only for a normal insert, the oldest
+    /// normal row; the row just created is never evicted. A prewarm insert
+    /// never evicts a normal session: when only normal rows remain over the
+    /// cap, the speculative row is taken back and the exchange fails quietly.
+    /// Runs inside the caller's transaction under an advisory lock on the
+    /// (user, ingress) pair, so concurrent inserts see one bound.
+    async fn insert_embed_session(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        ingress_id: &str,
+        user_id: &str,
+        prewarm: bool,
+    ) -> Result<String, AuthFailure> {
+        Self::lock_embed_sessions(tx, user_id, ingress_id).await?;
+        let now = Utc::now();
+        let token = format!("ies_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let expires_at = if prewarm {
+            now + Duration::seconds(INGRESS_PREWARM_SESSION_TTL_SECONDS)
+        } else {
+            now + Duration::hours(INGRESS_SESSION_TTL_HOURS)
+        };
         sqlx::query(
-            "INSERT INTO ingress_sessions(token, ingress_id, user_id, created_at, expires_at, embed) \
-             VALUES($1, $2, $3, $4, $5, TRUE)",
+            "INSERT INTO ingress_sessions(token, ingress_id, user_id, created_at, expires_at, embed, prewarm) \
+             VALUES($1, $2, $3, $4, $5, TRUE, $6)",
         )
-        .bind(&session_token)
-        .bind(row.get::<String, _>("ingress_id"))
-        .bind(&user_id)
+        .bind(&token)
+        .bind(ingress_id)
+        .bind(user_id)
         .bind(now.to_rfc3339())
-        .bind((now + Duration::hours(INGRESS_SESSION_TTL_HOURS)).to_rfc3339())
-        .execute(&self.pool)
+        .bind(expires_at.to_rfc3339())
+        .bind(prewarm)
+        .execute(&mut **tx)
         .await
         .map_err(AuthFailure::database)?;
-        Ok(session_token)
+        sqlx::query(
+            "DELETE FROM ingress_sessions WHERE token IN ( \
+                SELECT token FROM ingress_sessions \
+                WHERE user_id = $1 AND ingress_id = $2 AND embed = TRUE AND expires_at > $3 \
+                AND NOT rotated AND token <> $4 \
+                AND (NOT $6::BOOLEAN OR prewarm) \
+                ORDER BY prewarm DESC, created_at ASC \
+                LIMIT GREATEST((SELECT count(*) FROM ingress_sessions \
+                    WHERE user_id = $1 AND ingress_id = $2 AND embed = TRUE AND expires_at > $3 \
+                    AND NOT rotated) - $5, 0))",
+        )
+        .bind(user_id)
+        .bind(ingress_id)
+        .bind(now.to_rfc3339())
+        .bind(&token)
+        .bind(EMBED_SESSIONS_PER_USER_AGENT)
+        .bind(prewarm)
+        .execute(&mut **tx)
+        .await
+        .map_err(AuthFailure::database)?;
+        if prewarm {
+            // Still over the cap: only normal sessions remain, and a hover
+            // never evicts one of those. Take the speculative row back.
+            let live: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM ingress_sessions \
+                 WHERE user_id = $1 AND ingress_id = $2 AND embed = TRUE AND expires_at > $3 AND NOT rotated",
+            )
+            .bind(user_id)
+            .bind(ingress_id)
+            .bind(now.to_rfc3339())
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(AuthFailure::database)?;
+            if live > EMBED_SESSIONS_PER_USER_AGENT {
+                sqlx::query("DELETE FROM ingress_sessions WHERE token = $1")
+                    .bind(&token)
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(AuthFailure::database)?;
+                tracing::info!(
+                    session_limit = EMBED_SESSIONS_PER_USER_AGENT,
+                    "prewarm embed exchange refused at session cap"
+                );
+                return Err(invalid_ingress_authorization());
+            }
+        }
+        Ok(token)
+    }
+
+    /// Rotation of a prewarm session on its first authorized document request
+    /// (#198, security 5580 refinement 1): a new 12-hour embed session is
+    /// issued for the same user and Agent origin; the prewarm row is marked
+    /// rotated and kept until its own 10-minute expiry so in-flight requests
+    /// carrying the old cookie still authenticate. `None` when the token is
+    /// not a live, unrotated prewarm session for this host.
+    pub async fn rotate_prewarm_embed_session(
+        &self,
+        hostname: &str,
+        token: &str,
+    ) -> Result<Option<String>, AuthFailure> {
+        let now = Utc::now();
+        // Mark and insert in one transaction (security 5618 item 3): a failed
+        // insert never leaves a rotated predecessor behind. The pair lock is
+        // taken first (security 5630): the exchange path locks the pair and
+        // may then evict this very row, so both paths acquire in the same
+        // order and PostgreSQL never has to break a deadlock.
+        let Some((ingress_id, user_id)) = sqlx::query_as::<_, (String, String)>(
+            "SELECT s.ingress_id, s.user_id FROM ingress_sessions s \
+             JOIN service_ingresses i ON i.ingress_id = s.ingress_id \
+             WHERE s.token = $1 AND lower(i.hostname) = lower($2) \
+             AND s.embed = TRUE AND s.prewarm = TRUE AND s.rotated = FALSE AND s.expires_at > $3",
+        )
+        .bind(token)
+        .bind(hostname)
+        .bind(now.to_rfc3339())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        else {
+            return Ok(None);
+        };
+        let mut tx = self.pool.begin().await.map_err(AuthFailure::database)?;
+        Self::lock_embed_sessions(&mut tx, &user_id, &ingress_id).await?;
+        // Re-checked under the lock: a concurrent exchange may have evicted the
+        // row, or a concurrent navigation rotated it already.
+        let marked = sqlx::query(
+            "UPDATE ingress_sessions s SET rotated = TRUE \
+             FROM service_ingresses i \
+             WHERE s.token = $1 AND lower(i.hostname) = lower($2) AND i.ingress_id = s.ingress_id \
+             AND s.embed = TRUE AND s.prewarm = TRUE AND s.rotated = FALSE AND s.expires_at > $3",
+        )
+        .bind(token)
+        .bind(hostname)
+        .bind(now.to_rfc3339())
+        .execute(&mut *tx)
+        .await
+        .map_err(AuthFailure::database)?
+        .rows_affected();
+        if marked == 0 {
+            return Ok(None);
+        }
+        let successor = Self::insert_embed_session(&mut tx, &ingress_id, &user_id, false).await?;
+        tx.commit().await.map_err(AuthFailure::database)?;
+        Ok(Some(successor))
+    }
+
+    /// The per-(user, Agent origin) advisory lock every embed session insert,
+    /// eviction and rotation takes first, inside its transaction.
+    async fn lock_embed_sessions(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        user_id: &str,
+        ingress_id: &str,
+    ) -> Result<(), AuthFailure> {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(format!("embed-sessions:{user_id}:{ingress_id}"))
+            .execute(&mut **tx)
+            .await
+            .map_err(AuthFailure::database)?;
+        Ok(())
     }
 
     pub async fn authenticate_ingress_session(
@@ -1556,12 +1716,62 @@ impl AuthStore {
             .await
     }
 
-    async fn authenticate_ingress_session_kind(
+    pub(crate) async fn authenticate_ingress_session_kind(
         &self,
         hostname: &str,
         token: &str,
         embed: bool,
     ) -> Result<Option<String>, AuthFailure> {
+        let Some((user_id, workspace_id)) = self
+            .ingress_session_identity(hostname, token, embed)
+            .await?
+        else {
+            return Ok(None);
+        };
+        // Preserve non-check callers' existing denial/error behavior.
+        if self
+            .require_workspace_member(&workspace_id, &user_id)
+            .await
+            .is_err()
+        {
+            return Ok(None);
+        }
+        Ok(Some(user_id))
+    }
+
+    /// Availability distinguishes an established denial from failed evaluation.
+    /// Other ingress authentication callers retain their existing semantics.
+    pub(crate) async fn authenticate_embed_session_for_check(
+        &self,
+        hostname: &str,
+        token: &str,
+    ) -> Result<Option<String>, AuthFailure> {
+        let Some((user_id, workspace_id)) =
+            self.ingress_session_identity(hostname, token, true).await?
+        else {
+            return Ok(None);
+        };
+        match self.require_workspace_member(&workspace_id, &user_id).await {
+            Ok(()) => Ok(Some(user_id)),
+            Err(error)
+                if matches!(
+                    error.code(),
+                    "workspace_access_denied" | "workspace_not_found"
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The common host/kind/expiry/token predicate; it never grants membership.
+    async fn ingress_session_identity(
+        &self,
+        hostname: &str,
+        token: &str,
+        embed: bool,
+    ) -> Result<Option<(String, String)>, AuthFailure> {
         let row = sqlx::query(
             "SELECT s.user_id, i.workspace_id FROM ingress_sessions s \
              JOIN service_ingresses i ON i.ingress_id = s.ingress_id \
@@ -1578,14 +1788,7 @@ impl AuthStore {
         let Some(row) = row else { return Ok(None) };
         let user_id: String = row.get("user_id");
         let workspace_id: String = row.get("workspace_id");
-        if self
-            .require_workspace_member(&workspace_id, &user_id)
-            .await
-            .is_err()
-        {
-            return Ok(None);
-        }
-        Ok(Some(user_id))
+        Ok(Some((user_id, workspace_id)))
     }
 
     pub async fn create_app_oauth_code(
@@ -1697,4 +1900,12 @@ impl AuthStore {
             .await?;
         Ok(grant)
     }
+}
+
+/// The session a redeemed embed code produced: the cookie value and the
+/// `Max-Age` the browser must receive (12 h, or 10 minutes for a prewarm).
+#[derive(Debug)]
+pub struct IssuedEmbedSession {
+    pub token: String,
+    pub max_age_seconds: i64,
 }
