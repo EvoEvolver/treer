@@ -51,6 +51,7 @@ pub const ACTION_MACHINE_DELETE: &str = "machine.delete";
 pub const ACTION_MACHINE_EXEC: &str = "machine.exec";
 pub const ACTION_MACHINE_FILE_WRITE: &str = "machine.file.write";
 pub const ACTION_MACHINE_FILE_READ: &str = "machine.file.read";
+pub const ACTION_MACHINE_METRICS_READ: &str = "machine.metrics.read";
 pub const ACTION_IDENTITY_TOKEN_ISSUE: &str = "identity.token.issue";
 pub const ACTION_HUMAN_LIST: &str = "human.list";
 pub const ACTION_SERVICE_LIST: &str = "service.list";

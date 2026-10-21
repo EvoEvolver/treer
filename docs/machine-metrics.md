@@ -100,7 +100,9 @@ The bounded one-shot helper is a change from the proposed long-lived helper.
 
 Proxy admits two concurrent metrics responses per process, with one per actor
 and at most four per machine. Admission follows authorization and remains owned
-by HTTP bytes through slow-reader transport. Responses are at most 1 MiB and
+by HTTP bytes through slow-reader transport. Agent callers currently share the
+`machine` admission actor within a machine, so one Agent's outstanding response
+can make another Agent's query busy. Responses are at most 1 MiB and
 all outcomes are `no-store`; busy includes `Retry-After: 5`. Metric bodies do not
 enter Controller result replay, Proxy history/database/logs or browser storage.
 Old Controllers return unsupported, offline machines return unavailable.

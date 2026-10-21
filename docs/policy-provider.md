@@ -65,6 +65,16 @@ owned by the Proxy.
 
 ## Default Policy
 
+`machine.metrics.read` authorizes the machine resource for both human and Agent
+real-time/history queries. It grants neither `machine.exec` nor file access.
+The metrics endpoint checks identity, workspace membership and machine binding
+before Policy, and rechecks identity/binding/Policy before returning bytes.
+Providers must register this action and explicitly cover intended readers in
+enforce mode; no implicit Agent grant is added. Collection itself is local and
+default-on for capable Controllers; denying reads does not stop collection.
+See [Machine hardware metrics](machine-metrics.md) for local disable/purge and
+the upgrade exposure under the existing monitor/default-allow mode.
+
 Schema v2 adds path/glob/prefix selectors, typed folder bindings, and AND folder
 relations without changing defaults. New Core requests
 `max_schema_version=2`; old Core rejects schema 2 rather than dropping conditions.

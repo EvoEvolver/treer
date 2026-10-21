@@ -96,12 +96,15 @@ impl Store {
         let mut salt_file = store.open_file("salt", true, false)?;
         if salt_file.metadata()?.len() == 0 {
             let _lease = store.writer_lease()?;
-            let mut digest = Sha256::new();
-            digest.update(uuid::Uuid::new_v4().as_bytes());
-            digest.update(uuid::Uuid::new_v4().as_bytes());
-            let bytes = digest.finalize();
-            salt_file.write_all(&bytes)?;
-            salt_file.sync_all()?;
+            // Another cold opener may have initialized it while we waited.
+            if salt_file.metadata()?.len() == 0 {
+                let mut digest = Sha256::new();
+                digest.update(uuid::Uuid::new_v4().as_bytes());
+                digest.update(uuid::Uuid::new_v4().as_bytes());
+                let bytes = digest.finalize();
+                salt_file.write_all(&bytes)?;
+                salt_file.sync_all()?;
+            }
         }
         salt_file.rewind()?;
         salt_file.read_exact(&mut store.salt)?;

@@ -1348,6 +1348,15 @@ requires `agent.tree.manage`. Conflicts fail before any process starts.
 
 ## Host and Controller
 
+Upgrading to a Controller with `machine.metrics.v1` enables five-second local
+CPU/RAM/NVIDIA collection by default, including when nobody is viewing it, with
+at most 24 hours of local history. Workspace members who can reach the machine
+can query it under the existing default Policy mode; enforce-mode providers
+must explicitly handle `machine.metrics.read` for human and Agent subjects.
+An OS-account owner can run `treer-agent-server metrics disable` to refuse
+queries and purge history, or `metrics enable` to resume collection. These
+controls apply to this account's shared installation, not all OS accounts.
+
 `treer-agent-host` is the stable process boundary. It understands only raw
 process commands, PTY input/output, resize, stop, and revisioned output replay.
 It does not understand agent kinds, prompts, workspaces, or the Proxy protocol.

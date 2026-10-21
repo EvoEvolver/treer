@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use std::sync::{Mutex, OnceLock};
 use treer_protocol::{MachineMetricsQuery, MachineMetricsResponse};
 
-const ACTION: &str = "machine.metrics.read";
+use crate::policy::ACTION_MACHINE_METRICS_READ as ACTION;
 static ADMITTED: OnceLock<Mutex<HashSet<(String, String, String)>>> = OnceLock::new();
 
 struct Admission((String, String, String));
@@ -183,7 +183,15 @@ pub(crate) async fn read_machine_metrics(
             "unsupported_command" | "unsupported_capability" | "controller_upgrade_required" => {
                 metrics_error("machine_metrics_unsupported")
             }
-            code if code.starts_with("machine_metrics_") => metrics_error(code),
+            code @ ("machine_metrics_invalid_query"
+            | "machine_metrics_invalid_range"
+            | "machine_metrics_forbidden"
+            | "machine_metrics_offline"
+            | "machine_metrics_unsupported"
+            | "machine_metrics_disabled"
+            | "machine_metrics_busy"
+            | "machine_metrics_timeout"
+            | "machine_metrics_invalid_response") => metrics_error(code),
             _ => metrics_error("machine_metrics_invalid_response"),
         })?;
         // Bound untrusted shapes before any second serialization; use typed
