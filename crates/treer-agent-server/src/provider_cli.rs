@@ -26,7 +26,9 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256, Sha512};
+#[cfg(unix)]
+use sha2::Sha256;
+use sha2::{Digest, Sha512};
 use tokio::io::AsyncReadExt;
 use tracing::warn;
 use treer_protocol::{
@@ -578,7 +580,7 @@ impl ProviderCliService {
 
     /// Test constructor: a fixture PATH (fixture npm) and a table whose
     /// integrity matches fixture tarballs. Production always embeds.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn for_test(
         root: PathBuf,
         server_id: &str,
@@ -639,7 +641,7 @@ impl ProviderCliService {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_operation_budget(&self, budget: Duration) {
         *self
             .inner
@@ -1854,6 +1856,7 @@ fn verify_file(
 /// Lexically resolves a symlink target read from `<prefix>/bin` to a path
 /// relative to the prefix: `..` pops, nothing may escape the prefix, and an
 /// absolute target must start inside it. `None` when it escapes.
+#[cfg(unix)]
 fn entry_target_within(target: &str, prefix_real: &Path) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
     let rest = if let Some(stripped) = target.strip_prefix('/') {

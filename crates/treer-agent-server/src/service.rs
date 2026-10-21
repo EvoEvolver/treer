@@ -1354,11 +1354,16 @@ fn retry_busy_executable<T>(
     mut spawn: impl FnMut() -> std::io::Result<T>,
     deadline: Instant,
 ) -> std::io::Result<T> {
+    #[cfg(not(unix))]
+    {
+        let _ = deadline;
+        spawn()
+    }
+    #[cfg(unix)]
     loop {
         match spawn() {
             Ok(child) => return Ok(child),
             Err(error) => {
-                #[cfg(unix)]
                 if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline {
                     std::thread::sleep(
                         Duration::from_millis(50)
@@ -1366,8 +1371,6 @@ fn retry_busy_executable<T>(
                     );
                     continue;
                 }
-                #[cfg(not(unix))]
-                let _ = deadline;
                 return Err(error);
             }
         }

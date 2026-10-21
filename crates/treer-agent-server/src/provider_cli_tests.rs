@@ -4,11 +4,14 @@
 //! fixture global prefix. The recipe table under test is the embedded release
 //! table with the Codex integrity replaced by the fixture tarball's SHA-512.
 use super::*;
+#[cfg(unix)]
 use serde_json::Value;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::time::Duration;
+#[cfg(unix)]
 use treer_protocol::{
     decide_provider_cli_action, ProviderCliObservedState, ProviderCliVersionRelation,
     PROVIDER_CLI_RETAINED_OPERATIONS, PROVIDER_RECIPES_TABLE,
@@ -16,11 +19,15 @@ use treer_protocol::{
 
 const TARBALL: &[u8] = b"fixture tarball bytes: not a real package\n";
 /// Fixture bytes standing in for the platform's native package tarball.
+#[cfg(unix)]
 const NATIVE_TARBALL: &[u8] = b"fixture native tarball bytes: not a real package\n";
+#[cfg(unix)]
 const CLAUDE: &str = "claude-native-npm";
+#[cfg(unix)]
 const CLAUDE_PINNED: &str = "2.1.302";
 /// The embedded Codex recipe's pinned version; the fixture install writes a
 /// binary reporting it, like a real global install would.
+#[cfg(unix)]
 const PINNED: &str = "0.163.0";
 
 struct TempDir(PathBuf);
@@ -45,6 +52,7 @@ impl Drop for TempDir {
 }
 const CODEX: &str = "codex-npm-posix";
 
+#[cfg(unix)]
 struct Fixture {
     _dir: TempDir,
     root: PathBuf,
@@ -68,6 +76,7 @@ fn integrity_of(bytes: &[u8]) -> String {
     )
 }
 
+#[cfg(unix)]
 fn table_with_codex_integrity(integrity: &str) -> ValidatedProviderTable {
     let mut table: Value = serde_json::from_str(PROVIDER_RECIPES_TABLE).unwrap();
     let codex = table["recipes"]
@@ -181,6 +190,7 @@ if [ -f "$dir/node-arch-wrong" ]; then echo other; else cat "$dir/node-arch"; fi
     }
 }
 
+#[cfg(unix)]
 impl Fixture {
     fn service(&self) -> ProviderCliService {
         ProviderCliService::for_test(
@@ -294,12 +304,14 @@ impl Fixture {
     }
 }
 
+#[cfg(unix)]
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
 /// The embedded table with this platform's Claude native pin pointing at the
 /// fixture native tarball and the given placed-binary bytes.
+#[cfg(unix)]
 fn table_with_native(binary: &[u8]) -> ValidatedProviderTable {
     let mut table: Value = serde_json::from_str(PROVIDER_RECIPES_TABLE).unwrap();
     let recipes = table["recipes"].as_array_mut().unwrap();
@@ -332,6 +344,7 @@ fn native_fixture(line: &str) -> Fixture {
     fixture
 }
 
+#[cfg(unix)]
 async fn run_native(
     fixture: &Fixture,
     service: &ProviderCliService,
@@ -366,6 +379,7 @@ fn operation_id(n: u32) -> String {
     format!("pco_{n:032x}")
 }
 
+#[cfg(unix)]
 async fn wait_terminal(service: &ProviderCliService, id: &str) -> ProviderCliOperationReport {
     let deadline = Instant::now() + Duration::from_secs(40);
     loop {
