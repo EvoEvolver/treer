@@ -903,3 +903,25 @@ caller and strict parser. It records source/body hashes, not samples, in test
 attachments. Without a real source capture this gate skips explicitly; the
 synthetic metrics suite does not substitute for it. Captured-source acceptance
 still does not establish authenticated Proxy/native lifecycle acceptance.
+
+
+For browser-direct local integration, build the production UI, then run
+`node e2e/native-metrics-direct.mjs PRIVATE_BINDING OUTPUT_DIRECTORY` from `web`.
+The private mode0600 JSON binding names `proxy_origin` (HTTP127.0.0.1),
+`organization_id`, `workspace_id`, `server_id`, `machine_name`, fixture `email` /
+`password`, and the native `source_sha`. Alternatively, an owner-supplied
+`cookie` (one name=value pair) uses isolated contexts with the existing fixture
+session; no logout of that shared session is performed, and its revocation
+remains with the fixture owner. Missing organization/name metadata may be read
+from actual authorized workspace/snapshot discovery. The fixture owner keeps the real native
+Proxy/Controller and collector alive, with at least two samples and Proxy
+`--app-public-url http://127.0.0.1:19485`; the script serves the built UI and
+runtime configuration at that address. Chromium, Firefox and WebKit log in
+through the real UI and query all four ranges against the actual Proxy, without
+API mocks or capture replay. A transport guard permits only the two loopback
+origins, read requests and login/logout writes. Results retain response hashes,
+fixed stages and numeric status, never credentials, response bodies, screenshots
+or browser state. Each runner-created login is logged out and checked with `/api/auth/me`401;
+unknown cleanup remains a failed result. The fixture owner retains responsibility
+for test workspace/process teardown. This opt-in gate grants no live deployment
+or machine update authority and does not run as part of the synthetic suite.
