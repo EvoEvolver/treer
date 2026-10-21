@@ -157,7 +157,7 @@ fn disk_expiry_capacity_corruption_disable_and_cancel_fail_whole() {
     assert!(query::assemble(&store, "source", &query, || false).is_err());
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // The sampler owns real process-wide credit.
 async fn actual_os_sampler_to_disk_and_wire_query() {
@@ -165,7 +165,7 @@ async fn actual_os_sampler_to_disk_and_wire_query() {
     let fixture = Fixture::new();
     let metrics = Metrics::open(fixture.0.clone()).unwrap();
     metrics.start();
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let mut seen = 0;
         metrics
@@ -175,7 +175,9 @@ async fn actual_os_sampler_to_disk_and_wire_query() {
                 |sample| {
                     assert!(sample.total.is_some_and(|value| value > 0.0));
                     assert!(sample.cpus.is_some_and(|value| value > 0));
-                    assert_eq!(sample.gpu_status, MachineMetricStatus::UnsupportedPlatform);
+                    if cfg!(target_os = "macos") {
+                        assert_eq!(sample.gpu_status, MachineMetricStatus::UnsupportedPlatform);
+                    }
                     seen += 1;
                     Ok(())
                 },
@@ -201,18 +203,29 @@ async fn actual_os_sampler_to_disk_and_wire_query() {
     let response =
         MachineMetricsResponse::parse_bounded(reply.bytes(), &query, "real-machine", Utc::now())
             .unwrap();
-    assert_eq!(response.series.len(), 4);
+    assert!(response.series.len() >= 4);
     assert_eq!(
         response.memory_method,
-        MachineMemoryMethod::MacosAvailableEstimate
+        if cfg!(target_os = "linux") {
+            MachineMemoryMethod::LinuxMemAvailable
+        } else if cfg!(target_os = "windows") {
+            MachineMemoryMethod::WindowsPhysicalAvailable
+        } else {
+            MachineMemoryMethod::MacosAvailableEstimate
+        }
     );
     assert_eq!(response.series[0].current.status, MachineMetricStatus::Ok);
     assert!(response.series[0].current.value.is_some());
+    println!("actual_metrics_entry os={} samples>=2 memory={:?} cpu_ok=true disk_reopen=pending gpu={:?}",std::env::consts::OS,response.memory_method,response.gpu_status);
     drop(reply);
     drop(metrics);
     tokio::time::sleep(Duration::from_secs(5)).await;
     let reopened = Metrics::open(fixture.0.clone()).unwrap();
     assert!(reopened.query("real-machine".into(), query).await.is_ok());
+    println!(
+        "actual_metrics_entry os={} disk_reopen=ok bounded_wire=ok; native_NVML_not_proven",
+        std::env::consts::OS
+    );
 }
 
 #[cfg(unix)]

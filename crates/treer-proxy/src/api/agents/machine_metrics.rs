@@ -211,8 +211,31 @@ pub(crate) async fn read_machine_metrics(
                     error: ProtocolError::new("workspace_not_found", "Workspace is unavailable"),
                 });
             }
-        } else if auth.authenticate_machine(&headers).await.is_err() {
-            return Err(metrics_error("machine_metrics_forbidden"));
+        } else {
+            let current_machine = auth
+                .authenticate_machine(&headers)
+                .await
+                .map_err(|_| metrics_error("machine_metrics_forbidden"))?;
+            if let Some(crate::policy::PolicySubject::Agent {
+                server_id: source_server,
+                agent_id,
+            }) = subject.as_ref()
+            {
+                // Ordinary Agent authentication caches credentials. Publication
+                // must instead observe revocation/rotation during this query.
+                auth.authenticate_bound_runtime(&workspace_id, source_server, agent_id, &headers)
+                    .await
+                    .map_err(|_| metrics_error("machine_metrics_forbidden"))?;
+            }
+            let current_subject =
+                control_policy_subject(&state, Some(&current_machine), &headers, &workspace_id)
+                    .await
+                    .map_err(|_| metrics_error("machine_metrics_forbidden"))?;
+            if current_machine.workspace_id.as_deref() != Some(workspace_id.as_str())
+                || current_subject != subject
+            {
+                return Err(metrics_error("machine_metrics_forbidden"));
+            }
         }
         // Identity may disappear while the source query runs. Re-resolve it
         // before the final Policy check instead of publishing a stale grant.
@@ -258,6 +281,53 @@ pub(crate) async fn read_machine_metrics(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use treer_protocol::*;
+
+    fn source_response(query: &MachineMetricsQuery, server_id: &str) -> MachineMetricsResponse {
+        MachineMetricsResponse {
+            schema: CAPABILITY_MACHINE_METRICS.into(),
+            server_id: server_id.into(),
+            generated_at: Utc::now(),
+            from: query.from,
+            to: query.to,
+            retained_from: None,
+            truncated: false,
+            sample_interval_ms: 5000,
+            bucket_width_ms: 5000,
+            stale_after_ms: 15000,
+            logical_cpus: None,
+            memory_method: MachineMemoryMethod::Unavailable,
+            scope: "os_visible_machine".into(),
+            gpus: vec![],
+            inventory_truncated: false,
+            gpu_status: MachineMetricStatus::WarmingUp,
+            series: [
+                MachineMetricKind::CpuUtilization,
+                MachineMetricKind::RamUsed,
+                MachineMetricKind::RamAvailable,
+                MachineMetricKind::RamTotal,
+            ]
+            .into_iter()
+            .map(|kind| MachineMetricSeries {
+                kind,
+                gpu_id: None,
+                unit: if kind == MachineMetricKind::CpuUtilization {
+                    MachineMetricUnit::Percent
+                } else {
+                    MachineMetricUnit::Bytes
+                },
+                current: MachineMetricCurrent {
+                    status: MachineMetricStatus::WarmingUp,
+                    value: None,
+                    sampled_at: None,
+                    age_ms: None,
+                },
+                points: vec![],
+            })
+            .collect(),
+        }
+    }
+
     #[test]
     fn strict_query_defaults_duplicates_and_bounds() {
         let now = Utc::now();
@@ -271,6 +341,145 @@ mod tests {
             "extra=1",
         ] {
             assert!(parse_query(Some(raw), now).is_err(), "{raw}");
+        }
+    }
+
+    #[tokio::test]
+    async fn machine_metrics_revalidates_uncached_agent_identity_after_query() {
+        let auth = AuthStore::for_test("test").await;
+        auth.seed_test_workspace("default").await;
+        let enrollment = auth
+            .create_machine_enrollment("default", "test")
+            .await
+            .unwrap();
+        let enrolled = auth.claim_machine_enrollment(&enrollment).await.unwrap();
+        for case in ["valid", "revoked", "rotated", "deleted"] {
+            let state = crate::api::tests::state_with_managed_agent().await;
+            let mut server = state.resolve_server("default", "machine-a").await.unwrap();
+            server.server_id = enrolled.server_id.clone();
+            server.name = enrolled.server_id.clone();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            state
+                .register_server_instance_with_capabilities(
+                    server,
+                    Uuid::new_v4(),
+                    "metrics-test".into(),
+                    vec![CAPABILITY_MACHINE_METRICS.into()],
+                    tx,
+                )
+                .await
+                .unwrap();
+            let mut agent = state.resolve_agent("default", "agent-a").await.unwrap();
+            agent.agent_id = format!("metrics-{case}");
+            agent.name = agent.agent_id.clone();
+            agent.server_id = enrolled.server_id.clone();
+            state.test_insert_agent(agent.clone()).await;
+            let credential = auth
+                .create_agent_credential("default", &enrolled.server_id, &agent.agent_id)
+                .await
+                .unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {}", enrolled.machine_token)).unwrap(),
+            );
+            headers.insert(
+                AGENT_ID_HEADER,
+                HeaderValue::from_str(&agent.agent_id).unwrap(),
+            );
+            headers.insert(
+                WORKLOAD_CREDENTIAL_HEADER,
+                HeaderValue::from_str(&credential).unwrap(),
+            );
+            let machine = auth.authenticate_machine(&headers).await.unwrap();
+            assert!(auth
+                .authenticate_agent(&machine, &headers)
+                .await
+                .unwrap()
+                .is_some());
+            let task = tokio::spawn({
+                let (state, auth, headers, machine, target) = (
+                    state.clone(),
+                    auth.clone(),
+                    headers.clone(),
+                    machine.clone(),
+                    enrolled.server_id.clone(),
+                );
+                async move {
+                    read_machine_metrics(
+                        State(state),
+                        Extension(auth),
+                        Extension(PolicyEngine::allow_all()),
+                        None,
+                        Some(Extension(machine)),
+                        headers,
+                        Path(("default".into(), target)),
+                        RawQuery(None),
+                    )
+                    .await
+                }
+            });
+            let envelope = crate::api::tests::next_lifecycle_command(&mut rx).await;
+            let AgentCommand::MachineMetrics { query } = envelope.command else {
+                panic!("metrics dispatch");
+            };
+            match case {
+                "revoked" => {
+                    sqlx::query("UPDATE agent_credentials SET revoked_at='2026-01-01T00:00:00Z' WHERE agent_id=$1").bind(&agent.agent_id).execute(&auth.pool()).await.unwrap();
+                }
+                "rotated" => {
+                    sqlx::query(
+                        "UPDATE agent_credentials SET secret_hash=repeat('0',64) WHERE agent_id=$1",
+                    )
+                    .bind(&agent.agent_id)
+                    .execute(&auth.pool())
+                    .await
+                    .unwrap();
+                }
+                "deleted" => {
+                    state
+                        .delete_agent("default", &agent.agent_id)
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+            // The ordinary TTL cache still accepts the original credential;
+            // the metrics publication boundary must not rely on that cache.
+            assert!(auth
+                .authenticate_agent(&machine, &headers)
+                .await
+                .unwrap()
+                .is_some());
+            state
+                .complete_command(CommandResult::success(
+                    envelope.command_id,
+                    serde_json::to_value(source_response(&query, &enrolled.server_id)).unwrap(),
+                ))
+                .await;
+            let response = task.await.unwrap();
+            assert_eq!(
+                response.status(),
+                if case == "valid" {
+                    StatusCode::OK
+                } else {
+                    StatusCode::FORBIDDEN
+                },
+                "{case}"
+            );
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            let body =
+                axum::body::to_bytes(response.into_body(), MACHINE_METRICS_MAX_RESPONSE_BYTES)
+                    .await
+                    .unwrap();
+            if case == "valid" {
+                assert!(serde_json::from_slice::<MachineMetricsResponse>(&body).is_ok());
+            } else {
+                assert!(std::str::from_utf8(&body)
+                    .unwrap()
+                    .contains("machine_metrics_forbidden"));
+                assert!(!std::str::from_utf8(&body).unwrap().contains("\"series\""));
+            }
         }
     }
 
@@ -418,53 +627,14 @@ mod tests {
             let AgentCommand::MachineMetrics { query } = envelope.command else {
                 panic!("typed metrics dispatch")
             };
-            let response = MachineMetricsResponse {
-                schema: CAPABILITY_MACHINE_METRICS.into(),
-                server_id: if case == "invalid" {
+            let response = source_response(
+                &query,
+                if case == "invalid" {
                     "other"
                 } else {
                     "machine-a"
-                }
-                .into(),
-                generated_at: Utc::now(),
-                from: query.from,
-                to: query.to,
-                retained_from: None,
-                truncated: false,
-                sample_interval_ms: 5000,
-                bucket_width_ms: 5000,
-                stale_after_ms: 15000,
-                logical_cpus: None,
-                memory_method: MachineMemoryMethod::Unavailable,
-                scope: "os_visible_machine".into(),
-                gpus: vec![],
-                inventory_truncated: false,
-                gpu_status: MachineMetricStatus::WarmingUp,
-                series: [
-                    MachineMetricKind::CpuUtilization,
-                    MachineMetricKind::RamUsed,
-                    MachineMetricKind::RamAvailable,
-                    MachineMetricKind::RamTotal,
-                ]
-                .into_iter()
-                .map(|kind| MachineMetricSeries {
-                    kind,
-                    gpu_id: None,
-                    unit: if kind == MachineMetricKind::CpuUtilization {
-                        MachineMetricUnit::Percent
-                    } else {
-                        MachineMetricUnit::Bytes
-                    },
-                    current: MachineMetricCurrent {
-                        status: MachineMetricStatus::WarmingUp,
-                        value: None,
-                        sampled_at: None,
-                        age_ms: None,
-                    },
-                    points: vec![],
-                })
-                .collect(),
-            };
+                },
+            );
             let mut data = serde_json::to_value(response).unwrap();
             data["future_extension"] = json!("must-not-forward");
             if case == "revoked" {
