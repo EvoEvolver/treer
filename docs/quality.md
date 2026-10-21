@@ -1,5 +1,16 @@
 # Quality And Maintenance
 
+### Workspace audit summary baseline
+
+The isolated PostgreSQL-backed Proxy suite covers the audit summary and feed
+authorization/scoping, filter agreement, category coverage, no-store responses,
+rate/concurrency and grouping bounds, typed-instant triggers and incremental
+backfill. Keep the Linux fix-forward tests using microsecond comparison instants
+and trigger/backfill agreement for nanosecond text. Run the complete suite when
+restoring this baseline so existing audit retention, admission and mutation
+behavior is checked alongside the summary extension. Local fixture success is
+not production migration or browser acceptance.
+
 ### Embedded session availability checks
 
 The Proxy embed-session tests use isolated PostgreSQL schemas and a fake local
