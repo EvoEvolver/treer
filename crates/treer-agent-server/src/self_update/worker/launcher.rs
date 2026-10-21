@@ -143,6 +143,8 @@ pub(in crate::self_update) async fn execute(
     )?;
     let intent = invocation.record_start_intent()?;
     intent.verify()?;
+    #[cfg(test)]
+    death_checkpoint("intent");
     controller.verify()?;
     cli.verify()?;
     let mut command = std::process::Command::new(invocation.program());
@@ -160,6 +162,8 @@ pub(in crate::self_update) async fn execute(
         deadline,
         4 * 1024 * 1024,
         |child| {
+            #[cfg(test)]
+            death_checkpoint("spawned");
             let result = (|| -> Result<_> {
                 intent.verify()?;
                 let image = treer_platform::process_image::ProcessImage::capture(child.id())?;
@@ -172,6 +176,8 @@ pub(in crate::self_update) async fn execute(
             match result {
                 Ok(record) => {
                     child_record = Some(record);
+                    #[cfg(test)]
+                    death_checkpoint("child_record");
                     Ok(())
                 }
                 Err(_) => Err(std::io::Error::other("update_recovery_required")),
@@ -192,4 +198,17 @@ pub(in crate::self_update) async fn execute(
         bail!("update_recovery_required");
     }
     Ok(output)
+}
+
+// Test-only synchronization in the real executor, never a production switch.
+#[cfg(test)]
+pub(in crate::self_update) fn death_checkpoint(stage: &str) {
+    if std::env::var("TREER_TEST_LAUNCHER_DEATH_STAGE").as_deref() != Ok(stage) {
+        return;
+    }
+    let ready = std::env::var_os("TREER_TEST_LAUNCHER_DEATH_READY").unwrap();
+    std::fs::write(ready, b"ready").unwrap();
+    loop {
+        std::thread::park();
+    }
 }

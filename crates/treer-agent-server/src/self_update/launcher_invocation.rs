@@ -1828,4 +1828,5 @@ mod tests {
             assert!(selected.lock().is_err());
         }
     }
+    include!("launcher_invocation/death_tests.rs");
 }

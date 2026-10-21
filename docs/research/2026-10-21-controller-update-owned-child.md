@@ -163,3 +163,31 @@ launcher/health/claim outcome and relevant manager lifecycle are exercised on
 that independently isolated target. E1's earlier/mid-install windows still need
 real authenticated worker-kill evidence in addition to the existing cancellation,
 intent, image and handoff tests. No claim that one inert probe closes all gates.
+
+
+## Owned launcher process-death follow-up on canonical Core union
+
+The follow-up is based on Core's `38728682` union through `98c9ddd2`, not the
+competing `1cbf3ca0` integration checkpoint. The native executor has test-only
+synchronization after durable intent, immediately after spawn but before child
+identity persistence, and after child identity persistence. An explicitly
+selected private test subprocess also stops before intent and after the real
+install executor returns but before any status invocation. The parent sends
+SIGKILL to its retained subprocess and reopens the journal twice. Receipt and
+intent/child records remain byte-stable, the phase remains CoreHealthy, and no
+status intent or release marker appears. The inert native program records at
+most one launch; ordinary same-owner repeat-execute rejection remains covered
+by the existing exclusive-intent test.
+
+These five cases exercise the real owned launcher `execute` path with retained
+Controller/CLI images and durable intent/identity handling. They use a synthetic
+CoreHealthy checkpoint and `OwnedActivation::fixture`, not an authenticated
+production worker handoff or a real installed Controller/launcher. The inert
+child exits after 700 ms on systems without PDEATHSIG; waiting for this bounded
+fixture is not evidence of real installer quiescence. The spawn-before-identity
+case deliberately has no durable child identity and remains ambiguous. Neither
+an available lock after worker death nor the bounded fixture lifetime grants
+replay, noexec or claim release. Full E1 worker/handoff/claim integration and
+E3/E5 manager/disposable-target acceptance remain open. Linux PDEATHSIG's
+separate actual owner-kill test is not relabeled as a macOS guarantee. All
+synchronization is cfg(test); capability remains OFF.
