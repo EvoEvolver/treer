@@ -224,3 +224,34 @@ not run in this fixture. Manager/disposable-account acceptance remains open,
 Windows unsupported and capability OFF. The extra bootstrap synchronization and
 legacy-guard accessors exist only under cfg(test); no production replay or
 ownership-adoption entry point is added.
+
+
+## Live Core refusal to launcher/claim composition
+
+A fourth authenticated-worker fixture case calls the actual one-shot
+`begin_core().run()` with no saved Host baseline. It uses the Live engine, not
+an injected Fake engine. Core must return RecoveryRequired without changing
+the Prepared receipt, keep the transferred locks while the worker remains
+owned, and permanently reject a second begin_core call. Calling the consuming
+`finish_launcher()` after that outcome must refuse before launcher preflight,
+Node resolution, account HOME access or installer execution. Once that owner is
+consumed, the durable local claim still blocks the real legacy guard through
+the same reopen checks as the process-death cases. This is a negative
+composition check, not successful update acceptance.
+
+Positive whole-worker-to-launcher execution has a concrete disposable-target
+dependency. The production `Invocation::prepare` intentionally resolves HOME
+from the effective OS account database and Node from fixed trusted locations;
+redirecting HOME in an environment variable does not isolate its installer.
+It then requires a genuine saved Host/workload baseline, authenticated replaced
+Controller/CLI image and epoch, fixed launcher install/status under that same
+account, quiescent completion and independent live image/Host/workload health.
+The prepare-only manager fixture does not provide that account or those live
+proofs. Running this path in the current shared account would write real
+launcher state and is outside this task's authorization. No test-only context,
+forged CoreHealthy receipt, copied binding or fake health return is substituted
+for these gates. The next positive acceptance run therefore needs an identified
+existing disposable account/VM with its own enrolled fixture and trusted Node,
+private Host/Controller/state roots, exact approved images and the generated
+manager plan. No such target has been established by the current local tests;
+no account, system service or VM infrastructure is created implicitly.

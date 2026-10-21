@@ -93,22 +93,25 @@ fn bootstrap_death_parent() {
         });
         wait_fixture(|| job.join("test-worker-authenticated").exists());
         std::fs::write(job.join("test-parent-authenticated"), b"ready").unwrap();
-        if stage == "owned" {
+        if matches!(stage.as_str(), "owned" | "core_refused") {
             peer.unwrap()
                 .offer_ownership(&journal, &selected, &held)
                 .unwrap();
             wait_fixture(|| {
                 assert!(child.0.try_wait().unwrap().is_none());
-                job.join("test-worker-owned").exists()
+                job.join(format!("test-worker-{stage}")).exists()
             });
         }
     }
     let receipt = std::fs::read(job.join("receipt.json")).unwrap();
     let claim = std::fs::read(root_path.join("web-active.json")).unwrap();
     let ownership = std::fs::read(job.join("ownership.json")).ok();
-    assert_eq!(ownership.is_some(), stage == "owned");
-    if stage == "owned" {
-        let value: serde_json::Value = serde_json::from_slice(ownership.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        ownership.is_some(),
+        matches!(stage.as_str(), "owned" | "core_refused")
+    );
+    if let Some(bytes) = &ownership {
+        let value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
         assert_eq!(value["pid"], child.0.id());
         assert!(!value["creation"].as_str().unwrap().is_empty());
     }
@@ -170,8 +173,32 @@ fn bootstrap_death_worker() {
     let id = std::env::var("TREER_TEST_WORKER_ID").unwrap();
     let resources =
         WorkerResources::open_at(&root, &id, || Inventory::load(&config, "fixture-host")).unwrap();
-    let owned = resources.enter().unwrap(); // Actual authenticated SAME-lock transfer.
+    let mut owned = resources.enter().unwrap(); // Actual authenticated SAME-lock transfer.
     assert_eq!(owned.progress(), CoreProgress::RecoveryRequired);
+    if std::env::var("TREER_TEST_WORKER_STAGE").as_deref() == Ok("core_refused") {
+        // Exercise the real Live engine with missing baseline, never a Fake
+        // engine or a fabricated CoreHealthy receipt/launcher permission.
+        let before = owned.journal.read().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(
+            runtime.block_on(owned.begin_core().unwrap().run()),
+            CoreProgress::RecoveryRequired
+        );
+        assert_eq!(owned.journal.read().unwrap(), before);
+        assert!(owned.selected.lock().is_err());
+        assert!(owned.begin_core().is_err());
+        assert_eq!(
+            runtime
+                .block_on(owned.finish_launcher())
+                .unwrap_err()
+                .to_string(),
+            "update_recovery_required"
+        );
+        bootstrap_checkpoint("core_refused");
+    }
     bootstrap_checkpoint("owned");
     panic!("fixture did not stop at selected boundary");
 }
@@ -186,7 +213,7 @@ fn sigkill_worker_bootstrap_keeps_claim() {
     std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o700)).unwrap();
     f.enrollment("srv_a", "ws_a", &installed);
     let digest = digest_file(&std::fs::File::open(&installed).unwrap()).unwrap();
-    for stage in ["running", "authenticated", "owned"] {
+    for stage in ["running", "authenticated", "owned", "core_refused"] {
         // Short physical path for Darwin sockaddr_un; never an enrolled state root.
         let path = std::fs::canonicalize("/tmp")
             .unwrap()
