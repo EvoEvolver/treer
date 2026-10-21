@@ -889,14 +889,25 @@ async fn start_service_and_wait(
 }
 
 pub async fn restore(workspace: &str) -> Result<()> {
-    let (_, config) = installed_service(workspace)?;
-    let activation = if controller_health_document(&config).await.is_some() {
+    let (paths, config) = installed_service(workspace)?;
+    restore_registered_service(&paths, &config).await
+}
+
+async fn restore_registered_service(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    let activation = if controller_health_document(config).await.is_some() {
         ServiceActivation::Managed
     } else {
-        start_and_wait(workspace).await?
+        start_service_and_wait(paths, config).await?
     };
-    wait_for_controller_and_proxy(&config).await?;
-    let mut url = controller_health_url(&config).context("invalid Controller URL")?;
+    wait_for_controller_and_proxy(config).await?;
+    eprintln!("treer: Controller connected; requesting Policy-authorized runtime recovery");
+    let body = request_runtime_restore(config).await?;
+    println!("{body}");
+    wait_for_foreground(activation).await
+}
+
+async fn request_runtime_restore(config: &ServiceConfig) -> Result<String> {
+    let mut url = controller_health_url(config).context("invalid Controller URL")?;
     url.set_path("/api/runtime/restore");
     let response = reqwest::Client::builder()
         .no_proxy()
@@ -910,10 +921,22 @@ pub async fn restore(workspace: &str) -> Result<()> {
     let status = response.status();
     let body = response.text().await?;
     if !status.is_success() {
+        if status == reqwest::StatusCode::FORBIDDEN
+            && serde_json::from_str::<treer_protocol::ApiError>(&body)
+                .is_ok_and(|response| response.error.code == "policy_provider_unavailable")
+        {
+            bail!(
+                "runtime recovery was not authorized: policy_provider_unavailable; \
+                 Controller connectivity does not establish Policy readiness. \
+                 The enrolled machine identity is unchanged. Restore the configured Policy \
+                 provider, then explicitly run `treer-agent-server restore --workspace {}` again; \
+                 no automatic retry or new enrollment is needed",
+                config.workspace
+            );
+        }
         bail!("runtime restore returned {status}: {body}");
     }
-    println!("{body}");
-    wait_for_foreground(activation).await
+    Ok(body)
 }
 
 fn should_migrate_host_socket(current: &Path, preferred: &Path) -> bool {
@@ -974,7 +997,20 @@ pub fn restart(workspace: &str) -> Result<()> {
 
 pub fn restart_controller(workspace: &str) -> Result<()> {
     let (paths, config) = installed_service(workspace)?;
-    restart_controller_at(&paths, &config.host_socket)
+    restart_installed_controller(&paths, &config)
+}
+
+fn restart_installed_controller(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+    if !host_is_running(&config.host_socket) {
+        bail!(
+            "the enrolled machine's Host is not running; restart-controller requires a live Host. \
+             Run `treer-agent-server restore --workspace {}` to start the registered Host and \
+             request Policy-authorized recovery using the existing machine identity; \
+             no new enrollment key is needed",
+            config.workspace
+        );
+    }
+    restart_controller_at(paths, &config.host_socket)
 }
 
 pub fn relocate_root(workspace: &str, root: &Path) -> Result<()> {

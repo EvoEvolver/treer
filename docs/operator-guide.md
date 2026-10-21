@@ -672,6 +672,25 @@ If the webpage still shows Offline, copy:
 treer-agent-server service --workspace ws_… restart-controller
 ```
 
+`restart-controller` requires a running Host. After an operating-system reboot,
+a `nohup` installation has no Host to restart. Preserve the enrollment and run:
+
+```bash
+treer-agent-server restore --workspace ws_…
+```
+
+This starts the registered Host when needed, using the existing machine identity
+and saved credentials. No new enrollment key is needed. Connection-ready output
+only confirms Controller/Proxy connectivity; runtime recovery is a separate
+Policy-authorized request. If it returns `policy_provider_unavailable`, the
+configured Policy provider is unavailable and recovery has not been authorized;
+this error does not establish invalid enrollment credentials. Restore the
+configured provider, then explicitly run the same `restore` command again.
+The command does not automatically retry the recovery POST or change Policy to
+fail open. Previously persisted automatic startup declarations have their own
+machine-scoped validation path, which preserves stopped/deleted intent; a
+Policy failure alone does not prove a same-machine startup dependency cycle.
+
 Each installed binary reports the package version and exact source commit:
 
 ```bash

@@ -873,6 +873,10 @@ struct ActivationFixture {
 #[cfg(unix)]
 impl ActivationFixture {
     async fn new() -> Self {
+        Self::with_routes(Router::new()).await
+    }
+
+    async fn with_routes(routes: Router) -> Self {
         use std::os::unix::fs::PermissionsExt;
 
         let directory =
@@ -923,7 +927,7 @@ exec sleep 5
             service_manager: ServiceManager::Foreground,
             service_fallback_reason: None,
         };
-        let app = Router::new().route(
+        let app = routes.route(
             "/api/health",
             get(|| async {
                 Json(json!({
@@ -961,6 +965,115 @@ exec sleep 5
 
     fn invocations(&self) -> String {
         fs::read_to_string(self.paths.state_dir.join("invocations")).unwrap_or_default()
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn recovery_missing_host_guides_explicit_restore_without_spawning_or_enrollment() {
+    for stale in [false, true] {
+        let fixture = ActivationFixture::new().await;
+        if stale {
+            create_stale_activation_socket(&fixture.config.host_socket);
+        }
+        let error = restart_installed_controller(&fixture.paths, &fixture.config)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Host is not running"));
+        assert!(error.contains("treer-agent-server restore --workspace default"));
+        assert!(error.contains("existing machine identity"));
+        assert!(fixture.invocations().is_empty());
+        assert!(!fixture.paths.config.exists());
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn recovery_policy_unavailable_allows_explicit_retry_with_unchanged_identity() {
+    use axum::http::{HeaderMap, StatusCode};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let routes = Router::new().route(
+        "/api/runtime/restore",
+        axum::routing::post(move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
+            let calls = observed.clone();
+            async move {
+                assert_eq!(headers["x-treer-operator-credential"], "op_test");
+                assert_eq!(body, json!({}));
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    (StatusCode::FORBIDDEN, Json(json!({"error": {
+                        "code": "policy_provider_unavailable", "message": "private upstream diagnostic"
+                    }})))
+                } else {
+                    (StatusCode::OK, Json(json!({"workspace_id":"default", "server_id":"srv_test", "items":[]})))
+                }
+            }
+        }),
+    );
+    let fixture = ActivationFixture::with_routes(routes).await;
+    fixture.config.save(&fixture.paths.config).unwrap();
+    let before = fs::read(&fixture.paths.config).unwrap();
+    let error = restore_registered_service(&fixture.paths, &fixture.config)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("policy_provider_unavailable"));
+    assert!(error.contains("identity is unchanged"));
+    assert!(error.contains("explicitly run"));
+    assert!(!error.contains("private upstream diagnostic"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "no automatic POST retry");
+    restore_registered_service(&fixture.paths, &fixture.config)
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(fs::read(&fixture.paths.config).unwrap(), before);
+    assert!(fixture.invocations().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn recovery_other_denials_are_not_misclassified_or_retried() {
+    use axum::http::StatusCode;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    for (status, code) in [
+        (StatusCode::UNAUTHORIZED, "invalid_credential"),
+        (StatusCode::FORBIDDEN, "policy_denied"),
+        (StatusCode::BAD_GATEWAY, "proxy_unavailable"),
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let routes = Router::new().route(
+            "/api/runtime/restore",
+            axum::routing::post(move || {
+                let calls = observed.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    (
+                        status,
+                        Json(json!({"error":{"code":code,"message":"fixture"}})),
+                    )
+                }
+            }),
+        );
+        let fixture = ActivationFixture::with_routes(routes).await;
+        let error = restore_registered_service(&fixture.paths, &fixture.config)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(code));
+        assert!(!error.contains("policy_provider_unavailable"));
+        assert!(!error.contains("identity is unchanged"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(fixture.invocations().is_empty());
     }
 }
 
