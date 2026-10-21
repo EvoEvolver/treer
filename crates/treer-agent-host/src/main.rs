@@ -8,9 +8,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 use tracing::{info, warn};
 use treer_agent_runtime::{HostRuntime, RuntimeError};
 use treer_host_protocol::{
@@ -22,6 +23,34 @@ use treer_platform::{connect_local, LocalListener, LocalStream};
 use uuid::Uuid;
 
 const RESULT_CACHE_LIMIT: usize = 1024;
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(8);
+
+fn operation_diagnostic(
+    kind: &str,
+    request_id: &str,
+    phase: &str,
+    elapsed_ms: u64,
+    error_code: Option<&str>,
+) {
+    static RATE: std::sync::Mutex<Option<(std::time::Instant, u32)>> = std::sync::Mutex::new(None);
+    let Ok(mut window) = RATE.try_lock() else {
+        return;
+    };
+    let (since, count) = window.get_or_insert((std::time::Instant::now(), 0));
+    if since.elapsed() >= Duration::from_secs(1) {
+        *since = std::time::Instant::now();
+        *count = 0;
+    }
+    if *count >= 20 {
+        return;
+    }
+    *count += 1;
+    drop(window);
+    info!(
+        kind,
+        request_id, phase, elapsed_ms, error_code, "host operation"
+    );
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -48,16 +77,19 @@ enum CommandArgs {
     },
 }
 
+#[derive(Clone)]
 struct HostState {
     runtime: HostRuntime,
-    results: Mutex<ResultCache>,
-    operation_gate: Mutex<()>,
-    restart_controller: mpsc::UnboundedSender<()>,
+    results: Arc<Mutex<ResultCache>>,
+    operations: Arc<Semaphore>,
+    controls: Arc<Semaphore>,
+    restart_controller: mpsc::Sender<()>,
 }
 
 struct ResultCache {
     values: HashMap<String, Result<HostResponse, HostError>>,
     order: VecDeque<String>,
+    bindings: HashMap<String, [u8; 32]>,
 }
 
 impl ResultCache {
@@ -65,6 +97,7 @@ impl ResultCache {
         Self {
             values: HashMap::new(),
             order: VecDeque::new(),
+            bindings: HashMap::new(),
         }
     }
 
@@ -75,9 +108,16 @@ impl ResultCache {
         while self.order.len() >= RESULT_CACHE_LIMIT {
             if let Some(oldest) = self.order.pop_front() {
                 self.values.remove(&oldest);
+                self.bindings.remove(&oldest);
             }
         }
-        self.order.push_back(operation_id.clone());
+        // Unknown effects are tombstones for this Host epoch, not replayable
+        // work. Never make a timed-out mutation runnable by cache eviction.
+        if !response.as_ref().err().is_some_and(|error| {
+            matches!(error.code.as_str(), "input_unknown" | "operation_unknown")
+        }) {
+            self.order.push_back(operation_id.clone());
+        }
         self.values.insert(operation_id, response);
     }
 }
@@ -117,11 +157,12 @@ async fn run_daemon(config: HostDaemonConfig) -> Result<()> {
     let listener = LocalListener::bind(&config.socket_path)
         .with_context(|| format!("failed to bind {}", config.socket_path.display()))?;
     set_socket_permissions(&config.socket_path)?;
-    let (restart_tx, mut restart_rx) = mpsc::unbounded_channel();
+    let (restart_tx, mut restart_rx) = mpsc::channel(1);
     let state = Arc::new(HostState {
         runtime,
-        results: Mutex::new(ResultCache::new()),
-        operation_gate: Mutex::new(()),
+        results: Arc::new(Mutex::new(ResultCache::new())),
+        operations: Arc::new(Semaphore::new(16)),
+        controls: Arc::new(Semaphore::new(8)),
         restart_controller: restart_tx,
     });
     let server_state = Arc::clone(&state);
@@ -215,13 +256,18 @@ async fn spawn_controller(config: &HostDaemonConfig) -> Result<Child> {
 }
 
 async fn serve(mut listener: LocalListener, state: Arc<HostState>) -> Result<()> {
+    let connections = Arc::new(Semaphore::new(32));
     loop {
         let stream = listener
             .accept()
             .await
             .context("failed to accept host client")?;
         let connection_state = Arc::clone(&state);
+        let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
+            continue;
+        };
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(error) = handle_connection(stream, connection_state).await {
                 warn!(%error, "host client disconnected");
             }
@@ -230,10 +276,18 @@ async fn serve(mut listener: LocalListener, state: Arc<HostState>) -> Result<()>
 }
 
 async fn handle_connection(stream: LocalStream, state: Arc<HostState>) -> Result<()> {
+    struct AbortWriter(tokio::task::AbortHandle);
+    impl Drop for AbortWriter {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
     let mut output_events = state.runtime.subscribe_output();
     let mut process_events = state.runtime.subscribe_processes();
     let (mut reader, mut writer) = tokio::io::split(stream);
-    let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<HostMessage>();
+    let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<HostMessage>(8);
+    let requests = Arc::new(Semaphore::new(2));
+    let control_requests = Arc::new(Semaphore::new(2));
     let writer_task = tokio::spawn(async move {
         while let Some(message) = outgoing_rx.recv().await {
             if let Err(error) = write_frame(&mut writer, &message).await {
@@ -242,6 +296,9 @@ async fn handle_connection(stream: LocalStream, state: Arc<HostState>) -> Result
             }
         }
     });
+    // All exits, including queue overflow and malformed frames, must release
+    // the socket writer instead of leaving a detached slow-reader task alive.
+    let _writer_guard = AbortWriter(writer_task.abort_handle());
     let mut synced = false;
     let mut live_after = HashMap::<String, OutputCursor>::new();
 
@@ -268,9 +325,15 @@ async fn handle_connection(stream: LocalStream, state: Arc<HostState>) -> Result
                         );
                         bail!("host protocol mismatch");
                     }
-                    if let HostCommand::Sync { cursors } = &request.command {
-                        let _operation_guard = state.operation_gate.lock().await;
-                        let response = sync_runtime(&state.runtime, cursors)?;
+                    if let HostCommand::Sync { .. } = &request.command {
+                        let response = execute_request(&state, &request).await;
+                        let response = match response {
+                            Ok(response) => response,
+                            Err(error) => {
+                                send_response(&outgoing_tx, request.request_id, Err(error));
+                                continue 'frames;
+                            }
+                        };
                         if let HostResponse::Synced { replay, .. } = &response {
                             live_after = replay
                                 .iter()
@@ -289,8 +352,21 @@ async fn handle_connection(stream: LocalStream, state: Arc<HostState>) -> Result
                         send_response(&outgoing_tx, request.request_id, Ok(response));
                         continue 'frames;
                     }
-                    let result = execute_request(&state, &request).await;
-                    send_response(&outgoing_tx, request.request_id, result);
+                    let lane = match request.command {
+                        HostCommand::Stop { .. } | HostCommand::Read { .. } | HostCommand::RestartController => &control_requests,
+                        _ => &requests,
+                    };
+                    let Ok(permit) = Arc::clone(lane).try_acquire_owned() else {
+                        send_response(&outgoing_tx, request.request_id, Err(HostError::new("host_busy", "connection request limit; not admitted")));
+                        continue 'frames;
+                    };
+                    let response_state = Arc::clone(&state);
+                    let responses = outgoing_tx.clone();
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        let result = execute_request(&response_state, &request).await;
+                        send_response(&responses, request.request_id, result);
+                    });
                     continue 'frames;
                 }
                 event = output_events.recv(), if synced => match event {
@@ -306,7 +382,7 @@ async fn handle_connection(stream: LocalStream, state: Arc<HostState>) -> Result
                                     revision: chunk.revision,
                                 },
                             );
-                            let _ = outgoing_tx.send(HostMessage::Output { chunk });
+                            outgoing_tx.try_send(HostMessage::Output { chunk }).map_err(|_| anyhow!("host output queue full or closed"))?;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
@@ -316,7 +392,7 @@ async fn handle_connection(stream: LocalStream, state: Arc<HostState>) -> Result
                 },
                 event = process_events.recv(), if synced => match event {
                     Ok(process) => {
-                        let _ = outgoing_tx.send(HostMessage::Process { process });
+                        outgoing_tx.try_send(HostMessage::Process { process }).map_err(|_| anyhow!("host process queue full or closed"))?;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
                         return Err(anyhow!("host process subscriber lagged by {count} events"));
@@ -355,39 +431,166 @@ async fn execute_request(
     state: &HostState,
     request: &HostRequest,
 ) -> Result<HostResponse, HostError> {
-    let _operation_guard = if request.command.is_mutating() {
-        Some(state.operation_gate.lock().await)
-    } else {
-        None
+    if request.request_id.len() > 128
+        || request
+            .operation_id
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 128)
+    {
+        return Err(HostError::new(
+            "invalid_request",
+            "request or operation id exceeds limit",
+        ));
+    }
+    // Admission is nonwaiting. Keep a separate control lane so stuck spawn,
+    // write or resize calls cannot consume Sync/Read/Stop/restart capacity.
+    let lane = match request.command {
+        HostCommand::Spawn { .. } | HostCommand::Write { .. } | HostCommand::Resize { .. } => {
+            &state.operations
+        }
+        _ => &state.controls,
     };
-    if request.command.is_mutating() {
+    let admit = || {
+        Arc::clone(lane)
+            .try_acquire_owned()
+            .map_err(|_| HostError::new("host_busy", "host capacity busy; request not admitted"))
+    };
+    let permit;
+    let mutating = request.command.is_mutating();
+    if mutating {
         let operation_id = request.operation_id.as_ref().ok_or_else(|| {
             HostError::new(
                 "operation_id_required",
                 "mutating commands need operation_id",
             )
         })?;
-        if let Some(response) = state.results.lock().await.values.get(operation_id).cloned() {
-            return response;
+        let fingerprint: [u8; 32] = Sha256::digest(
+            encode_message(&request.command)
+                .map_err(|_| HostError::new("invalid_request", "could not encode command"))?,
+        )
+        .into();
+        let mut cache = state.results.lock().await;
+        if let Some(binding) = cache.bindings.get(operation_id) {
+            if binding != &fingerprint {
+                return Err(HostError::new(
+                    "operation_conflict",
+                    "operation id belongs to another command",
+                ));
+            }
+            if let Some(response) = cache.values.get(operation_id).cloned() {
+                return response;
+            }
+            return Err(operation_unknown());
         }
+        permit = admit()?;
+        // In-flight entries are never evicted. Completed entries retain the
+        // existing bounded replay cache contract, and cannot hide pending work.
+        if cache.bindings.len() >= RESULT_CACHE_LIMIT {
+            if let Some(oldest) = cache.order.pop_front() {
+                cache.values.remove(&oldest);
+                cache.bindings.remove(&oldest);
+            } else {
+                return Err(HostError::new(
+                    "host_busy",
+                    "operation ledger full; request not admitted",
+                ));
+            }
+        }
+        cache.bindings.insert(operation_id.clone(), fingerprint);
+    } else {
+        permit = admit()?;
     }
-    let response: Result<HostResponse, HostError> = (|| match &request.command {
-        HostCommand::Sync { .. } => unreachable!("sync is handled by the connection"),
+    let state = state.clone();
+    let request = request.clone();
+    let kind = match request.command {
+        HostCommand::Sync { .. } => "sync",
+        HostCommand::Spawn { .. } => "spawn",
+        HostCommand::Read { .. } => "read",
+        HostCommand::Write { .. } => "write",
+        HostCommand::Resize { .. } => "resize",
+        HostCommand::Stop { .. } => "stop",
+        HostCommand::RestartController => "restart_controller",
+    };
+    let diagnostic_id = request.request_id.clone();
+    // The detached task owns admission and the operation ledger through actual
+    // completion, even when the socket disconnects or the response times out.
+    let task = tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        operation_diagnostic(kind, &request.request_id, "admitted", 0, None);
+        let runtime = state.runtime.clone();
+        let restart = state.restart_controller.clone();
+        let command = request.command;
+        let response = if let HostCommand::Write { process_id, writes } = command {
+            let _permit = permit;
+            runtime
+                .write_async(&process_id, &writes)
+                .await
+                .map(|process| HostResponse::Process { process })
+                .map_err(host_runtime_error)
+        } else {
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                execute_runtime(&runtime, &restart, &command)
+            })
+            .await
+            .unwrap_or_else(|_| Err(operation_unknown()))
+        };
+        if let Some(operation_id) = request.operation_id.filter(|_| mutating) {
+            state
+                .results
+                .lock()
+                .await
+                .insert(operation_id, response.clone());
+        }
+        operation_diagnostic(
+            kind,
+            &request.request_id,
+            "completed",
+            started.elapsed().as_millis() as u64,
+            response.as_ref().err().map(|error| error.code.as_str()),
+        );
+        response
+    });
+    tokio::time::timeout(OPERATION_TIMEOUT, task)
+        .await
+        .map_err(|_| {
+            operation_diagnostic(
+                kind,
+                &diagnostic_id,
+                "response_deadline_unknown",
+                OPERATION_TIMEOUT.as_millis() as u64,
+                Some("operation_unknown"),
+            );
+            operation_unknown()
+        })?
+        .unwrap_or_else(|_| Err(operation_unknown()))
+}
+
+fn operation_unknown() -> HostError {
+    HostError::new(
+        "operation_unknown",
+        "operation outcome unknown; do not retry with a new id; reconcile the owned process",
+    )
+}
+
+fn execute_runtime(
+    runtime: &HostRuntime,
+    restart: &mpsc::Sender<()>,
+    command: &HostCommand,
+) -> Result<HostResponse, HostError> {
+    match command {
+        HostCommand::Sync { cursors } => sync_runtime(runtime, cursors)
+            .map_err(|_| HostError::new("sync_failed", "could not snapshot host runtime")),
         HostCommand::Spawn { request } => Ok(HostResponse::Process {
-            process: state
-                .runtime
-                .spawn(request.clone())
-                .map_err(host_runtime_error)?,
+            process: runtime.spawn(request.clone()).map_err(host_runtime_error)?,
         }),
         HostCommand::Read { process_id, cursor } => Ok(HostResponse::Output {
-            replay: state
-                .runtime
+            replay: runtime
                 .read(process_id, cursor.as_ref())
                 .map_err(host_runtime_error)?,
         }),
         HostCommand::Write { process_id, writes } => Ok(HostResponse::Process {
-            process: state
-                .runtime
+            process: runtime
                 .write(process_id, writes)
                 .map_err(host_runtime_error)?,
         }),
@@ -396,29 +599,23 @@ async fn execute_request(
             cols,
             rows,
         } => Ok(HostResponse::Process {
-            process: state
-                .runtime
+            process: runtime
                 .resize(process_id, *cols, *rows)
                 .map_err(host_runtime_error)?,
         }),
         HostCommand::Stop { process_id } => Ok(HostResponse::Process {
-            process: state.runtime.stop(process_id).map_err(host_runtime_error)?,
+            process: runtime.stop(process_id).map_err(host_runtime_error)?,
         }),
         HostCommand::RestartController => {
-            state.restart_controller.send(()).map_err(|_| {
-                HostError::new("supervisor_stopped", "controller supervisor stopped")
+            restart.try_send(()).map_err(|_| {
+                HostError::new(
+                    "restart_busy",
+                    "controller supervisor busy or stopped; not admitted",
+                )
             })?;
             Ok(HostResponse::Ack)
         }
-    })();
-    if let Some(operation_id) = &request.operation_id {
-        state
-            .results
-            .lock()
-            .await
-            .insert(operation_id.clone(), response.clone());
     }
-    response
 }
 
 fn host_runtime_error(error: RuntimeError) -> HostError {
@@ -426,7 +623,7 @@ fn host_runtime_error(error: RuntimeError) -> HostError {
 }
 
 fn send_response(
-    outgoing: &mpsc::UnboundedSender<HostMessage>,
+    outgoing: &mpsc::Sender<HostMessage>,
     request_id: String,
     result: Result<HostResponse, HostError>,
 ) {
@@ -442,7 +639,7 @@ fn send_response(
             error: Some(error),
         },
     };
-    let _ = outgoing.send(message);
+    let _ = outgoing.try_send(message);
 }
 
 async fn request_controller_restart(socket: &Path) -> Result<()> {
@@ -624,11 +821,12 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("treer-host-fragment-{}", Uuid::new_v4().simple()));
         std::fs::create_dir_all(&root).unwrap();
-        let (restart_controller, mut restarts) = mpsc::unbounded_channel();
+        let (restart_controller, mut restarts) = mpsc::channel(1);
         let state = Arc::new(HostState {
             runtime: HostRuntime::new(&root).unwrap(),
-            results: Mutex::new(ResultCache::new()),
-            operation_gate: Mutex::new(()),
+            results: Arc::new(Mutex::new(ResultCache::new())),
+            operations: Arc::new(Semaphore::new(16)),
+            controls: Arc::new(Semaphore::new(8)),
             restart_controller,
         });
         let sync = HostRequest {
@@ -775,11 +973,12 @@ mod tests {
                 let root = std::env::temp_dir()
                     .join(format!("treer-host-invalid-{}", Uuid::new_v4().simple()));
                 std::fs::create_dir_all(&root).unwrap();
-                let (restart_controller, mut restarts) = mpsc::unbounded_channel();
+                let (restart_controller, mut restarts) = mpsc::channel(1);
                 let state = Arc::new(HostState {
                     runtime: HostRuntime::new(&root).unwrap(),
-                    results: Mutex::new(ResultCache::new()),
-                    operation_gate: Mutex::new(()),
+                    results: Arc::new(Mutex::new(ResultCache::new())),
+                    operations: Arc::new(Semaphore::new(16)),
+                    controls: Arc::new(Semaphore::new(8)),
                     restart_controller,
                 });
                 let (mut client, stream) = tokio::io::duplex(4096);
@@ -855,11 +1054,12 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).expect("create test root");
         let runtime = HostRuntime::new(&root).expect("create runtime");
-        let (restart_controller, _) = mpsc::unbounded_channel();
+        let (restart_controller, _) = mpsc::channel(1);
         let state = HostState {
             runtime,
-            results: Mutex::new(ResultCache::new()),
-            operation_gate: Mutex::new(()),
+            results: Arc::new(Mutex::new(ResultCache::new())),
+            operations: Arc::new(Semaphore::new(16)),
+            controls: Arc::new(Semaphore::new(8)),
             restart_controller,
         };
         let request = HostRequest {
@@ -897,11 +1097,12 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).expect("create test root");
         let runtime = HostRuntime::new(&root).expect("create runtime");
-        let (restart_controller, _) = mpsc::unbounded_channel();
+        let (restart_controller, _) = mpsc::channel(1);
         let state = HostState {
             runtime,
-            results: Mutex::new(ResultCache::new()),
-            operation_gate: Mutex::new(()),
+            results: Arc::new(Mutex::new(ResultCache::new())),
+            operations: Arc::new(Semaphore::new(16)),
+            controls: Arc::new(Semaphore::new(8)),
             restart_controller,
         };
         let mut request = HostRequest {
@@ -924,14 +1125,18 @@ mod tests {
         let first = execute_request(&state, &request)
             .await
             .expect_err("first spawn should fail");
+        assert_eq!(first, execute_request(&state, &request).await.unwrap_err());
         let HostCommand::Spawn { request: spawn } = &mut request.command else {
             unreachable!("test request is spawn");
         };
         spawn.cwd = ".".to_string();
         let second = execute_request(&state, &request)
             .await
-            .expect_err("cached failure should be replayed");
-        assert_eq!(first, second);
+            .expect_err("changed command must conflict");
+        assert_eq!(second.code, "operation_conflict");
         assert!(state.runtime.list().is_empty());
     }
 }
+
+#[cfg(test)]
+mod isolation_tests;
