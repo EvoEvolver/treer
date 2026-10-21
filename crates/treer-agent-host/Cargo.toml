@@ -20,5 +20,8 @@ treer-platform.workspace = true
 treer-host-protocol = { path = "../treer-host-protocol" }
 uuid.workspace = true
 
+[dev-dependencies]
+treer-agent-runtime = { path = "../treer-agent-runtime", features = ["test-fixtures"] }
+
 [lints]
 workspace = true

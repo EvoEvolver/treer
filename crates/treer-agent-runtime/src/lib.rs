@@ -88,13 +88,15 @@ struct RuntimeInner {
 }
 
 struct HostProcess {
+    #[cfg(all(windows, feature = "test-fixtures"))]
+    test_input_writer: Mutex<Option<std::io::PipeWriter>>,
     #[cfg(windows)]
     process_tree: Mutex<Option<treer_platform::ProcessTreeGuard>>,
     info: Mutex<HostProcessInfo>,
     input: Mutex<Option<std_mpsc::SyncSender<InputWrite>>>,
     input_busy: AtomicBool,
     input_uncertain: Arc<AtomicBool>,
-    #[cfg(test)]
+    #[cfg(any(test, all(windows, feature = "test-fixtures")))]
     input_writer_finished: Arc<AtomicBool>,
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
@@ -103,6 +105,8 @@ struct HostProcess {
 }
 
 struct InputWrite {
+    #[cfg(all(windows, feature = "test-fixtures"))]
+    test_writer: Option<std::io::PipeWriter>,
     bootstrap: bool,
     writes: Vec<HostWrite>,
     deadline: Instant,
@@ -116,6 +120,31 @@ struct InputCompletion {
     result: std_mpsc::Receiver<Result<(), String>>,
     async_result: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
     accepted: bool,
+}
+
+/// Native Windows fault fixture, absent from normal builds and all RPCs.
+/// ConPTY can buffer a nonreader's input without blocking its input pipe, so
+/// the regression substitutes a private, non-drained kernel pipe for one
+/// user batch. Bootstrap and the actual PTY/child lifecycle remain unchanged.
+#[cfg(all(windows, feature = "test-fixtures"))]
+pub struct BlockedInputFixture {
+    reader: Option<std::io::PipeReader>,
+    process: Arc<HostProcess>,
+}
+
+#[cfg(all(windows, feature = "test-fixtures"))]
+impl BlockedInputFixture {
+    /// Release only after the test has observed the owned child exit. Closing
+    /// our read end wakes the real blocked WriteFile; wait for its writer slot.
+    pub fn release_after_exit(mut self) {
+        assert!(!self.process.info.lock().unwrap().running);
+        drop(self.reader.take());
+        let until = Instant::now() + Duration::from_secs(5);
+        while !self.process.input_writer_finished.load(Ordering::Acquire) {
+            assert!(Instant::now() < until, "native input writer did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 impl InputCompletion {
@@ -238,6 +267,22 @@ impl OutputBuffer {
 }
 
 impl HostRuntime {
+    #[cfg(all(windows, feature = "test-fixtures"))]
+    pub fn block_input_for_test(&self, process_id: &str) -> BlockedInputFixture {
+        let process = self.get_running(process_id).unwrap();
+        assert!(!process.input_busy.load(Ordering::Acquire));
+        let (reader, writer) = std::io::pipe().unwrap();
+        assert!(process
+            .test_input_writer
+            .lock()
+            .unwrap()
+            .replace(writer)
+            .is_none());
+        BlockedInputFixture {
+            reader: Some(reader),
+            process,
+        }
+    }
     pub fn new(root: impl AsRef<Path>) -> Result<Self, RuntimeError> {
         let root = std::fs::canonicalize(root.as_ref())
             .map_err(|error| RuntimeError::InvalidCwd(error.to_string()))?;
@@ -417,13 +462,15 @@ impl HostRuntime {
             metadata: request.metadata,
         };
         let process = Arc::new(HostProcess {
+            #[cfg(all(windows, feature = "test-fixtures"))]
+            test_input_writer: Mutex::new(None),
             #[cfg(windows)]
             process_tree: Mutex::new(process_tree),
             info: Mutex::new(info.clone()),
             input: Mutex::new(Some(input)),
             input_busy: AtomicBool::new(false),
             input_uncertain: Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
+            #[cfg(any(test, all(windows, feature = "test-fixtures")))]
             input_writer_finished,
             child: Mutex::new(Some(child)),
             master: Mutex::new(Some(pair.master)),
@@ -532,6 +579,8 @@ impl HostRuntime {
                 .ok_or_else(|| RuntimeError::ProcessNotRunning(process_id.to_string()))?;
             input
                 .try_send(InputWrite {
+                    #[cfg(all(windows, feature = "test-fixtures"))]
+                    test_writer: process.test_input_writer.lock().unwrap().take(),
                     bootstrap: false,
                     writes: writes.to_vec(),
                     deadline: Instant::now() + INPUT_DEADLINE,
@@ -790,6 +839,13 @@ fn spawn_input_writer(
             finished,
         };
         while let Ok(write) = input.recv() {
+            #[cfg(all(windows, feature = "test-fixtures"))]
+            let mut test_writer = write.test_writer;
+            #[cfg(all(windows, feature = "test-fixtures"))]
+            let writer: &mut dyn Write = match test_writer.as_mut() {
+                Some(test_writer) => test_writer,
+                None => writer.as_mut(),
+            };
             let started = Instant::now();
             if write.bootstrap {
                 tracing::debug!(%process_id, phase = "conpty_cursor_write_started", "PTY bootstrap");
@@ -869,6 +925,8 @@ fn spawn_output_reader(
                     if let Some(input) = input.as_ref() {
                         let queued = input
                             .try_send(InputWrite {
+                                #[cfg(all(windows, feature = "test-fixtures"))]
+                                test_writer: None,
                                 bootstrap: true,
                                 writes: vec![HostWrite {
                                     data: b"\x1b[1;1R".to_vec(),

@@ -137,6 +137,11 @@ async fn admitted(state: &HostState, operation: &str) {
 async fn real_pty_backpressure_preserves_other_workload_control_and_unknown_no_replay() {
     let (state, root, mut restarts) = fixture().await;
     spawn_blocked(&state, "blocked").await;
+    // ConPTY may legitimately absorb 2 MiB without the child reading it.
+    // Inject real native pipe backpressure into this generation's input writer
+    // only; bootstrap, child and all other PTYs remain actual ConPTY.
+    #[cfg(windows)]
+    let blocked_input = state.runtime.block_input_for_test("blocked");
     let write = {
         let state = Arc::clone(&state);
         tokio::spawn(async move { execute_request(&state, &write_request()).await })
@@ -282,6 +287,8 @@ async fn real_pty_backpressure_preserves_other_workload_control_and_unknown_no_r
         panic!()
     };
     assert!(!process.running);
+    #[cfg(windows)]
+    blocked_input.release_after_exit();
     assert_eq!(state.operations.available_permits(), 16);
     assert_eq!(state.controls.available_permits(), 8);
     drop(state);
@@ -293,6 +300,8 @@ async fn same_connection_sync_stop_and_disconnect_do_not_cancel_or_replay_admitt
     let (state, root, _) = fixture().await;
     spawn_blocked(&state, "blocked").await;
     spawn_blocked(&state, "other").await;
+    #[cfg(windows)]
+    let blocked_input = state.runtime.block_input_for_test("blocked");
     let (mut client, server) = tokio::io::duplex(2 * 1024 * 1024);
     let connection = tokio::spawn(handle_connection(Box::new(server), Arc::clone(&state)));
     write_frame(&mut client, &write_request()).await.unwrap();
@@ -366,6 +375,8 @@ async fn same_connection_sync_stop_and_disconnect_do_not_cancel_or_replay_admitt
     )
     .await
     .unwrap();
+    #[cfg(windows)]
+    blocked_input.release_after_exit();
     let until = Instant::now() + Duration::from_secs(3);
     while !state
         .results
