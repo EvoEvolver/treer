@@ -1028,7 +1028,7 @@ mod tests {
             &runtime,
             "nonreader",
             "NONREADER_READY",
-            Instant::now() + Duration::from_secs(5),
+            Instant::now() + Duration::from_secs(15),
         );
         let process = runtime.get("nonreader").unwrap();
         let writer = {

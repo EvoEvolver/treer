@@ -77,7 +77,11 @@ async fn spawn_blocked(state: &HostState, id: &str) {
     )
     .await
     .unwrap();
-    let until = Instant::now() + Duration::from_secs(5);
+    // Match the existing native ConPTY fixture's startup budget. Native cold
+    // runtime tests take 9-11s on hosted Windows; this is separate from the
+    // 3s unrelated-operation bound and the actual pending-write assertion.
+    let started = Instant::now();
+    let until = started + Duration::from_secs(15);
     loop {
         let replay = state.runtime.read(id, None).unwrap();
         let bytes: Vec<_> = replay
@@ -86,6 +90,10 @@ async fn spawn_blocked(state: &HostState, id: &str) {
             .flat_map(|chunk| chunk.data.iter().copied())
             .collect();
         if String::from_utf8_lossy(&bytes).contains("PTY_BACKPRESSURE_READY") {
+            eprintln!(
+                "isolated fixture ready: elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
             break;
         }
         assert!(
