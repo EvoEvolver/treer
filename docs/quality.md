@@ -297,6 +297,13 @@ The tests are `treer-agent-host::isolation_tests` and runtime
 `cancelled_async_input_reclaims_writer_after_owned_stop`. The ignored child
 tests are subprocess helpers, not skipped acceptance cases. Native ConPTY
 execution is required separately; cross-compilation does not prove it.
+On reclamation failure the runtime assertion records each of the five required
+conditions (exit observed, input/child/master released, writer lease finished),
+plus content-free test-only writer phase and cancellation flags. Phase 0 means
+waiting for input, 1 writing or delaying, 2 publishing completion, and 3 leaving
+the writer loop. These diagnostics do not change the five-second reclamation
+bound or replace the actual resource-release assertion; a pass on another OS
+does not resolve a native failure.
 
 Run the complete gate on demand or while preparing a release:
 

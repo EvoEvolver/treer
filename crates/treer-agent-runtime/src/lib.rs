@@ -98,6 +98,11 @@ struct HostProcess {
     input_uncertain: Arc<AtomicBool>,
     #[cfg(any(test, all(windows, feature = "test-fixtures")))]
     input_writer_finished: Arc<AtomicBool>,
+    #[cfg(test)]
+    // Content-free diagnostic only: 0 receiving, 1 writing/delaying,
+    // 2 publishing completion, 3 leaving the writer loop. The separate
+    // finished flag still proves that the actual writer lease was released.
+    input_writer_phase: Arc<std::sync::atomic::AtomicU8>,
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     output: Mutex<OutputBuffer>,
@@ -437,11 +442,15 @@ impl HostRuntime {
             .map_err(|error| RuntimeError::Terminal(error.to_string()))?;
         let (input, input_rx) = std_mpsc::sync_channel(1);
         let input_writer_finished = Arc::new(AtomicBool::new(false));
+        #[cfg(test)]
+        let input_writer_phase = Arc::new(std::sync::atomic::AtomicU8::new(0));
         spawn_input_writer(
             writer,
             input_rx,
             writer_permit,
             Arc::clone(&input_writer_finished),
+            #[cfg(test)]
+            Arc::clone(&input_writer_phase),
             request.process_id.clone(),
         );
         let output = OutputBuffer::new();
@@ -472,6 +481,8 @@ impl HostRuntime {
             input_uncertain: Arc::new(AtomicBool::new(false)),
             #[cfg(any(test, all(windows, feature = "test-fixtures")))]
             input_writer_finished,
+            #[cfg(test)]
+            input_writer_phase,
             child: Mutex::new(Some(child)),
             master: Mutex::new(Some(pair.master)),
             output: Mutex::new(output),
@@ -821,6 +832,7 @@ fn spawn_input_writer(
     input: std_mpsc::Receiver<InputWrite>,
     _permit: OwnedSemaphorePermit,
     finished: Arc<AtomicBool>,
+    #[cfg(test)] phase: Arc<std::sync::atomic::AtomicU8>,
     process_id: String,
 ) {
     std::thread::spawn(move || {
@@ -839,6 +851,8 @@ fn spawn_input_writer(
             finished,
         };
         while let Ok(write) = input.recv() {
+            #[cfg(test)]
+            phase.store(1, Ordering::Release);
             #[cfg(all(windows, feature = "test-fixtures"))]
             let mut test_writer = write.test_writer;
             #[cfg(all(windows, feature = "test-fixtures"))]
@@ -885,12 +899,18 @@ fn spawn_input_writer(
                 warn!(%process_id, phase = "input_writer_settled_unknown", elapsed_ms = started.elapsed().as_millis() as u64,
                     bytes = write.writes.iter().map(|part| part.data.len()).sum::<usize>(), "owned PTY input writer settled; no retry");
             }
+            #[cfg(test)]
+            phase.store(2, Ordering::Release);
             let _ = write.async_result.send(result.clone());
             let _ = write.result.send(result);
             if failed {
                 break;
             }
+            #[cfg(test)]
+            phase.store(0, Ordering::Release);
         }
+        #[cfg(test)]
+        phase.store(3, Ordering::Release);
     });
 }
 
@@ -1293,17 +1313,19 @@ mod tests {
             let input_released = process.input.lock().expect("process input").is_none();
             let child_released = process.child.lock().expect("process child").is_none();
             let master_released = process.master.lock().expect("process master").is_none();
-            if exited
-                && input_released
-                && child_released
-                && master_released
-                && process.input_writer_finished.load(Ordering::Acquire)
-            {
+            let writer_finished = process.input_writer_finished.load(Ordering::Acquire);
+            if exited && input_released && child_released && master_released && writer_finished {
                 return;
             }
             assert!(
                 Instant::now() < deadline,
-                "exited process resources were not released"
+                "exited process resources were not released: exited={exited} \
+                 input_released={input_released} child_released={child_released} \
+                 master_released={master_released} writer_finished={writer_finished} \
+                 writer_phase={} input_busy={} input_uncertain={}",
+                process.input_writer_phase.load(Ordering::Acquire),
+                process.input_busy.load(Ordering::Acquire),
+                process.input_uncertain.load(Ordering::Acquire),
             );
             std::thread::sleep(Duration::from_millis(20));
         }
