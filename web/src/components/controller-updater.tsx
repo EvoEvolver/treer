@@ -1,13 +1,34 @@
 import { useEffect, useRef, useState } from 'react'
+import { createControllerUpdateClient, CONTROLLER_UPDATE_CAPABILITY } from '@/lib/controller-update-client'
+import type { Machine } from '@/lib/api'
 import { useT } from '@/i18n'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { controllerUpdateActive, controllerUpdateStatus, sameControllerIdentity, type ControllerUpdateClient, type ControllerUpdatePreview, type ControllerUpdateSnapshot } from '@/lib/controller-update'
+import { controllerUpdateActive, controllerUpdateCanPrepare, controllerUpdateStatus, sameControllerIdentity, type ControllerUpdateClient, type ControllerUpdatePreview, type ControllerUpdateSnapshot } from '@/lib/controller-update'
+
+// Authenticated scope keys contain only user ID and an in-memory auth epoch.
+export function ControllerUpdateEntry({ workspaceId, machine, scopeKey }: { workspaceId: string; machine: Machine; scopeKey: string }) {
+  const supported = machine.capabilities?.includes(CONTROLLER_UPDATE_CAPABILITY) ?? false
+  const key = JSON.stringify([workspaceId, machine.server_id, scopeKey, supported])
+  const [binding, setBinding] = useState<{ key: string; client: ControllerUpdateClient } | null>(null)
+  useEffect(() => {
+    const lifetime = new AbortController()
+    const client = createControllerUpdateClient(workspaceId, { server_id: machine.server_id, capabilities: supported ? [CONTROLLER_UPDATE_CAPABILITY] : [] }, lifetime.signal)
+    setBinding({ key, client })
+    return () => lifetime.abort()
+  }, [workspaceId, machine.server_id, scopeKey, supported, key])
+  if (!binding || binding.key !== key) return null
+  return <ControllerUpdater machineId={machine.server_id} client={binding.client} scopeKey={key} />
+}
 
 // Same prepare/one-use-confirm/read-only-observe interaction as the CLI installer.
 // Scope by workspace/machine/session at the call site; nothing is persisted.
-// This component is not mounted in MachineView until the Core adapter is reviewed.
-export function ControllerUpdater({ machineId, client }: { machineId: string; client: ControllerUpdateClient }) {
+// Runtime mutation remains gated by both Proxy and Controller capabilities.
+export function ControllerUpdater({ machineId, client, scopeKey }: { machineId: string; client: ControllerUpdateClient; scopeKey: string }) {
+  // Caller changes this opaque epoch on user/session changes; never use a token.
+  return <ScopedControllerUpdater key={JSON.stringify([scopeKey, machineId])} machineId={machineId} client={client} />
+}
+function ScopedControllerUpdater({ machineId, client }: { machineId: string; client: ControllerUpdateClient }) {
   const t = useT()
   const [open, setOpen] = useState(false)
   const [snapshot, setSnapshot] = useState<ControllerUpdateSnapshot | null>(null)
@@ -33,6 +54,10 @@ export function ControllerUpdater({ machineId, client }: { machineId: string; cl
     const next = await client.inspect(signal, expectedOperationId.current ?? undefined)
     if (signal.aborted || !mounted.current) return
     if (next.machineId !== machineId || next.operation && (next.operation.machineId !== machineId || expectedOperationId.current && next.operation.id !== expectedOperationId.current)) throw Error('invalid_response')
+    if (next.operation && controllerUpdateCanPrepare(next)) {
+      attempted.current = false
+      expectedOperationId.current = null
+    }
     setSnapshot(next)
     // After an attempted dispatch, absence is not proof that nothing happened.
     setUncertain(attempted.current && !next.operation)
@@ -64,7 +89,7 @@ export function ControllerUpdater({ machineId, client }: { machineId: string; cl
     generation.current++; token.current = null; setPreview(null); setExpired(false); setOpen(next)
   }
   async function prepare(targetId: string) {
-    if (pending.current || attempted.current || uncertain || !snapshot?.supported || !snapshot.current || snapshot.blockedByOtherOperation || snapshot.operation) return
+    if (pending.current || attempted.current || uncertain || !snapshot || !controllerUpdateCanPrepare(snapshot) || !snapshot.current) return
     pending.current = true; setBusy(true); setError(false); token.current = null; setPreview(null)
     const epoch = ++generation.current, controller = new AbortController(); read.current?.abort(); read.current = controller
     try {
@@ -132,7 +157,7 @@ export function ControllerUpdater({ machineId, client }: { machineId: string; cl
             {expired && <p role="alert">{t('controller_update.expired')}</p>}
             <div className="flex flex-wrap justify-end gap-2"><Button variant="outline" className="max-md:min-h-11" onClick={() => changeOpen(false)}>{t('common.cancel')}</Button><Button className="max-md:min-h-11" disabled={busy || expired} onClick={() => void dispatch()}>{t('controller_update.title')}</Button></div>
           </> : <>
-            {snapshot?.supported && snapshot.current && !snapshot.blockedByOtherOperation && !operation && !uncertain && !attempted.current && <div className="space-y-2">
+            {snapshot && controllerUpdateCanPrepare(snapshot) && !uncertain && !attempted.current && <div className="space-y-2">
               <p>{t('controller_update.trusted')}</p>
               {snapshot.targets.length === 0 && <p>{t('controller_update.no_targets')}</p>}
               {snapshot.targets.map(target => <Button key={target.id} variant="outline" className="mr-2 max-w-full whitespace-normal break-words max-md:min-h-11" disabled={busy} onClick={() => void prepare(target.id)}>{t('controller_update.choose', { version: target.version })}</Button>)}

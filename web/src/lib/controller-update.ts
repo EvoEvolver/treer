@@ -1,5 +1,5 @@
 // UI view models only, not a wire protocol. The Core adapter must validate and
-// bind every response before supplying this interface; no adapter is enabled yet.
+// bind every response before supplying this interface. Runtime support is gated.
 export interface ControllerIdentity { release_sha: string; artifact_source_sha: string; controller_sha256: string; cli_sha256: string }
 export interface ControllerRelease { id: string; version: string; commit: string; platform: string; identity: ControllerIdentity }
 export const sameControllerIdentity = (a: ControllerIdentity | undefined, b: ControllerIdentity) => !!a && a.release_sha === b.release_sha && a.artifact_source_sha === b.artifact_source_sha && a.controller_sha256 === b.controller_sha256 && a.cli_sha256 === b.cli_sha256
@@ -26,6 +26,9 @@ export interface ControllerUpdateSnapshot {
   current: ControllerRelease | null
   targets: ControllerRelease[]
   operation: ControllerUpdateOperation | null
+  // Adapter proof: fresh ready catalog/current identity, resolved prior claim,
+  // and server cooldown permit explicit new prepare. Never infer from age.
+  prepareAllowed: boolean
   blockedByOtherOperation: boolean
 }
 export interface ControllerUpdatePreview {
@@ -51,3 +54,9 @@ export function controllerUpdateStatus(op: ControllerUpdateOperation): Controlle
   return op.status
 }
 export const controllerUpdateActive = (op: ControllerUpdateOperation) => ['preparing', 'queued', 'dispatched', 'updating', 'waiting_for_reconnect'].includes(controllerUpdateStatus(op))
+
+export function controllerUpdateCanPrepare(snapshot: ControllerUpdateSnapshot): boolean {
+  const status = snapshot.operation && controllerUpdateStatus(snapshot.operation)
+  return snapshot.prepareAllowed === true && snapshot.supported && !!snapshot.current && !snapshot.blockedByOtherOperation
+    && (!status || ['succeeded', 'rolled_back', 'failed'].includes(status))
+}

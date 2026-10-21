@@ -1,3 +1,4 @@
+import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ControllerUpdater } from '../../src/components/controller-updater'
 import type { ControllerUpdateClient, ControllerUpdateOperation, ControllerUpdateSnapshot } from '../../src/lib/controller-update'
@@ -5,7 +6,7 @@ export function mountControllerUpdate(mode = 'normal') {
   const identity = (c: string) => ({ release_sha: c.repeat(40), artifact_source_sha: c.repeat(40), controller_sha256: c.repeat(64), cli_sha256: c.repeat(64) })
   const current = { id: 'release-current', version: '1.0.0', commit: 'a'.repeat(40), platform: 'macos-arm64', identity: identity('a') }
   const target = { id: 'release-target', version: '1.1.0', commit: 'b'.repeat(40), platform: 'macos-arm64', identity: identity('b') }
-  const snapshot: ControllerUpdateSnapshot = { machineId: 'test-machine', supported: true, current, targets: [target], operation: null, blockedByOtherOperation: false }
+  const snapshot: ControllerUpdateSnapshot = { machineId: 'test-machine', supported: true, current, targets: [target], operation: null, blockedByOtherOperation: false, prepareAllowed: true }
   const counts = { inspect: 0, prepare: 0, dispatch: 0 }
   const operation = (status: ControllerUpdateOperation['status']): ControllerUpdateOperation => ({ id: 'update-one', machineId: snapshot.machineId, current, target, status, receiptVerified: false, health: 'unknown', observedAt: null, restored: null, observation: 'available', phase: null })
   if (['unsupported', 'offline', 'forbidden', 'unavailable'].includes(mode)) { snapshot.supported = false; snapshot.unavailableReason = mode as never }
@@ -19,6 +20,7 @@ export function mountControllerUpdate(mode = 'normal') {
   if (mode === 'rollback-failed') snapshot.operation = operation('rollback_failed')
   if (mode === 'partial') snapshot.operation = operation('partial')
   if (mode === 'rollback') snapshot.operation = { ...operation('rolled_back'), restored: current, observedIdentity: current.identity, receiptVerified: true, phase: 'rolled_back', health: 'passed' }
+  if (snapshot.operation) snapshot.prepareAllowed = false
   if (mode === 'long-token') { current.version = 'c'.repeat(128); target.version = 'v'.repeat(128) }
   if (mode === 'long') { target.version = '<img src=x onerror=alert(1)>'.repeat(4); target.platform = 'macos-arm64' }
   const client: ControllerUpdateClient = {
@@ -31,6 +33,19 @@ export function mountControllerUpdate(mode = 'normal') {
     },
   }
   const node = document.createElement('div'); node.id = 'controller-update-test'; document.body.replaceChildren(node)
-  let root = createRoot(node); root.render(<ControllerUpdater machineId={snapshot.machineId} client={client} />)
-  return { counts, snapshot, unmount: () => root.unmount(), remount: () => { root.unmount(); root = createRoot(node); root.render(<ControllerUpdater machineId={snapshot.machineId} client={client} />) } }
+  let scopeKey = 'user-one/session-one'
+  const render = () => <ControllerUpdater machineId={snapshot.machineId} client={client} scopeKey={scopeKey} />
+  let root = createRoot(node); root.render(render())
+  return { counts, snapshot, changeSession: () => { scopeKey += "/new"; root.render(render()) }, unmount: () => root.unmount(), remount: () => { root.unmount(); root = createRoot(node); root.render(render()) } }
+}
+
+export async function mountControllerUpdateEntry() {
+  const { ControllerUpdateEntry } = await import('../../src/components/controller-updater')
+  const { CONTROLLER_UPDATE_CAPABILITY } = await import('../../src/lib/controller-update-client')
+  const node = document.createElement('div'); document.body.replaceChildren(node)
+  const root = createRoot(node)
+  let scope = 1
+  const render = () => root.render(<StrictMode><ControllerUpdateEntry workspaceId="test-workspace" machine={{ server_id: 'test-machine', capabilities: [CONTROLLER_UPDATE_CAPABILITY] } as any} scopeKey={`user-one/session-${scope}`} /></StrictMode>)
+  render()
+  return { changeSession: () => { scope++; render() }, unmount: () => root.unmount() }
 }

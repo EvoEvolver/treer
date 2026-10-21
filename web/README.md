@@ -848,25 +848,34 @@ Iframe appearance hints are included in the initial URL. Exact-origin theme
 messages start after that iframe loads, and continue on later theme changes;
 new iframe instances wait for their own load event.
 
-### Controller update UI preparation (#222)
+### Controller update browser adapter (#222)
 
 `controller-updater.tsx` reuses the provider installer's prepare, explicit
-one-use confirmation and read-only observation interaction, plus the existing
-Dialog/Button controls. The optional `controllerUpdateClient` slot places it
-beside Install agent CLIs in the Machine action area. No production caller
-supplies that client yet: this is synthetic UI preparation, not enabled browser
-update support. The existing installer requests and execution remain separate.
+one-use confirmation and GET-only observation interaction beside Install agent
+CLIs. `controller-update-client.ts` connects the reviewed catalog, prepare,
+confirm and operation discovery routes under the workspace/machine API. It does
+not introduce installation commands or a separate native updater. Runtime
+mutation requires `machine.controller-update.v1` from both Proxy and Controller;
+capability remains off until the backend/native acceptance is ready.
 
-`lib/controller-update.ts` defines presentation models, not shared wire models
-or a new operation API. The eventual adapter must validate the Core #222
-contract and scope every response to the current user/workspace/machine. It
-must discover durable operations before capability gating, retain the selected
-operation UUID from preview, and perform GET-only recovery after a lost confirm
-response or refresh. Map `accepted` to an in-progress presentation, keep receipt
-phase and observation availability separate, and use a clearly labelled Build
-SHA fallback when no current-version label is available. Catalog targets must
-come from the server, with all four identity hashes bound to the preview; no
-browser-supplied commands, paths or URLs are supported by this component.
+The browser strictly validates the shared321e contract before mapping to
+`lib/controller-update.ts` presentation models: explicit nulls, bounded lists,
+UUIDs, four identity hashes, exact plan, closed status/phase/health partitions,
+chronology and newest-first discovery. Discovery runs before capability/catalog
+gating, so catalog501 or offline observations retain durable results. Reads are
+no-store, refuse redirects and have a15-second wall timeout and256KiB body cap.
+Current versions without a label explicitly display their build SHA. Receipt
+verification is the server adapter's responsibility; browser structural checks
+never establish native receipt authenticity.
+
+WorkspaceApp supplies an in-memory user/auth epoch. A user/session change,
+workspace/machine switch or logout discards tokens and operation selectors,
+aborts the old HTTP lifetime and ignores late completions. Browser storage is
+not used. Resolved history remains visible while a fresh ready catalog, current
+identity, no unresolved claim and elapsed failure cooldown permit an explicit
+new preview. Partial, unconfirmed and rollback-failed histories never unlock a
+new update; absence after attempted confirm is not proof of non-dispatch.
+Server prepare/confirm still enforce slot, cooldown and session authority.
 
 The component consumes its in-memory token before dispatch, prevents a second
 submit, and stores no token or operation data in browser storage. Closing clears
