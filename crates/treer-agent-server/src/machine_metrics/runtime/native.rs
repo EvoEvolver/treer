@@ -421,7 +421,13 @@ mod image_tests {
         #[cfg(unix)]
         std::fs::rename(&replacement, &path).unwrap();
         #[cfg(windows)]
-        treer_platform::publish_transfer_file(&replacement, &path, true).unwrap();
+        {
+            // The production platform publication helper is private. A rename
+            // aside followed by publication exercises the same retained-handle
+            // identity refusal without exporting a test-only platform API.
+            std::fs::rename(&path, directory.0.join("retained-image")).unwrap();
+            std::fs::rename(&replacement, &path).unwrap();
+        }
         assert!(pinned.unchanged_path().is_none());
         let activator = directory.0.join("activator");
         std::fs::write(&activator, b"original").unwrap();
