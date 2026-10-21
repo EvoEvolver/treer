@@ -852,7 +852,7 @@ new iframe instances wait for their own load event.
 
 `controller-updater.tsx` reuses the provider installer's prepare, explicit
 one-use confirmation and GET-only observation interaction beside Install agent
-CLIs. `controller-update-client.ts` connects the reviewed catalog, prepare,
+CLIs. `controller-update-client.ts` connects the catalog at the controller-update root, prepare,
 confirm and operation discovery routes under the workspace/machine API. It does
 not introduce installation commands or a separate native updater. Runtime
 mutation requires `machine.controller-update.v1` from both Proxy and Controller;
@@ -863,7 +863,7 @@ The browser strictly validates the shared321e contract before mapping to
 UUIDs, four identity hashes, exact plan, closed status/phase/health partitions,
 chronology and newest-first discovery. Discovery runs before capability/catalog
 gating, so catalog501 or offline observations retain durable results. Reads are
-no-store, refuse redirects and have a15-second wall timeout and256KiB body cap.
+no-store, refuse redirects and have a15-second wall timeout and64KiB body cap.
 Current versions without a label explicitly display their build SHA. Receipt
 verification is the server adapter's responsibility; browser structural checks
 never establish native receipt authenticity.

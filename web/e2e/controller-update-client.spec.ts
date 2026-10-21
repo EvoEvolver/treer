@@ -19,7 +19,8 @@ async function harness(page: Page, mode = 'normal') {
       if (mode === 'late-read' && calls.filter(c => c.path.endsWith('/operations')).length === 1) await new Promise<void>(resolve => { releasePrepare = resolve })
       return route.fulfill({ json: { operations: captured ? [captured] : [], blocked_by_other_operation: false } })
     }
-    if (path.endsWith('/catalog')) return ['offline-resolved', 'unsupported-resolved'].includes(mode) ? route.fulfill({ status: mode === 'unsupported-resolved' ? 501 : 503, json: {} }) : route.fulfill({ json: { ...catalog(), ...(mode === 'bad-null' ? { current: undefined } : {}), ...(mode === 'extra' ? { command: 'forbidden' } : {}) } })
+    if (path.endsWith('/controller-update') && mode === 'oversize') return route.fulfill({ contentType: 'application/json', body: ' '.repeat(65536) + JSON.stringify(catalog()) })
+    if (path.endsWith('/controller-update')) return ['offline-resolved', 'unsupported-resolved'].includes(mode) ? route.fulfill({ status: mode === 'unsupported-resolved' ? 501 : 503, json: {} }) : route.fulfill({ json: { ...catalog(), ...(mode === 'bad-null' ? { current: undefined } : {}), ...(mode === 'extra' ? { command: 'forbidden' } : {}) } })
     if (path.endsWith('/prepare')) {
       if (mode === 'late-prepare') await new Promise<void>(resolve => { releasePrepare = resolve })
       return route.fulfill({ json: { operation_id: operationId, current, target, plan_digest: 'd'.repeat(64), steps: ['verify_artifacts', 'stage', 'replace_controller_and_cli', 'verify_health', 'reconcile_launcher', 'finalize'], confirmation_token: token, expires_at: new Date(Date.now() + 115000).toISOString() } })
@@ -46,6 +47,8 @@ for (const mode of ['normal', 'lost']) test(`real HTTP client ${mode}: prepare/c
   await expect(dialog(page)).toContainText('Update queued.')
   await dialog(page).getByRole('button', { name: 'Check update status' }).click()
   expect(h.calls.filter(c => c.method === 'POST').map(c => c.body)).toEqual([{ target_id: 'target-b' }, { confirmation_token: token }])
+  expect(h.calls.some(c => c.method === 'GET' && c.path.endsWith('/controller-update'))).toBe(true)
+  expect(h.calls.some(c => c.path.endsWith('/catalog'))).toBe(false)
   expect(h.calls.some(c => c.path.endsWith('/operations/' + operationId))).toBe(true)
   await expect(page.locator('body')).not.toContainText(token)
   h.store(operation('succeeded'))
@@ -54,7 +57,7 @@ for (const mode of ['normal', 'lost']) test(`real HTTP client ${mode}: prepare/c
   await expect(dialog(page).getByRole('button', { name: 'Preview 1.1.0' })).toBeVisible()
   expect(h.calls.filter(c => c.path.endsWith('/confirm'))).toHaveLength(1)
 })
-for (const mode of ['bad-null', 'extra']) test(`strict HTTP decoder refuses ${mode}`, async ({ page }) => {
+for (const mode of ['bad-null', 'extra', 'oversize']) test(`strict HTTP decoder refuses ${mode}`, async ({ page }) => {
   const h = await harness(page, mode)
   await expect(dialog(page)).toContainText('could not be verified')
   await expect(dialog(page).getByRole('button', { name: /Preview / })).toHaveCount(0)

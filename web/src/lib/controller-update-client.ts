@@ -99,7 +99,7 @@ export function createControllerUpdateClient(workspaceId: string, machine: Pick<
       if (!response.ok) throw new ApiError('controller_update_unavailable', response.status)
       require(response.body)
       const reader = response.body.getReader(), chunks: Uint8Array[] = []; let length = 0
-      for (;;) { const { value, done } = await reader.read(); if (done) break; length += value.length; if (length > 262144) { await reader.cancel(); throw Error('invalid_response') }; chunks.push(value) }
+      for (;;) { const { value, done } = await reader.read(); if (done) break; length += value.length; if (length > 65536) { await reader.cancel(); throw Error('invalid_response') }; chunks.push(value) }
       const bytes = new Uint8Array(length); let offset = 0
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length }
       return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
@@ -127,7 +127,7 @@ export function createControllerUpdateClient(workspaceId: string, machine: Pick<
       const capabilities = (config as { capabilities?: unknown })?.capabilities
       if (!Array.isArray(capabilities) || !capabilities.includes(CONTROLLER_UPDATE_CAPABILITY) || !machine.capabilities?.includes(CONTROLLER_UPDATE_CAPABILITY)) return unavailable('unsupported')
       let catalog: ReturnType<typeof decodeControllerCatalog>
-      try { catalog = decodeControllerCatalog(await request(`${base}/catalog`, signal)) } catch (error) { if (signal.aborted || lifetime.aborted) throw Error('aborted'); return unavailable(error instanceof ApiError && error.status === 501 ? 'unsupported' : error instanceof ApiError && error.status === 403 ? 'forbidden' : 'unavailable') }
+      try { catalog = decodeControllerCatalog(await request(base, signal)) } catch (error) { if (signal.aborted || lifetime.aborted) throw Error('aborted'); return unavailable(error instanceof ApiError && error.status === 501 ? 'unsupported' : error instanceof ApiError && error.status === 403 ? 'forbidden' : 'unavailable') }
       const ready = catalog.supported && catalog.availability === 'ready'
       const cooldownElapsed = !selected || selected.state === 'succeeded' || selected.finished !== null && BigInt(Date.now()) * 1000000n >= selected.finished + 60000000000n
       return { machineId, supported: ready, unavailableReason: catalog.availability === 'offline' ? 'offline' : !ready ? 'unavailable' : undefined, current: catalog.current, targets: catalog.targets, operation: selected?.operation ?? null, blockedByOtherOperation: discovery.blocked || catalog.availability === 'busy', prepareAllowed: ready && !discovery.blocked && !discovery.operations.some(o => unresolved.has(o.state)) && cooldownElapsed }
