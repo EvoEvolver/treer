@@ -21,9 +21,11 @@ jobs:
           set -o pipefail
           test "$(git rev-parse HEAD)" = 5ad8cc3698a2c9397ebbd25ee2db7e864a15ef31
           printf 'RUNTIME_REMEDY_SOURCE=%s WRAPPER=%s\n' "$(git rev-parse HEAD)" "$GITHUB_SHA"
-          cargo test --locked -p treer-agent-runtime -p treer-agent-host --lib -- --nocapture 2>&1 | tee runtime-remedy.log
+          cargo test --locked -p treer-agent-runtime --lib -- --nocapture 2>&1 | tee runtime-remedy.log
           grep -F 'tests::cancelled_async_input_reclaims_writer_after_owned_stop' runtime-remedy.log
           grep -F 'test tests::writer_permit_covers_writer_destruction ... ok' runtime-remedy.log
           grep -F 'test tests::cancelled_async_input_reclaims_writer_after_owned_stop ... ok' runtime-remedy.log
           grep -E 'test result: ok\. [1-9][0-9]* passed; 0 failed;' runtime-remedy.log
+          cargo test --locked -p treer-agent-host --bin treer-agent-host -- --nocapture 2>&1 | tee host-remedy.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed; 0 failed;' host-remedy.log
           cargo clippy --locked -p treer-agent-runtime -p treer-agent-host --all-targets -- -D warnings
