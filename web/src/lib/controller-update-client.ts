@@ -130,7 +130,7 @@ export function createControllerUpdateClient(workspaceId: string, machine: Pick<
       try { catalog = decodeControllerCatalog(await request(base, signal)) } catch (error) { if (signal.aborted || lifetime.aborted) throw Error('aborted'); return unavailable(error instanceof ApiError && error.status === 501 ? 'unsupported' : error instanceof ApiError && error.status === 403 ? 'forbidden' : 'unavailable') }
       const ready = catalog.supported && catalog.availability === 'ready'
       const cooldownElapsed = !selected || selected.state === 'succeeded' || selected.finished !== null && BigInt(Date.now()) * 1000000n >= selected.finished + 60000000000n
-      return { machineId, supported: ready, unavailableReason: catalog.availability === 'offline' ? 'offline' : !ready ? 'unavailable' : undefined, current: catalog.current, targets: catalog.targets, operation: selected?.operation ?? null, blockedByOtherOperation: discovery.blocked || catalog.availability === 'busy', prepareAllowed: ready && !discovery.blocked && !discovery.operations.some(o => unresolved.has(o.state)) && cooldownElapsed }
+      return { machineId, supported: ready, unavailableReason: !catalog.supported ? 'unsupported' : catalog.availability === 'offline' ? 'offline' : !ready ? 'unavailable' : undefined, current: catalog.current, targets: catalog.targets, operation: selected?.operation ?? null, blockedByOtherOperation: discovery.blocked || catalog.availability === 'busy', prepareAllowed: ready && !discovery.blocked && !discovery.operations.some(o => unresolved.has(o.state)) && cooldownElapsed }
     },
     async prepare(targetId, signal) {
       preview = null

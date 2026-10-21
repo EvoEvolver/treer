@@ -6,7 +6,7 @@ const token = 'CONFIRMATION_SECRET_NOT_DISPLAYED_123456'
 const catalog = () => ({ support: 'supported', availability: 'ready', current, observed_at: '2026-10-20T23:00:00Z', platform: target.platform, catalog_revision: 1, targets: [target] })
 const operation = (state = 'accepted') => ({ operation_id: operationId, current, target, state, phase: state === 'succeeded' ? 'complete' : null, observation: 'available', observed_identity: state === 'succeeded' ? target.identity : null, restored_identity: null, health: state === 'succeeded' ? 'healthy' : 'unknown', receipt_revision: state === 'succeeded' ? 1 : null, created_at: '2026-10-20T23:00:00Z', updated_at: '2026-10-20T23:01:00Z', observed_at: state === 'succeeded' ? '2026-10-20T23:01:00Z' : null, finished_at: state === 'succeeded' ? '2026-10-20T23:01:00Z' : null, error_code: null })
 async function harness(page: Page, mode = 'normal') {
-  let stored: any = ['resolved', 'offline-resolved', 'unsupported-resolved', 'late-read'].includes(mode) ? operation('succeeded') : null
+  let stored: any = ['resolved', 'offline-resolved', 'unsupported-resolved', 'manual-resolved', 'late-read'].includes(mode) ? operation('succeeded') : null
   const calls: { method: string; path: string; body: any }[] = []
   let releasePrepare: (() => void) | undefined
   await page.route('**/api/**', async route => {
@@ -20,7 +20,7 @@ async function harness(page: Page, mode = 'normal') {
       return route.fulfill({ json: { operations: captured ? [captured] : [], blocked_by_other_operation: false } })
     }
     if (path.endsWith('/controller-update') && mode === 'oversize') return route.fulfill({ contentType: 'application/json', body: ' '.repeat(65536) + JSON.stringify(catalog()) })
-    if (path.endsWith('/controller-update')) return ['offline-resolved', 'unsupported-resolved'].includes(mode) ? route.fulfill({ status: mode === 'unsupported-resolved' ? 501 : 503, json: {} }) : route.fulfill({ json: { ...catalog(), ...(mode === 'bad-null' ? { current: undefined } : {}), ...(mode === 'extra' ? { command: 'forbidden' } : {}) } })
+    if (path.endsWith('/controller-update')) return ['offline-resolved', 'unsupported-resolved'].includes(mode) ? route.fulfill({ status: mode === 'unsupported-resolved' ? 501 : 503, json: {} }) : route.fulfill({ json: { ...catalog(), ...(mode === 'manual-resolved' ? { support: 'manual_update_required', availability: 'catalog_unavailable', targets: [] } : {}), ...(mode === 'bad-null' ? { current: undefined } : {}), ...(mode === 'extra' ? { command: 'forbidden' } : {}) } })
     if (path.endsWith('/prepare')) {
       if (mode === 'late-prepare') await new Promise<void>(resolve => { releasePrepare = resolve })
       return route.fulfill({ json: { operation_id: operationId, current, target, plan_digest: 'd'.repeat(64), steps: ['verify_artifacts', 'stage', 'replace_controller_and_cli', 'verify_health', 'reconcile_launcher', 'finalize'], confirmation_token: token, expires_at: new Date(Date.now() + 115000).toISOString() } })
@@ -91,10 +91,10 @@ test('unresolved history remains blocked even with ready catalog', async ({ page
   expect(h.calls.filter(c => c.method === 'POST')).toHaveLength(0)
 })
 
-for (const mode of ['offline-resolved', 'unsupported-resolved']) test(`durable result survives ${mode} catalog without prepare`, async ({ page }) => {
+for (const mode of ['offline-resolved', 'unsupported-resolved', 'manual-resolved']) test(`durable result survives ${mode} catalog without prepare`, async ({ page }) => {
   const h = await harness(page, mode)
   await expect(dialog(page)).toContainText('Target version and health verified')
-  if (mode === 'unsupported-resolved') await expect(dialog(page)).toContainText('Update it manually first')
+  if (['unsupported-resolved', 'manual-resolved'].includes(mode)) await expect(dialog(page)).toContainText('Update it manually first')
   await expect(dialog(page).getByRole('button', { name: /Preview / })).toHaveCount(0)
   expect(h.calls.filter(c => c.method === 'POST')).toHaveLength(0)
 })

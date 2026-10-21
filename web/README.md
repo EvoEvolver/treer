@@ -905,3 +905,7 @@ the current inert component conservatively blocks while any operation remains.
 Session/user changes must reset the client scope and ignore late responses.
 The strict shared-model successor is `321e006c`; adapter fixtures must follow
 its required nullable keys and conservative outcome rules.
+
+A successful Controller catalog response with `manual_update_required` keeps the
+manual-update guidance and durable operation discovery, just like an unsupported
+catalog status. It never enables preview or confirmation.
