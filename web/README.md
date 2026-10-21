@@ -891,3 +891,15 @@ erase its valid history. Inconsistent presence/status pairs reject the response.
 The eight fixed-answer presence cases for Core/Web parity live in
 `docs/fixtures/machine-metrics-presence-vectors.json`; the browser regression
 pins the file's SHA-256 before passing its inputs to the complete parser.
+
+
+The opt-in `machine-metrics-source.spec.ts` gate accepts an ignored, local capture
+file through `METRICS_SOURCE_CAPTURE`. Core emits `{source_sha, server_id, to,
+bodies}`: a committed source SHA, opaque test machine ID, common millisecond UTC
+query end, and four unmodified JSON response strings from the actual
+collector/disk/query path (15m,1h,6h,24h; max_points360). The browser freezes its
+query clock to that end and renders these exact bytes through the Machine API
+caller and strict parser. It records source/body hashes, not samples, in test
+attachments. Without a real source capture this gate skips explicitly; the
+synthetic metrics suite does not substitute for it. Captured-source acceptance
+still does not establish authenticated Proxy/native lifecycle acceptance.
