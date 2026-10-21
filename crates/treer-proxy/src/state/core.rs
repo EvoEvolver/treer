@@ -338,6 +338,7 @@ impl AppState {
     /// Controller capability stays in the connection table (#153 data
     /// minimization, #173).
     pub(crate) const READ_MODEL_CAPABILITIES: &'static [&'static str] = &[
+        treer_protocol::CAPABILITY_MACHINE_METRICS,
         treer_protocol::CAPABILITY_MACHINE_UPLOAD,
         treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3,
     ];

@@ -2479,14 +2479,21 @@ async fn cluster_replica_keeps_read_model_capabilities_when_the_owner_snapshot_h
     };
     let upload = treer_protocol::CAPABILITY_MACHINE_UPLOAD;
     let v3 = treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3;
+    let metrics = treer_protocol::CAPABILITY_MACHINE_METRICS;
     state
-        .apply_cluster_snapshot(update(1, vec![upload, v3]))
+        .apply_cluster_snapshot(update(1, vec![metrics, upload, v3]))
         .await;
-    assert_eq!(read_model_capabilities(&state).await, vec![upload, v3]);
+    assert_eq!(
+        read_model_capabilities(&state).await,
+        vec![metrics, upload, v3]
+    );
     // The owning instance republishes after a Controller snapshot that
     // carries no capabilities: the replica keeps what it knows (#173).
     state.apply_cluster_snapshot(update(2, Vec::new())).await;
-    assert_eq!(read_model_capabilities(&state).await, vec![upload, v3]);
+    assert_eq!(
+        read_model_capabilities(&state).await,
+        vec![metrics, upload, v3]
+    );
     // An explicit list from the owner still replaces it (a re-registered
     // Controller without v3, e.g. Windows).
     state.apply_cluster_snapshot(update(3, vec![upload])).await;
@@ -2498,6 +2505,7 @@ async fn disconnect_keeps_last_known_capabilities_and_reconnect_replaces_them() 
     let state = AppState::new();
     let upload = treer_protocol::CAPABILITY_MACHINE_UPLOAD;
     let v3 = treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3;
+    let metrics = treer_protocol::CAPABILITY_MACHINE_METRICS;
     let first = Uuid::new_v4();
     let (first_tx, _first_rx) = mpsc::unbounded_channel();
     state
@@ -2505,16 +2513,22 @@ async fn disconnect_keeps_last_known_capabilities_and_reconnect_replaces_them() 
             test_server(),
             first,
             "controller-1".to_string(),
-            [upload, v3, treer_protocol::CAPABILITY_MACHINE_EXEC].map(str::to_string),
+            [metrics, upload, v3, treer_protocol::CAPABILITY_MACHINE_EXEC].map(str::to_string),
             first_tx,
         )
         .await
         .expect("register");
     // Only the allow-listed names reach the read model.
-    assert_eq!(read_model_capabilities(&state).await, vec![upload, v3]);
+    assert_eq!(
+        read_model_capabilities(&state).await,
+        vec![metrics, upload, v3]
+    );
     // While offline the last known list stays; the dialog gates on status.
     state.disconnect_server("alpha", "server", first).await;
-    assert_eq!(read_model_capabilities(&state).await, vec![upload, v3]);
+    assert_eq!(
+        read_model_capabilities(&state).await,
+        vec![metrics, upload, v3]
+    );
     // A legacy-only Controller reconnecting replaces the list ...
     let second = Uuid::new_v4();
     let (second_tx, _second_rx) = mpsc::unbounded_channel();
