@@ -153,3 +153,20 @@ results do not establish those excluded surfaces on this selected source.
 Core owns shared operator, quality and security documentation in its parent.
 The diagnostic 285-case proof remains bound to its original source, with final
 port checks reported separately.
+
+## Accepted audit and mobile successor
+
+Following Release inventory #198:7617, a separate successor on frozen `02e66bed`
+restores the previously excluded Web audit-summary group from `fb915a47`,
+`fb8ef0d5`, `8d94d9e3` and the delayed mobile Browse tree fix from `6be9a4f1`.
+These were omitted from the current lineage, not intentionally replaced. The
+selected leaves come from accepted diagnostic `e19960bf`; they preserve the
+current metrics, Add machine/focus, prewarm and combined logout implementation.
+The audit view requires Core's matching `workspace.audit-summary.v1` capability,
+typed category table/version and bounded summary endpoint; capability absence
+leaves the ordinary audit list available. Core2 owns its separate backend port.
+Only the audit component/parser/list integration, translations, chart tokens,
+contrast check, tests, mobile initialization hunk and matching README are added;
+no Apps/Issues/launcher ancestry is imported. The earlier minimal source's
+exclusions and CI/full-gate results remain historically accurate, not successor
+verification. Release owns composition with Core2 and subsequent complete gates.

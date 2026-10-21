@@ -259,8 +259,13 @@ function WorkspaceAppContent() {
       return
     }
     firstPathname.current = ""
-    if (workloads.some((agent) => agent.agent_id === routeWorkloadId)) showAgentTerminal(routeWorkloadId)
-    else { setError(t("app.workload_not_found")); replaceWorkloadRoute(null) }
+    if (workloads.some((agent) => agent.agent_id === routeWorkloadId)) {
+      // Inventory can finish after a phone user has already opened the Tree.
+      // Restore the URL's selection without reversing that explicit gesture.
+      const keepTreeOpen = isMobile && mobileTreeOpen
+      showAgentTerminal(routeWorkloadId)
+      if (keepTreeOpen) { setMobileTerminalOpen(false); setMobileTreeOpen(true) }
+    } else { setError(t("app.workload_not_found")); replaceWorkloadRoute(null) }
     // showAgentTerminal is recreated every render; the workspace marker makes this run once per workspace.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routeWorkloadId, inventoryReady, routeMatchesWorkspace, workspaceId, workloads])

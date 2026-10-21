@@ -3615,6 +3615,27 @@ test.describe('resumable machine upload', () => {
 })
 
 
+test("mobile explicit Browse tree survives delayed deep-link inventory initialization", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  let resume!: () => void
+  const held = new Promise<void>((resolve) => { resume = resolve })
+  await page.route("**/api/workspaces/ws-1/apps", async (route) => {
+    await held
+    return ok(route, { apps: [] })
+  })
+  await page.goto("/orgs/org-1/workspaces/ws-1/workloads/ag-1")
+  const tree = page.locator("#tree-sidebar")
+  await page.getByRole("button", { name: "Browse tree", exact: true }).click()
+  await expect(tree).toBeVisible()
+  const loaded = page.waitForResponse((response) => response.url().endsWith("/ws-1/apps"))
+  resume()
+  await loaded
+  await expect(page.getByRole("tabpanel", { name: "/api-server", exact: true, includeHidden: true })).toBeAttached()
+  await expect(tree).toBeVisible()
+  await tree.getByRole("treeitem", { name: "api-server", exact: true }).click()
+  await expect(page.getByRole("tabpanel", { name: "/api-server", exact: true })).toBeVisible()
+})
+
 // #223: the Tree entry shares the real workspace bootstrap/dialog flow.
 for (const mobile of [false, true]) for (const enrolled of [false, true]) test(`Tree Add machine opens shared workspace dialog (${enrolled ? 'enrolled' : 'empty'}, ${mobile ? '390' : 'desktop'})`, async ({ page }, info) => {
   await page.setViewportSize({ width: mobile ? 390 : 1360, height: 844 })
