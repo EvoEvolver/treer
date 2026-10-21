@@ -1,135 +1,275 @@
 name: CI
+run-name: P0 224 native artifacts 8eb65ff4 (no publish)
 
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: release224-native-artifacts-8eb65ff4
+  cancel-in-progress: false
 
 jobs:
-  rust:
-    name: Rust and PostgreSQL tests
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
+  windows:
+    name: Build windows-x86_64
+    runs-on: windows-2022
+    timeout-minutes: 45
     env:
-      TREER_TEST_DATABASE_URL: postgres://treer:treer@127.0.0.1:55432/treer_test
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_USER: treer
-          POSTGRES_PASSWORD: treer
-          POSTGRES_DB: treer_test
-        ports:
-          - 55432:5432
-        options: >-
-          --health-cmd "pg_isready -U treer -d treer_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-        with:
-          toolchain: 1.90.0
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Release workflow security regressions (fake registry only)
-        run: node --test scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs scripts/install-checksums.test.mjs
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Build workspace binaries
-        run: cargo build --workspace --locked
-      - name: Test workspace including database boundaries
-        run: cargo test --workspace --locked
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  web:
-    name: Frontend types and build
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
+      RUST_VERSION: 1.90.0
     defaults:
       run:
-        working-directory: web
+        shell: pwsh
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: 10.12.4
+          ref: 8eb65ff4e145fa2497c4b7dfa13a5dc9bb267861
+      - name: Record source commit
+        run: '"TREER_BUILD_COMMIT=$(git rev-parse HEAD)" >> $env:GITHUB_ENV'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
-      - run: pnpm build
-
-  agent-launcher:
-    name: Agent launcher types, fake harnesses and browser
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: launchers/agent/package-lock.json
-      - name: Install launcher dependencies
-        run: npm --prefix launchers/agent ci --ignore-scripts
-      - name: Install isolated browser runtime
-        run: cd launchers/agent && npx playwright install --with-deps chromium
-      - name: Check launcher and browser sources
-        run: npm --prefix launchers/agent run check
-      - name: Unit and installer tests (fake harnesses only)
-        run: npm --prefix launchers/agent test
-      - name: Closed Codex, ACP and Claude Interface regression
+          node-version: '22'
+      - name: Prepare verified launcher payload
         run: |
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
-          node scripts/ais-e2e.mjs
-      - name: Browser controls and screenshots
-        run: npm --prefix launchers/agent run test:browser
+          npm --prefix launchers/agent ci --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/prepare-launcher-release.mjs --output "$env:RUNNER_TEMP/treer-launcher-payload" --source-commit "$env:TREER_BUILD_COMMIT"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Select MSVC Rust
+        run: |
+          rustup toolchain install "${env:RUST_VERSION}-x86_64-pc-windows-msvc" --profile minimal
+          rustup default "${env:RUST_VERSION}-x86_64-pc-windows-msvc"
+          rustc --version --verbose
+      - name: Test local transport, process ownership and ConPTY
+        run: |
+          cargo test --locked -p treer-platform -p treer-agent-runtime -p treer-agent-host
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p treer-agent-server --bin treer-agent-server windows_
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test native file-transfer Controller and CLI boundaries
+        run: |
+          cargo test --locked -p treer-agent-server --bin treer-agent-server machine_file_transfer::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p treer-cli --bin treer machine_file::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test machine registration lock and replacement
+        # The registration lock is a named mutex on Windows and the contender case
+        # runs a separate process for about two minutes; both must execute natively.
+        timeout-minutes: 8
+        run: |
+          cargo test --locked -p treer-agent-server --bin treer-agent-server service::tests::machine_
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test private-state placement rule (must run both tests)
+        # The placement predicate walks to the drive root and the Controller matrix
+        # decides whether image uploads stay enabled; the windows_ filter above does
+        # not select them, so name them exactly and fail if either did not run.
+        run: |
+          $output = cargo test --locked -p treer-agent-server --bin treer-agent-server -- --exact `
+            private_state::placement_tests::placement_allows_hidden_state_under_a_plain_home_and_refuses_repositories `
+            controller::private_state_tests::hidden_private_state_under_a_plain_home_is_injected_until_a_repository_appears 2>&1 | Out-String
+          Write-Host $output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($output -notmatch '(?m)^test result: ok\. 2 passed; 0 failed') { Write-Host 'both placement tests must run'; exit 1 }
+      - name: Build machine binaries
+        # /Brepro replaces the linker timestamp with a content hash so the same source
+        # on the same pinned image links to the same bytes. It is the only link argument.
         env:
-          CODEX_UI_SCREENSHOTS: ${{ runner.temp }}/launcher-screenshots
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: failure()
+          RUSTFLAGS: -C link-arg=/Brepro
+        run: cargo build --locked --release -p treer-cli -p treer-agent-host -p treer-agent-server
+      - name: Windows administrator requirement (standard user, disposable runner)
+        # Creates a temporary standard local user: the script itself refuses to run
+        # unless this is a GitHub-hosted runner. Never enable it on self-hosted machines.
+        timeout-minutes: 10
+        env:
+          TREER_DISPOSABLE_RUNNER: '1'
+        run: |
+          ./scripts/windows-standard-user-check.ps1 -InstallScript ./scripts/install.ps1 -AgentServer ./target/release/treer-agent-server.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test real Controller and CLI
+        run: |
+          cargo build --locked -p treer-agent-host -p treer-agent-server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p treer-cli --test controller -- --ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p treer-agent-server --bin treer-agent-server windows_real_host -- --ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Stage artifacts
+        env:
+          RUSTFLAGS: -C link-arg=/Brepro
+        run: ./scripts/stage-release-artifacts.ps1 -Destination release-artifacts/windows-x86_64
+      - name: Verify the staged binaries rebuild to the same bytes
+        # Fails closed before upload: the hashes compared are the staged (published) ones.
+        # The staged copies survive the clean; the rebuild uses the same flags, path and
+        # package set, because building fewer packages can change feature unification.
+        env:
+          RUSTFLAGS: -C link-arg=/Brepro
+        run: |
+          $staged = @{}
+          foreach ($binary in @('treer', 'treer-agent-host', 'treer-agent-server')) {
+            $staged[$binary] = (Get-FileHash -Algorithm SHA256 "release-artifacts/windows-x86_64/$binary").Hash.ToLowerInvariant()
+          }
+          cargo clean --release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release -p treer-cli -p treer-agent-host -p treer-agent-server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $different = @()
+          foreach ($binary in @('treer', 'treer-agent-host', 'treer-agent-server')) {
+            $rebuilt = (Get-FileHash -Algorithm SHA256 "target/release/$binary.exe").Hash.ToLowerInvariant()
+            Write-Host "$binary staged $($staged[$binary]) rebuilt $rebuilt"
+            if ($staged[$binary] -ne $rebuilt) { $different += $binary }
+          }
+          if ($different.Count -gt 0) { throw "Clean rebuild is not byte-identical to the staged artifact: $($different -join ', ')." }
+      - name: Test Windows installation and PATH
+        run: ./scripts/test-windows-install.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
+      - name: Test Windows PowerShell installer compatibility
+        shell: powershell
+        run: ./scripts/test-windows-install.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
+      - name: Test Windows machine update transactions
+        run: ./scripts/test-windows-update.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
+      - name: Test Windows PowerShell machine update compatibility
+        shell: powershell
+        run: ./scripts/test-windows-update.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
+      - name: Upload build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: agent-launcher-screenshots
-          path: ${{ runner.temp }}/launcher-screenshots
-          if-no-files-found: ignore
+          name: treer-windows-x86_64
+          path: release-artifacts/windows-x86_64/
+          if-no-files-found: error
+          retention-days: 14
 
-  release-tooling:
-    name: Release tooling and fake machine updates
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-22.04
+            system: Linux
+            architecture: x86_64
+          - platform: linux-aarch64
+            runner: ubuntu-22.04-arm
+            system: Linux
+            architecture: aarch64
+          - platform: darwin-x86_64
+            runner: macos-15-intel
+            system: Darwin
+            architecture: x86_64
+          - platform: darwin-aarch64
+            runner: macos-15
+            system: Darwin
+            architecture: arm64
+
+    env:
+      RUST_VERSION: 1.90.0
+
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
+          ref: 8eb65ff4e145fa2497c4b7dfa13a5dc9bb267861
+
+      - name: Record source commit
+        shell: bash
+        run: echo "TREER_BUILD_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
-      - name: Closed release, checksum, detachment and rollback tests
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-      - name: Documentation links and launcher test isolation
+          node-version: '22'
+
+      - name: Prepare verified launcher payload
+        shell: bash
         run: |
-          node scripts/check-docs.mjs
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
+          set -euo pipefail
+          npm --prefix launchers/agent ci --ignore-scripts
+          node scripts/prepare-launcher-release.mjs --output "$RUNNER_TEMP/treer-launcher-payload" --source-commit "$TREER_BUILD_COMMIT"
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Verify native runner
+        shell: bash
+        env:
+          EXPECTED_SYSTEM: ${{ matrix.system }}
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = "$EXPECTED_SYSTEM"
+          test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
+
+      - name: Select stable Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustc --version --verbose
+
+      - name: Build agent binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release \
+            -p treer-cli \
+            -p treer-agent-host \
+            -p treer-agent-server
+
+      - name: Stage and verify artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh scripts/stage-release-artifacts.sh \
+            "${{ matrix.platform }}" \
+            "release-artifacts/${{ matrix.platform }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: treer-${{ matrix.platform }}
+          path: release-artifacts/${{ matrix.platform }}/
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-settlement-delta:
+    name: Windows2025 settlement delta (two exact tests)
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          ref: 8eb65ff4e145fa2497c4b7dfa13a5dc9bb267861
+      - name: Select maintained Rust toolchain
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal --component clippy
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default 1.90.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Strict Host and runtime tests Clippy
+        run: |
+          cargo clippy --locked -p treer-agent-host -p treer-agent-runtime --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Both settlement regressions independently must run once
+        run: |
+          $failed = $false
+          $cases = @(
+            @{ Package = 'treer-agent-host'; Test = 'isolation_tests::same_connection_sync_stop_and_disconnect_do_not_cancel_or_replay_admitted_write' },
+            @{ Package = 'treer-agent-runtime'; Test = 'tests::observed_exit_does_not_complete_a_pending_input_receiver' }
+          )
+          foreach ($case in $cases) {
+            $output = cargo test --locked -p $case.Package $case.Test -- --exact --nocapture 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            Write-Host $output
+            Write-Host ('EXACT_SETTLEMENT_RESULT source=8eb65ff4e145fa2497c4b7dfa13a5dc9bb267861 test=' + $case.Test + ' exit=' + $code)
+            if ($code -ne 0 -or $output -notmatch 'test result: ok\. 1 passed; 0 failed') { $failed = $true }
+          }
+          if ($failed) { exit 1 }
