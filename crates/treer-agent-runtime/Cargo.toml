@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Only Host's native regression dev-dependency enables fault injection.
+test-fixtures = []
+
 [dependencies]
 chrono.workspace = true
 portable-pty.workspace = true

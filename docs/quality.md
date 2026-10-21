@@ -222,6 +222,34 @@ processes from the old Host is unavailable; restoring startup intent does not
 restore that transcript. This limitation is separate from inventory incorrectly
 erasing output that the current Host/Controller still retains.
 
+Host isolation regressions use private real PTYs with a child that does not
+read input. Unix raw-mode PTYs provide actual input backpressure. Windows
+ConPTY can legitimately buffer the complete 2 MiB input despite that child;
+the Windows Host fault fixture therefore substitutes a private native pipe
+with an open, nonreading reader for one affected user-input batch. This
+dev-dependency-only feature does not change bootstrap, actual ConPTY children,
+other PTYs, production builds, or RPCs. It proves native blocked-write
+isolation, not sustained ConPTY input backpressure. The reader is released
+after observed child exit, then the fixture waits for the actual writer slot
+to be reclaimed. A 2 MiB write must genuinely remain pending while another
+Agent spawns, resizes, reads and stops, and inventory / Controller restart
+remain bounded. They also cover same-connection control and disconnect,
+UNKNOWN replay refusal, full mutation admission with an independent control
+lane, and future cancellation. After an owned stop the runtime test waits for
+the actual input writer to exit and its process resources to be released;
+response timeout alone is not resource-reclamation evidence. The tests are
+also explicit about settlement: observing child exit does not complete a
+pending input receiver. A controlled runtime regression holds that completion
+past three seconds and requires UNKNOWN at the existing five-second input
+deadline. The Host disconnect regression waits for ledger settlement within
+the existing overall operation deadline measured from submission; its separate
+two/three-second Sync/Stop responsiveness assertions remain unchanged.
+The tests are `treer-agent-host::isolation_tests` and runtime
+`observed_exit_does_not_complete_a_pending_input_receiver` /
+`cancelled_async_input_reclaims_writer_after_owned_stop`. The ignored child
+tests are subprocess helpers, not skipped acceptance cases. Native ConPTY
+execution is required separately; cross-compilation does not prove it.
+
 Run the complete gate on demand or while preparing a release:
 
 ```sh

@@ -57,6 +57,39 @@ Windows defaults to a detached user Host. The Host owns a kill-on-close Job
 Object, and runtime workloads get nested jobs; Controller replacement leaves
 these handles with the stable Host. They manage lifecycle, not sandboxing.
 
+Host PTY backpressure is isolated by process generation. There is no global
+mutation lock. Registry, spawn-reservation and operation-cache locks protect
+short in-memory transitions only; path lookup, PTY creation, exec, terminal
+write, resize and kill do not hold them. Resize and stop use nonwaiting
+per-process master/child locks. Stop success requires the monitor to observe
+exit, not merely a successful kill request (otherwise `operation_unknown`).
+
+Each generation has one input writer and a one-batch channel. A batch is at
+most 2 MiB / 256 parts with less than five seconds of requested delay. Input
+awaits asynchronously for five seconds. Timeout or cancellation returns
+`input_unknown` and permanently refuses further input to that generation;
+later submissions return `input_refused` without another possible side effect.
+remaining chunks are checked before execution. A kernel write already in
+progress may remain blocked. Its dedicated writer retains its slot until it
+actually exits; a process-wide 128-writer limit includes these stuck writers.
+This is bounded isolation, not a promise of immediate kernel cancellation or
+automatic recovery of the affected Agent.
+
+Host admission is nonwaiting: 16 spawn/write/resize operations and a separate
+8-operation inventory/read/stop/restart lane. Each of at most 32 connections
+has two mutation and two control requests in flight, plus an eight-message
+outbound queue; Sync can pass a pending write on the same connection. A slow
+subscriber is disconnected on event overflow so replay gaps are not hidden.
+The Controller restart queue has one slot. Admitted mutations outlive socket
+disconnects and response deadlines; their admission remains owned through
+actual execution. In-flight operation IDs are bound to the command digest and
+cannot execute twice. Pending IDs return UNKNOWN, changed commands conflict,
+and UNKNOWN tombstones are not evicted during the Host epoch. The bounded
+1024-entry ledger refuses new mutations when no completed entry can be evicted;
+ordinary completed-result replay remains a bounded in-memory cache. None of
+these records survives a Host restart. Rate-limited diagnostics contain only
+request IDs, operation kind, phase, elapsed time and error code, never input.
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,
