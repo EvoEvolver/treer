@@ -94,7 +94,7 @@ impl HostClient {
             for (_, sender) in pending.drain() {
                 let _ = sender.send(Err(HostError::new(
                     "host_disconnected",
-                    "host connection closed",
+                    "host connection closed; submitted mutation outcome may be unknown; reconcile without automatic retry",
                 )));
             }
         });
@@ -132,7 +132,9 @@ impl HostClient {
         self.pending.lock().await.insert(request_id.clone(), sender);
         if self.outgoing.send(request).is_err() {
             self.pending.lock().await.remove(&request_id);
-            return Err(anyhow!("host request channel closed"));
+            return Err(anyhow!(
+                "host request channel closed; request not submitted"
+            ));
         }
         match tokio::time::timeout(REQUEST_TIMEOUT, receiver).await {
             Ok(Ok(Ok(response))) => Ok(response),
@@ -140,7 +142,7 @@ impl HostClient {
             Ok(Err(_)) => Err(anyhow!("host response channel closed")),
             Err(_) => {
                 self.pending.lock().await.remove(&request_id);
-                Err(anyhow!("host request {request_id} timed out"))
+                Err(anyhow!("host request {request_id} timed out; mutation outcome unknown; do not automatically retry"))
             }
         }
     }

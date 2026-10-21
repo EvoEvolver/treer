@@ -222,6 +222,19 @@ processes from the old Host is unavailable; restoring startup intent does not
 restore that transcript. This limitation is separate from inventory incorrectly
 erasing output that the current Host/Controller still retains.
 
+Host isolation regressions use private real PTYs with a raw-mode child that
+does not read input. A 2 MiB write must genuinely remain pending while another
+Agent spawns, resizes, reads and stops, and inventory / Controller restart
+remain bounded. They also cover same-connection control and disconnect,
+UNKNOWN replay refusal, full mutation admission with an independent control
+lane, and future cancellation. After an owned stop the runtime test waits for
+the actual input writer to exit and its process resources to be released;
+response timeout alone is not resource-reclamation evidence. The tests are
+`treer-agent-host::isolation_tests` and runtime
+`cancelled_async_input_reclaims_writer_after_owned_stop`. The ignored child
+tests are subprocess helpers, not skipped acceptance cases. Native ConPTY
+execution is required separately; cross-compilation does not prove it.
+
 Run the complete gate on demand or while preparing a release:
 
 ```sh

@@ -1,15 +1,15 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex, RwLock, Weak};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use thiserror::Error;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
 use tracing::warn;
 use treer_host_protocol::{
     HostOutputChunk, HostOutputReplay, HostProcessInfo, HostSpawnRequest, HostWrite, OutputCursor,
@@ -19,6 +19,12 @@ use uuid::Uuid;
 const OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 const COMPLETED_PROCESS_LIMIT: usize = 256;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const INPUT_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+const INPUT_DEADLINE: Duration = Duration::from_secs(5);
+// A platform write may remain in its kernel call until the owned PTY closes.
+// Its permit stays with that writer thread, including after a caller times out.
+const INPUT_WRITER_LIMIT: usize = 128;
+static INPUT_WRITERS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 const BRACKETED_PASTE_ENABLE: &[u8] = b"\x1b[?2004h";
 const BRACKETED_PASTE_DISABLE: &[u8] = b"\x1b[?2004l";
 
@@ -38,6 +44,12 @@ pub enum RuntimeError {
     Spawn(String),
     #[error("terminal operation failed: {0}")]
     Terminal(String),
+    #[error("terminal input outcome is unknown; do not retry; inspect or stop the owned process")]
+    InputUnknown,
+    #[error("terminal input or spawn capacity is busy; request was not admitted")]
+    Busy,
+    #[error("process exit outcome is unknown; reconcile the owned process")]
+    StopUnknown,
 }
 
 impl RuntimeError {
@@ -50,6 +62,9 @@ impl RuntimeError {
             Self::InvalidRequest(_) => "invalid_request",
             Self::Spawn(_) => "spawn_failed",
             Self::Terminal(_) => "terminal_error",
+            Self::InputUnknown => "input_unknown",
+            Self::Busy => "runtime_busy",
+            Self::StopUnknown => "operation_unknown",
         }
     }
 }
@@ -63,6 +78,7 @@ struct RuntimeInner {
     host_epoch: String,
     root: PathBuf,
     processes: RwLock<HashMap<String, Arc<HostProcess>>>,
+    spawning: Mutex<HashSet<String>>,
     completed_processes: Mutex<VecDeque<String>>,
     process_events: broadcast::Sender<HostProcessInfo>,
     output_events: broadcast::Sender<HostOutputChunk>,
@@ -72,7 +88,11 @@ struct HostProcess {
     #[cfg(windows)]
     process_tree: Mutex<Option<treer_platform::ProcessTreeGuard>>,
     info: Mutex<HostProcessInfo>,
-    input: Mutex<Option<std_mpsc::Sender<InputWrite>>>,
+    input: Mutex<Option<std_mpsc::SyncSender<InputWrite>>>,
+    input_busy: AtomicBool,
+    input_uncertain: Arc<AtomicBool>,
+    #[cfg(test)]
+    input_writer_finished: Arc<AtomicBool>,
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     output: Mutex<OutputBuffer>,
@@ -80,9 +100,41 @@ struct HostProcess {
 }
 
 struct InputWrite {
-    data: Vec<u8>,
-    delay: Duration,
+    writes: Vec<HostWrite>,
+    deadline: Instant,
+    uncertain: Arc<AtomicBool>,
     result: std_mpsc::SyncSender<Result<(), String>>,
+    async_result: tokio::sync::oneshot::Sender<Result<(), String>>,
+}
+
+struct InputCompletion {
+    process: Arc<HostProcess>,
+    result: std_mpsc::Receiver<Result<(), String>>,
+    async_result: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
+    accepted: bool,
+}
+
+impl InputCompletion {
+    fn finish(mut self, success: bool) -> Result<HostProcessInfo, RuntimeError> {
+        if !success {
+            return Err(RuntimeError::InputUnknown);
+        }
+        self.accepted = false;
+        self.process
+            .info
+            .lock()
+            .map_err(|_| RuntimeError::Terminal("process state lock poisoned".into()))
+            .map(|info| info.clone())
+    }
+}
+
+impl Drop for InputCompletion {
+    fn drop(&mut self) {
+        if self.accepted {
+            self.process.input_uncertain.store(true, Ordering::Release);
+        }
+        self.process.input_busy.store(false, Ordering::Release);
+    }
 }
 
 struct OutputBuffer {
@@ -198,6 +250,7 @@ impl HostRuntime {
                 host_epoch: format!("host_{}", Uuid::new_v4().simple()),
                 root,
                 processes: RwLock::new(HashMap::new()),
+                spawning: Mutex::new(HashSet::new()),
                 completed_processes: Mutex::new(VecDeque::new()),
                 process_events,
                 output_events,
@@ -239,8 +292,29 @@ impl HostRuntime {
                 "process_id and command must not be empty".to_string(),
             ));
         }
-        let mut processes =
-            self.inner.processes.write().map_err(|_| {
+        let request_bytes = request
+            .command
+            .len()
+            .saturating_add(request.cwd.len())
+            .saturating_add(request.metadata.len())
+            .saturating_add(request.args.iter().map(String::len).sum::<usize>())
+            .saturating_add(
+                request
+                    .env
+                    .iter()
+                    .map(|(key, value)| key.len().saturating_add(value.len()))
+                    .sum::<usize>(),
+            );
+        if request.process_id.len() > 128 || request_bytes > 64 * 1024 {
+            return Err(RuntimeError::InvalidRequest(
+                "spawn exceeds bounded identity or request limit".into(),
+            ));
+        }
+        // Reserve only this id. Path lookup, PTY allocation and process launch
+        // must never hold the process registry used by list/read/stop.
+        let reservation = SpawnReservation::new(&self.inner, &request.process_id)?;
+        let processes =
+            self.inner.processes.read().map_err(|_| {
                 RuntimeError::Terminal("process registry lock poisoned".to_string())
             })?;
         if let Some(process) = processes.get(&request.process_id) {
@@ -258,6 +332,11 @@ impl HostRuntime {
                 .map_err(|_| RuntimeError::Terminal("completed registry lock poisoned".into()))?
                 .retain(|id| id != &request.process_id);
         }
+        drop(processes);
+        let writer_permit =
+            Arc::clone(INPUT_WRITERS.get_or_init(|| Arc::new(Semaphore::new(INPUT_WRITER_LIMIT))))
+                .try_acquire_owned()
+                .map_err(|_| RuntimeError::Busy)?;
         let cwd = self.resolve_cwd(&request.cwd)?;
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -307,8 +386,15 @@ impl HostRuntime {
             .master
             .take_writer()
             .map_err(|error| RuntimeError::Terminal(error.to_string()))?;
-        let (input, input_rx) = std_mpsc::channel();
-        spawn_input_writer(writer, input_rx);
+        let (input, input_rx) = std_mpsc::sync_channel(1);
+        let input_writer_finished = Arc::new(AtomicBool::new(false));
+        spawn_input_writer(
+            writer,
+            input_rx,
+            writer_permit,
+            Arc::clone(&input_writer_finished),
+            request.process_id.clone(),
+        );
         let output = OutputBuffer::new();
         let now = Utc::now();
         let info = HostProcessInfo {
@@ -331,13 +417,21 @@ impl HostRuntime {
             process_tree: Mutex::new(process_tree),
             info: Mutex::new(info.clone()),
             input: Mutex::new(Some(input)),
+            input_busy: AtomicBool::new(false),
+            input_uncertain: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            input_writer_finished,
             child: Mutex::new(Some(child)),
             master: Mutex::new(Some(pair.master)),
             output: Mutex::new(output),
             stopping: AtomicBool::new(false),
         });
-        processes.insert(request.process_id, Arc::clone(&process));
-        drop(processes);
+        self.inner
+            .processes
+            .write()
+            .map_err(|_| RuntimeError::Terminal("process registry lock poisoned".into()))?
+            .insert(request.process_id, Arc::clone(&process));
+        drop(reservation);
         let _ = self.inner.process_events.send(info.clone());
         spawn_output_reader(Arc::downgrade(&self.inner), Arc::clone(&process), reader);
         spawn_process_monitor(Arc::downgrade(&self.inner), process);
@@ -362,14 +456,69 @@ impl HostRuntime {
         process_id: &str,
         writes: &[HostWrite],
     ) -> Result<HostProcessInfo, RuntimeError> {
+        let completion = self.begin_write(process_id, writes)?;
+        let success = matches!(completion.result.recv_timeout(INPUT_DEADLINE), Ok(Ok(())));
+        completion.finish(success)
+    }
+
+    /// Host callers wait asynchronously; no shared blocking worker is occupied
+    /// by input backpressure or inter-part delay. Dropping this future poisons
+    /// the input generation rather than silently permitting a retry.
+    pub async fn write_async(
+        &self,
+        process_id: &str,
+        writes: &[HostWrite],
+    ) -> Result<HostProcessInfo, RuntimeError> {
+        let mut completion = self.begin_write(process_id, writes)?;
+        let receiver = completion.async_result.take().expect("completion receiver");
+        let success = matches!(
+            tokio::time::timeout(INPUT_DEADLINE, receiver).await,
+            Ok(Ok(Ok(())))
+        );
+        completion.finish(success)
+    }
+
+    fn begin_write(
+        &self,
+        process_id: &str,
+        writes: &[HostWrite],
+    ) -> Result<InputCompletion, RuntimeError> {
         if writes.is_empty() {
             return Err(RuntimeError::InvalidRequest(
                 "writes must not be empty".to_string(),
             ));
         }
+        let bytes = writes
+            .iter()
+            .try_fold(0usize, |sum, write| sum.checked_add(write.data.len()));
+        let delay = writes
+            .iter()
+            .try_fold(0u64, |sum, write| sum.checked_add(write.delay_ms));
+        if writes.len() > 256
+            || bytes.is_none_or(|n| n > INPUT_LIMIT_BYTES)
+            || delay.is_none_or(|n| n >= INPUT_DEADLINE.as_millis() as u64)
+        {
+            return Err(RuntimeError::InvalidRequest(
+                "input exceeds bounded batch or delay limit".into(),
+            ));
+        }
         let process = self.get_running(process_id)?;
-        for write in writes {
-            let (result, result_rx) = std_mpsc::sync_channel(1);
+        if process.input_uncertain.load(Ordering::Acquire) {
+            return Err(RuntimeError::InputUnknown);
+        }
+        process
+            .input_busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| RuntimeError::Busy)?;
+        let (result, result_rx) = std_mpsc::sync_channel(1);
+        let (async_result, async_rx) = tokio::sync::oneshot::channel();
+        let mut completion = InputCompletion {
+            process: Arc::clone(&process),
+            result: result_rx,
+            async_result: Some(async_rx),
+            accepted: false,
+        };
+        {
             let input = process
                 .input
                 .lock()
@@ -378,22 +527,17 @@ impl HostRuntime {
                 .cloned()
                 .ok_or_else(|| RuntimeError::ProcessNotRunning(process_id.to_string()))?;
             input
-                .send(InputWrite {
-                    data: write.data.clone(),
-                    delay: Duration::from_millis(write.delay_ms),
+                .try_send(InputWrite {
+                    writes: writes.to_vec(),
+                    deadline: Instant::now() + INPUT_DEADLINE,
+                    uncertain: Arc::clone(&process.input_uncertain),
                     result,
+                    async_result,
                 })
-                .map_err(|_| RuntimeError::Terminal("terminal input queue closed".to_string()))?;
-            result_rx
-                .recv()
-                .map_err(|_| RuntimeError::Terminal("terminal input writer stopped".to_string()))?
-                .map_err(RuntimeError::Terminal)?;
+                .map_err(|_| RuntimeError::Busy)?;
         }
-        process
-            .info
-            .lock()
-            .map_err(|_| RuntimeError::Terminal("process state lock poisoned".to_string()))
-            .map(|info| info.clone())
+        completion.accepted = true;
+        Ok(completion)
     }
 
     pub fn resize(
@@ -403,10 +547,7 @@ impl HostRuntime {
         rows: u16,
     ) -> Result<HostProcessInfo, RuntimeError> {
         let process = self.get_running(process_id)?;
-        let master = process
-            .master
-            .lock()
-            .map_err(|_| RuntimeError::Terminal("terminal lock poisoned".to_string()))?;
+        let master = process.master.try_lock().map_err(|_| RuntimeError::Busy)?;
         master
             .as_ref()
             .ok_or_else(|| RuntimeError::ProcessNotRunning(process_id.to_string()))?
@@ -427,10 +568,11 @@ impl HostRuntime {
     pub fn stop(&self, process_id: &str) -> Result<HostProcessInfo, RuntimeError> {
         let process = self.get_running(process_id)?;
         process.stopping.store(true, Ordering::Release);
+        process.input_uncertain.store(true, Ordering::Release);
         process
             .child
-            .lock()
-            .map_err(|_| RuntimeError::Terminal("child lock poisoned".to_string()))?
+            .try_lock()
+            .map_err(|_| RuntimeError::Busy)?
             .as_mut()
             .ok_or_else(|| RuntimeError::ProcessNotRunning(process_id.to_string()))?
             .kill()
@@ -441,12 +583,23 @@ impl HostRuntime {
             .lock()
             .map_err(|_| RuntimeError::Terminal("process tree lock poisoned".into()))?
             .take();
-        self.inner
-            .update_process(&process, |info| {
-                info.running = false;
-                info.exited_at = Some(Utc::now());
-            })
-            .ok_or_else(|| RuntimeError::Terminal("process state lock poisoned".to_string()))
+        // A successful kill request is not an observed exit. The monitor owns
+        // reaping and the terminal state; do not release a generation early.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let info = process
+                .info
+                .lock()
+                .map_err(|_| RuntimeError::Terminal("process state lock poisoned".into()))?
+                .clone();
+            if !info.running {
+                return Ok(info);
+            }
+            if Instant::now() >= deadline {
+                return Err(RuntimeError::StopUnknown);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn get(&self, process_id: &str) -> Result<Arc<HostProcess>, RuntimeError> {
@@ -578,17 +731,84 @@ impl Drop for RuntimeInner {
     }
 }
 
-fn spawn_input_writer(mut writer: Box<dyn Write + Send>, input: std_mpsc::Receiver<InputWrite>) {
+struct SpawnReservation<'a> {
+    runtime: &'a RuntimeInner,
+    id: String,
+}
+
+impl<'a> SpawnReservation<'a> {
+    fn new(runtime: &'a RuntimeInner, id: &str) -> Result<Self, RuntimeError> {
+        let mut spawning = runtime.spawning.lock().map_err(|_| RuntimeError::Busy)?;
+        if !spawning.insert(id.to_owned()) {
+            return Err(RuntimeError::Busy);
+        }
+        Ok(Self {
+            runtime,
+            id: id.to_owned(),
+        })
+    }
+}
+
+impl Drop for SpawnReservation<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut spawning) = self.runtime.spawning.lock() {
+            spawning.remove(&self.id);
+        }
+    }
+}
+
+fn spawn_input_writer(
+    mut writer: Box<dyn Write + Send>,
+    input: std_mpsc::Receiver<InputWrite>,
+    _permit: OwnedSemaphorePermit,
+    finished: Arc<AtomicBool>,
+    process_id: String,
+) {
     std::thread::spawn(move || {
-        while let Ok(write) = input.recv() {
-            if !write.delay.is_zero() {
-                std::thread::sleep(write.delay);
+        struct WriterLease {
+            _permit: OwnedSemaphorePermit,
+            finished: Arc<AtomicBool>,
+        }
+        impl Drop for WriterLease {
+            fn drop(&mut self) {
+                self.finished.store(true, Ordering::Release);
             }
-            let result = writer
-                .write_all(&write.data)
-                .and_then(|_| writer.flush())
-                .map_err(|error| error.to_string());
+        }
+        let _lease = WriterLease { _permit, finished };
+        while let Ok(write) = input.recv() {
+            let started = Instant::now();
+            let result = (|| {
+                for part in &write.writes {
+                    let delay_end = Instant::now() + Duration::from_millis(part.delay_ms);
+                    while Instant::now() < delay_end {
+                        if write.uncertain.load(Ordering::Acquire)
+                            || Instant::now() >= write.deadline
+                        {
+                            return Err("input_unknown".into());
+                        }
+                        std::thread::sleep(
+                            Duration::from_millis(10)
+                                .min(delay_end.saturating_duration_since(Instant::now())),
+                        );
+                    }
+                    for chunk in part.data.chunks(4096) {
+                        if write.uncertain.load(Ordering::Acquire)
+                            || Instant::now() >= write.deadline
+                        {
+                            return Err("input_unknown".into());
+                        }
+                        writer.write_all(chunk).map_err(|error| error.to_string())?;
+                    }
+                    writer.flush().map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            })();
             let failed = result.is_err();
+            if failed || write.uncertain.load(Ordering::Acquire) {
+                warn!(%process_id, phase = "input_writer_settled_unknown", elapsed_ms = started.elapsed().as_millis() as u64,
+                    bytes = write.writes.iter().map(|part| part.data.len()).sum::<usize>(), "owned PTY input writer settled; no retry");
+            }
+            let _ = write.async_result.send(result.clone());
             let _ = write.result.send(result);
             if failed {
                 break;
@@ -623,12 +843,18 @@ fn spawn_output_reader(
             #[cfg(windows)]
             if cursor_query.observe(&buffer[..count]) {
                 let (result, _) = std_mpsc::sync_channel(1);
+                let (async_result, _) = tokio::sync::oneshot::channel();
                 if let Ok(input) = process.input.lock() {
                     if let Some(input) = input.as_ref() {
-                        let _ = input.send(InputWrite {
-                            data: b"\x1b[1;1R".to_vec(),
-                            delay: Duration::ZERO,
+                        let _ = input.try_send(InputWrite {
+                            writes: vec![HostWrite {
+                                data: b"\x1b[1;1R".to_vec(),
+                                delay_ms: 0,
+                            }],
+                            deadline: Instant::now() + INPUT_DEADLINE,
+                            uncertain: Arc::clone(&process.input_uncertain),
                             result,
+                            async_result,
                         });
                     }
                 }
@@ -734,6 +960,104 @@ mod tests {
     use std::time::Instant;
 
     #[test]
+    #[ignore = "private raw-mode nonreader child for input isolation"]
+    fn nonreader_fixture() {
+        #[cfg(unix)]
+        assert!(std::process::Command::new("/bin/stty")
+            .args(["raw", "-echo"])
+            .status()
+            .unwrap()
+            .success());
+        println!("NONREADER_READY");
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(Duration::from_secs(45));
+    }
+
+    #[tokio::test]
+    async fn cancelled_async_input_reclaims_writer_after_owned_stop() {
+        let root = std::env::temp_dir().join(format!("treer224-input-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir(&root).unwrap();
+        let runtime = HostRuntime::new(&root).unwrap();
+        runtime
+            .spawn(HostSpawnRequest {
+                process_id: "nonreader".into(),
+                command: std::env::current_exe().unwrap().display().to_string(),
+                args: vec![
+                    "--exact".into(),
+                    "tests::nonreader_fixture".into(),
+                    "--ignored".into(),
+                    "--nocapture".into(),
+                ],
+                cwd: ".".into(),
+                env: BTreeMap::new(),
+                cols: 80,
+                rows: 24,
+                metadata: String::new(),
+            })
+            .unwrap();
+        wait_for_output_until(
+            &runtime,
+            "nonreader",
+            "NONREADER_READY",
+            Instant::now() + Duration::from_secs(5),
+        );
+        let process = runtime.get("nonreader").unwrap();
+        let writer = {
+            let runtime = runtime.clone();
+            tokio::spawn(async move {
+                runtime
+                    .write_async(
+                        "nonreader",
+                        &[HostWrite {
+                            data: vec![b'x'; INPUT_LIMIT_BYTES],
+                            delay_ms: 0,
+                        }],
+                    )
+                    .await
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !process.input_busy.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline);
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!writer.is_finished(), "real backpressure required");
+        assert!(matches!(
+            runtime.begin_write(
+                "nonreader",
+                &[HostWrite {
+                    data: vec![b'y'],
+                    delay_ms: 0
+                }]
+            ),
+            Err(RuntimeError::Busy)
+        ));
+        writer.abort();
+        assert!(writer.await.unwrap_err().is_cancelled());
+        assert!(process.input_uncertain.load(Ordering::Acquire));
+        assert!(!process.input_busy.load(Ordering::Acquire));
+        assert!(matches!(
+            runtime.begin_write(
+                "nonreader",
+                &[HostWrite {
+                    data: vec![b'y'],
+                    delay_ms: 0
+                }]
+            ),
+            Err(RuntimeError::InputUnknown)
+        ));
+        let info = runtime.stop("nonreader").unwrap();
+        assert!(!info.running);
+        assert!(info.exit_code.is_some());
+        wait_for_resources_released(&process); // includes actual writer exit and its permit
+        assert!(process.input_writer_finished.load(Ordering::Acquire));
+        drop(process);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn conpty_startup_cursor_query_handles_chunk_boundaries_once() {
         for split in 0..=4 {
             let mut query = ConPtyCursorQuery::default();
@@ -799,7 +1123,12 @@ mod tests {
             let input_released = process.input.lock().expect("process input").is_none();
             let child_released = process.child.lock().expect("process child").is_none();
             let master_released = process.master.lock().expect("process master").is_none();
-            if exited && input_released && child_released && master_released {
+            if exited
+                && input_released
+                && child_released
+                && master_released
+                && process.input_writer_finished.load(Ordering::Acquire)
+            {
                 return;
             }
             assert!(

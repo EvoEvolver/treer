@@ -17,6 +17,18 @@ Everything below is for running your own control plane.
 
 ## Self-hosted deployment
 
+For an unresponsive terminal, a Proxy's online machine status alone does not
+prove Host control health. Inspect the Host inventory and another workload
+before concluding that every Agent has failed. A blocked Agent's PTY input
+must not block other Agents or inventory / Controller restart requests.
+`input_unknown` or `operation_unknown` means a submitted mutation may have had
+effects: do not automatically resend it, especially under a new operation ID.
+Reconcile the owned process and use an explicit stop when termination is
+intended. Stop can itself report UNKNOWN until exit is actually observed.
+Input remains refused for that uncertain generation; there is no automatic
+retry, watchdog recovery, or guarantee that a blocked kernel write cancels
+immediately. Host restart discards its in-memory idempotency records.
+
 A single-host install runs PostgreSQL, NATS, Proxy, the browser App, and an
 updater sidecar from published GHCR images. Copy `.env.example`, set
 `ADMIN_PASSWORD`, `POSTGRES_PASSWORD`, `DATABASE_URL`, and a long random
