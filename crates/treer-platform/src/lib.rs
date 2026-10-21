@@ -5,8 +5,35 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[allow(unsafe_code)]
+pub mod birth_lock;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod bounded_child;
 mod environment;
+#[cfg(unix)]
+pub mod installation_directory;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod local_filesystem;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod lock_transfer;
 pub mod machine_file;
+#[cfg(unix)]
+pub mod private_directory;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod process_image;
+#[cfg(unix)]
+pub mod retained_executable;
+#[cfg(test)]
+mod update_binding;
+#[cfg(test)]
+mod update_deadline;
+#[cfg(test)]
+mod update_record_order;
+#[cfg(test)]
+mod update_registration;
+#[cfg(test)]
+mod windows_update_layout;
 pub use environment::{
     clean_process_environment_before_threads, inherited_environment, inherited_variable_allowed,
     machine_exec_environment, machine_exec_variable_allowed,
@@ -15,6 +42,11 @@ pub use environment::{
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows;
+// Development fixture only until directory trust and daemon-owned handoff are
+// enforced. No downstream crate can reach this launch surface.
+#[cfg(all(windows, test))]
+#[allow(unsafe_code)]
+mod windows_update_bootstrap;
 #[cfg(windows)]
 pub use windows::{
     current_user_sid, process_created_at, terminate_process, LocalLock, ProcessTreeGuard,

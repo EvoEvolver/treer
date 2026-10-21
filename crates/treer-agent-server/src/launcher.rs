@@ -489,7 +489,7 @@ fn trusted_executable(path: &Path) -> Result<PathBuf> {
     trusted_file(path, true)
 }
 
-fn node_executable(explicit: Option<PathBuf>) -> Result<PathBuf> {
+pub(crate) fn node_executable(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return trusted_executable(&path);
     }

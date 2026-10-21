@@ -13,9 +13,20 @@ mod private_state;
 mod provider_cli;
 mod proxy;
 mod release_update;
+#[cfg(unix)]
+pub mod self_update;
 mod service;
 mod startup_store;
 mod tui;
+#[cfg(test)]
+mod windows_update_envelope;
+#[cfg(test)]
+mod windows_update_record;
+// Reuse the inert publication classifier; no platform API or production
+// dependency is exposed while the receipt format remains a test-only draft.
+#[cfg(test)]
+#[path = "../../treer-platform/src/windows_update_layout.rs"]
+mod windows_update_layout_model;
 mod workload_proxy;
 
 use std::io::{self, BufRead, IsTerminal, Write};

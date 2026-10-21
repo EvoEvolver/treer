@@ -377,6 +377,27 @@ in the repository, and missing keys or unsigned releases fail closed.
 Publishing an R2 release does not automatically update running machines;
 operators invoke `treer-agent-server update` separately.
 
+The Unix Rust self-update replacement is still under development and is not
+enabled for production. Its storage preflight requires local APFS/HFS on macOS,
+or ext2/3/4, XFS or Btrfs on Linux. It rejects NFS/SMB, overlayfs (including a
+container's writable root), virtiofs/9p/FUSE shared directories, tmpfs, F2FS, ZFS,
+bcachefs and unknown types with `update_storage_unsupported_filesystem`. Place
+Treer state on a supported local volume; for a Linux container use a dedicated
+volume backed by ext4/XFS/Btrfs. A named volume alone is not proof: its driver or
+backing storage can still be unsupported. Do not move active enrollment state
+or alter running services to bypass this check. The supported filesystem table
+and container-default caveats are in the
+[self-update plan](research/2026-10-16-controller-self-update.md).
+
+The Windows Rust self-update parity implementation is still inert and has no
+production recovery command. If a future attempt reserves a newer installation
+marker but fails before publishing its matching receipt, that attempt remains
+blocked: do not retry, delete the marker or copy back an older receipt to clear
+it. Preserve both records and staged evidence for inspection. Recovery remains
+unavailable until a protected human-authorization channel is implemented;
+neither a command-line acknowledgment nor matching file hashes grants recovery
+authority. See the [Windows parity plan](research/2026-10-17-controller-self-update-windows.md).
+
 Open the web UI, select a workspace, and choose **Add machine**. The dialog
 separates installation from workspace enrollment. The installation command is
 public and reusable:
@@ -2354,6 +2375,11 @@ by repository tests; run `python3 -m unittest discover -s scripts/tests -p
 activation-order, detachment and rollback checks.
 
 ### Windows split-step manual machine update
+
+The planned Rust self-update path remains inert and is limited to local NTFS
+volumes with persistent ACLs; ReFS/Dev Drive and other filesystems are unsupported.
+Its future admission path must refuse unsupported filesystems before mutation;
+the current manual procedure below is separate from that planned implementation.
 
 For a reviewed Canary set, use `scripts/update-machine.ps1` from a trusted local
 copy. This is separate from signed release-channel updates: same-origin
