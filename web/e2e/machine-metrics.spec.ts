@@ -81,7 +81,11 @@ test('repeated failure stops; refresh retries and logout clears metric memory', 
   // React development StrictMode may abort the first mount; measure completed polling after readiness.
   const initial = s.queries()
   await page.clock.fastForward(31000); await expect.poll(s.queries).toBe(initial + 1)
+  // A request count observes dispatch, before its response schedules the next timer.
+  // Wait for processing to finish before advancing the clock again.
+  await expect(panel(page).getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled()
   await page.clock.fastForward(61000); await expect.poll(s.queries).toBe(initial + 2)
+  await expect(panel(page).getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled()
   await page.clock.fastForward(180000); expect(s.queries()).toBe(initial + 2)
   await panel(page).getByRole('button', { name: 'Refresh', exact: true }).click(); await expect.poll(s.queries).toBe(initial + 3)
   await page.getByRole('button', { name: 'Close', exact: true }).click()
