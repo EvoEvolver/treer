@@ -71,7 +71,10 @@ GET /agent/workspaces/{workspace_id}/machines/{server_id}/metrics
 Workspace membership, machine binding and `machine.metrics.read` Policy apply
 before dispatch. Human/Agent identity and Policy are rechecked before output.
 The route grants neither exec nor file access. Existing Policy modes remain;
-no implicit enforce-mode Agent grant is added. The Policy App's action registry
+enforce mode requires an explicit matching allow rule for this action, including
+in pre-existing documents; unlisted/default allow does not grant it. Monitor
+and absent-provider effective defaults stay unchanged. No implicit Agent grant
+is added. The Policy App's action registry
 and any explicit grants must include the action before enforced Agent use.
 
 `from`/`to` are explicit RFC3339 timestamps with a maximum 24-hour span. Omit

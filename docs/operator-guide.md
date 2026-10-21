@@ -1352,7 +1352,10 @@ Upgrading to a Controller with `machine.metrics.v1` enables five-second local
 CPU/RAM/NVIDIA collection by default, including when nobody is viewing it, with
 at most 24 hours of local history. Workspace members who can reach the machine
 can query it under the existing default Policy mode; enforce-mode providers
-must explicitly handle `machine.metrics.read` for human and Agent subjects.
+must explicitly grant `machine.metrics.read` with matching reader rules.
+Old enforce documents without those rules deny both humans and Agents until
+republished; defaults alone cannot grant this action. Existing monitor mode
+still allows queries, even when a rule computes deny.
 An OS-account owner can run `treer-agent-server metrics disable` to refuse
 queries and purge history, or `metrics enable` to resume collection. These
 controls apply to this account's shared installation, not all OS accounts.

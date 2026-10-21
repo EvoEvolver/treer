@@ -1304,10 +1304,19 @@ impl CompiledWorkspacePolicy {
                     && path_match::conditions_match(rule, request)
             })
         });
-        let effect = matched
-            .map(|r| r.effect)
-            .or_else(|| self.defaults.get(&request.action).copied())
-            .unwrap_or(PolicyEffect::Allow);
+        // New sensitive telemetry must not become an implicit grant in old
+        // enforce documents whose unlisted actions historically default Allow.
+        // Monitor keeps its existing effective Allow behavior.
+        let metrics_grant_missing =
+            request.action == ACTION_MACHINE_METRICS_READ && matched.is_none();
+        let effect = if metrics_grant_missing {
+            PolicyEffect::Deny
+        } else {
+            matched
+                .map(|r| r.effect)
+                .or_else(|| self.defaults.get(&request.action).copied())
+                .unwrap_or(PolicyEffect::Allow)
+        };
         PolicyExplanation {
             computed_effect: effect,
             effective_decision: if self.mode == PolicyMode::Monitor {
@@ -1317,7 +1326,9 @@ impl CompiledWorkspacePolicy {
             },
             mode: self.mode,
             matched_rule_id: matched.map(|r| r.id.clone()),
-            reason: if matched.is_some() {
+            reason: if metrics_grant_missing {
+                "machine metrics require an explicit matching grant"
+            } else if matched.is_some() {
                 "rule matched"
             } else {
                 "no rule matched; action default"
@@ -1635,6 +1646,131 @@ mod tests {
         assert!(cached_provider_result(&absent)
             .expect("missing provider abstains")
             .is_none());
+    }
+
+    #[test]
+    fn machine_metrics_old_enforce_documents_require_a_matching_grant() {
+        for schema in [1, 2] {
+            for defaults in [
+                serde_json::json!({}),
+                serde_json::json!({"machine.metrics.read":"allow"}),
+            ] {
+                let document: WorkspacePolicyDocument = serde_json::from_value(serde_json::json!({
+                    "schema_version":schema,"defaults":defaults,"rules":[]
+                }))
+                .unwrap();
+                for subject in [
+                    PolicySubject::Human {
+                        user_id: "member".into(),
+                    },
+                    PolicySubject::Agent {
+                        server_id: "machine".into(),
+                        agent_id: "agent".into(),
+                    },
+                    PolicySubject::Machine {
+                        server_id: "machine".into(),
+                    },
+                    PolicySubject::Service {
+                        service_id: "service".into(),
+                    },
+                ] {
+                    let request = PolicyRequest::new(
+                        "workspace",
+                        subject,
+                        ACTION_MACHINE_METRICS_READ,
+                        PolicyResource::new(RESOURCE_MACHINE, "machine"),
+                    );
+                    let enforced = CompiledWorkspacePolicy::explain_document(
+                        document.clone(),
+                        PolicyMode::Enforce,
+                        &request,
+                    );
+                    assert_eq!(enforced.effective_decision, PolicyEffect::Deny);
+                    assert!(enforced.matched_rule_id.is_none());
+                    let monitor = CompiledWorkspacePolicy::explain_document(
+                        document.clone(),
+                        PolicyMode::Monitor,
+                        &request,
+                    );
+                    assert_eq!(monitor.computed_effect, PolicyEffect::Deny);
+                    assert_eq!(monitor.effective_decision, PolicyEffect::Allow);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn machine_metrics_actual_policy_app_v2_templates_match_core_evaluator() {
+        let output=std::process::Command::new("python3")
+            .env_clear().env("PATH",std::env::var_os("PATH").unwrap_or_default())
+            .arg("-B").arg("-c")
+            .arg("import sys,json;sys.path.insert(0,sys.argv[1]);import policy;print(json.dumps([policy.template_document(t['id'],{})['document'] for t in policy.TEMPLATES]))")
+            .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/policy"))
+            .output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let documents: Vec<WorkspacePolicyDocument> =
+            serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(documents.len(), 2);
+        for document in documents {
+            assert_eq!(document.schema_version, 2);
+            for (subject, expected) in [
+                (
+                    PolicySubject::Human {
+                        user_id: "owner".into(),
+                    },
+                    PolicyEffect::Allow,
+                ),
+                (
+                    PolicySubject::Human {
+                        user_id: "member".into(),
+                    },
+                    PolicyEffect::Allow,
+                ),
+                (
+                    PolicySubject::Agent {
+                        server_id: "machine".into(),
+                        agent_id: "agent".into(),
+                    },
+                    PolicyEffect::Deny,
+                ),
+                (
+                    PolicySubject::Machine {
+                        server_id: "machine".into(),
+                    },
+                    PolicyEffect::Deny,
+                ),
+                (
+                    PolicySubject::Service {
+                        service_id: "service".into(),
+                    },
+                    PolicyEffect::Deny,
+                ),
+            ] {
+                let request = PolicyRequest::new(
+                    "workspace",
+                    subject,
+                    ACTION_MACHINE_METRICS_READ,
+                    PolicyResource::new(RESOURCE_MACHINE, "machine"),
+                );
+                let explanation = CompiledWorkspacePolicy::explain_document(
+                    document.clone(),
+                    PolicyMode::Enforce,
+                    &request,
+                );
+                assert_eq!(explanation.effective_decision, expected);
+                if expected == PolicyEffect::Allow {
+                    assert_eq!(
+                        explanation.matched_rule_id.as_deref(),
+                        Some("human-machine-metrics-read")
+                    );
+                }
+            }
+        }
     }
 
     #[test]

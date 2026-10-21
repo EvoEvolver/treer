@@ -70,7 +70,12 @@ real-time/history queries. It grants neither `machine.exec` nor file access.
 The metrics endpoint checks identity, workspace membership and machine binding
 before Policy, and rechecks identity/binding/Policy before returning bytes.
 Providers must register this action and explicitly cover intended readers in
-enforce mode; no implicit Agent grant is added. Collection itself is local and
+enforce mode. Core requires a matching allow rule for this action in enforce
+mode, even if an old document omits the action or sets its default to allow.
+Old enforce documents therefore deny humans and Agents until explicitly
+republished with intended reader rules; no stored document is rewritten.
+Monitor and absent-provider fallback retain their existing effective allow.
+No implicit Agent grant is added. Collection itself is local and
 default-on for capable Controllers; denying reads does not stop collection.
 See [Machine hardware metrics](machine-metrics.md) for local disable/purge and
 the upgrade exposure under the existing monitor/default-allow mode.

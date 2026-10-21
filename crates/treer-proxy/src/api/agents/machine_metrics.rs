@@ -275,6 +275,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enforced_human_grant_denies_agent_and_machine_before_dispatch() {
+        use treer_protocol::{
+            PolicyMode, PolicyPrincipalKind, PolicyPrincipalRef, WorkspacePolicyDocument,
+        };
+        use treer_proxy::policy_store::WorkspacePolicyStore;
+        let auth = AuthStore::for_test("test").await;
+        auth.seed_test_workspace("default").await;
+        let store = WorkspacePolicyStore::new(auth.pool());
+        let document: WorkspacePolicyDocument = serde_json::from_value(json!({
+            "schema_version":2,"defaults":{},"rules":[{
+                "id":"human-machine-metrics-read","priority":100,"effect":"allow",
+                "subjects":[{"kind":"human"}],"actions":[ACTION],
+                "resources":[{"kind":"machine"}]
+            }]
+        }))
+        .unwrap();
+        store
+            .replace(
+                "default",
+                0,
+                PolicyMode::Enforce,
+                document,
+                PolicyPrincipalRef {
+                    kind: PolicyPrincipalKind::Human,
+                    id: "owner".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let policy = PolicyEngine::durable(store);
+        for agent in [false, true] {
+            let state = crate::api::tests::state_with_managed_agent().await;
+            let server = state.resolve_server("default", "machine-a").await.unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            state
+                .register_server_instance_with_capabilities(
+                    server,
+                    Uuid::new_v4(),
+                    "metrics-test".into(),
+                    vec![treer_protocol::CAPABILITY_MACHINE_METRICS.into()],
+                    tx,
+                )
+                .await
+                .unwrap();
+            let mut headers = HeaderMap::new();
+            if agent {
+                headers.insert(AGENT_ID_HEADER, HeaderValue::from_static("agent-a"));
+            }
+            let response = read_machine_metrics(
+                State(state),
+                Extension(auth.clone()),
+                Extension(policy.clone()),
+                None,
+                Some(Extension(MachineSession {
+                    server_id: Some("machine-a".into()),
+                    workspace_id: Some("default".into()),
+                })),
+                headers,
+                Path(("default".into(), "machine-a".into())),
+                RawQuery(None),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert!(std::str::from_utf8(&body)
+                .unwrap()
+                .contains("machine_metrics_forbidden"));
+            assert!(
+                rx.try_recv().is_err(),
+                "denial must precede Controller dispatch"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn authorized_dispatch_revalidation_unknown_fields_and_slow_reader() {
         use treer_protocol::*;
         let auth = AuthStore::for_test("test").await;
