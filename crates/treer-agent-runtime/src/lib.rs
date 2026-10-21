@@ -1061,6 +1061,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn observed_exit_does_not_complete_a_pending_input_receiver() {
+        let root =
+            std::env::temp_dir().join(format!("treer224-settlement-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir(&root).unwrap();
+        let runtime = HostRuntime::new(&root).unwrap();
+        runtime
+            .spawn(HostSpawnRequest {
+                process_id: "settlement".into(),
+                command: std::env::current_exe().unwrap().display().to_string(),
+                args: vec![
+                    "--exact".into(),
+                    "tests::nonreader_fixture".into(),
+                    "--ignored".into(),
+                    "--nocapture".into(),
+                ],
+                cwd: ".".into(),
+                env: BTreeMap::new(),
+                cols: 80,
+                rows: 24,
+                metadata: String::new(),
+            })
+            .unwrap();
+        wait_for_output_until(
+            &runtime,
+            "settlement",
+            "NONREADER_READY",
+            Instant::now() + Duration::from_secs(15),
+        );
+        let process = runtime.get("settlement").unwrap();
+        // Hold an accepted completion explicitly instead of assuming a given
+        // OS wakes a kernel writer at child exit. This tests the async deadline
+        // boundary; the separate native regressions prove real backpressure.
+        let (sender, receiver) = std_mpsc::sync_channel(1);
+        *process.input.lock().unwrap() = Some(sender);
+        let submitted = tokio::time::Instant::now();
+        let mut write = {
+            let runtime = runtime.clone();
+            tokio::spawn(async move {
+                runtime
+                    .write_async(
+                        "settlement",
+                        &[HostWrite {
+                            data: vec![b'x'],
+                            delay_ms: 0,
+                        }],
+                    )
+                    .await
+            })
+        };
+        let pending = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(pending) = receiver.try_recv() {
+                    break pending;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let stopped = runtime.stop("settlement").unwrap();
+        assert!(!stopped.running && stopped.exit_code.is_some());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), &mut write)
+                .await
+                .is_err(),
+            "observed exit must not manufacture completion of accepted input"
+        );
+        let result =
+            tokio::time::timeout_at(submitted + INPUT_DEADLINE + Duration::from_secs(1), write)
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(matches!(result, Err(RuntimeError::InputUnknown)));
+        assert!(process.input_uncertain.load(Ordering::Acquire));
+        assert!(!process.input_busy.load(Ordering::Acquire));
+        drop(pending);
+        wait_for_resources_released(&process);
+        drop(process);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn cancelled_async_input_reclaims_writer_after_owned_stop() {
         let root = std::env::temp_dir().join(format!("treer224-input-{}", Uuid::new_v4().simple()));
         std::fs::create_dir(&root).unwrap();
