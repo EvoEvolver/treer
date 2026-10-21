@@ -2537,18 +2537,94 @@ terminal success requires the complete native receipt projection, matching
 Controller and CLI identity, and correlated health. A reconnect alone proves
 none of those things. Resolved operations remain discoverable for seven days.
 
-Release catalogs are provisioned by reviewed server-side release tooling in
-`controller_update_catalog_entries`; there is no browser catalog-write route or
-remote `latest` lookup. Explicit release ordering and a persisted per-platform
+Provision a reviewed local release catalog with Proxy startup option
+`--controller-update-catalog /absolute/path/catalog.json` (or
+`TREER_CONTROLLER_UPDATE_CATALOG`). This is an operator trust decision, not
+signature verification or a browser catalog-write route. The file is bounded
+to 64 KiB and has this shape:
+
+```json
+{"schema_version":1,"catalogs":[{"platform":"linux-x86_64","revision":1,"entries":[{"release_sequence":1,"target":{"target_id":"reviewed-release-id","identity":{"release_sha":"<40 lowercase hex>","artifact_source_sha":"<40 lowercase hex>","controller_sha256":"<64 lowercase hex>","cli_sha256":"<64 lowercase hex>"},"platform":"linux-x86_64","version_label":"reviewed version"}}]}]}
+```
+
+Replace the illustrative digest placeholders with reviewed release identities.
+Include the installed identity and at most sixteen newer targets per platform;
+`release_sequence` explicitly defines upgrade order. There are at most five
+platform catalogs, with unique positive revision/sequence values below 2^53.
+Import is atomic, repeated identical revisions are safe, and a revision cannot
+be reinterpreted or decreased. An absent or invalid catalog disables preview;
+there is no remote `latest` lookup. Explicit ordering and a persisted per-platform
 revision floor reject unknown ordering, same-release updates and rollback of
 catalog metadata. Provisioning records alone does not enable machine updates.
 
-This adapter does **not** yet advertise `machine.controller-update.v1`. The
-#111 production native submit/recovery entry and its platform acceptance remain
-required before enabling it. Controllers without that entry return a fixed
-unsupported result, and discovery of already persisted operations remains
-available. The adapter must not substitute machine Exec, the legacy updater,
-PowerShell or Python for the missing native entry. Development tests use a fake
-Controller and isolated PostgreSQL; they do not demonstrate a real upgrade or
-native-platform acceptance. See the
+The Proxy advertises its typed API; the Controller update capability remains
+source-gated off until whole worker/launcher native acceptance is reviewed for
+that platform. Both capabilities are required; a browser or environment flag
+cannot bypass this gate. Discovery of already persisted operations remains
+available. The adapter never substitutes machine Exec, the legacy updater,
+PowerShell or Python for the typed native path. Local PostgreSQL and owned-child
+tests do not demonstrate a real machine upgrade. See the
 [reviewed wire contract](research/2026-10-20-controller-update-web-contract.md).
+
+The Unix native reader opens only the fixed service jobs directory and canonical
+job UUID. It requires a matching durable submission binding and native receipt,
+including original and target image digests. Old unbound jobs are not adopted.
+A raw `complete` or `rolled_back` receipt alone cannot produce success. A private
+whole-health outcome and durable release of the matching native active claim
+must also match; observation refuses an incomplete final-evidence write rather
+than publishing a conflicting result at the same receipt revision.
+
+The Controller-side native adapter also requires a private, locally provisioned
+`controller-update-catalog.json` in its service configuration directory. Its
+schema is `{schema_version:1, revision, accept_shared_binaries, entries}`. Each
+entry contains `release_sequence`, the same complete `target` as the Proxy
+catalog, a pinned `sums_sha256`, a fixed HTTPS `artifact_base` ending in `/`,
+`allow_pinned:true` and explicit `allow_artifact_origin`. These are local operator
+choices; the browser cannot supply them. Only a strictly increasing sequence is
+eligible. Same-release and downgrade overrides are absent. Explicit checksum
+pins are transition acknowledgments, not publisher signatures or freshness.
+
+The Controller owns submission independently of its Proxy websocket. Update
+commands do not block heartbeat or operation queries. Disconnect drops response
+waiting only; the original task continues without resubmission. A Controller
+process exit can leave preparation unresolved, and discovery never restarts it.
+
+Native preparation revalidates the installed Controller/CLI against those local
+pins and holds installation and enrollment locks. Before downloading it writes
+an exclusive private active claim and the complete operation binding, then
+verifies both artifacts, saves startup/Host/Controller baseline evidence, stages
+both replacements and the original-image activator, and probes the authenticated
+staged pair. It does not replace installed names, restart services, or launch an
+installer. An existing job or active claim is never resumed by another POST;
+owner death and elapsed time do not clear it. Read-only operation lookup works
+from its fixed journal after restart. Capability remains disabled until the
+complete worker/launcher execution and whole-health reconciliation pass native
+acceptance; preparation tests alone do not enable Console updates.
+
+The native handoff copies the original installed Controller into the private
+job, starts only that fixed worker with its UUID, and authenticates the running
+image, OS parent and exact socket peer before transferring the same lock file
+descriptions once. Lost acknowledgment never starts another worker. Its private
+entry runs before normal Controller startup, metrics helpers or runtime threads;
+it cannot be reused as a metrics GPU probe or an ordinary Controller fallback.
+Before enabling this path alongside metrics, verify that helper re-exec
+compares the running OS image to the installed Controller inode and refuses a
+stale replaced image or job-local activator. Never execute the newly replaced
+path as an old Controller helper, and never run ordinary metrics startup in
+the private worker. This integration check is part of native acceptance.
+The worker uses the existing Rust image publication, Host restart, workload
+health and verified rollback transaction; it never restarts the Host.
+
+After Core health, the original owned worker directly owns each fixed launcher
+install/status child. It persists exclusive start intent before each spawn,
+retains authenticated Controller/CLI and Node handles, clears inherited
+environment and uses bounded output and process-group quiescence. This lifecycle
+assumes trusted cooperating installers whose descendants retain the group and
+remain signalable; it is not a sandbox. A timeout, cancellation, failed result
+or unproven quiescence remains unresolved/partial and never authorizes retry or
+rollback over a possibly running installer. Only strict launcher result matching
+and a final Controller/CLI/Host/workload health check permit whole completion.
+No permit/EOF fixture or reconstructed supervisor marker supplies authority.
+The legacy CLI updater now holds the same local installation locks and refuses
+an unresolved native active claim, including corrupt or empty claims. It also
+refuses an ambient CLI path that differs from its saved installed sibling.

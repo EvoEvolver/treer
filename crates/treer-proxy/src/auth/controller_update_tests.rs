@@ -342,3 +342,72 @@ async fn silence_becomes_unconfirmed_without_releasing_or_resending() {
     assert!(again.dispatch.is_none());
     assert_eq!(again.operation, op);
 }
+
+#[tokio::test]
+async fn operator_catalog_import_is_immutable_atomic_and_never_regresses() {
+    let auth = store().await;
+    let b = binding();
+    let mut current = b.target.clone();
+    current.target_id = "release-a".into();
+    current.identity = b.current.clone();
+    let document = serde_json::json!({"schema_version":1,"catalogs":[{
+        "platform":"linux-x86_64","revision":2,"entries":[
+            {"release_sequence":20,"target":b.target},
+            {"release_sequence":10,"target":current}
+        ]
+    }]});
+    let bytes = serde_json::to_vec(&document).unwrap();
+    auth.provision_controller_update_catalog(&bytes)
+        .await
+        .unwrap();
+    auth.provision_controller_update_catalog(&bytes)
+        .await
+        .unwrap();
+    let (rev, targets) = auth
+        .controller_update_targets(wire::Platform::LinuxX86_64, &b.current)
+        .await
+        .unwrap();
+    assert_eq!(rev, 2);
+    assert_eq!(targets, vec![b.target.clone()]);
+    let mut changed = document.clone();
+    changed["catalogs"][0]["entries"][0]["target"]["version_label"] =
+        serde_json::json!("reinterpreted");
+    assert!(auth
+        .provision_controller_update_catalog(&serde_json::to_vec(&changed).unwrap())
+        .await
+        .is_err());
+    changed = document.clone();
+    changed["catalogs"][0]["revision"] = serde_json::json!(1);
+    assert!(auth
+        .provision_controller_update_catalog(&serde_json::to_vec(&changed).unwrap())
+        .await
+        .is_err());
+    changed = document.clone();
+    changed["catalogs"][0]["entries"][0]["target"]["url"] =
+        serde_json::json!("https://untrusted.invalid");
+    assert!(auth
+        .provision_controller_update_catalog(&serde_json::to_vec(&changed).unwrap())
+        .await
+        .is_err());
+    assert!(auth
+        .provision_controller_update_catalog(&vec![b' '; 64 * 1024 + 1])
+        .await
+        .is_err());
+    // A higher revision is admitted atomically and old ordering cannot return.
+    changed = document.clone();
+    changed["catalogs"][0]["revision"] = serde_json::json!(3);
+    auth.provision_controller_update_catalog(&serde_json::to_vec(&changed).unwrap())
+        .await
+        .unwrap();
+    assert!(auth
+        .provision_controller_update_catalog(&bytes)
+        .await
+        .is_err());
+    assert_eq!(
+        auth.controller_update_targets(wire::Platform::LinuxX86_64, &b.current)
+            .await
+            .unwrap()
+            .0,
+        3
+    );
+}

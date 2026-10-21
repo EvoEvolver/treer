@@ -238,6 +238,19 @@ impl<'a> Invocation<'a> {
         node_budget(deadline, || parse_node_version(output.stdout()))
     }
 
+    // Private access for the direct original-owned worker executor. These
+    // references grant no new ownership or replay capability.
+    pub(in crate::self_update) fn bound_receipt(&self) -> Result<Receipt> {
+        self.verify_binding()?;
+        Ok(self.receipt.clone())
+    }
+    pub(in crate::self_update) fn selected(&self) -> &Selected {
+        self.selected
+    }
+    pub(in crate::self_update) fn owner(&self) -> &OwnedActivation {
+        self.owned
+    }
+
     pub fn program(&self) -> &Path {
         &self.program
     }
@@ -1650,6 +1663,77 @@ mod tests {
             .err()
             .unwrap();
             assert_eq!(error.to_string(), "update_launcher_context_invalid");
+        }
+    }
+    #[tokio::test]
+    async fn direct_owned_child_has_exclusive_intent_and_never_retries_success_or_failure() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+        for exit in [0, 23] {
+            let f = Fixture::standard_config();
+            let script = format!("#!/bin/sh\n[ \"$1\" = launcher ] || exit 44\n[ \"$LANG\" = C ] && [ -n \"$TMPDIR\" ] || exit 45\n[ -z \"${{NODE_OPTIONS+x}}${{TREER_MACHINE_TOKEN+x}}${{TREER_WORKLOAD_CREDENTIAL+x}}\" ] || exit 46\nprintf ran >> launch-count\nprintf '{{}}'\nexit {exit}\n");
+            std::fs::write(f.bin.join(Binary::Controller.name()), &script).unwrap();
+            for name in [Binary::Controller.name(), Binary::Cli.name()] {
+                std::fs::set_permissions(f.bin.join(name), std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
+            let selected = f.inventory().select(None, false).unwrap();
+            let locks = selected.lock().unwrap();
+            let mut r = receipt();
+            r.workspace_id = "ws_a".into();
+            r.server_id = "srv_a".into();
+            r.controller_sha256 = format!("{:x}", Sha256::digest(script.as_bytes()));
+            r.cli_sha256 = format!("{:x}", Sha256::digest(b"cli"));
+            r.publications = Publications::new(
+                r.controller_sha256.clone(),
+                r.cli_sha256.clone(),
+                &r.controller_sha256,
+                &r.cli_sha256,
+            );
+            let jobs = PrivateDirectory::open(&f.path)
+                .unwrap()
+                .create_child("jobs")
+                .unwrap();
+            let journal = Journal::create(&jobs, &r).unwrap();
+            let prepared = journal.prepare_fixture().unwrap();
+            let activating = journal
+                .advance(prepared.revision, Phase::Activating)
+                .unwrap();
+            let before = journal
+                .advance(activating.revision, Phase::CoreHealthy)
+                .unwrap();
+            let owned = OwnedActivation::fixture(locks, prepared);
+            let temporary = LauncherTemporary::create(
+                &selected,
+                &owned,
+                &journal,
+                &f.path.join("jobs").join(before.job_id.to_string()),
+            )
+            .unwrap();
+            let node = NodeFixture::new();
+            let plan = Invocation::with_context(
+                &selected,
+                &owned,
+                &journal,
+                Operation::Install,
+                &f.path,
+                &node.node(),
+            )
+            .unwrap()
+            .bind_node(retain_node(&node.node()).unwrap())
+            .unwrap()
+            .bind_temporary(&temporary)
+            .unwrap();
+            let result = crate::self_update::worker::launcher::execute(&plan).await;
+            assert_eq!(result.is_ok(), exit == 0);
+            assert_eq!(std::fs::read(f.bin.join("launch-count")).unwrap(), b"ran");
+            assert!(crate::self_update::worker::launcher::execute(&plan)
+                .await
+                .is_err());
+            assert_eq!(std::fs::read(f.bin.join("launch-count")).unwrap(), b"ran");
+            assert_eq!(journal.read().unwrap(), before);
+            assert!(selected.lock().is_err());
         }
     }
 }

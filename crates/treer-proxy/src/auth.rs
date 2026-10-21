@@ -816,6 +816,7 @@ impl AuthStore {
 mod accounts;
 mod apps;
 mod controller_update;
+mod controller_update_catalog;
 #[cfg(test)]
 mod controller_update_tests;
 mod email;

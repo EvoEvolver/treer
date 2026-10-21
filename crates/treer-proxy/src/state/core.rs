@@ -334,12 +334,12 @@ impl AppState {
     }
 
     /// Capabilities the browser read models expose per machine. The Web only
-    /// decides between the legacy and the chunked upload route; every other
-    /// Controller capability stays in the connection table (#153 data
-    /// minimization, #173).
+    /// decides between upload routes and whether the typed update entry exists;
+    /// unrelated Controller capabilities stay in the connection table.
     pub(crate) const READ_MODEL_CAPABILITIES: &'static [&'static str] = &[
         treer_protocol::CAPABILITY_MACHINE_UPLOAD,
         treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3,
+        treer_protocol::controller_update::CAPABILITY,
     ];
 
     fn read_model_capabilities<'a>(

@@ -529,7 +529,7 @@ async fn core_messages_rollout_disabled() -> ApiFailure {
 
 async fn health() -> Json<Value> {
     Json(
-        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_PLAN_V2, treer_protocol::CAPABILITY_WORKSPACE_PINS, treer_protocol::CAPABILITY_INGRESS_PROTECTION, treer_protocol::CAPABILITY_AGENT_INTERFACE_ORIGIN, treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3] }),
+        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_PLAN_V2, treer_protocol::controller_update::CAPABILITY, treer_protocol::CAPABILITY_WORKSPACE_PINS, treer_protocol::CAPABILITY_INGRESS_PROTECTION, treer_protocol::CAPABILITY_AGENT_INTERFACE_ORIGIN, treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3] }),
     )
 }
 

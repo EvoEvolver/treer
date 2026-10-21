@@ -233,6 +233,9 @@ pub(crate) async fn controller_update_confirm(
     {
         return Err(failure("controller_update_preview_changed"));
     }
+    // Catalog inspection can wait on a remote Controller. Recheck membership
+    // and machine.exec after that wait, immediately before consuming authority.
+    authorize(&state, &auth, &policy, &session, &ws, &machine).await?;
     let accepted = auth
         .controller_update_accept(&s, &request.confirmation_token, &binding)
         .await?;

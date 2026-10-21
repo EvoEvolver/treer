@@ -18,6 +18,18 @@ pub struct DispatchBinding {
 }
 
 impl DispatchBinding {
+    /// Canonical plan binding shared by Proxy confirmation and native admission.
+    pub fn expected_plan_digest(&self) -> Result<String, serde_json::Error> {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(&(
+            &self.current,
+            &self.target,
+            self.catalog_revision,
+            crate::controller_update::PLAN_STEPS,
+        ))?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+
     pub fn validate(&self) -> bool {
         use crate::controller_update::{Preview, PLAN_STEPS};
         self.catalog_revision > 0

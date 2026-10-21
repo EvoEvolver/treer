@@ -102,6 +102,12 @@ async fn durable_prepare_confirm_discover_poll_and_no_repeat_dispatch() {
     let auth = seeded().await;
     let state = super::tests::state_with_managed_agent().await;
     let mut rx = attach(&state).await;
+    assert!(state
+        .resolve_server(WS, MACHINE)
+        .await
+        .unwrap()
+        .capabilities
+        .contains(&wire::CAPABILITY.to_owned()));
     let counter = Arc::new(AtomicUsize::new(0));
     let observed = counter.clone();
     let fake_state = state.clone();

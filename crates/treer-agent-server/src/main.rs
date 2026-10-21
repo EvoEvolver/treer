@@ -2,6 +2,7 @@ mod agent_interface;
 mod cli_command;
 mod cli_session;
 mod controller;
+mod controller_update;
 mod host_client;
 mod interface_cache;
 mod launcher;
@@ -207,6 +208,26 @@ struct ServerArgs {
 }
 
 fn main() -> Result<()> {
+    // Private old-image worker MUST branch before Tokio, normal Controller
+    // startup, metrics helpers or any other threads/forks. Never fall back to
+    // ordinary service execution after malformed or failed worker bootstrap.
+    #[cfg(unix)]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--controller-update-worker"))
+    {
+        let mut arguments = std::env::args_os().skip(2);
+        let selector = arguments
+            .next()
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| anyhow::anyhow!("update_worker_bootstrap_failed"))?;
+        if arguments.next().is_some() {
+            anyhow::bail!("update_worker_bootstrap_failed");
+        }
+        let worker = self_update::web_adapter::enter_worker(&selector)
+            .map_err(|_| anyhow::anyhow!("update_worker_bootstrap_failed"))?;
+        return self_update::web_adapter::run_worker(worker)
+            .map_err(|_| anyhow::anyhow!("update_recovery_required"));
+    }
     // Saved service configuration supplies identity; never let a launcher or
     // service manager's inherited workload identity override it.
     if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--execute-cli"))

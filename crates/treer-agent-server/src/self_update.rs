@@ -40,6 +40,9 @@ pub mod safety;
 pub mod selection;
 pub mod startup_backup;
 mod verified_image;
+pub mod web_adapter;
+mod web_preparation;
+mod web_result;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod worker;
 
@@ -197,11 +200,9 @@ impl Receipt {
             Source::Pin {
                 sums_sha256,
                 allow_pinned,
-                allow_same,
-                allow_downgrade,
                 ..
             } => {
-                if !hex(sums_sha256, 64) || !allow_pinned || (!allow_same && !allow_downgrade) {
+                if !hex(sums_sha256, 64) || !allow_pinned {
                     bail!("invalid_update_receipt");
                 }
             }
@@ -630,6 +631,25 @@ mod tests {
                 windows_marker
             );
         }
+    }
+
+    #[test]
+    fn pinned_forward_upgrade_does_not_require_same_or_downgrade_permission() {
+        let mut r = receipt();
+        if let Source::Pin {
+            allow_same,
+            allow_downgrade,
+            ..
+        } = &mut r.source
+        {
+            *allow_same = false;
+            *allow_downgrade = false;
+        }
+        r.validate().unwrap();
+        if let Source::Pin { allow_pinned, .. } = &mut r.source {
+            *allow_pinned = false;
+        }
+        assert!(r.validate().is_err());
     }
 
     #[test]

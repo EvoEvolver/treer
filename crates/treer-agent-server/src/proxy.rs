@@ -604,9 +604,17 @@ impl ProxyClient {
                             // prevents this socket from receiving their nested requests.
                             // Keep a bounded, connection-owned set: disconnect drops the
                             // futures and kill_on_drop terminates their child processes.
+                            // Update queries also perform bounded image probes, so must
+                            // not block heartbeat/GET delivery. Dispatch explicitly owns
+                            // a detached Controller task; dropping this response future
+                            // cannot cancel an accepted native submission.
                             if matches!(
                                 envelope.command,
-                                AgentCommand::Exec { .. } | AgentCommand::ProviderCliCheck { .. }
+                                AgentCommand::Exec { .. }
+                                    | AgentCommand::ProviderCliCheck { .. }
+                                    | AgentCommand::ControllerUpdateInspect {}
+                                    | AgentCommand::ControllerUpdateDispatch { .. }
+                                    | AgentCommand::ControllerUpdateOperation { .. }
                             ) {
                                 if exec_ids.contains(&envelope.command_id) {
                                     continue;
@@ -1026,16 +1034,59 @@ impl ProxyClient {
                 .map(|response| CommandResult::success(command_id.clone(), response))
                 .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
             // The typed web path must not fall back to Exec or the legacy
-            // updater before the #111 native entry/recovery gate is available.
-            AgentCommand::ControllerUpdateInspect {}
-            | AgentCommand::ControllerUpdateDispatch { .. }
-            | AgentCommand::ControllerUpdateOperation { .. } => CommandResult::failure(
-                command_id.clone(),
-                ProtocolError::new(
-                    "controller_update_unsupported",
-                    "Native Controller update adapter is unavailable",
-                ),
-            ),
+            // updater before native whole-worker/launcher acceptance is available.
+            AgentCommand::ControllerUpdateInspect {} => {
+                crate::controller_update::inspect(&self.server.workspace_id, &self.server.server_id)
+                    .await
+                    .map(|report| CommandResult::success(command_id.clone(), report))
+                    .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error))
+            }
+            AgentCommand::ControllerUpdateDispatch { binding } => {
+                crate::controller_update::dispatch(
+                    &self.server.workspace_id,
+                    &self.server.server_id,
+                    binding,
+                )
+                .await
+                .map(|operation| CommandResult::success(command_id.clone(), operation))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error))
+            }
+            AgentCommand::ControllerUpdateOperation { operation_id } => {
+                #[cfg(unix)]
+                {
+                    let workspace = self.server.workspace_id.clone();
+                    let server = self.server.server_id.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        crate::self_update::web_adapter::operation(
+                            &workspace,
+                            &server,
+                            &operation_id,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(Ok(operation)) => CommandResult::success(command_id.clone(), operation),
+                        _ => CommandResult::failure(
+                            command_id.clone(),
+                            ProtocolError::new(
+                                "controller_update_receipt_invalid",
+                                "Native update evidence is unavailable",
+                            ),
+                        ),
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = operation_id;
+                    CommandResult::failure(
+                        command_id.clone(),
+                        ProtocolError::new(
+                            "controller_update_unsupported",
+                            "Native Controller update adapter is unavailable",
+                        ),
+                    )
+                }
+            }
             AgentCommand::ProviderCliRecipes {} => self
                 .runtime
                 .provider_cli()

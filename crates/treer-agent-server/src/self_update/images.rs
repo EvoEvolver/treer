@@ -54,7 +54,7 @@ fn validate_mode(mode: u32) -> Result<()> {
     Ok(())
 }
 
-fn stage(receipt: &Receipt, binary: Binary, restoring: bool) -> String {
+pub(super) fn stage(receipt: &Receipt, binary: Binary, restoring: bool) -> String {
     format!(
         ".treer-update-{}-{}-{}",
         receipt.job_id,

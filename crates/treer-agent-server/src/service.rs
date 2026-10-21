@@ -690,6 +690,11 @@ pub(crate) fn self_update_jobs_directory() -> Result<PathBuf> {
         .join("jobs"))
 }
 
+#[cfg(unix)]
+pub(crate) fn controller_update_config_directory() -> Result<PathBuf> {
+    config_dir().map_err(|_| anyhow::anyhow!("controller_update_catalog_unavailable"))
+}
+
 pub fn preflight_registration(workspace: &str, mode: ServiceMode) -> Result<ServiceSelection> {
     validate_workspace(workspace)?;
     require_host_binary(&ServicePaths::new("preflight")?)?;
@@ -1089,6 +1094,14 @@ pub async fn update(
             paths.executable.display()
         )
     })?;
+    #[cfg(unix)]
+    let _native_update_guard = crate::self_update::web_adapter::legacy_update_guard(
+        &services
+            .iter()
+            .map(|(paths, config)| (paths.executable.clone(), config.workspace.clone()))
+            .collect::<Vec<_>>(),
+        &treer_executable,
+    )?;
     let platform = artifact_platform(std::env::consts::OS, std::env::consts::ARCH)?;
     let public_key_path = public_key.unwrap_or(
         config_dir()?

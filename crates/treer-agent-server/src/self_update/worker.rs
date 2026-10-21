@@ -14,6 +14,7 @@ use super::{
 };
 
 mod core;
+pub(in crate::self_update) mod launcher;
 pub use core::{CoreProgress, CoreRun};
 
 /// This only locates existing resources; it is not ownership or authority to
