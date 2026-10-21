@@ -221,11 +221,26 @@ async fn real_pty_backpressure_preserves_other_workload_control_and_unknown_no_r
         execute_request(&state, &write_request()).await.unwrap_err(),
         result
     );
-    let mut another = write_request();
-    another.operation_id = Some("never-retry-input".into());
+    for index in 0..RESULT_CACHE_LIMIT + 1 {
+        let mut another = request(
+            "refuse-new-input",
+            HostCommand::Write {
+                process_id: "blocked".into(),
+                writes: vec![treer_host_protocol::HostWrite {
+                    data: vec![b'x'],
+                    delay_ms: 0,
+                }],
+            },
+        );
+        another.operation_id = Some(format!("refused-input-{index}"));
+        assert_eq!(
+            execute_request(&state, &another).await.unwrap_err().code,
+            "input_refused"
+        );
+    }
     assert_eq!(
-        execute_request(&state, &another).await.unwrap_err().code,
-        "input_unknown"
+        execute_request(&state, &write_request()).await.unwrap_err(),
+        result
     );
     let HostResponse::Process { process } = bounded(
         &state,

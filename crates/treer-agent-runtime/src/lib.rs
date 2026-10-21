@@ -46,6 +46,8 @@ pub enum RuntimeError {
     Terminal(String),
     #[error("terminal input outcome is unknown; do not retry; inspect or stop the owned process")]
     InputUnknown,
+    #[error("input refused: prior input outcome unknown; this request was not admitted; reconcile the owned process")]
+    InputRefused,
     #[error("terminal input or spawn capacity is busy; request was not admitted")]
     Busy,
     #[error("process exit outcome is unknown; reconcile the owned process")]
@@ -63,6 +65,7 @@ impl RuntimeError {
             Self::Spawn(_) => "spawn_failed",
             Self::Terminal(_) => "terminal_error",
             Self::InputUnknown => "input_unknown",
+            Self::InputRefused => "input_refused",
             Self::Busy => "runtime_busy",
             Self::StopUnknown => "operation_unknown",
         }
@@ -504,7 +507,7 @@ impl HostRuntime {
         }
         let process = self.get_running(process_id)?;
         if process.input_uncertain.load(Ordering::Acquire) {
-            return Err(RuntimeError::InputUnknown);
+            return Err(RuntimeError::InputRefused);
         }
         process
             .input_busy
@@ -567,16 +570,21 @@ impl HostRuntime {
 
     pub fn stop(&self, process_id: &str) -> Result<HostProcessInfo, RuntimeError> {
         let process = self.get_running(process_id)?;
-        process.stopping.store(true, Ordering::Release);
-        process.input_uncertain.store(true, Ordering::Release);
+        let mut child = process.child.try_lock().map_err(|_| RuntimeError::Busy)?;
+        // One stop submission per generation. Further requests cannot create
+        // more possibly-effectful kills / UNKNOWN ledger entries while this
+        // target is stuck. A failed try_lock has not consumed this admission.
         process
-            .child
-            .try_lock()
-            .map_err(|_| RuntimeError::Busy)?
+            .stopping
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| RuntimeError::Busy)?;
+        process.input_uncertain.store(true, Ordering::Release);
+        child
             .as_mut()
             .ok_or_else(|| RuntimeError::ProcessNotRunning(process_id.to_string()))?
             .kill()
             .map_err(|error| RuntimeError::Terminal(error.to_string()))?;
+        drop(child);
         #[cfg(windows)]
         process
             .process_tree
@@ -766,15 +774,19 @@ fn spawn_input_writer(
 ) {
     std::thread::spawn(move || {
         struct WriterLease {
-            _permit: OwnedSemaphorePermit,
+            permit: Option<OwnedSemaphorePermit>,
             finished: Arc<AtomicBool>,
         }
         impl Drop for WriterLease {
             fn drop(&mut self) {
+                drop(self.permit.take());
                 self.finished.store(true, Ordering::Release);
             }
         }
-        let _lease = WriterLease { _permit, finished };
+        let _lease = WriterLease {
+            permit: Some(_permit),
+            finished,
+        };
         while let Ok(write) = input.recv() {
             let started = Instant::now();
             let result = (|| {
@@ -1045,7 +1057,7 @@ mod tests {
                     delay_ms: 0
                 }]
             ),
-            Err(RuntimeError::InputUnknown)
+            Err(RuntimeError::InputRefused)
         ));
         let info = runtime.stop("nonreader").unwrap();
         assert!(!info.running);
