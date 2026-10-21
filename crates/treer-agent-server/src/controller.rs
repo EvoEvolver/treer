@@ -291,6 +291,7 @@ struct ControllerInner {
     private_state: Result<PrivateStateRoot, &'static str>,
     private_state_ledger: Mutex<QuotaLedger>,
     provider_cli: crate::provider_cli::ProviderCliService,
+    metrics: Mutex<Option<crate::machine_metrics::runtime::Metrics>>,
     recovery_lock: tokio::sync::Mutex<()>,
     uploads: crate::machine_upload::Uploads,
     /// Per-Agent interface (re)registration windows (#164 Controller item,
@@ -439,6 +440,7 @@ impl ControllerRuntime {
                     config.provider_cli_root.clone(),
                     &config.server_id,
                 ),
+                metrics: Mutex::new(None),
                 host,
                 workspace_id: config.workspace_id,
                 server_id: config.server_id,
@@ -1877,7 +1879,45 @@ impl ControllerRuntime {
             // Plan v2 (#131): verify-file steps and exact expected versions.
             capabilities.push(treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_PLAN_V2.to_string());
         }
+        if self
+            .inner
+            .metrics
+            .lock()
+            .is_ok_and(|metrics| metrics.is_some())
+        {
+            capabilities.push(treer_protocol::CAPABILITY_MACHINE_METRICS.into());
+        }
         capabilities
+    }
+
+    pub fn start_machine_metrics(&self, path: PathBuf) {
+        if let Ok(mut slot) = self.inner.metrics.lock() {
+            if slot.is_none() {
+                if let Ok(metrics) = crate::machine_metrics::runtime::Metrics::open(path) {
+                    metrics.start();
+                    *slot = Some(metrics);
+                }
+            }
+        }
+    }
+
+    pub async fn machine_metrics(
+        &self,
+        query: treer_protocol::MachineMetricsQuery,
+    ) -> Result<crate::machine_metrics::runtime::Reply, ProtocolError> {
+        let metrics = self
+            .inner
+            .metrics
+            .lock()
+            .ok()
+            .and_then(|metrics| metrics.clone())
+            .ok_or_else(|| {
+                ProtocolError::new(
+                    "machine_metrics_disabled",
+                    "Machine metrics are unavailable",
+                )
+            })?;
+        metrics.query(self.inner.server_id.clone(), query).await
     }
 
     pub async fn exec_machine(

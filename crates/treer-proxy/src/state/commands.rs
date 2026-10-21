@@ -1,6 +1,53 @@
 use super::*;
 
+// Metrics has no durable side effect and must not accumulate abandoned pending
+// requests after an HTTP disconnect/deadline. Other command replay is unchanged.
+struct MetricsPendingCleanup(Option<(AppState, String)>);
+impl Drop for MetricsPendingCleanup {
+    fn drop(&mut self) {
+        if let Some((state, id)) = self.0.take() {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let pending = state.inner.pending.lock().await.remove(&id);
+                    if let Some(pending) = pending {
+                        if let Some(connection) =
+                            state.inner.connections.read().await.get(&pending.server)
+                        {
+                            if let Ok(wire) =
+                                serde_json::to_string(&ProxyMessage::CancelMachineMetrics {
+                                    command_id: id,
+                                })
+                            {
+                                let _ = connection.outgoing.send(SocketFrame::Text(wire));
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
+}
+
 impl AppState {
+    pub async fn pending_machine_metrics(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+        id: &str,
+    ) -> bool {
+        self.inner
+            .pending
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|pending| {
+                pending.server.workspace_id == workspace_id
+                    && pending.server.server_id == server_id
+                    && pending.required_capability
+                        == Some(treer_protocol::CAPABILITY_MACHINE_METRICS)
+            })
+    }
+
     /// Defence in depth against replay on a replacement Controller. A deletion
     /// can race this read, so the Controller's durable denial fence remains the
     /// authority for in-flight commands. Never use a cached PG result here.
@@ -145,12 +192,21 @@ impl AppState {
                 result: result_tx,
             },
         );
+        let _metrics_cleanup = MetricsPendingCleanup(
+            (required_capability == Some(treer_protocol::CAPABILITY_MACHINE_METRICS))
+                .then(|| (self.clone(), command_id.clone())),
+        );
         if outgoing.send(SocketFrame::Text(encoded)).is_err() {
             self.inner.pending.lock().await.remove(&command_id);
             return Err(ProtocolError::new("server_offline", server_id));
         }
 
-        let result = match tokio::time::timeout(COMMAND_TIMEOUT, result_rx).await {
+        let timeout = if required_capability == Some(treer_protocol::CAPABILITY_MACHINE_METRICS) {
+            Duration::from_secs(10)
+        } else {
+            COMMAND_TIMEOUT
+        };
+        let result = match tokio::time::timeout(timeout, result_rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => {
                 self.inner.pending.lock().await.remove(&command_id);
@@ -272,6 +328,7 @@ impl AppState {
                     pending.server == key
                         && pending.required_capability.is_some_and(|required| {
                             required == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER
+                                || required == treer_protocol::CAPABILITY_MACHINE_METRICS
                                 || required
                                     == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL
                                 || required
@@ -304,7 +361,9 @@ impl AppState {
         };
         for (command_id, pending) in rejected {
             let required = pending.required_capability.unwrap_or("unknown");
-            let error = if required == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER {
+            let error = if required == treer_protocol::CAPABILITY_MACHINE_METRICS {
+                ProtocolError::new("machine_metrics_offline", "Machine connection changed")
+            } else if required == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER {
                 ProtocolError::new("machine_transfer_stale", "Controller connection changed; transfer commands are not replayed, inspect the destination before retrying")
             } else if required == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL
                 || required == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2

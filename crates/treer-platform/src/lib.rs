@@ -17,7 +17,8 @@ pub use environment::{
 mod windows;
 #[cfg(windows)]
 pub use windows::{
-    current_user_sid, process_created_at, terminate_process, LocalLock, ProcessTreeGuard,
+    current_user_sid, limit_helper_memory, process_created_at, system_windows_directory,
+    terminate_process, transfer_file_identity, trusted_system_library, LocalLock, ProcessTreeGuard,
 };
 
 pub trait LocalIo: AsyncRead + AsyncWrite + Unpin + Send {}

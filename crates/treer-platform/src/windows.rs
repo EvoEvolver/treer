@@ -384,6 +384,43 @@ fn read_security(path: &Path) -> io::Result<SecurityReport> {
 const SYSTEM_SID: &str = "S-1-5-18";
 const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
 
+/// A fixed System32 driver library may be writable only by OS/service
+/// administrators. This accepts read ACEs for ordinary users, never write ACEs.
+pub fn trusted_system_library(path: &Path) -> io::Result<bool> {
+    let system = system_windows_directory()?.join("System32");
+    if path.parent() != Some(system.as_path()) {
+        return Ok(false);
+    }
+    let trusted = |sid: &str| {
+        sid == SYSTEM_SID
+            || sid == ADMINISTRATORS_SID
+            || sid == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+    };
+    for candidate in [&system, path] {
+        let report = read_security(candidate)?;
+        if !trusted(&report.owner)
+            || report.control & SE_DACL_PRESENT == 0
+            || report.aces.is_empty()
+        {
+            return Ok(false);
+        }
+        for ace in report.aces {
+            if ace.ace_type == ACCESS_DENIED_ACE_TYPE {
+                continue;
+            }
+            let Some((mask, sid)) = ace.plain else {
+                return Ok(false);
+            };
+            if ace.ace_type != ACCESS_ALLOWED_ACE_TYPE
+                || (mask & 0x500d_0116 != 0 && !trusted(&sid))
+            {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// Whether `path` carries the private descriptor `secure_path` writes: owned by
 /// this process's token user or token owner (the SID the system assigns as
 /// default owner of objects this process creates), a present and protected
@@ -647,6 +684,29 @@ impl ProcessTreeGuard {
             Ok(Self { _handle: handle })
         }
     }
+}
+
+/// Install a commit-memory limit for this short-lived internal helper only.
+/// The job handle intentionally lasts until process exit, so returning the
+/// helper's final response does not close a kill-on-close job prematurely.
+pub fn limit_helper_memory(bytes: usize) -> io::Result<()> {
+    let guard = ProcessTreeGuard::new()?;
+    unsafe {
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            | JOB_OBJECT_LIMIT_PROCESS_MEMORY
+            | JOB_OBJECT_LIMIT_JOB_MEMORY;
+        limits.ProcessMemoryLimit = bytes;
+        limits.JobMemoryLimit = bytes;
+        checked(SetInformationJobObject(
+            guard._handle.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            mem::size_of_val(&limits) as u32,
+        ))?;
+    }
+    mem::forget(guard);
+    Ok(())
 }
 
 /// Thread-bound startup lock. Windows releases an abandoned mutex on owner exit.

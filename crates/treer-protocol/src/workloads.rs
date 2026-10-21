@@ -528,6 +528,9 @@ pub enum AgentCommand {
     Exec {
         request: MachineExecRequest,
     },
+    MachineMetrics {
+        query: crate::MachineMetricsQuery,
+    },
     UploadBegin {
         upload_id: String,
         directory: String,
@@ -603,6 +606,7 @@ impl AgentCommand {
                 Some(CAPABILITY_AGENT_STARTUP)
             }
             Self::Exec { .. } => Some(CAPABILITY_MACHINE_EXEC),
+            Self::MachineMetrics { .. } => Some(crate::CAPABILITY_MACHINE_METRICS),
             Self::ProviderCliRecipes {}
             | Self::ProviderCliCheck { .. }
             | Self::ProviderCliOperation { .. } => {

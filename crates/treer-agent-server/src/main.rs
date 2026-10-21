@@ -53,6 +53,13 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Control machine-local hardware collection for this OS account")]
+    Metrics {
+        #[command(subcommand)]
+        action: MetricsAction,
+    },
+    #[command(hide = true)]
+    MetricsGpuProbe,
     #[command(
         about = "Install, update, inspect or roll back the version-bound default Agent launcher"
     )]
@@ -73,6 +80,13 @@ enum Command {
     },
     #[command(about = "Manage the host agent-server service")]
     Service(ServiceArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum MetricsAction {
+    Status,
+    Enable,
+    Disable,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -197,6 +211,14 @@ struct ServerArgs {
 }
 
 fn main() -> Result<()> {
+    // The fixed internal probe needs neither Tokio worker stacks nor any
+    // Controller configuration/credentials. Parent provides a private locked
+    // salt descriptor as stdin and a cleared environment.
+    if std::env::args_os().len() == 2
+        && std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("metrics-gpu-probe"))
+    {
+        return machine_metrics::runtime::gpu_probe();
+    }
     // Saved service configuration supplies identity; never let a launcher or
     // service manager's inherited workload identity override it.
     if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--execute-cli"))
@@ -246,6 +268,20 @@ async fn async_main() -> Result<()> {
         }
     }
     match args.command {
+        Some(Command::Metrics { action }) => {
+            let enabled = match action {
+                MetricsAction::Status => None,
+                MetricsAction::Enable => Some(true),
+                MetricsAction::Disable => Some(false),
+            };
+            let enabled = machine_metrics::runtime::configure_collection(
+                service::state_dir()?.join("machine-metrics"),
+                enabled,
+            )?;
+            println!("{}", serde_json::json!({"enabled":enabled}));
+            Ok(())
+        }
+        Some(Command::MetricsGpuProbe) => machine_metrics::runtime::gpu_probe(),
         Some(Command::Launcher(args)) => launcher::run(args).await,
         None => run_server(args.server).await,
         Some(Command::Connect(connect)) => connect_machine(connect).await,
@@ -359,6 +395,7 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
     )
     .map_err(|error| anyhow::anyhow!(error.message))?;
     runtime.restore_cached_interfaces().await;
+    runtime.start_machine_metrics(service::state_dir()?.join("machine-metrics"));
     let proxy_ws = agent_websocket_url(args.proxy)?;
     let mut server = proxy::server_info(
         server_id.clone(),

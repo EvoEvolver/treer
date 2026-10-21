@@ -1705,6 +1705,12 @@ pub fn uninstall(workspace: &str) -> Result<()> {
     platform::uninstall(&paths, &config)?;
     remove_if_exists(&paths.config)?;
     remove_if_exists(&paths.host_config)?;
+    if installed_services()?.is_empty() && paths.state_dir.join("machine-metrics").exists() {
+        crate::machine_metrics::runtime::configure_collection(
+            paths.state_dir.join("machine-metrics"),
+            Some(false),
+        )?;
+    }
     println!("treer: agent server service uninstalled");
     Ok(())
 }

@@ -9,6 +9,11 @@ credential files and impersonate B. Unix 0700/0600 and Windows current-SID/SYSTE
 ACLs do not isolate processes belonging to that same user. Separate roots,
 workspace credentials, Policy and loopback ports do not change this boundary.
 Use independent OS users or containers for mutually untrusted workspaces.
+Machine [hardware metrics](machine-metrics.md) use that same account boundary:
+private local history is shared across its enrollments, while every remote
+query still requires workspace/machine binding and `machine.metrics.read`
+Policy. Metrics checksums are corruption detection, not authentication against
+the owning account; no metric history is persisted by Proxy.
 Connect warns when another local enrollment filename exists; this is a
 name-only existence check, not inspection of its credentials.
 

@@ -4,7 +4,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
 use chrono::Utc;
-use futures_util::{stream::FuturesUnordered, SinkExt, StreamExt};
+use futures_util::{
+    future::{AbortHandle, Abortable},
+    stream::FuturesUnordered,
+    SinkExt, StreamExt,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Notify;
@@ -106,6 +110,7 @@ fn decode_proxy_message(text: &str) -> anyhow::Result<DecodedProxyMessage> {
             | "terminal_attach"
             | "terminal_resize"
             | "terminal_detach"
+            | "cancel_machine_metrics"
             | "error"
     ) {
         return Ok(DecodedProxyMessage::Unknown {
@@ -312,9 +317,31 @@ impl ProxyClient {
         info!(proxy = %self.proxy_ws, "connected to proxy");
         let mut exec_commands = FuturesUnordered::new();
         let mut exec_ids = std::collections::HashSet::new();
+        let mut metrics_commands = FuturesUnordered::new();
+        let mut metrics_cancels = HashMap::<String, AbortHandle>::new();
 
         loop {
             tokio::select! {
+                Some((command_id, result)) = metrics_commands.next(), if !metrics_commands.is_empty() => {
+                    metrics_cancels.remove(&command_id);
+                    // Source metrics are deliberately absent from command_cache.
+                    // The charged owner outlives the raw frame and socket flush.
+                    match result {
+                        Ok(reply) => {
+                            let reply: crate::machine_metrics::runtime::Reply = reply;
+                            if reply.revoked() { continue; }
+                            let prefix = format!("{{\"type\":\"command_result\",\"result\":{{\"command_id\":{},\"data\":", serde_json::to_string(&command_id)?);
+                            let mut wire = String::with_capacity(prefix.len() + reply.bytes().len() + 2);
+                            wire.push_str(&prefix);
+                            wire.push_str(std::str::from_utf8(reply.bytes())?);
+                            wire.push_str("}}");
+                            if reply.revoked() { continue; }
+                            tokio::time::timeout(Duration::from_secs(2), outgoing.send(Message::Text(wire.into()))).await
+                                .context("machine metrics transport timed out")??;
+                        }
+                        Err(error) => send(&mut outgoing, &AgentServerMessage::CommandResult { result: CommandResult::failure(command_id, error) }).await?,
+                    }
+                }
                 Some(result) = exec_commands.next(), if !exec_commands.is_empty() => {
                     let result: CommandResult = result;
                     exec_ids.remove(&result.command_id);
@@ -599,7 +626,28 @@ impl ProxyClient {
                                 return Ok(disposition);
                             }
                         }
+                        ProxyMessage::CancelMachineMetrics { command_id } => {
+                            if let Some(cancel) = metrics_cancels.remove(&command_id) { cancel.abort(); }
+                        }
                         ProxyMessage::Command { envelope } => {
+                            if let AgentCommand::MachineMetrics { query } = &envelope.command {
+                                let command_id = envelope.command_id.clone();
+                                if envelope.workspace_id != self.server.workspace_id || metrics_commands.len() >= 2 {
+                                    let result = CommandResult::failure(command_id, ProtocolError::new("machine_metrics_busy", "Machine metrics admission refused"));
+                                    send(&mut outgoing, &AgentServerMessage::CommandResult { result }).await?;
+                                } else {
+                                    let query = query.clone();
+                                    let runtime = self.runtime.clone();
+                                    let (cancel, registration) = AbortHandle::new_pair();
+                                    metrics_cancels.insert(command_id.clone(),cancel);
+                                    metrics_commands.push(async move {
+                                        let result = Abortable::new(runtime.machine_metrics(query),registration).await
+                                            .unwrap_or_else(|_| Err(ProtocolError::new("machine_metrics_timeout","Machine metrics query cancelled")));
+                                        (command_id,result)
+                                    });
+                                }
+                                continue;
+                            }
                             // Exec children may call Treer themselves. Awaiting them here
                             // prevents this socket from receiving their nested requests.
                             // Keep a bounded, connection-owned set: disconnect drops the
@@ -775,6 +823,14 @@ impl ProxyClient {
         }
         let command_id = envelope.command_id;
         let result = match envelope.command {
+            // Normal command execution must never cache a metrics response.
+            AgentCommand::MachineMetrics { .. } => CommandResult::failure(
+                command_id.clone(),
+                ProtocolError::new(
+                    "machine_metrics_invalid_query",
+                    "Machine metrics require bounded query dispatch",
+                ),
+            ),
             AgentCommand::AppEnsureLifecycle {
                 agent_id,
                 workload_credential,

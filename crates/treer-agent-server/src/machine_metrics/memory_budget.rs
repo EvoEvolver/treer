@@ -23,6 +23,13 @@ struct State {
 
 static MACHINE_BUDGET: OnceLock<MemoryBudget> = OnceLock::new();
 
+#[cfg(test)]
+pub(super) fn test_machine_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[derive(Clone)]
 pub struct MemoryBudget(Arc<State>);
 
@@ -323,6 +330,7 @@ mod tests {
 
     #[test]
     fn independently_obtained_machine_handles_share_credit_and_revoked_slot() {
+        let _test_guard = test_machine_lock();
         let budget = MemoryBudget::machine();
         let slot = budget.try_assembly().unwrap();
         let full = build(&budget, AGGREGATE_BYTES);

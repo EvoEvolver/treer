@@ -31,6 +31,8 @@ serde_json.workspace = true
 sha2.workspace = true
 strip-ansi-escapes.workspace = true
 subtle.workspace = true
+sysinfo = { version = "=0.37.2", default-features = false, features = ["system"] }
+nvml-wrapper = "=0.11.0"
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true

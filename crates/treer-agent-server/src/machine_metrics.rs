@@ -8,4 +8,5 @@ pub mod gpu_inventory;
 pub mod history;
 pub mod memory_budget;
 pub mod response_encoding;
+pub mod runtime;
 pub mod stored_frame;

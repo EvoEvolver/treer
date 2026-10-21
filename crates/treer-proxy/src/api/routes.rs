@@ -152,6 +152,10 @@ pub fn router(
             post(exec_machine),
         )
         .registered_route(
+            "/agent/workspaces/{workspace_id}/machines/{server_id}/metrics",
+            get(read_machine_metrics),
+        )
+        .registered_route(
             "/agent/workspaces/{workspace_id}/machines/{server_id}/files",
             post(upload_machine_file).layer(DefaultBodyLimit::max(MAX_MACHINE_UPLOAD_BODY_BYTES)),
         )
@@ -554,6 +558,10 @@ pub fn router(
         .registered_route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/exec",
             post(exec_machine),
+        )
+        .registered_route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/metrics",
+            get(read_machine_metrics),
         )
         .registered_route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/restore",

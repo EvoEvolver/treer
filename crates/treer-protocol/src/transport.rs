@@ -87,6 +87,10 @@ pub enum ProxyMessage {
     Command {
         envelope: CommandEnvelope,
     },
+    /// Connection-scoped cancellation for an admitted metrics read only.
+    CancelMachineMetrics {
+        command_id: String,
+    },
     TerminalAttach {
         session_id: String,
         agent_id: String,

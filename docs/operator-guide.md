@@ -1362,6 +1362,10 @@ Controller, which owns parsing, help, skills, and all command business logic.
 
 ## Workspace network
 
+For local CPU/RAM/NVIDIA collection, retention, query limits and owner controls,
+see [Machine hardware metrics](machine-metrics.md). History stays on the source
+machine; an offline machine cannot be queried from a central history copy.
+
 Treer forwards explicitly registered TCP/HTTP endpoints. It does not capture
 outbound traffic, create network namespaces, or change OS DNS. Newly launched
 managed Agents and Apps receive independent explicit HTTP proxy entries and

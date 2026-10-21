@@ -12,6 +12,7 @@ matching the question; follow its source links for implementation detail.
 | [Product direction](product.md) | Purpose, current audience, product promise, and delivery boundaries |
 | [Capability roadmap](roadmap.md) | Real scenarios, capability planes, dependencies, and sequencing |
 | [Architecture](architecture.md) | Components, ownership rules, protocols, state, and information flows |
+| [Machine hardware metrics](machine-metrics.md) | Machine-local collection/history, authorized queries, resource controls and current validation |
 | [Security model](security.md) | Trust tier, supported claims, credentials, isolation, and known gaps |
 | [Policy Provider protocol](policy-provider.md) | App-supplied policy bundle contract, caching, failure behavior, and management APIs |
 | [Quality and maintenance](quality.md) | Verification, documentation rules, current gaps, and review triggers |

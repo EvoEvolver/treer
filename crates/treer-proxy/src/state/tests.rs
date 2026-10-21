@@ -1,6 +1,60 @@
 use super::*;
 
 #[tokio::test]
+async fn machine_metrics_abandoned_http_request_cancels_exact_source_command() {
+    let state = AppState::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            test_server(),
+            Uuid::new_v4(),
+            "metrics-cancel".into(),
+            vec![treer_protocol::CAPABILITY_MACHINE_METRICS.into()],
+            tx,
+        )
+        .await
+        .unwrap();
+    let waiting = tokio::spawn({
+        let state = state.clone();
+        async move {
+            let now = Utc::now();
+            state
+                .send_command(
+                    "alpha",
+                    "server",
+                    AgentCommand::MachineMetrics {
+                        query: treer_protocol::MachineMetricsQuery {
+                            from: now - chrono::Duration::minutes(15),
+                            to: now,
+                            max_points: 360,
+                        },
+                    },
+                )
+                .await
+        }
+    });
+    let ProxyMessage::Command { envelope } =
+        serde_json::from_str(&expect_text(rx.recv().await.unwrap())).unwrap()
+    else {
+        panic!("expected metrics dispatch")
+    };
+    waiting.abort();
+    assert!(waiting.await.unwrap_err().is_cancelled());
+    let cancelled = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<ProxyMessage>(&expect_text(cancelled)).unwrap(),
+        ProxyMessage::CancelMachineMetrics {
+            command_id: envelope.command_id
+        }
+    );
+    assert!(state.inner.pending.lock().await.is_empty());
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn durable_creation_guard_rejects_deleted_dispatch_forward_and_replay() {
     let auth = crate::auth::AuthStore::for_test("test").await;
     auth.seed_test_workspace("alpha").await;

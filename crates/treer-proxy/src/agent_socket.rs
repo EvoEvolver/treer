@@ -192,6 +192,47 @@ async fn handle(
             }
             continue;
         };
+        // Identify an oversized metrics result before materializing its JSON
+        // value tree. RawValue borrows the data bytes without allocating them.
+        if text.len() > treer_protocol::MACHINE_METRICS_MAX_RESPONSE_BYTES + 1024 {
+            #[derive(serde::Deserialize)]
+            struct Header<'a> {
+                #[serde(borrow)]
+                result: Option<&'a serde_json::value::RawValue>,
+            }
+            #[derive(serde::Deserialize)]
+            struct ResultHeader<'a> {
+                command_id: &'a str,
+            }
+            if let (Some((workspace_id, server_id)), Ok(header)) =
+                (identity.as_ref(), serde_json::from_str::<Header<'_>>(&text))
+            {
+                if let Some(raw) = header.result {
+                    if let Ok(result) = serde_json::from_str::<ResultHeader<'_>>(raw.get()) {
+                        if state
+                            .pending_machine_metrics(workspace_id, server_id, result.command_id)
+                            .await
+                        {
+                            let _ = state
+                                .complete_command_from(
+                                    workspace_id,
+                                    server_id,
+                                    connection_id,
+                                    treer_protocol::CommandResult::failure(
+                                        result.command_id,
+                                        ProtocolError::new(
+                                            "machine_metrics_invalid_response",
+                                            "Machine metrics are unavailable",
+                                        ),
+                                    ),
+                                )
+                                .await;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
         let parsed = match serde_json::from_str::<AgentServerMessage>(&text) {
             Ok(parsed) => parsed,
             Err(err) => {

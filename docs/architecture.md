@@ -36,6 +36,10 @@ flowchart LR
 The Host is intentionally product-agnostic. Shared wire models live in protocol
 crates. Every distributed lookup is scoped by workspace before machine or Agent
 ID.
+Machine [hardware metrics](machine-metrics.md) are collected and retained only
+in the source account's private machine-local store. Authorized, bounded queries
+use the existing Controller connection; snapshots, heartbeats and Proxy
+persistence do not carry metric history. The Host has no metrics responsibility.
 `treer-protocol/src/lib.rs` retains constants and the public export surface;
 private modules group inventory, Policy, identity, messages, Apps, workloads,
 binary frames, network services, events, transport, and enrollment models.
