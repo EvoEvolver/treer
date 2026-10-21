@@ -284,7 +284,7 @@ impl AppState {
             .sum()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub async fn live_server(&self, server_id: &str) -> Option<ServerInfo> {
         let workspaces = self.inner.workspaces.read().await;
         workspaces
