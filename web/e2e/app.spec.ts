@@ -3613,3 +3613,71 @@ test.describe('resumable machine upload', () => {
     expect(calls.begin).toHaveLength(0)
   })
 })
+
+
+// #223: the Tree entry shares the real workspace bootstrap/dialog flow.
+for (const mobile of [false, true]) for (const enrolled of [false, true]) test(`Tree Add machine opens shared workspace dialog (${enrolled ? 'enrolled' : 'empty'}, ${mobile ? '390' : 'desktop'})`, async ({ page }, info) => {
+  await page.setViewportSize({ width: mobile ? 390 : 1360, height: 844 })
+  if (!enrolled) await page.route('**/api/workspaces/ws-1/snapshot', route => ok(route, { ...snapshot, servers: [], agents: [] }))
+  const requests: { path: string; body: unknown }[] = []
+  await page.route('**/api/workspaces/*/bootstrap', route => {
+    requests.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() })
+    return ok(route, { install_command: 'echo synthetic install', connect_command: `echo connect ${new URL(route.request().url()).pathname}` })
+  })
+  await page.goto('/')
+  await browseTreeOnMobile(page)
+  const trigger = page.getByRole('button', { name: 'Add to tree', exact: true })
+  await expect(page.getByRole('tree', { name: 'Workspace workloads' })).toHaveAttribute('aria-busy', 'false')
+  await expect.poll(async () => { await trigger.focus(); return trigger.evaluate(e => e === document.activeElement) }).toBe(true)
+  await trigger.press('Enter')
+  await expect(page.getByRole('menuitem', { name: 'Add folder', exact: true })).toBeVisible()
+  await expect(page.getByRole('menuitem', { name: enrolled ? 'Add agent' : 'Set up a machine before creating an agent', exact: true })).toBeVisible()
+  const add = page.getByRole('menuitem', { name: 'Add machine', exact: true })
+  await expect(add).toBeEnabled()
+  if (mobile) expect((await add.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+  await page.screenshot({ path: info.outputPath('tree-add-machine-menu.png') })
+  await add.focus(); await page.keyboard.press('Enter')
+  const setup = page.getByRole('dialog', { name: 'Add machine', exact: true })
+  await expect(setup).toBeVisible(); await expect(page.getByRole('menu')).toHaveCount(0)
+  await expect(setup.locator('textarea').last()).toHaveValue('echo connect /api/workspaces/ws-1/bootstrap')
+  await expect.poll(() => setup.evaluate(e => e.contains(document.activeElement))).toBe(true)
+  expect(requests).toEqual([{ path: '/api/workspaces/ws-1/bootstrap', body: {} }])
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: info.outputPath('tree-add-machine-dialog.png') })
+  await page.keyboard.press('Escape'); await expect(setup).toHaveCount(0)
+  await expect(trigger).toBeFocused()
+  // The original Add folder action still opens its editor after the dialog.
+  await trigger.click(); await page.getByRole('menuitem', { name: 'Add folder', exact: true }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+})
+test('Tree Add machine follows current workspace and has no selected-folder payload', async ({ page }) => {
+  const requests: string[] = []
+  await page.route('**/api/workspaces/*/bootstrap', route => { requests.push(new URL(route.request().url()).pathname); expect(route.request().postDataJSON()).toEqual({}); return ok(route, { install_command: 'echo synthetic', connect_command: 'echo workspace two' }) })
+  await page.goto('/orgs/org-2/workspaces/ws-2')
+  await page.getByRole('button', { name: 'Add to tree', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Add machine', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: 'Add machine', exact: true })).toBeVisible()
+  expect(requests).toEqual(['/api/workspaces/ws-2/bootstrap'])
+})
+
+test('Tree Add machine bootstrap refusal clears the Tree focus target before settings opens', async ({ page }) => {
+  let calls = 0
+  await page.route('**/api/workspaces/ws-1/bootstrap', route => {
+    calls++
+    return calls === 1 ? route.fulfill({ status: 403, json: { error: 'synthetic bootstrap refusal' } }) : ok(route, { install_command: 'echo synthetic', connect_command: 'echo workspace one' })
+  })
+  await page.goto('/')
+  const plus = page.getByRole('button', { name: 'Add to tree', exact: true })
+  await plus.click(); await page.getByRole('menuitem', { name: 'Add machine', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('HTTP 403')
+  await expect(page.getByRole('dialog', { name: 'Add machine', exact: true })).toHaveCount(0)
+  await openWorkspaceSettings(page)
+  await page.locator('[data-tour="add-machine"]').getByRole('button', { name: 'Add', exact: true }).click()
+  const setup = page.getByRole('dialog', { name: 'Add machine', exact: true })
+  await expect(setup).toBeVisible()
+  await page.keyboard.press('Escape'); await expect(setup).toHaveCount(0)
+  // Wait through deferred focus restoration before checking the failed entry is gone.
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+  await expect(plus).not.toBeFocused()
+  expect(calls).toBe(2)
+})

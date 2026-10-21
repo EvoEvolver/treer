@@ -15,7 +15,7 @@ import { machineName } from "@/lib/api"
 import { formatCommandLine } from "@/lib/command-line"
 import { agentPath } from "@/lib/workload-path"
 import { Copy,Play,Rocket } from "lucide-react"
-import type { Dispatch,FormEvent,SetStateAction } from "react"
+import type { Dispatch,FormEvent,SetStateAction,RefObject } from "react"
 import { t } from "@/i18n"
 
 interface WorkspaceDialogsProps {
@@ -23,6 +23,7 @@ interface WorkspaceDialogsProps {
   creationFailure: AgentCreationFailure | null
   creationCommandMissing: boolean
   onReservationCleaned: () => void
+  installReturnFocus?: RefObject<HTMLElement | null>
   state: ReturnType<typeof useWorkspaceDialogState>
   user: User
   setUser: Dispatch<SetStateAction<User | null | undefined>>
@@ -52,7 +53,7 @@ interface WorkspaceDialogsProps {
   confirmDeleteWorkspace: () => Promise<void>
 }
 
-export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, creationFailure, onReservationCleaned, state, user, setUser, showError, createOrganization, organization, createWorkspace, saveLaunchProfile, launchFromProfile, onlineMachines, deleteLaunchProfile, createAgent, selectAgentProfile, launchProfiles, selectedCreateProfile, changeAgentCommandLine, deleteAppDeployment, copy, submitRename, snapshot, workloadTree, uploadScopeActive, selectedAgentMachine, confirmDelete, workspaceMachineCount, workspace, confirmDeleteWorkspace }: WorkspaceDialogsProps) {
+export function WorkspaceDialogs({ installReturnFocus, creationCommandMissing, reservationCleaned, creationFailure, onReservationCleaned, state, user, setUser, showError, createOrganization, organization, createWorkspace, saveLaunchProfile, launchFromProfile, onlineMachines, deleteLaunchProfile, createAgent, selectAgentProfile, launchProfiles, selectedCreateProfile, changeAgentCommandLine, deleteAppDeployment, copy, submitRename, snapshot, workloadTree, uploadScopeActive, selectedAgentMachine, confirmDelete, workspaceMachineCount, workspace, confirmDeleteWorkspace }: WorkspaceDialogsProps) {
   const {
     settingsOpen, setSettingsOpen, createOrganizationOpen, setCreateOrganizationOpen,
     createWorkspaceOpen, setCreateWorkspaceOpen, deleteWorkspaceOpen, setDeleteWorkspaceOpen,
@@ -128,7 +129,11 @@ export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, c
 
 
     <Dialog open={installOpen} onOpenChange={setInstallOpen}>
-      <DialogContent className="max-w-xl" data-tour="add-machine-dialog">
+      <DialogContent className="max-w-xl" data-tour="add-machine-dialog" onCloseAutoFocus={(event) => {
+        const trigger = installReturnFocus?.current
+        if (installReturnFocus) installReturnFocus.current = null
+        if (trigger?.isConnected) { event.preventDefault(); trigger.focus() }
+      }}>
         <DialogHeader><DialogTitle>{t("dialogs.add_machine")}</DialogTitle><DialogDescription>{t("dialogs.install_treer_then_connect_this")}</DialogDescription></DialogHeader>
         <div className="space-y-4">
           <Field label={t("dialogs.operating_system")}><Select value={installPlatform} onValueChange={setInstallPlatform}><SelectTrigger aria-label={t("dialogs.installation_operating_system")}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="unix">{t("dialogs.linux_macos")}</SelectItem><SelectItem value="windows">{t("dialogs.windows_powershell")}</SelectItem></SelectContent></Select></Field>
