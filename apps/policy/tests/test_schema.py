@@ -10,6 +10,36 @@ policy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(policy)
 
 class SchemaTests(unittest.TestCase):
+    def test_metrics_seed_humans_only_and_monitor_compatibility(self):
+        action = policy.ACTION_MACHINE_METRICS_READ
+        self.assertNotIn(action, policy.READ_ACTIONS)
+        self.assertNotIn(action, policy.WRITE_ACTIONS)
+        for template in policy.TEMPLATES:
+            document = policy.template_document(template['id'], {})['document']
+            # Only the metrics slice has v1 selectors. Exercise the production
+            # evaluator, without pretending to evaluate the v2 tree rules here.
+            metrics = {'schema_version': 1, 'groups': {},
+                       'defaults': {action: document['defaults'][action]},
+                       'rules': [r for r in document['rules'] if action in r['actions']]}
+            self.assertEqual(len(metrics['rules']), 1)
+            for mode in ('enforce', 'monitor'):
+                for kind, identifier in (('human', 'owner'), ('human', 'member'),
+                                         ('agent', 'worker'), ('machine', 'controller'),
+                                         ('service', 'app')):
+                    with self.subTest(template=template['id'], mode=mode, actor=identifier):
+                        result = policy.evaluate_request({
+                            'subject': {'kind': kind, 'id': identifier},
+                            'action': action, 'resource': {'kind': 'machine', 'id': 'visible'}},
+                            {'revision': 1, 'mode': mode, 'document': metrics})
+                        self.assertEqual(result['effect'], 'allow' if kind == 'human' else 'deny')
+                        self.assertEqual(result['decision'],
+                                         'allow' if kind == 'human' or mode == 'monitor' else 'deny')
+            wrong_resource = policy.evaluate_request({
+                'subject': {'kind': 'human', 'id': 'owner'}, 'action': action,
+                'resource': {'kind': 'agent', 'id': 'other'}},
+                {'revision': 1, 'mode': 'enforce', 'document': metrics})
+            self.assertEqual(wrong_resource['decision'], 'deny')
+
     def rule_document(self):
         return policy.template_document('team-isolation', {})['document']
 

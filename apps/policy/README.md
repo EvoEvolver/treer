@@ -35,6 +35,14 @@ State defaults to `apps/policy/data/policy.json`. Override it with
 Back up that file. Publication writes it atomically with mode `0600` and uses an
 optimistic revision check. The initial revision is monitor mode with no rules,
 which preserves the current allow behavior until an operator publishes policy.
+Both generated templates register `machine.metrics.read` with a deny default
+and a human-only allow rule for `machine` resources. In enforce mode this lets
+workspace owners and members read machines visible to them after Core's visibility
+checks; Agent/App subjects receive no metrics grant. Metrics is deliberately
+excluded from the Agent observer read list. Existing published policies are not
+rewritten, template drafts remain monitor mode, and absent-provider behavior is
+unchanged. Review and publish the metrics default and human rule before enforced
+use; this grants no machine exec or file access.
 Bundled installations store the same state in `.treer-policy-data.json` at the
 machine workspace root so App upgrades do not replace it.
 

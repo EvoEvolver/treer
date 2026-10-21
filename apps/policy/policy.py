@@ -256,6 +256,15 @@ def safety_warnings(document):
     return warnings
 
 
+ACTION_MACHINE_METRICS_READ = 'machine.metrics.read'
+# Machine visibility is checked by Core before Policy. This grant is human-only;
+# never include metrics in READ_ACTIONS, which grants Agent observer access.
+HUMAN_MACHINE_METRICS_RULE = {
+    'id': 'human-machine-metrics-read', 'priority': 100, 'effect': 'allow',
+    'subjects': [{'kind': 'human'}], 'actions': [ACTION_MACHINE_METRICS_READ],
+    'resources': [{'kind': 'machine'}],
+}
+
 COLLAB_ACTIONS = ['agent.discover', 'agent.metadata.read', 'agent.output.read',
                   'agent.prompt', 'agent.input', 'agent.stop', 'message.send']
 READ_ACTIONS = ['agent.discover', 'agent.metadata.read', 'agent.output.read',
@@ -304,6 +313,8 @@ def template_document(name, options):
              'actions':WRITE_ACTIONS[:], 'resources':[{}]},
         ]
     else: raise PolicyError(404, 'template_not_found', 'Unknown template')
+    document['defaults'][ACTION_MACHINE_METRICS_READ] = 'deny'
+    document['rules'].append(copy.deepcopy(HUMAN_MACHINE_METRICS_RULE))
     return {'document':validate_document(document), 'mode':'monitor',
             'warnings':['Template replaces the draft only. Review explicit human grants and action coverage before enforcement. Owner Policy/Tree rescue is provided by Core, not these rules.']}
 
