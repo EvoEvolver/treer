@@ -1,5 +1,18 @@
 use std::{env, path::PathBuf};
 
+// A native build host may validate one image while the deployment uses a
+// different absolute path. This is build-time binding only: runtime overrides
+// remain forbidden, and the artifact manifest must hash both images.
+fn deployment_path(key: &str, image: &std::path::Path) -> PathBuf {
+    println!("cargo:rerun-if-env-changed={key}");
+    let path = env::var_os(key).map(PathBuf::from).unwrap_or_else(|| image.to_owned());
+    assert!(path.is_absolute(), "deployment tool path must be absolute");
+    let text = path.to_str().expect("deployment tool path must be UTF-8");
+    assert!(!text.chars().any(char::is_control), "deployment tool path contains control characters");
+    assert!(path.components().all(|c| !matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir)), "deployment tool path must be normalized");
+    path
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=TREER_SPIKE_BUILD_CODEX");
@@ -33,7 +46,8 @@ fn main() {
                 .expect("tool header");
             assert_ne!(&prefix, b"#!", "default builds require native tools, not PATH-dependent script interpreters; set TREER_SPIKE_BUILD_CODEX to the absolute native Codex binary at build time");
         }
-        println!("cargo:rustc-env={key}={}", path.display());
+        let target = deployment_path(&format!("TREER_SPIKE_TARGET_{}", name.to_uppercase()), &path);
+        println!("cargo:rustc-env={key}={}", target.display());
     }
     let claude = env::var_os("TREER_SPIKE_BUILD_CLAUDE")
         .map(PathBuf::from)
@@ -55,7 +69,8 @@ fn main() {
                 "Claude production path must be a pinned native executable"
             );
         }
-        println!("cargo:rustc-env=SPIKE_CLAUDE_PATH={}", path.display());
+        let target = deployment_path("TREER_SPIKE_TARGET_CLAUDE", &path);
+        println!("cargo:rustc-env=SPIKE_CLAUDE_PATH={}", target.display());
     } else {
         println!("cargo:rustc-env=SPIKE_CLAUDE_PATH=");
     }
