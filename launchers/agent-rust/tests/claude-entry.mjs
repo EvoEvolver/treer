@@ -104,6 +104,26 @@ test('restart between tool result and turn result preserves uncertain receipt an
   assert.equal(state.thread.turns[0].items.find(i=>i.kind==='commandExecution').detailText,'synthetic retained output');
   assert.equal((await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').length,1);
 });
+test('Claude cached terminal display cannot clear an uncertain acknowledged receipt on restart',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_HOLD:'never-created'});
+  assert.equal((await f.post({prompt:'uncertain provider result'})).status,200);
+  await until(f.snapshot,s=>s.thread.turns.some(t=>t.items.some(i=>i.kind==='commandExecution'&&i.status==='completed')));
+  await stop(f.child);
+  const path=join(f.state,'rust-spike.json'),saved=JSON.parse(await readFile(path,'utf8'));
+  assert.equal(saved.records[0].submission.state,'running');
+  // Deliberately make the display checkpoint claim completion while the
+  // independent durable dispatch receipt remains unresolved. It is not a
+  // fresh provider response and must never authorize the queued next input.
+  saved.claudeTurns[0].status='completed';
+  await writeFile(path,JSON.stringify(saved),{mode:0o600});
+  const resumed=await f.launch(),state=await resumed.snapshot();
+  assert.equal(state.runtime.state,'blocked');
+  assert.match(state.thread.lastError,/uncertain/);
+  const retained=JSON.parse(await readFile(path,'utf8'));
+  assert.equal(retained.records[0].submission.state,'failed');
+  assert.match(retained.records[0].submission.error,/uncertain/);
+  assert.equal((await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').length,1);
+});
 test('actual Claude interrupt is correlated and only result completes the interrupted turn',async t=>{
   const f=await fixture(t,{CLAUDE_FIXTURE_HOLD:'never-created'});
   assert.equal((await f.post({prompt:'interrupt this turn'})).status,200);
