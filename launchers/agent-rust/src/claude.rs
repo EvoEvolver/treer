@@ -19,6 +19,7 @@ pub enum Request {
     Local(Value),
     Wire(Value),
 }
+#[cfg(any(unix, test))]
 pub fn import_history(
     state: &mut Value,
     seed: &Value,

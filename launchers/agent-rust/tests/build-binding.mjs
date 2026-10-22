@@ -18,4 +18,8 @@ test('deployment paths bind independently of native build images without allowin
   for(const bad of ['relative/codex','/home/target/../codex','/home/target/codex\nother'])assert.notEqual(run({TREER_SPIKE_TARGET_CODEX:bad}).status,0);
   assert.notEqual(run({TREER_SPIKE_BUILD_CODEX:'/nonexistent-native-input'}).status,0);
   assert.notEqual(run({TREER_SPIKE_BUILD_CODEX:resolve('../agent/tests/fake-codex.mjs')}).status,0,'script input cannot become a production provider');
+  const windows={CARGO_CFG_TARGET_OS:'windows',TREER_SPIKE_TARGET_CODEX:'C:\\Treer\\codex.exe',TREER_SPIKE_TARGET_TREER:'C:\\Treer\\treer.exe',TREER_SPIKE_TARGET_CLAUDE:'C:\\Treer\\claude.exe'};
+  assert.equal(run(windows).status,0);
+  for(const path of ['C:codex.exe','C:\\Treer\\..\\codex.exe','C:\\Treer\\codex.cmd','C:\\Treer\\file:stream.exe','\\\\server\\share\\codex.exe','C:\\Treer\\codex.exe.'])
+    assert.notEqual(run({...windows,TREER_SPIKE_TARGET_CODEX:path}).status,0,path);
 });
