@@ -81,6 +81,10 @@ writer refuses, and restarts from the durable checkpoint. It reads no provider
 history/config/auth and touches no enrolled Agent. Cleanup terminates only its
 own child handles and removes only its fresh temporary root. The subprocess
 restart uses Windows termination, testing lease/Job cleanup on abrupt exit.
+Startup refusal is reported immediately with the child exit/spawn status and at
+most 4096 bytes of synthetic-child stderr, with the owned temporary root
+redacted. This diagnostic is restricted to the suite's credential-free
+environment and synthetic producers, not installed provider sessions.
 
 Default-feature artifact creation and actual Windows installation remain distinct
 results, bound to their exact source, provider paths and bytes by Release. No
