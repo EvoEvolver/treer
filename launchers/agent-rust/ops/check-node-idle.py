@@ -7,6 +7,7 @@ durable pending work, not full import compatibility or provider delivery.
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -67,7 +68,19 @@ def inspect(source, thread, private=None, delivery_audit=False):
         require(not os.listdir(images))
         if (private / ".rust-launcher.lock").exists() or (private / ".rust-launcher.lock").is_symlink():
             require(read_private(private / ".rust-launcher.lock", 0) == b"")
-    require(set(os.listdir(source)) == {"agent-ui.json", "queue.json"})
+    names = set(os.listdir(source))
+    sidecar = "agent-ui.json.goal-usage.json"
+    require({"agent-ui.json", "queue.json"} <= names <= {"agent-ui.json", "queue.json", sidecar})
+    sidecar_bytes = None
+    if sidecar in names:
+        sidecar_bytes = read_private(source / sidecar, 65536)
+        usage = json.loads(sidecar_bytes, object_pairs_hook=unique_pairs)
+        require(isinstance(usage, dict) and set(usage) == {"sessionId", "goalKey", "goal", "pendingExit", "tokensUsed", "timeUsedSeconds", "resultTokens"})
+        session = usage["sessionId"]
+        require(isinstance(session, str) and 0 < len(session.encode()) <= 1024 and all(c.isascii() and (c.isalnum() or c in "_-") for c in session))
+        require(usage["goalKey"] == "" and all(usage[k] is None for k in ("goal", "pendingExit", "tokensUsed", "timeUsedSeconds")))
+        tokens = usage["resultTokens"]
+        require(type(tokens) in (int, float) and math.isfinite(tokens) and tokens >= 0)
     thread_bytes = read_private(source / "agent-ui.json", 65536)
     queue_bytes = read_private(source / "queue.json", 32 * 1024 * 1024)
     ui = json.loads(thread_bytes, object_pairs_hook=unique_pairs)
@@ -117,6 +130,9 @@ def inspect(source, thread, private=None, delivery_audit=False):
                        for name, data in [("agent-ui.json", thread_bytes), ("queue.json", queue_bytes)]])
     if delivery_audit:
         result.update(deliveries=deliveries, privateRootChecked=private is not None)
+    if sidecar_bytes is not None:
+        result["files"].append(dict(name=sidecar, bytes=len(sidecar_bytes), sha256=hashlib.sha256(sidecar_bytes).hexdigest()))
+        result["inertGoalUsageSidecar"] = True
     return result
 
 

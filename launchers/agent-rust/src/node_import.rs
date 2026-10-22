@@ -195,6 +195,21 @@ fn empty_node_images(root: &Path) -> Result<Option<(u64, u64)>> {
     }
     Ok(Some((m.dev(), m.ino())))
 }
+// Claude's local usage sidecar can survive a later Codex session. Only an
+// explicitly action-free checkpoint is inert; preserve its exact backup bytes
+// for Node rollback, without interpreting it as a Codex goal or replaying it.
+fn inert_goal_usage(bytes: &[u8]) -> Result<()> {
+    let value = crate::bounded_json::decode(bytes)?;
+    crate::runtime::node_fields(&value, &["sessionId", "goalKey", "goal", "pendingExit", "tokensUsed", "timeUsedSeconds", "resultTokens"])?;
+    if !value["sessionId"].as_str().is_some_and(|s| !s.is_empty() && s.len() <= 1024 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+        || value["goalKey"] != ""
+        || ["goal", "pendingExit", "tokensUsed", "timeUsedSeconds"].into_iter().any(|key| !value.get(key).is_some_and(Value::is_null))
+        || !value["resultTokens"].as_f64().is_some_and(|n| n.is_finite() && n >= 0.0)
+    {
+        bail!("node_import_goal_usage_not_inert");
+    }
+    Ok(())
+}
 pub fn prepare(
     root: &Path,
     cwd: &Path,
@@ -310,9 +325,13 @@ fn prepare_inner(
     } else {
         json!({"version":1,"records":[]})
     };
-    // Local goal-exit guards need their own parity adapter. Never silently lose
-    // them; native goal state itself will be resumed from the provider thread.
+    // Live/pending local goal guards still need their own parity adapter.
+    // Inert usage is backup-only, never a source of Codex goal authority.
     for entry in &backup.files {
+        if entry.name == format!("{thread_name}.goal-usage.json") {
+            inert_goal_usage(&read(&backup_dir.join(&entry.name), 64 * 1024)?)?;
+            continue;
+        }
         if !["agent-ui.json", "codex-ui.json", "queue.json"].contains(&entry.name.as_str()) {
             bail!("node_import_sidecar_unsupported");
         }
@@ -404,6 +423,40 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+    #[test]
+    fn inert_goal_sidecar_backed_up_and_restored_but_never_becomes_goal() {
+        let f = Fixture::new();
+        let bytes = br#"{"sessionId":"old-claude-session","goalKey":"","goal":null,"pendingExit":null,"tokensUsed":null,"timeUsedSeconds":null,"resultTokens":12345}"#;
+        let name = "agent-ui.json.goal-usage.json";
+        write_new(&f.source.join(name), bytes).unwrap();
+        prepare(&f.private, &f.cwd, "ag_test", Some("thread-test"), true).unwrap();
+        assert_eq!(fs::read(f.private.join(BACKUP).join(name)).unwrap(), bytes);
+        let saved = Store::open(&f.private, &f.cwd).unwrap().load().unwrap().unwrap();
+        assert!(saved["goals"].is_null());
+        assert_eq!(saved["threadId"], "thread-test");
+        restore(&f.private, &f.cwd, "ag_test").unwrap();
+        assert_eq!(fs::read(f.source.join(name)).unwrap(), bytes);
+    }
+    #[test]
+    fn goal_sidecar_requires_explicit_inert_shape_and_preserves_refused_backup() {
+        let base = json!({"sessionId":"old-session","goalKey":"","goal":null,"pendingExit":null,"tokensUsed":null,"timeUsedSeconds":null,"resultTokens":0});
+        let mut faults = Vec::new();
+        for (key, value) in [("goal", json!({"status":"active"})), ("pendingExit", json!({"status":"done"})), ("goalKey", json!("old-goal")), ("tokensUsed", json!(0)), ("timeUsedSeconds", json!(0)), ("resultTokens", json!(-1)), ("resultTokens", json!("0")), ("sessionId", json!("")), ("unknown", Value::Null)] {
+            let mut invalid = base.clone(); invalid[key] = value; faults.push(serde_json::to_vec(&invalid).unwrap());
+        }
+        let mut missing = base.clone(); missing.as_object_mut().unwrap().remove("pendingExit");
+        faults.push(serde_json::to_vec(&missing).unwrap());
+        faults.push(br#"{"goal":null,"goal":{"status":"active"}}"#.to_vec());
+        for bytes in faults {
+            let f = Fixture::new();
+            let name = "agent-ui.json.goal-usage.json";
+            write_new(&f.source.join(name), &bytes).unwrap();
+            assert!(prepare(&f.private, &f.cwd, "ag_test", None, true).is_err());
+            assert!(!f.private.join("rust-spike.json").exists());
+            assert_eq!(fs::read(f.source.join(name)).unwrap(), bytes);
+            assert_eq!(fs::read(f.private.join(BACKUP).join(name)).unwrap(), bytes);
         }
     }
     #[test]

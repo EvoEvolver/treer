@@ -1,5 +1,17 @@
 # Rust launcher experiment (#158)
 
+Release migration compatibility: the importer may preserve a strictly inert
+`agent-ui.json.goal-usage.json` (or matching legacy `codex-ui.json` suffix)
+as backup-only bytes. It must contain exactly the known Claude usage fields,
+an ASCII session identity, empty goalKey, explicit null goal/pendingExit/usage,
+and a finite nonnegative resultTokens counter. This never imports a Claude goal
+into Codex; active/pending/unknown sidecars still refuse. The complete stopped
+source inventory, including this sidecar, is restored byte-for-byte on rollback.
+Terminal Node receipt text may already be empty; original fingerprints and
+receipt identities remain authoritative and cannot dispatch again. This focused
+compatibility increment leaves final-retention, cursor/provider version rules,
+128 MiB disk caps and all running/pending work refusals unchanged.
+
 This is a separate, unpublished Cargo workspace. It does not replace
 `launchers/agent`, enter the production bundle, change a saved profile, or change
 Core behavior. The scope reset 4767 was retracted by #158/4773. Current decision

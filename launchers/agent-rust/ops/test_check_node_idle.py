@@ -11,6 +11,28 @@ spec.loader.exec_module(check)
 
 
 class Check(unittest.TestCase):
+    def test_inert_goal_sidecar_preserved_and_pending_unknown_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory).resolve()
+            for name, data in [('agent-ui.json', {'threadId': 'synthetic'}), ('queue.json', {'version': 1, 'records': []})]:
+                path = source / name
+                path.write_text(json.dumps(data))
+                path.chmod(0o600)
+            path = source / 'agent-ui.json.goal-usage.json'
+            inert = dict(sessionId='old-claude', goalKey='', goal=None, pendingExit=None, tokensUsed=None, timeUsedSeconds=None, resultTokens=123)
+            path.write_text(json.dumps(inert))
+            path.chmod(0o600)
+            before = path.read_bytes()
+            result = check.inspect(source, 'synthetic')
+            self.assertEqual(result['code'], 'node_idle')
+            self.assertTrue(result['inertGoalUsageSidecar'])
+            self.assertEqual(len(result['files']), 3)
+            self.assertEqual(path.read_bytes(), before)
+            for key, value in [('goal', {'status': 'active'}), ('pendingExit', {}), ('goalKey', 'old'), ('resultTokens', True), ('unknown', None)]:
+                path.write_text(json.dumps({**inert, key: value}))
+                with self.assertRaises(ValueError):
+                    check.inspect(source, 'synthetic')
+
     def test_delivery_projection_excludes_prompt_and_other_content(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory).resolve()

@@ -794,6 +794,58 @@ test('Rust imports a Node queue once, resumes its thread, preserves retries and 
   assert.equal(await readFile(join(legacy,'agent-ui.json'),'utf8'),threadBytes);
   assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8'),providerBefore,'restore must not start the provider');
 });
+test('Rust imports bounded current Node terminal receipts and inert Claude usage, runs new turn and restores all source bytes',{skip:useNode,timeout:30000},async t=>{
+  const s=await fixture(t,{FAKE_CODEX_COMPLETE_TURNS:'1',FAKE_CODEX_RELAY_RECOVERY:''});
+  const first=await fetch(s.base+'/api/state').then(r=>r.json());
+  const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
+  await unlink(join(s.state,'rust-spike.json'));
+  const legacy=join(s.root,'cwd/.treer/agents/ag_contract');await mkdir(legacy,{recursive:true,mode:0o700});
+  const threadBytes=JSON.stringify({threadId:first.thread.id});
+  const text='synthetic terminal',fingerprint=createHash('sha256').update(JSON.stringify({text,delivery:'queue',sender:null,notify:null})).digest('hex');
+  const records=Array.from({length:1024},(_,n)=>{
+    const id='sub_11111111-1111-4111-8111-'+String(n).padStart(12,'0');
+    return {operationId:'terminal-'+n,fingerprint,text:'',delivery:'queue',notify:null,receipt:{id,disposition:'sent',position:null},notification:null,
+      turnScope:'11111111-1111-4111-8111-111111111111',priorTurnId:null,sourceMessage:{messageId:'msg_'+n,deliveryId:'dlv_'+n,ackPending:false},
+      submission:{id,state:n%2?'done':'interrupted',sender:null,created_at:'2026-10-18T00:00:00Z',position:null,text_preview:text,turn_id:'prior-'+n,assistant_preview:null,error:null}};
+  });
+  const originals={'agent-ui.json':threadBytes,'queue.json':JSON.stringify({version:1,records}),
+    'agent-ui.json.goal-usage.json':JSON.stringify({sessionId:'old-claude-session',goalKey:'',goal:null,pendingExit:null,tokensUsed:null,timeUsedSeconds:null,resultTokens:123456})};
+  for(const [name,bytes] of Object.entries(originals))await writeFile(join(legacy,name),bytes,{mode:0o600});
+  const imported=await s.launch({},true,['--import-node-state']);
+  const state=await fetch(imported.base+'/api/state').then(r=>r.json());
+  assert.equal(state.thread.id,first.thread.id);assert.equal(state.goal,null);
+  for(const [name,bytes] of Object.entries(originals))assert.equal(await readFile(join(s.state,'node-backup-v1',name),'utf8'),bytes);
+  const post=body=>fetch(imported.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify(body)});
+  const same=await post({text,operation_id:'terminal-1023'}).then(r=>r.json());
+  assert.equal(same.duplicate,true);assert.deepEqual(same.submission,records[1023].receipt);
+  assert.equal((await post({text:'conflict',operation_id:'terminal-1023'})).status,409);
+  const next=await post({text:'new synthetic turn',operation_id:'new-after-import'}).then(r=>r.json());
+  assert.equal(next.accepted,true,JSON.stringify(next));
+  const settled=await until(async()=>({receipt:await fetch(imported.base+'/v1/submissions/'+next.submission.id,{headers:s.headers}).then(r=>r.json()),state:await fetch(imported.base+'/api/state').then(r=>r.json())}),x=>['done','failed','interrupted'].includes(x.receipt.submission?.state)||x.state.runtime.state==='blocked');
+  assert.equal(settled.receipt.submission?.state,'done',JSON.stringify({receipt:settled.receipt,runtime:settled.state.runtime,logs:s.logs()}));
+  const exit=once(imported.child,'exit');imported.child.kill('SIGTERM');await exit;
+  const providerBefore=await readFile(join(s.root,'provider.jsonl'),'utf8');
+  await execFileAsync(binary,['--restore-node-backup'],{cwd:join(s.root,'cwd'),env:s.env,timeout:5000});
+  for(const [name,bytes] of Object.entries(originals))assert.equal(await readFile(join(legacy,name),'utf8'),bytes);
+  assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8'),providerBefore);
+});
+
+for(const field of ['goal','pendingExit','unknown'])test('Rust rejects non-inert goal sidecar '+field+' before provider start',{skip:useNode},async t=>{
+  const s=await fixture(t);const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  await unlink(join(s.state,'rust-spike.json'));
+  const legacy=join(s.root,'cwd/.treer/agents/ag_contract');await mkdir(legacy,{recursive:true,mode:0o700});
+  await writeFile(join(legacy,'agent-ui.json'),'{"threadId":"thread"}',{mode:0o600});
+  await writeFile(join(legacy,'queue.json'),'{"version":1,"records":[]}',{mode:0o600});
+  const usage={sessionId:'old-claude',goalKey:'',goal:null,pendingExit:null,tokensUsed:null,timeUsedSeconds:null,resultTokens:0,[field]:{status:'active'}};
+  const bytes=JSON.stringify(usage),name='agent-ui.json.goal-usage.json';
+  await writeFile(join(legacy,name),bytes,{mode:0o600});
+  const providerBefore=await readFile(join(s.root,'provider.jsonl'),'utf8');
+  await assert.rejects(execFileAsync(binary,['--import-node-state'],{cwd:join(s.root,'cwd'),env:s.env,timeout:5000}),e=>e.code===1&&e.stderr.includes('node_state_import_failed'));
+  assert.equal(await readFile(join(s.state,'node-backup-v1',name),'utf8'),bytes);
+  assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8'),providerBefore);
+  await assert.rejects(readFile(join(s.state,'rust-spike.json')),{code:'ENOENT'});
+});
+
 test('Rust malformed Node state keeps exact backup and refuses before spawning provider',{skip:useNode,timeout:60000},async t=>{
   const id='sub_11111111-1111-4111-8111-111111111111';
   const record={operationId:'op',fingerprint:'a'.repeat(64),text:'',delivery:'queue',notify:null,receipt:{id,disposition:'sent',position:null},notification:null,submission:{id,state:'done',sender:null,created_at:'2026-10-18T00:00:00Z',position:null,text_preview:'seeded-private-text',turn_id:null,assistant_preview:null,error:null}};
