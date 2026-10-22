@@ -1,5 +1,10 @@
 # Rust launcher experiment (#158)
 
+The isolated [Claude adapter increment](CLAUDE.md) (#231) adds a distinct
+stream-json backend and supported-snapshot import. Its explicit capability
+differences and remaining native artifact/target acceptance are documented there;
+it does not change any existing Codex artifact or running Agent.
+
 Incoming-message parity correction: [message batching](MESSAGE-BATCHING.md)
 documents atomic whole-poll admission, busy queued-tail coalescing, durable
 delivery ACK checkpoints, bounds and remaining concrete ingress differences.

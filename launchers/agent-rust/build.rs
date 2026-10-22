@@ -3,6 +3,7 @@ use std::{env, path::PathBuf};
 fn main() {
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=TREER_SPIKE_BUILD_CODEX");
+    println!("cargo:rerun-if-env-changed=TREER_SPIKE_BUILD_CLAUDE");
     for (name, key) in [("codex", "SPIKE_CODEX_PATH"), ("treer", "SPIKE_TREER_PATH")] {
         let selected = if name == "codex" {
             env::var_os("TREER_SPIKE_BUILD_CODEX").map(PathBuf::from)
@@ -33,5 +34,29 @@ fn main() {
             assert_ne!(&prefix, b"#!", "default builds require native tools, not PATH-dependent script interpreters; set TREER_SPIKE_BUILD_CODEX to the absolute native Codex binary at build time");
         }
         println!("cargo:rustc-env={key}={}", path.display());
+    }
+    let claude = env::var_os("TREER_SPIKE_BUILD_CLAUDE")
+        .map(PathBuf::from)
+        .map(|p| {
+            assert!(p.is_absolute(), "Claude build-time path must be absolute");
+            p.canonicalize().expect("Claude build-time path must exist")
+        });
+    if let Some(path) = claude {
+        assert!(path.is_absolute());
+        if env::var_os("CARGO_FEATURE_FIXTURE_HARNESS").is_none() {
+            use std::io::Read;
+            let mut prefix = [0; 2];
+            std::fs::File::open(&path)
+                .unwrap()
+                .read_exact(&mut prefix)
+                .unwrap();
+            assert_ne!(
+                &prefix, b"#!",
+                "Claude production path must be a pinned native executable"
+            );
+        }
+        println!("cargo:rustc-env=SPIKE_CLAUDE_PATH={}", path.display());
+    } else {
+        println!("cargo:rustc-env=SPIKE_CLAUDE_PATH=");
     }
 }

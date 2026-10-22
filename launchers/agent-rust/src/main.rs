@@ -9,6 +9,7 @@ mod image_format;
 mod model;
 mod node_import;
 mod rpc;
+mod claude;
 mod runtime;
 mod store;
 mod transcript;
@@ -77,6 +78,8 @@ async fn main() -> Result<()> {
     let files = files::Files::new(cwd.clone())
         .map_err(|_| anyhow::anyhow!("workspace_file_root_unavailable"))?;
     let agent = env("TREER_AGENT_ID").unwrap_or_default();
+    let harness=env("AGENT_UI_HARNESS").unwrap_or("codex".into());
+    if !matches!(harness.as_str(),"codex"|"claude") {bail!("unsupported harness");}
     if agent.len() > 128
         || !agent
             .bytes()
@@ -85,7 +88,7 @@ async fn main() -> Result<()> {
         bail!("invalid agent id")
     }
     if !cfg!(feature = "fixture-harness")
-        && (env("CODEX_BIN").is_some() || env("RUST_SPIKE_CODEX_ARGS").is_some())
+        && (env("CODEX_BIN").is_some() || env("RUST_SPIKE_CODEX_ARGS").is_some() || env("CLAUDE_BIN").is_some() || env("RUST_SPIKE_CLAUDE_ARGS").is_some())
     {
         bail!("harness overrides require the fixture-harness test feature")
     }
@@ -107,9 +110,15 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     disk_history::prepare(&private_root, &cwd)?;
-    node_import::prepare(&private_root, &cwd, &agent,
+    if harness=="claude" && std::env::args().any(|arg|arg=="--import-node-state") {bail!("claude_requires_explicit_supported_history_import");}
+    if harness=="claude" {
+        let seed=env("RUST_CLAUDE_IMPORT_SNAPSHOT").map(PathBuf::from);
+        let importing=std::env::args().any(|arg|arg=="--import-claude-state");
+        if importing!=seed.is_some(){bail!("claude_import_requires_explicit_snapshot_and_flag");}
+        node_import::prepare_claude(&private_root,&cwd,&agent,env("AGENT_UI_SESSION_ID").as_deref(),seed.as_deref())?;
+    } else {node_import::prepare(&private_root, &cwd, &agent,
         env("AGENT_UI_SESSION_ID").or_else(|| env("CODEX_UI_THREAD_ID")).as_deref(),
-        std::env::args().any(|arg| arg == "--import-node-state"))?;
+        std::env::args().any(|arg| arg == "--import-node-state"))?;}
     let attachments = if !agent.is_empty() {
         Some(Arc::new(tokio::sync::Mutex::new(
             attachments::Attachments::open(
@@ -137,15 +146,22 @@ async fn main() -> Result<()> {
     let port = listener.local_addr()?.port();
     let instance =
         env("AGENT_UI_INSTANCE_ID").unwrap_or(format!("rust-spike-{}", uuid::Uuid::new_v4()));
-    let codex_args = if let Some(args) = env("RUST_SPIKE_CODEX_ARGS") {
+    let codex_args = if harness=="claude" {
+        if let Some(args)=env("RUST_SPIKE_CLAUDE_ARGS") {serde_json::from_str::<Vec<String>>(&args)?}
+        else {vec!["--print","--verbose","--output-format","stream-json","--input-format","stream-json","--include-partial-messages","--dangerously-skip-permissions"].into_iter().map(String::from).collect()}
+    } else if let Some(args) = env("RUST_SPIKE_CODEX_ARGS") {
         serde_json::from_str::<Vec<String>>(&args)?
     } else {
         vec!["app-server".into(), "--listen".into(), "stdio://".into()]
     };
     let handle = runtime::spawn(runtime::Config {
+        claude:harness=="claude",
         cwd,
         private_root,
-        codex: if cfg!(feature = "fixture-harness") {
+        codex: if harness=="claude" {
+            let command=if cfg!(feature="fixture-harness"){env("CLAUDE_BIN").unwrap_or(env!("SPIKE_CLAUDE_PATH").into())}else{env!("SPIKE_CLAUDE_PATH").into()};
+            if command.is_empty(){bail!("Claude native tool was not pinned at build time");}command
+        } else if cfg!(feature = "fixture-harness") {
             env("CODEX_BIN").unwrap_or(env!("SPIKE_CODEX_PATH").into())
         } else {
             env!("SPIKE_CODEX_PATH").into()

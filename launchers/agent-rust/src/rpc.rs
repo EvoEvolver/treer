@@ -81,6 +81,7 @@ pub struct Rpc {
     reviewed_provider: Arc<AtomicBool>,
     diagnostics: Arc<std::sync::Mutex<Value>>,
     selections: Selections,
+    claude: Option<Arc<std::sync::Mutex<crate::claude::Adapter>>>,
 }
 
 impl Rpc {
@@ -90,6 +91,12 @@ impl Rpc {
         cwd: &std::path::Path,
         capture_stderr: bool,
     ) -> Result<(Self, ProviderChild, mpsc::Receiver<Value>)> {
+        Self::spawn_backend(command,args,cwd,capture_stderr,None)
+    }
+    pub fn spawn_claude(command:&str,args:&[String],cwd:&std::path::Path,capture_stderr:bool,session:String)->Result<(Self,ProviderChild,mpsc::Receiver<Value>)>{
+        Self::spawn_backend(command,args,cwd,capture_stderr,Some(crate::claude::Adapter::new(session)?))
+    }
+    fn spawn_backend(command:&str,args:&[String],cwd:&std::path::Path,capture_stderr:bool,adapter:Option<crate::claude::Adapter>)->Result<(Self,ProviderChild,mpsc::Receiver<Value>)>{
         let mut child = Command::new(command)
             .args(args)
             .current_dir(cwd)
@@ -106,6 +113,7 @@ impl Rpc {
             reviewed_provider: Arc::new(AtomicBool::new(false)),
             diagnostics: Arc::new(std::sync::Mutex::new(json!({"transport":"open","beforeCleanup":null,"stderrCapture":if capture_stderr {"pending"} else {"disabled"}}))),
             selections: Arc::default(),
+            claude:adapter.map(|a|Arc::new(std::sync::Mutex::new(a))),
         };
         let (events, receiver) = mpsc::channel(8);
         let stdout = child.stdout.take().unwrap();
@@ -127,17 +135,21 @@ impl Rpc {
         });
         let reader_rpc = rpc.clone();
         let stdout_reader = tokio::spawn(async move {
-            let mut lines = Reader::new(stdout, reader_rpc.selections.clone());
+            let (mut codex_lines,mut claude_lines)=if reader_rpc.claude.is_some(){(None,Some(BufReader::new(stdout)))}else{(Some(Reader::new(stdout,reader_rpc.selections.clone())),None)};
             let reason = loop {
-                let line = match lines.next().await {
+                let next=if let Some(lines)=&mut claude_lines{crate::claude::line(lines).await.map_err(|_|"claude_invalid_frame")}else{codex_lines.as_mut().unwrap().next().await};
+                let line = match next {
                     Ok(Some(message)) => message,
                     Err(reason) => {
-                        reader_rpc.diagnostics.lock().unwrap()["frameFailure"] = lines.diagnostic();
+                        reader_rpc.diagnostics.lock().unwrap()["frameFailure"] = codex_lines.as_ref().map(|lines|lines.diagnostic()).unwrap_or(json!({"category":"claude_frame_refused"}));
                         break reason;
                     },
                     Ok(None) => break "stdout_eof",
                 };
-                let mut message = line;
+                let messages=if let Some(adapter)=&reader_rpc.claude{
+                    match adapter.lock().unwrap().consume(line){Ok(messages)=>messages,Err(_)=>break "claude_protocol_refused"}
+                }else{vec![line]};
+                for mut message in messages {
                 let history=&message["result"]["treerHistory"];
                 if history.is_object() {
                     reader_rpc.diagnostics.lock().unwrap()["historyScan"]=json!({"frameBytes":history["frameBytes"],"turnCount":history["total"],"nodeCount":history["nodeCount"],"elapsedMs":history["elapsedMs"],"staleInProgressCount":history["staleInProgressCount"],"threadStatus":history["threadStatus"],"historyAuthority":history["historyAuthority"]});
@@ -146,7 +158,7 @@ impl Rpc {
                     // Runtime pumps this bounded queue while awaiting its RPCs.
                     // Full means lossless backpressure, never transport failure.
                     if events.send(message).await.is_err() {
-                        break "consumer_closed";
+                        return;
                     }
                 } else if let Some(id) = message["id"].as_u64() {
                     if let Some(reply) = reader_rpc.pending.lock().await.remove(&id) {
@@ -157,6 +169,7 @@ impl Rpc {
                         };
                         let _ = reply.send(result);
                     }
+                }
                 }
             };
             reader_rpc.fail(reason);
@@ -181,6 +194,7 @@ impl Rpc {
     }
 
     pub async fn write(&self, message: Value) -> Result<()> {
+        if self.claude.is_some()&&message["method"]=="initialized"{return Ok(());}
         let mut bytes = serde_json::to_vec(&message)?;
         if bytes.len() > 128 * 1024 {
             bail!("RPC input too large");
@@ -208,6 +222,25 @@ impl Rpc {
     }
     async fn request_history(&self, method: &str, params: Value, selection: Option<crate::provider_stream::Selection>) -> Result<Value> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
+        if let Some(adapter)=&self.claude{
+            if selection.is_some(){bail!("claude_older_history_unavailable");}
+            let request=adapter.lock().unwrap().request(id,method,&params)?;
+            return match request {
+                crate::claude::Request::Local(result)=>Ok(result),
+                crate::claude::Request::Wire(wire)=>{
+                    if method=="turn/start"{
+                        let dispatched=adapter.lock().unwrap().dispatched();
+                        self.write(wire).await?;
+                        Ok(dispatched)
+                    }else{
+                        let(tx,rx)=oneshot::channel();self.pending.lock().await.insert(id,tx);
+                        let result=async{self.write(wire).await?;rx.await.map_err(|_|anyhow!("Claude disconnected"))?};
+                        let result=match timeout(Duration::from_secs(60),result).await{Ok(r)=>r,Err(_)=>{self.fail("claude_control_timeout");Err(anyhow!("claude_control_timeout"))}};
+                        self.pending.lock().await.remove(&id);result
+                    }
+                }
+            };
+        }
         let full_history = full_history_request(method, &params);
         if full_history || selection.is_some() {
             let mut selection = selection.unwrap_or_default();

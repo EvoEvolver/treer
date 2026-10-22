@@ -83,6 +83,7 @@ struct Record {
     message_batch: Option<messages::Batch>,
 }
 struct Runtime {
+    claude:bool,
     rpc: Rpc,
     events: mpsc::Receiver<Value>,
     rpc_completed_turns: HashSet<String>,
@@ -126,6 +127,7 @@ impl Drop for AbortTask {
 }
 
 pub struct Config {
+    pub claude:bool,
     pub cwd: PathBuf,
     pub private_root: PathBuf,
     pub codex: String,
@@ -134,9 +136,14 @@ pub struct Config {
     pub attachments: Option<Arc<tokio::sync::Mutex<Attachments>>>,
     pub capture_stderr: bool,
 }
-pub fn spawn(config: Config) -> Result<Handle> {
+pub fn spawn(mut config: Config) -> Result<Handle> {
     let store = Store::open(&config.private_root, &config.cwd)?;
     let saved = store.load().map_err(|_| anyhow!("private_state_invalid"))?;
+    if config.claude {
+        if let Some(saved)=&saved {
+            if saved["harness"]!="claude" {bail!("private_state_harness_mismatch");}
+        } else if config.session.is_some() {bail!("claude_resume_requires_supported_history_checkpoint");}
+    } else if saved.as_ref().is_some_and(|s|s["harness"]=="claude") {bail!("private_state_harness_mismatch");}
     // Refuse malformed durable dispatch state before starting a provider. Never
     // discard an invalid record: it may contain an uncertain dispatch intent.
     if let Some(saved) = &saved {
@@ -146,7 +153,11 @@ pub fn spawn(config: Config) -> Result<Handle> {
             bail!("private_state_session_mismatch");
         }
     }
-    let (rpc, mut child, events) = Rpc::spawn(&config.codex, &config.codex_args, &config.cwd, config.capture_stderr)?;
+    let (rpc, mut child, events) = if config.claude {
+        let session=config.session.clone().or_else(||saved.as_ref().and_then(|s|s["threadId"].as_str()).map(str::to_owned)).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
+        config.codex_args.extend([if saved.is_some(){"--resume"}else{"--session-id"}.into(),session.clone()]);
+        Rpc::spawn_claude(&config.codex,&config.codex_args,&config.cwd,config.capture_stderr,session)?
+    }else{Rpc::spawn(&config.codex, &config.codex_args, &config.cwd, config.capture_stderr)?};
     let (commands, mut requests) = mpsc::channel::<Request>(64);
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let shutdown_requested = shutdown.clone();
@@ -155,6 +166,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
         json!({"ready":false,"runtime":{"state":"starting","error":null},"thread":null,"queue":[],"modelOptions":[],"backgroundTasks":[],"goal":null}),
     ));
     let mut rt = Runtime {
+        claude:config.claude,
         rpc,
         events,
         rpc_completed_turns: HashSet::new(),
@@ -262,7 +274,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
                         eprintln!("Rust spike: goal edit retained for reconciliation");
                     }
                     if rt.drain().await.is_err() { eprintln!("Rust spike: queue dispatch failed; retained"); }
-                    if !observation_pending && !rt.dispatch_blocked && rt.thread["activeTurnId"].is_string() {
+                    if !rt.claude && !observation_pending && !rt.dispatch_blocked && rt.thread["activeTurnId"].is_string() {
                         observation_pending = observe_tx.try_send(json!({"threadId":rt.thread["id"],"targetTurnId":rt.thread["activeTurnId"]})).is_ok();
                     }
                     if !rt.history_failed && !notification_pending {
@@ -446,6 +458,15 @@ impl Runtime {
         for turn in result["thread"]["turns"].as_array().into_iter().flatten() {
             self.turns.insert(model::turn(turn))?;
         }
+        if self.claude {
+            if let Some(saved)=&saved {
+                let turns=saved["claudeTurns"].as_array().filter(|turns|turns.len()<=50).ok_or_else(||anyhow!("claude_history_checkpoint_invalid"))?;
+                for turn in turns { self.turns.insert(turn.clone())?; }
+                self.history_start=saved["claudeHistoryStart"].as_u64().ok_or_else(||anyhow!("claude_history_checkpoint_invalid"))? as usize;
+                self.history_total=saved["claudeHistoryTotal"].as_u64().ok_or_else(||anyhow!("claude_history_checkpoint_invalid"))? as usize;
+                if self.history_start>self.history_total || turns.len()>self.history_total {bail!("claude_history_checkpoint_invalid");}
+            }
+        }
         // Project accepted user items once, then admit every subsequent update
         // through the same byte budget. Snapshot reads never replay the journal.
         let dropped=self.turns.dropped;
@@ -494,8 +515,13 @@ impl Runtime {
             bail!("private_state_write_failed");
         }
         receipts::prune(&mut self.records, self.dispatch_blocked, &self.thread["activeTurnId"]);
-        if let Err(error) = self.store
-            .save(&json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records,"goals":self.goals})) {
+        let mut state=json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records,"goals":self.goals});
+        if self.claude {
+            state["harness"]=json!("claude");state["claudeTurns"]=json!(&*self.turns);
+            state["claudeHistoryStart"]=json!(self.history_start+self.turns.dropped);
+            state["claudeHistoryTotal"]=json!(self.history_total);
+        }
+        if let Err(error) = self.store.save(&state) {
             eprintln!("Rust spike: checkpoint_failure=1");
             if error.is::<crate::store::PublicationUncertain>() {
                 self.checkpoint = (self.records.clone(), self.goals.clone());
@@ -530,9 +556,19 @@ impl Runtime {
         let queue: Vec<_> = self.records.iter().filter(|r|r.submission["state"] == "queued").enumerate().map(|(n,r)|json!({"id":r.submission["id"],"text":r.text,"createdAt":r.submission["created_at"],"sender":r.submission["sender"],"position":n+1})).collect();
         let mut snapshot = json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"],"cleanup":{"providerExit":self.provider_exit,"processGroup":if self.provider_exit == "not_requested" {"not_requested"} else {"termination_requested_unverified"},"detachedDescendants":"not_guaranteed"}},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":null,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}});
         snapshot["thread"] = thread;
+        if self.claude {
+            snapshot["harness"]=json!({"id":"claude","name":"Claude","capabilities":{"images":false,"steer":false,"backgroundTasks":false,"goal":null,"sessionTransfer":null}});
+            snapshot["attachmentsAvailable"]=json!(false);
+            snapshot["attachmentStorageStatus"]=json!("unsupported");
+        }
         let start=(self.history_start+self.turns.dropped).min(self.history_total);
         snapshot["thread"]["hasOlderItems"]=json!(start>0);
         snapshot["history"]=json!({"limit":50,"totalTurns":self.history_total,"cursor":if start>0 {Some(format!("{}:{start:x}",self.history_nonce))}else{None}});
+        if self.claude && start>0 {
+            snapshot["history"]["cursor"]=Value::Null;
+            snapshot["history"]["unavailable"]=json!(true);
+            snapshot["thread"]["historyUnavailable"]=json!(true);
+        }
         snapshot["runtime"]["provider"] = self.rpc.diagnostics();
         snapshot["runtime"]["provider"]["finalProjection"] = self.final_projection.clone();
         snapshot["runtime"]["journalHistory"] = json!({"state":self.disk_history_status,"diskLimitBytes":crate::disk_history::DISK_LIMIT,"sampleIntervalSeconds":300});
@@ -617,6 +653,7 @@ impl Runtime {
         }
         match method {
             "history_page" => {
+                if self.claude {bail!("claude_older_history_unavailable");}
                 let cursor=body["cursor"].as_str().ok_or_else(||anyhow!("history_cursor_invalid"))?;
                 if cursor.len()>48 {bail!("history_cursor_invalid");}
                 let suffix=cursor.strip_prefix(&format!("{}:",self.history_nonce)).ok_or_else(||anyhow!("history_cursor_invalid"))?;
@@ -712,6 +749,7 @@ impl Runtime {
                 Ok(json!({"accepted":true}))
             }
             "settings" => {
+                if self.claude {bail!("claude_settings_not_yet_supported");}
                 if body.get("model").is_some() {
                     self.thread["model"] = body["model"].clone();
                 }
@@ -925,6 +963,8 @@ impl Runtime {
         let text = supplied_text.trim();
         let ids = body.get("attachment_ids").cloned().unwrap_or(json!([]));
         let has_images = ids.as_array().is_some_and(|ids| !ids.is_empty());
+        if self.claude && has_images {bail!("claude_images_unsupported");}
+        if self.claude && body["delivery"]=="steer" && self.thread["activeTurnId"].is_string() {bail!("claude_steer_unsupported");}
         if text.is_empty() && !has_images {
             bail!("text or images required");
         }
@@ -1358,6 +1398,7 @@ impl Runtime {
                         items.push(mapped);
                     }
                     self.upsert_turn(turn)?;
+                    if self.claude {self.persist()?;}
                 }
             }
             "turn/plan/updated" => {

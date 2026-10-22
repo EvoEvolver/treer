@@ -217,11 +217,14 @@ pub fn prepare(
     explicit_session: Option<&str>,
     allow_import: bool,
 ) -> Result<()> {
-    prepare_inner(root, cwd, agent, explicit_session, allow_import).map_err(|_| {
+    prepare_inner(root, cwd, agent, explicit_session, allow_import,None).map_err(|_| {
         anyhow::anyhow!(
             "node_state_import_failed; source preserved; inspect local backup before retry"
         )
     })
+}
+pub fn prepare_claude(root:&Path,cwd:&Path,agent:&str,session:Option<&str>,seed:Option<&Path>)->Result<()> {
+    prepare_inner(root,cwd,agent,session,seed.is_some(),seed).map_err(|_|anyhow::anyhow!("claude_state_import_failed; source preserved; no fresh-session fallback"))
 }
 fn prepare_inner(
     root: &Path,
@@ -229,6 +232,7 @@ fn prepare_inner(
     agent: &str,
     explicit_session: Option<&str>,
     allow_import: bool,
+    claude_seed:Option<&Path>,
 ) -> Result<()> {
     let store = Store::open(root, cwd)?;
     if fs::symlink_metadata(root.join(".node-backup-restored")).is_ok() {
@@ -336,7 +340,12 @@ fn prepare_inner(
             bail!("node_import_sidecar_unsupported");
         }
     }
-    let state = crate::runtime::import_node_queue(&thread, &queue)?;
+    let mut state = crate::runtime::import_node_queue(&thread, &queue)?;
+    if let Some(seed)=claude_seed {
+        let seed=crate::bounded_json::decode(&read(seed,16*1024*1024)?)?;
+        let hash=backup.files.iter().find(|e|e.name=="queue.json").map(|e|e.sha256.as_str()).ok_or_else(||anyhow::anyhow!("claude_seed_queue_missing"))?;
+        crate::claude::import_history(&mut state,&seed,agent,cwd,hash)?;
+    }
     // Recheck source after conversion, before the only publication. Same-account
     // concurrent mutation remains an operator precondition, as with Node.
     if serde_json::to_value(inventory(&dir)?)? != serde_json::to_value(&backup.files)? {
