@@ -17,6 +17,9 @@ lease prevents a second writer and survives as a file after holder exit.
 Private-state opening failures retain the underlying cause beneath the fixed
 `private_state_unavailable` label, with fixed directory-chain, canonicalization,
 security-query or identity stages where applicable.
+On an ACL refusal the fixture-feature image also emits the platform's bounded
+categorical descriptor report (principal classes and flags, no raw SIDs or
+paths). This diagnostic neither repairs the descriptor nor changes acceptance.
 Checkpoint publication uses the platform's write-through atomic replacement;
 publication failure cannot authorize dispatch or recovery. Disk-only history
 remains bounded and never becomes recovery input.

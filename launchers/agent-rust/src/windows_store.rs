@@ -113,18 +113,28 @@ impl Store {
         let root = fs::canonicalize(root).context("private_state_root_canonical")?;
         let cwd = fs::canonicalize(cwd).context("private_state_cwd_canonical")?;
         if !treer_platform::private_path_is_secure(&root).context("private_state_security_query")? {
+            // Synthetic native entry diagnostics only: the existing platform
+            // report emits categorical principals/flags, never SIDs or paths.
+            #[cfg(feature = "fixture-harness")]
+            eprintln!(
+                "private_state_security: {}",
+                treer_platform::private_path_security_report(&root)
+                    .unwrap_or_else(|_| "report_unavailable".into())
+            );
             bail!("private_state_root_unavailable");
         }
         // Compare actual directory identities, not case-sensitive path strings:
         // Windows spelling/case aliases cannot turn cwd data into "outside".
         let cwd_file = treer_platform::machine_file::open_protected(&cwd)
             .context("private_state_cwd_identity")?;
-        let (cwd_volume, cwd_index, _, _) = treer_platform::transfer_file_identity(&cwd_file)?;
+        let (cwd_volume, cwd_index, _, _) = treer_platform::transfer_file_identity(&cwd_file)
+            .context("private_state_cwd_identity_query")?;
         let mut child: Option<&Path> = None;
         for ancestor in root.ancestors() {
             let file = treer_platform::machine_file::open_protected(ancestor)
                 .context("private_state_ancestor_identity")?;
-            let (volume, index, _, _) = treer_platform::transfer_file_identity(&file)?;
+            let (volume, index, _, _) = treer_platform::transfer_file_identity(&file)
+                .context("private_state_ancestor_identity_query")?;
             if (volume, index) == (cwd_volume, cwd_index) {
                 let hidden = child
                     .and_then(Path::file_name)
@@ -142,7 +152,7 @@ impl Store {
                 match fs::symlink_metadata(ancestor.join(marker)) {
                     Ok(_) => bail!("private_state_in_vcs"),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(error).context("private_state_vcs_probe"),
                 }
             }
         }
