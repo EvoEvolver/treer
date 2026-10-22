@@ -22,7 +22,10 @@ enrich their original `tool_use.id`; they never introduce a phantom user turn.
 Local user insertion covers providers that do not echo input. Final assistant
 summaries retain completed tool output; conflicting terminal identity/content
 refuses the transport. Only `result` settles the turn. An earlier system idle
-notification cannot drain the next queued prompt.
+notification cannot drain the next queued prompt. An interrupt marks the turn
+interrupted only after its matching successful control response; refusal leaves
+the provider's normal result authoritative. A late response cannot mark a newer
+turn interrupted.
 
 The existing notification batching, receipt pruning/pressure, operation-ID
 dedup, durable-before-ACK and retry paths are shared. The Claude journal has an

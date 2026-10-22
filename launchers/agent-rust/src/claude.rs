@@ -12,6 +12,7 @@ pub struct Adapter {
     order: Vec<String>,
     user: String,
     interrupted: bool,
+    pending_interrupts: BTreeMap<u64, String>,
     announced: bool,
 }
 pub enum Request {
@@ -140,6 +141,7 @@ impl Adapter {
             order: vec![],
             user: String::new(),
             interrupted: false,
+            pending_interrupts: BTreeMap::new(),
             announced: false,
         })
     }
@@ -189,7 +191,11 @@ impl Adapter {
                 )
             }
             "turn/interrupt" => {
-                self.interrupted = true;
+                let turn = self
+                    .active
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("claude_no_active_turn"))?;
+                self.pending_interrupts.insert(id, turn);
                 Request::Wire(
                     json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"interrupt"}}),
                 )
@@ -324,6 +330,14 @@ impl Adapter {
                     .as_str()
                     .and_then(|s| s.parse::<u64>().ok())
                     .ok_or_else(|| anyhow::anyhow!("claude_control_identity"))?;
+                if !matches!(r["subtype"].as_str(), Some("success" | "error")) {
+                    bail!("claude_control_response_kind");
+                }
+                if let Some(turn) = self.pending_interrupts.remove(&id) {
+                    if r["subtype"] == "success" && self.active.as_ref() == Some(&turn) {
+                        self.interrupted = true;
+                    }
+                }
                 out.push(if r["subtype"] == "error" {
                     json!({"id":id,"error":{"code":"claude_control_refused"}})
                 } else {

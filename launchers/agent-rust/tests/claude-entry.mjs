@@ -69,6 +69,16 @@ test('actual Claude interrupt is correlated and only result completes the interr
   assert.equal(state.thread.turns.at(-1).status,'interrupted');
   assert.equal(state.thread.turns.at(-1).items.find(i=>i.kind==='commandExecution').detailText,'synthetic retained output');
 });
+test('refused interrupt does not relabel a successful provider result',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_HOLD:'never-created',CLAUDE_FIXTURE_REFUSE_INTERRUPT:'1'});
+  assert.equal((await f.post({prompt:'finish normally despite refusal'})).status,200);
+  await until(f.snapshot,s=>s.thread.activeTurnId&&s.thread.turns.some(t=>t.items.some(i=>i.kind==='commandExecution')));
+  assert.equal((await fetch(f.base+'/api/interrupt',{method:'POST',body:'{}'})).status,400);
+  const state=await until(f.snapshot,s=>s.thread.status==='idle');
+  assert.equal(state.thread.turns.length,1);
+  assert.equal(state.thread.turns[0].status,'completed');
+  assert.equal(state.thread.turns[0].items.find(i=>i.kind==='commandExecution').detailText,'synthetic retained output');
+});
 test('actual Claude import consumes supported snapshot plus exact Node queue backup and same-session new turn',async t=>{
   const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
   const queue=JSON.stringify({version:1,records:[]})+'\n',thread='synthetic-existing-claude';

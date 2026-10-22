@@ -8,6 +8,10 @@ const finish=()=>{active=false;emit({type:'result',subtype:'success',is_error:fa
 createInterface({input:process.stdin}).on('line',line=>{
   const event=JSON.parse(line);
   if(event.type==='control_request'){
+    if(event.request.subtype==='interrupt'&&process.env.CLAUDE_FIXTURE_REFUSE_INTERRUPT){
+      emit({type:'control_response',response:{subtype:'error',request_id:event.request_id,error:'synthetic interrupt refused'}});
+      clearTimeout(timer);timer=setTimeout(finish,150);return;
+    }
     emit({type:'control_response',response:{subtype:'success',request_id:event.request_id,response:{}}});
     if(event.request.subtype==='interrupt'){clearTimeout(timer);finish();}
     return;
