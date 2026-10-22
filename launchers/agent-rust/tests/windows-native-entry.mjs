@@ -11,15 +11,31 @@ import {localFetch as fetch} from '../../agent/tests/hermetic.mjs';
 const binary=process.env.RUST_SPIKE_BIN;
 assert.equal(process.platform,'win32','this suite must execute on Windows');
 assert.ok(binary,'RUST_SPIKE_BIN must name the Windows fixture-feature PE');
-const sid=execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command','[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],{encoding:'utf8'}).trim();
-assert.match(sid,/^S-1-/);
 async function until(read, accept, check=()=>{}){const end=Date.now()+15000;while(Date.now()<end){check();try{const value=await read();if(accept(value))return value;}catch{}await new Promise(r=>setTimeout(r,30));}check(true);throw Error('windows_entry_deadline');}
 for(const harness of ['codex','claude'])test(`Windows native ${harness}: text queue, durable restart and single writer`,async t=>{
   const root=await realpath(await mkdtemp(join(tmpdir(),'treer-rust-win-'))),cwd=join(root,'cwd'),state=join(root,'private'),port=join(root,'port');
   await mkdir(cwd);await mkdir(state);
-  execFileSync('icacls.exe',[state,'/inheritance:r','/grant:r',`*${sid}:(OI)(CI)F`],{stdio:'pipe'});
   const children=[];
   t.after(async()=>{for(const child of children)if(child.exitCode===null&&child.signalCode===null){const exit=once(child,'exit');child.kill();await exit;}await rm(root,{recursive:true,force:true,maxRetries:30,retryDelay:100});});
+  // Replace the DACL of this newly created, owned fixture directory with the
+  // exact secure_directory descriptor. icacls grant:r only replaces one
+  // principal's grants and can retain unrelated explicit ACEs.
+  execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',`
+    $ErrorActionPreference='Stop'
+    $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+    $sid=$identity.User.Value
+    $acl=Get-Acl -LiteralPath $env:TREER_FIXTURE_STATE
+    $acl.SetSecurityDescriptorSddlForm("D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;$sid)",[Security.AccessControl.AccessControlSections]::Access)
+    Set-Acl -LiteralPath $env:TREER_FIXTURE_STATE -AclObject $acl
+    $actual=Get-Acl -LiteralPath $env:TREER_FIXTURE_STATE
+    if (-not $actual.AreAccessRulesProtected) { throw 'fixture_dacl_not_protected' }
+    $rules=@($actual.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+    if ($rules.Count -ne 2) { throw 'fixture_dacl_wrong_ace_count' }
+    foreach ($rule in $rules) {
+      if ($rule.IsInherited -or $rule.AccessControlType -ne 'Allow' -or $rule.IdentityReference.Value -notin @($sid,'S-1-5-18')) { throw 'fixture_dacl_wrong_ace' }
+    }
+    if ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @($sid,$identity.Owner.Value)) { throw 'fixture_dacl_wrong_owner' }
+  `],{env:{...process.env,TREER_FIXTURE_STATE:state},stdio:'pipe'});
   const env={SystemRoot:process.env.SystemRoot,TEMP:root,TMP:root,USERPROFILE:root,PATH:process.env.PATH,
     AGENT_UI_CWD:cwd,TREER_RUST_SPIKE_STATE_DIR:state,AGENT_UI_PUBLIC_DIR:resolve('../agent/public'),AGENT_UI_PORT_FILE:port,AGENT_UI_PORT:'0',AGENT_UI_HARNESS:harness,
     CODEX_BIN:process.execPath,CLAUDE_BIN:process.execPath,RUST_SPIKE_CODEX_ARGS:JSON.stringify([resolve('../agent/tests/fake-codex.mjs')]),RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-stream.mjs')]),CLAUDE_FIXTURE_LOG:join(root,'calls'),FAKE_CODEX_COMPLETE_TURNS:'1',FAKE_CODEX_STATUS:'idle'};
