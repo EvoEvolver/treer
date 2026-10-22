@@ -22,6 +22,9 @@ for await(const line of createInterface({input:process.stdin})) {
       turns[0].status=process.env.RECOVERY_STATUS;
       if(turns[0].status!=='inProgress')turns[0].items.push({id:'restored-answer',type:'agentMessage',text:'synthetic recovered answer'});
     }
+    if(request.method==='thread/resume'&&process.env.RECOVERY_OLD==='1') {
+      turns.push(...Array.from({length:65},(_,n)=>({id:`later-${n}`,status:'completed',items:[]})));
+    }
     result={thread:{id:threadId,status:{type:turns.some(t=>t.status==='inProgress')?'active':'idle'},turns:process.env.RECOVERY_MISSING==='1'?[]:turns}};
   }
   if(request.method==='turn/start') {

@@ -11,45 +11,54 @@ fn uncertain(record: &Record) -> bool {
 pub(super) fn reconcile(records: &mut VecDeque<Record>, turns: &Transcript) -> bool {
     let mut blocked = false;
     for record in records {
-        if record.submission["state"] != "running" && !uncertain(record) {
-            continue;
-        }
         let turn = record.submission["turn_id"]
             .as_str()
             .and_then(|id| turns.iter().find(|turn| turn["id"].as_str() == Some(id)));
-        let state = turn.and_then(|turn| match turn["status"].as_str() {
-            Some("completed") => Some("done"),
-            Some("failed") => Some("failed"),
-            Some("interrupted") => Some("interrupted"),
-            Some("inProgress") => Some("running"),
-            _ => None,
-        });
-        if let (Some(turn), Some(state)) = (turn, state) {
-            record.submission["state"] = json!(state);
-            record.submission["error"] = if state == "running" {
-                Value::Null
-            } else {
-                turn["error"].clone()
-            };
-            if state != "running" {
-                record.submission["assistant_preview"] = json!(turn["items"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .rev()
-                    .find(|item| item["kind"] == "agentMessage")
-                    .and_then(|item| item["text"].as_str())
-                    .map(|text| preview(text, 2048)));
-            }
-        } else {
-            // Keep every unresolved operation and its original identity. In
-            // particular, do not infer a match from text, ordering or idle.
-            blocked = true;
-            record.submission["state"] = json!("failed");
-            record.submission["error"] = json!("Restart recovery: dispatch outcome uncertain; matching provider turn unavailable; not replayed");
-        }
+        blocked |= reconcile_record(record, turn);
     }
     blocked
+}
+
+pub(super) fn needs_recovery(record: &Record) -> bool {
+    record.submission["state"] == "running" || uncertain(record)
+}
+
+pub(super) fn reconcile_record(record: &mut Record, turn: Option<&Value>) -> bool {
+    if !needs_recovery(record) {
+        return false;
+    }
+    let state = turn.and_then(|turn| match turn["status"].as_str() {
+        Some("completed") => Some("done"),
+        Some("failed") => Some("failed"),
+        Some("interrupted") => Some("interrupted"),
+        Some("inProgress") => Some("running"),
+        _ => None,
+    });
+    if let (Some(turn), Some(state)) = (turn, state) {
+        record.submission["state"] = json!(state);
+        record.submission["error"] = if state == "running" {
+            Value::Null
+        } else {
+            turn["error"].clone()
+        };
+        if state != "running" {
+            record.submission["assistant_preview"] = json!(turn["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .rev()
+                .find(|item| item["kind"] == "agentMessage")
+                .and_then(|item| item["text"].as_str())
+                .map(|text| preview(text, 2048)));
+        }
+    } else {
+        // Keep every unresolved operation and its original identity. In
+        // particular, do not infer a match from text, ordering or idle.
+        record.submission["state"] = json!("failed");
+        record.submission["error"] = json!("Restart recovery: dispatch outcome uncertain; matching provider turn unavailable; not replayed");
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]

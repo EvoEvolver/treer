@@ -14,12 +14,17 @@ Message acknowledgement obligations remain intact. Recovery never sends the old
 input again. Once reconciliation commits, previously queued work continues in its
 original order. A previously completed ordinary receipt never reopens.
 
-A missing ID, missing retained turn, or unknown turn status remains uncertain and
+A turn outside the recent window is looked up by its exact ID through the
+existing bounded streaming `thread/read` selector. This retains normal memory,
+history authority, thread identity and private-publication checks. At most 256
+recovery lookups are admitted per startup. Events remain serviced during reads;
+receipt lookup uses immutable submission/turn IDs rather than mutable positions.
+
+A missing ID, missing provider turn, or unknown turn status remains uncertain and
 keeps dispatch paused. Idle alone, matching text, or the absence of a turn does
 not establish completion. History/trust validation and private publication checks
 remain mandatory. This change does not implement arbitrary operator resolution
-of genuinely ambiguous unacknowledged dispatches or recovery of turns outside the
-retained history window.
+of genuinely ambiguous unacknowledged dispatches.
 
 Focused validation: `cargo test --features fixture-harness runtime::recovery`,
 and `tests/contract.mjs` selected with `restart recovery reconciles`. The latter

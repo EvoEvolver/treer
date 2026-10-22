@@ -348,8 +348,11 @@ impl Runtime {
         self.provider_selected(method,params,None).await
     }
     async fn provider_selected(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>) -> Result<Value> {
+        self.provider_query(method, params, selection, None).await
+    }
+    async fn provider_query(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>, target: Option<String>) -> Result<Value> {
         // This outer deadline is polled even during an event's reply write.
-        let result = match timeout(Duration::from_secs(60), self.wait_provider_response(method, params, selection)).await {
+        let result = match timeout(Duration::from_secs(60), self.wait_provider_response(method, params, selection, target)).await {
             Ok(result) => result,
             Err(_) => { self.rpc.fail("rpc_timeout"); Err(anyhow!("provider_rpc_timeout")) },
         };
@@ -359,10 +362,13 @@ impl Runtime {
         }
         result
     }
-    async fn wait_provider_response(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>) -> Result<Value> {
+    async fn wait_provider_response(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>, target: Option<String>) -> Result<Value> {
         self.rpc_completed_turns.clear();
         let rpc = self.rpc.clone();
-        let response = rpc.request_selected(method, params, selection);
+        let response = async {
+            if target.is_some() { rpc.request_target(method, params, target).await }
+            else { rpc.request_selected(method, params, selection).await }
+        };
         tokio::pin!(response);
         loop {
             tokio::select! {
@@ -462,7 +468,29 @@ impl Runtime {
         // Only freshly resumed provider turns can reconcile acknowledged work.
         // Claude's retained journal history below is a display checkpoint, not
         // independent evidence that an uncertain provider operation finished.
-        let recovery_blocked = recovery::reconcile(&mut self.records, &self.turns);
+        let mut recovery_blocked = recovery::reconcile(&mut self.records, &self.turns);
+        if recovery_blocked && !self.claude {
+            // The normal window is deliberately bounded. Select an older
+            // acknowledged turn by exact ID using the existing streaming reader,
+            // not a complete in-memory history or a journal-synthesized turn.
+            let missing = self.records.iter()
+                .filter(|record| recovery::needs_recovery(record))
+                .filter_map(|record| record.submission["turn_id"].as_str()
+                    .filter(|id| !self.turns.iter().any(|turn| turn["id"] == *id))
+                    .map(|id| (record.submission["id"].clone(),id.to_owned())))
+                .collect::<Vec<_>>();
+            if missing.len() > receipts::PENDING_LIMIT { bail!("recovery_target_limit"); }
+            for (submission_id,id) in missing {
+                let observed=self.provider_query("thread/read",json!({"threadId":self.thread["id"],"includeTurns":true}),None,Some(id.clone())).await?;
+                if observed["thread"]["id"] != self.thread["id"] { bail!("recovery_thread_mismatch"); }
+                if !matches!(observed["thread"]["status"]["type"].as_str(),Some("idle"|"active")) { bail!("recovery_thread_status_unavailable"); }
+                let turn=observed["thread"]["turns"].as_array().and_then(|turns|turns.iter().find(|turn|turn["id"]==id)).map(model::turn);
+                if let Some(record)=self.records.iter_mut().find(|record|record.submission["id"]==submission_id && record.submission["turn_id"]==id) {
+                    recovery::reconcile_record(record,turn.as_ref());
+                }
+            }
+            recovery_blocked=self.records.iter().any(|record| recovery::needs_recovery(record) && record.submission["state"] != "running");
+        }
         if self.claude {
             if let Some(saved)=&saved {
                 let turns=saved["claudeTurns"].as_array().filter(|turns|turns.len()<=50).ok_or_else(||anyhow!("claude_history_checkpoint_invalid"))?;
