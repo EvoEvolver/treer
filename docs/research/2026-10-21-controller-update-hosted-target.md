@@ -183,7 +183,7 @@ recorded worker identity/claim and reconcile all owned duties before claiming
 cleanup; native failure or timeouts do not prove quiescence. Do not rerun the
 same root or silently clear its intent. On success, native-result cleanup is
 still separate from process/manager acceptance. Actual hosted execution of this
-source is pending Release; local compilation and guard tests are not acceptance.
+source is recorded below; local compilation and guard tests alone are not acceptance.
 
 The fixture final image check uses retained `InstallationDirectory` /
 `VerifiedImage` authentication for both installed target Controller and CLI.
@@ -212,3 +212,40 @@ worker image; failed observation does not prove death. Every snapshot retains
 absent claim at one observation is not a whole-process cleanup proof. Evidence
 write failure remains unknown; it does not retry submission or replace an old
 receipt. Production/default builds contain no diagnostic entry or stage hooks.
+
+## Actual Linux native evidence and next boundary
+
+Hosted run [39706258946](https://github.com/EvoEvolver/treer/actions/runs/39706258946)
+executed source `c545d2777ba3ff02c70f848ec72f7ec4dfeadd97` once: the exact
+native fixture passed, operation `dd1d3304-3493-4474-a28d-b618cbc089ac`
+reached Complete revision7/healthy, and observed Controller/CLI hashes matched
+the target binding. The source success path checked the Complete journal,
+matching active claim absence, identical fresh projection and both retained
+installed target images. All23 fixed stage leaves were present; neither failure
+leaf was emitted. This establishes Linux same-source feature-to-normal physical
+replacement through actual preparation, authenticated SAME-lock transfer,
+worker/Core publication, portable launcher and whole-health checks using local
+pinned artifacts and synthetic Proxy transport. It is not a released-version
+upgrade or enrolled-machine rollout. The acceptance feature is never shipped;
+the product capability remains OFF.
+
+Release owns the bounded receipt `positive-safe-result.json`, SHA256
+`425a34176272dd1288b120df1f3365a6929f1c2b2c8120ea349d8c8e72176a94`,
+under its disposable-CI review evidence. Core2 independently reconciled all34
+saved artifact byte counts and hashes. Cleanup proves Host reap/socket absence;
+worker image-attested quiescence was not separately inventoried, and launcher
+account state was retained for completed disposable-job teardown. Historical
+run39704103725 first cause remains UNKNOWN and its worker/claim cleanup remains
+UNPROVEN; later success does not resolve that historical evidence gap.
+
+Actual manager lifecycle, network Distributor, ProxyDB/Policy, macOS/Windows
+and enrolled activation remain separate unaccepted scopes. In particular,
+`scripts/controller-update-manager-fixture.py` prepares an inert process topology
+and must not be relabeled as real updater/manager acceptance. Core owns canonical
+integration, Core2 the next native fixture composition, Release the dedicated
+workflow and run evidence, and Leader any target allocation beyond the existing
+disposable hosted scope. A real manager successor must preserve the production
+Host/worker identity and SAME-lock path, bind only task-owned manager resources,
+and measure both replacement survival and resource cleanup. User-bus query
+availability alone proves neither. No repeat of the passed unchanged fixture is
+needed to document this gap.
