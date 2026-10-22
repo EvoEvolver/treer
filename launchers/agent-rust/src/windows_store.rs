@@ -1,6 +1,6 @@
 //! Windows private journal. All Win32 mechanics stay in treer-platform.
 //! Existing Controller-owned roots are checked, never adopted or ACL-repaired.
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::{
     fs::{self, File},
@@ -35,8 +35,7 @@ pub struct Lease {
 }
 impl Lease {
     pub fn acquire(root: &Path, cwd: &Path, _agent: &str) -> Result<Self> {
-        let store =
-            Store::open(root, cwd).map_err(|_| anyhow::anyhow!("private_state_unavailable"))?;
+        let store = Store::open(root, cwd).context("private_state_unavailable")?;
         match store.read_checked(LEASE, 0) {
             Ok(_) => {}
             Err(error) if is_not_found(&error) => {
@@ -110,19 +109,21 @@ impl Store {
         }
         // Open lexical components first: canonicalization must not erase a
         // junction/symlink. These retained handles refuse delete sharing.
-        let handle = Root::open(root, &[])?;
-        let root = fs::canonicalize(root)?;
-        let cwd = fs::canonicalize(cwd)?;
-        if !treer_platform::private_path_is_secure(&root)? {
+        let handle = Root::open(root, &[]).context("private_state_directory_chain")?;
+        let root = fs::canonicalize(root).context("private_state_root_canonical")?;
+        let cwd = fs::canonicalize(cwd).context("private_state_cwd_canonical")?;
+        if !treer_platform::private_path_is_secure(&root).context("private_state_security_query")? {
             bail!("private_state_root_unavailable");
         }
         // Compare actual directory identities, not case-sensitive path strings:
         // Windows spelling/case aliases cannot turn cwd data into "outside".
-        let cwd_file = treer_platform::machine_file::open_protected(&cwd)?;
+        let cwd_file = treer_platform::machine_file::open_protected(&cwd)
+            .context("private_state_cwd_identity")?;
         let (cwd_volume, cwd_index, _, _) = treer_platform::transfer_file_identity(&cwd_file)?;
         let mut child: Option<&Path> = None;
         for ancestor in root.ancestors() {
-            let file = treer_platform::machine_file::open_protected(ancestor)?;
+            let file = treer_platform::machine_file::open_protected(ancestor)
+                .context("private_state_ancestor_identity")?;
             let (volume, index, _, _) = treer_platform::transfer_file_identity(&file)?;
             if (volume, index) == (cwd_volume, cwd_index) {
                 let hidden = child
