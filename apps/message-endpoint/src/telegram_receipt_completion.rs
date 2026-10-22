@@ -49,45 +49,104 @@ pub(crate) fn dispatch(
     authenticated: &AuthenticatedDelivery,
     now: i64,
 ) -> Result<bool, Error> {
+    // Do not interpret untrusted receipt selectors until Core's actual sender
+    // is known to be a provisioned endpoint. Unknown principals use the existing
+    // bounded aggregate rejection path, never the exact-delivery ledger.
+    {
+        let h = hub.lock().map_err(|_| Error::Binding)?;
+        let delivery = authenticated.delivery();
+        if delivery.message.sender.kind != SenderKind::Agent
+            || !h.store.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM hub_bindings WHERE endpoint=?1)",
+                [&delivery.message.sender.id],
+                |r| r.get::<_, bool>(0),
+            )?
+        {
+            return Ok(false);
+        }
+    }
     let body = &authenticated.delivery().message.body;
     let value: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
+        Err(_) if body.contains("treer.telegram.app-asserted-receipts.") => {
+            return reject_and_ack(hub, core, authenticated, now);
+        }
         Err(_) => return Ok(false),
     };
     match value.get("protocol").and_then(|v| v.as_str()) {
         Some(crate::telegram_receipts::CAPABILITY) => {}
         Some(p) if p.starts_with("treer.telegram.app-asserted-receipts.") => {
-            return Err(Error::Binding)
+            return reject_and_ack(hub, core, authenticated, now);
         }
         _ => return Ok(false),
     }
     if body.len() > 4096 {
-        return Err(Error::Binding);
+        return reject_and_ack(hub, core, authenticated, now);
     }
-    let receipt: Receipt = serde_json::from_value(value).map_err(|_| Error::Binding)?;
+    let receipt: Receipt = match serde_json::from_value(value) {
+        Ok(receipt) => receipt,
+        Err(_) => return reject_and_ack(hub, core, authenticated, now),
+    };
+    if receipt.scope.endpoint_id != authenticated.delivery().message.sender.id {
+        return reject_and_ack(hub, core, authenticated, now);
+    }
     let intent = {
         let h = hub.lock().map_err(|_| Error::Binding)?;
-        if receipt.scope.endpoint_id != authenticated.delivery().message.sender.id {
-            return Err(Error::Binding);
-        }
-        let row: Option<(i64,String)> = h.store.db.query_row(
+        // Receipt mode may never have been initialized in a legacy/email-only
+        // deployment. Absence is no matching job, not a transient SQL failure.
+        let initialized: bool = h.store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='telegram_handoff_modes')",
+            [], |r| r.get(0),
+        )?;
+        let row: Option<(i64, Option<String>)> = if initialized {
+            h.store.db.query_row(
             "SELECT i.id,i.lease_token FROM inbound i JOIN telegram_handoff_modes m ON m.job=i.id AND m.mode='receipt'
+             JOIN endpoints e ON e.id=i.endpoint AND e.generation=i.generation AND e.recipient=i.recipient
+             JOIN hub_bindings b ON b.endpoint=e.id AND b.reason!='deleted'
              JOIN telegram_sources s ON s.endpoint=i.endpoint AND s.generation=i.generation AND s.external_id=i.external_id
              WHERE i.endpoint=?1 AND i.generation=?2 AND i.recipient=?3
              AND json_extract(s.source,'$.message_id')=?4",
             params![receipt.scope.endpoint_id,receipt.scope.generation,receipt.scope.recipient_id,receipt.native_message_id.to_string()],
             |r| Ok((r.get(0)?,r.get(1)?)),
-        ).optional()?;
-        let (job, token) = row.ok_or(Error::Binding)?;
-        CoreIntent {
-            endpoint: receipt.scope.endpoint_id.clone(),
-            generation: receipt.scope.generation,
-            job,
-            token,
-            parts: vec![],
-        }
+        ).optional()?
+        } else {
+            None
+        };
+        row.and_then(|(job, token)| {
+            token.map(|token| CoreIntent {
+                endpoint: receipt.scope.endpoint_id.clone(),
+                generation: receipt.scope.generation,
+                job,
+                token,
+                parts: vec![],
+            })
+        })
     };
-    commit_and_ack(hub, core, authenticated, &intent, now)?;
+    let Some(intent) = intent else {
+        return reject_and_ack(hub, core, authenticated, now);
+    };
+    match commit_and_ack(hub, core, authenticated, &intent, now) {
+        Ok(_) => Ok(true),
+        Err(Error::InvalidReceipt) => reject_and_ack(hub, core, authenticated, now),
+        Err(error) => Err(error),
+    }
+}
+
+fn reject_and_ack(
+    hub: &std::sync::Mutex<Hub<crate::core::Core>>,
+    core: &crate::core::Core,
+    authenticated: &AuthenticatedDelivery,
+    now: i64,
+) -> Result<bool, Error> {
+    {
+        let mut h = hub.lock().map_err(|_| Error::Binding)?;
+        if authenticated.workspace() != h.workspace || !core.is_identity(&h.own_id) {
+            return Err(Error::Binding);
+        }
+        h.reject_invalid_receipt(authenticated.delivery(), now)?;
+    }
+    // A committed rejection precedes ACK; storage/ACK errors keep it unacked.
+    core.ack(&authenticated.delivery().delivery_id)?;
     Ok(true)
 }
 
@@ -116,6 +175,10 @@ impl<M: Mailbox + Directory> Hub<M> {
     ) -> Result<Recorded, Error> {
         self.complete_telegram_receipt_dispatch(authenticated, intent, now, false)
             .map(|(recorded, _)| recorded)
+            .map_err(|error| match error {
+                Error::InvalidReceipt => Error::Binding,
+                other => other,
+            })
     }
 
     fn complete_telegram_receipt_dispatch<'a>(
@@ -245,7 +308,7 @@ impl<M: Mailbox + Directory> Hub<M> {
                 native_message_id: native_id,
             },
         )
-        .map_err(|_| Error::Binding)?;
+        .map_err(|_| Error::InvalidReceipt)?;
         // Terminal storage outcomes alone never authorize ack. The bounded
         // mapping ring may be evicted, but the completed job retains its final
         // Core ID. A changed assertion must not be acknowledged or resurrect

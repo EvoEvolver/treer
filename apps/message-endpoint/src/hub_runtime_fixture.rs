@@ -216,6 +216,286 @@ fn wait_until(mut check: impl FnMut() -> bool) {
     }
 }
 #[test]
+fn receipt_rejection_storage_and_ack_failure_remain_unacked_until_recovery() {
+    let f = Fixture::new();
+    let running = f.start(false);
+    let preview = f.command(json!({"action":"preview_create","endpoint_id":"ag_endpoint","recipient":"ag_recipient","generation":1}))["preview"].clone();
+    f.command(json!({"action":"create","endpoint_id":"ag_endpoint","recipient":"ag_recipient","generation":1,"expected":preview,"confirm":true}));
+    let root = f._root.path().canonicalize().unwrap();
+    let db = rusqlite::Connection::open(root.join("state/hub.sqlite3")).unwrap();
+    db.execute_batch("CREATE TRIGGER veto_poison BEFORE INSERT ON failures BEGIN SELECT RAISE(ABORT,'synthetic disk failure'); END;").unwrap();
+    std::fs::write(root.join("fail-ack"), b"synthetic ACK unavailable").unwrap();
+    f.control("core", json!({"delivery_id":"del_poison_recovery","recipient":{"kind":"agent","id":"app_hub"},"message":{"message_id":"msg_poison_recovery","sender":{"kind":"agent","id":"ag_endpoint"},"body":json!({"protocol":"treer.telegram.app-asserted-receipts.v999"}).to_string(),"context_ids":[]}}));
+    wait_until(|| {
+        f.settings()["settings"]["workers"]["consecutive_failed_drains"]
+            .as_u64()
+            .is_some_and(|n| n > 0)
+    });
+    assert_eq!(f.status()["acked"], 0);
+    assert!(
+        !root.join("ack-refused").exists(),
+        "failed rejection commit must never attempt ACK"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM failures", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    db.execute_batch("DROP TRIGGER veto_poison;").unwrap();
+    wait_until(|| root.join("ack-refused").exists());
+    assert_eq!(f.status()["acked"], 0);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM failures", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    std::fs::remove_file(root.join("fail-ack")).unwrap();
+    wait_until(|| f.status()["acked"] == 1);
+    wait_until(|| f.settings()["settings"]["workers"]["consecutive_failed_drains"] == 0);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM failures", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    drop(db);
+    drop(running);
+}
+
+#[test]
+fn receipt_shaped_poison_from_unknown_and_bound_senders_does_not_starve_runtime() {
+    let f = Fixture::new();
+    let running = f.start(false);
+    let preview = f.command(json!({"action":"preview_create","endpoint_id":"ag_endpoint","recipient":"ag_recipient","generation":1}))["preview"].clone();
+    f.command(json!({"action":"create","endpoint_id":"ag_endpoint","recipient":"ag_recipient","generation":1,"expected":preview,"confirm":true}));
+    let p = f.command(json!({"action":"preview_create","endpoint_id":"ag_healthy","recipient":"ag_recipient","generation":1}))["preview"].clone();
+    f.command(json!({"action":"create","endpoint_id":"ag_healthy","recipient":"ag_recipient","generation":1,"expected":p,"confirm":true}));
+    let root = f._root.path().canonicalize().unwrap();
+    let db = rusqlite::Connection::open(root.join("state/hub.sqlite3")).unwrap();
+    db.execute("UPDATE endpoints SET paused=0 WHERE id='ag_healthy'", [])
+        .unwrap();
+    db.execute(
+        "UPDATE hub_bindings SET checked_at=?1 WHERE endpoint='ag_healthy'",
+        [now()],
+    )
+    .unwrap();
+    drop(db);
+    // More than one oldest-unacked page from EACH principal category. No
+    // Telegram account activation or receipt job exists, including legacy mode.
+    let selector = json!({"protocol":crate::telegram_receipts::CAPABILITY,"verification":"app_asserted",
+        "scope":{"endpoint_id":"ag_endpoint","account_id":"bot_fixture","generation":1,"recipient_id":"ag_recipient","chat_id":-100,"topic_id":null},
+        "job_id":"nonexistent","payload_digest":"a".repeat(64),"native_message_id":123,"final_core_message_id":"msg_nonexistent"});
+    let mut mismatch = selector.clone();
+    mismatch["scope"]["endpoint_id"] = json!("ag_someone_else");
+    let mut oversize = selector.clone();
+    oversize["padding"] = json!("x".repeat(5000));
+    let bodies = [
+        json!({"protocol":"treer.telegram.app-asserted-receipts.v999"}).to_string(),
+        json!({"protocol":crate::telegram_receipts::CAPABILITY}).to_string(),
+        mismatch.to_string(),
+        selector.to_string(),
+        oversize.to_string(),
+        format!(
+            "{{\"protocol\":\"{}\",",
+            crate::telegram_receipts::CAPABILITY
+        ),
+    ];
+    let mut batch = vec![];
+    for (kind, sender) in [
+        ("agent", "ag_unknown"),
+        ("human", "ag_endpoint"),
+        ("agent", "ag_endpoint"),
+    ] {
+        for n in 0..11 {
+            let id = format!("poison_{kind}_{sender}_{n}");
+            batch.push(json!({"delivery_id":format!("del_{id}"),"recipient":{"kind":"agent","id":"app_hub"},
+                "message":{"message_id":format!("msg_{id}"),"sender":{"kind":kind,"id":sender},"body":bodies[n % bodies.len()],"context_ids":[]}}));
+        }
+    }
+    let frame = Envelope::Outbound {
+        delivery_id: "del_healthy_page_original".into(),
+        message_id: "msg_healthy_page_original".into(),
+        original_sender: Sender {
+            kind: SenderKind::Agent,
+            id: "ag_recipient".into(),
+        },
+        body: "healthy after unknown and bound poison".into(),
+        context_ids: vec![],
+    }
+    .fragments("ag_healthy", 1)
+    .unwrap()
+    .remove(0);
+    batch.push(json!({"delivery_id":"del_healthy_page","recipient":{"kind":"agent","id":"app_hub"},"message":{"message_id":"msg_healthy_page","sender":{"kind":"agent","id":"ag_healthy"},"body":frame,"context_ids":[]}}));
+    f.control("core-batch", json!(batch));
+    // Legitimate relay status queued AFTER all 33 poison deliveries, using the
+    // actual pinned CLI/relay implementation, must still reach this binding.
+    let root = f._root.path().canonicalize().unwrap();
+    let cli = root.join("endpoint-cli");
+    let config = crate::relay::Config {
+        endpoint_id: "ag_endpoint".into(),
+        hub_id: "app_hub".into(),
+        generation: 1,
+        recipients: vec!["ag_recipient".into()],
+        cli_sha256: crate::relay::hash_executable(&cli).unwrap(),
+        cli,
+        state_directory: root.join("relay-state"),
+        release_sha256: crate::relay::hash_executable(&std::env::current_exe().unwrap()).unwrap(),
+    };
+    let (relay, actual) = crate::relay::Relay::open(config, "ag_endpoint").unwrap();
+    relay
+        .report_binary(&actual, "poison-following-status")
+        .unwrap();
+    wait_until(|| f.status()["acked"].as_u64().is_some_and(|n| n >= 35));
+    wait_until(|| f.settings()["settings"]["workers"]["consecutive_failed_drains"] == 0);
+    let db = rusqlite::Connection::open_with_flags(
+        root.join("state/hub.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM failures", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        11
+    );
+    assert_eq!(
+        db.query_row("SELECT sum(attempts) FROM hub_unknown_senders", [], |r| r
+            .get::<_, i64>(
+            0
+        ))
+        .unwrap(),
+        22
+    );
+    assert!(db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM transfers WHERE endpoint='ag_healthy' AND state=1)",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    let diagnostic: String = db
+        .query_row(
+            "SELECT diagnostic FROM hub_bindings WHERE endpoint='ag_endpoint'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&diagnostic).unwrap()["state"],
+        "running"
+    );
+    assert_eq!(f.settings()["settings"]["workers"]["failures"], 0);
+    drop(db);
+    drop(running);
+}
+
+#[test]
+fn receipt_poison_1001_keeps_other_endpoint_live_and_global_block_unchanged() {
+    let f = Fixture::new();
+    let running = f.start(false);
+    for endpoint in ["ag_endpoint", "ag_healthy"] {
+        let p = f.command(json!({"action":"preview_create","endpoint_id":endpoint,"recipient":"ag_recipient","generation":1}))["preview"].clone();
+        f.command(json!({"action":"create","endpoint_id":endpoint,"recipient":"ag_recipient","generation":1,"expected":p,"confirm":true}));
+    }
+    let root = f._root.path().canonicalize().unwrap();
+    let db = rusqlite::Connection::open(root.join("state/hub.sqlite3")).unwrap();
+    // Synthetic active placements, no account/channel activation: exercise the
+    // real inbox receiver and durable outbound admission, not external sending.
+    db.execute("UPDATE endpoints SET paused=0", []).unwrap();
+    db.execute("UPDATE hub_bindings SET checked_at=?1", [now()])
+        .unwrap();
+    // Unlike short fixtures, this queue runs beyond the 30s readback TTL.
+    // Enable the actual periodic Core metadata refresh rather than letting the
+    // fixture's intentionally closed test gate make the healthy binding stale.
+    running.release_readbacks();
+    let mut batch = Vec::new();
+    for n in 0..1001 {
+        batch.push(json!({"delivery_id":format!("del_budget_{n}"),"recipient":{"kind":"agent","id":"app_hub"},"message":{"message_id":format!("msg_budget_{n}"),"sender":{"kind":"agent","id":"ag_endpoint"},"body":json!({"protocol":"treer.telegram.app-asserted-receipts.v999"}).to_string(),"context_ids":[]}}));
+    }
+    let frame = Envelope::Outbound {
+        delivery_id: "del_healthy_original".into(),
+        message_id: "msg_healthy_original".into(),
+        original_sender: Sender {
+            kind: SenderKind::Agent,
+            id: "ag_recipient".into(),
+        },
+        body: "healthy following poison".into(),
+        context_ids: vec![],
+    }
+    .fragments("ag_healthy", 1)
+    .unwrap()
+    .remove(0);
+    batch.push(json!({"delivery_id":"del_healthy_after_budget","recipient":{"kind":"agent","id":"app_hub"},"message":{"message_id":"msg_healthy_after_budget","sender":{"kind":"agent","id":"ag_healthy"},"body":frame,"context_ids":[]}}));
+    f.control("core-batch", json!(batch));
+    let deadline = Instant::now() + Duration::from_secs(150);
+    loop {
+        if f.status()["acked"] == 1002 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "1001 poison queue did not drain");
+        thread::sleep(Duration::from_millis(200));
+    }
+    wait_until(|| f.settings()["settings"]["workers"]["consecutive_failed_drains"] == 0);
+    assert_eq!(
+        db.query_row(
+            "SELECT COUNT(*) FROM failures WHERE endpoint='ag_endpoint'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1000
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT attempts FROM hub_invalid_receipt_overflow WHERE endpoint='ag_endpoint'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT blocked FROM hub_identity", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(db
+        .query_row(
+            "SELECT paused FROM endpoints WHERE id='ag_endpoint'",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    assert!(!db
+        .query_row(
+            "SELECT paused FROM endpoints WHERE id='ag_healthy'",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    assert!(db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM transfers WHERE endpoint='ag_healthy' AND state=1)",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    assert_eq!(f.settings()["settings"]["workers"]["failures"], 0);
+    drop(db);
+    drop(running);
+    // Read back across a stopped runtime; aggregation is durable, not RAM-only.
+    let db = rusqlite::Connection::open(root.join("state/hub.sqlite3")).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT attempts FROM hub_invalid_receipt_overflow WHERE endpoint='ag_endpoint'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
 fn telegram_roundtrip_traverses_hub_and_actual_rust_relay_with_endpoint_identity() {
     let f = Fixture::new();
     let running = f.start(true);
@@ -414,6 +694,44 @@ fn telegram_roundtrip_traverses_hub_and_actual_rust_relay_with_endpoint_identity
         .as_str()
         .unwrap();
     let mut receipt: Value = serde_json::from_str(wire).unwrap();
+    let mut invalid = receipt.clone();
+    invalid["payload_digest"] = json!("0".repeat(64));
+    f.control("core",json!({"delivery_id":"del_receipt_wrong_digest","recipient":{"kind":"agent","id":"app_hub"},"message":{"message_id":"msg_receipt_wrong_digest","sender":{"kind":"agent","id":"ag_endpoint"},"body":invalid.to_string(),"context_ids":[]}}));
+    wait_until(|| {
+        let db = rusqlite::Connection::open_with_flags(
+            root.join("core-fixture.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        db.query_row(
+            "SELECT ack=1 FROM inbox WHERE delivery='del_receipt_wrong_digest'",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
+    });
+    let db = rusqlite::Connection::open_with_flags(
+        root.join("state/hub.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM failures WHERE delivery='del_receipt_wrong_digest'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert!(db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM inbound WHERE pending=0 AND core_id=?1)",
+            [delivered["id"].as_str().unwrap()],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    drop(db);
     receipt["final_core_message_id"] = json!("msg_changed_final");
     f.control("core",json!({"delivery_id":"del_terminal_changed","recipient":{"kind":"agent","id":"app_hub"},"message":{"message_id":"msg_terminal_changed","sender":{"kind":"agent","id":"ag_endpoint"},"body":receipt.to_string(),"context_ids":[]}}));
     wait_until(|| {

@@ -36,6 +36,8 @@ pub enum Error {
     RefetchRateLimited,
     #[error("hub_receipt_conflict")]
     ReceiptConflict,
+    #[error("hub_invalid_receipt")]
+    InvalidReceipt,
 }
 impl From<rusqlite::Error> for Error {
     fn from(error: rusqlite::Error) -> Self {
@@ -173,7 +175,10 @@ impl<M: Mailbox + Directory> Hub<M> {
         CREATE TABLE IF NOT EXISTS hub_rejections(delivery TEXT PRIMARY KEY,reason TEXT NOT NULL,created_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS hub_unknown_senders(kind TEXT NOT NULL,sender TEXT NOT NULL,attempts INTEGER NOT NULL,last_seen INTEGER NOT NULL,PRIMARY KEY(kind,sender));
         CREATE TABLE IF NOT EXISTS hub_unknown_overflow(singleton INTEGER PRIMARY KEY CHECK(singleton=1),attempts INTEGER NOT NULL,last_seen INTEGER NOT NULL);
-        INSERT OR IGNORE INTO hub_unknown_overflow VALUES(1,0,0);")?;
+        INSERT OR IGNORE INTO hub_unknown_overflow VALUES(1,0,0);
+        CREATE TABLE IF NOT EXISTS hub_invalid_receipt_overflow(endpoint TEXT PRIMARY KEY,attempts INTEGER NOT NULL,last_seen INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS hub_invalid_receipt_overflow_total(singleton INTEGER PRIMARY KEY CHECK(singleton=1),attempts INTEGER NOT NULL,last_seen INTEGER NOT NULL);
+        INSERT OR IGNORE INTO hub_invalid_receipt_overflow_total VALUES(1,0,0);")?;
         let health_columns = tx
             .prepare("PRAGMA table_info(hub_core_handoff_health)")?
             .query_map([], |r| r.get::<_, String>(1))?
@@ -763,6 +768,67 @@ impl<M: Mailbox + Directory> Hub<M> {
         }
         Ok(())
     }
+    pub(crate) fn reject_invalid_receipt(
+        &mut self,
+        delivery: &Delivery,
+        now: i64,
+    ) -> Result<(), Error> {
+        if now < crate::transfers::TOMBSTONE_TTL
+            || delivery.recipient.kind != SenderKind::Agent
+            || delivery.recipient.id != self.own_id
+        {
+            return Err(Error::Binding);
+        }
+        if self.blocked()? {
+            return Err(Error::FailureBudget);
+        }
+        if delivery.message.sender.kind != SenderKind::Agent {
+            return Err(Error::Binding);
+        }
+        let id = &delivery.message.sender.id;
+        let view = self.view(id)?;
+        // Only this new deterministic receipt rejection path may aggregate at
+        // saturation. Valid receipts, uncertain dispositions and legacy failure
+        // handling retain their original fail-closed storage/ACK semantics.
+        match self.store.record_failure(
+            id,
+            view.binding.generation,
+            &delivery.delivery_id,
+            delivery.message.body.as_bytes(),
+            FailureReason::InvalidEnvelope,
+            now,
+        ) {
+            Ok(()) => Ok(()),
+            Err(StorageError::Full) => {
+                let tx = self.store.db.transaction()?;
+                let changed = tx.execute("UPDATE hub_invalid_receipt_overflow SET attempts=CASE WHEN attempts<9223372036854775807 THEN attempts+1 ELSE attempts END,last_seen=?2 WHERE endpoint=?1",params![id,now])?;
+                if changed == 0 {
+                    let count: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM hub_invalid_receipt_overflow",
+                        [],
+                        |r| r.get(0),
+                    )?;
+                    if count < UNKNOWN_SENDER_SLOTS {
+                        tx.execute(
+                            "INSERT INTO hub_invalid_receipt_overflow VALUES(?1,1,?2)",
+                            params![id, now],
+                        )?;
+                    } else {
+                        tx.execute("UPDATE hub_invalid_receipt_overflow_total SET attempts=CASE WHEN attempts<9223372036854775807 THEN attempts+1 ELSE attempts END,last_seen=?1 WHERE singleton=1",[now])?;
+                    }
+                }
+                // Never replace an existing hold/reconciliation reason. Only a
+                // newly paused endpoint receives this reason; no global bit is
+                // set or cleared. Counts are attempts, including ACK retries.
+                tx.execute("UPDATE hub_bindings SET reason='invalid_receipt_budget',revision=revision+1 WHERE endpoint=?1 AND EXISTS(SELECT 1 FROM endpoints WHERE id=?1 AND paused=0)",[id])?;
+                tx.execute("UPDATE endpoints SET paused=1 WHERE id=?1", [id])?;
+                tx.commit()?;
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn record_rejection(
         &mut self,
         id: &str,
@@ -1446,6 +1512,120 @@ mod tests {
         assert!(hub.view("ag_endpoint").unwrap().paused);
         assert_eq!(hub.view("ag_endpoint").unwrap().revision, 1);
     }
+    #[test]
+    fn invalid_receipt_global_capacity_does_not_block_or_rewrite_other_endpoint() {
+        let (mut hub, _) = fixture();
+        activate(&mut hub);
+        let mut other = binding();
+        other.endpoint_id = "ag_other".into();
+        hub.add_binding(other).unwrap();
+        hub.store.db.execute_batch("WITH RECURSIVE n(x) AS(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) INSERT INTO failures(endpoint,generation,delivery,payload_bytes,reason,created_at) SELECT 'ag_other',1,'del_history_'||x,3,0,1800000000 FROM n;").unwrap();
+        hub.reject_invalid_receipt(&delivery("del_full_global", "ag_endpoint", "bad"), NOW)
+            .unwrap();
+        assert!(!hub.blocked().unwrap());
+        assert!(hub.view("ag_endpoint").unwrap().paused);
+        assert_eq!(hub.view("ag_other").unwrap().reason, "owner_paused");
+        assert_eq!(hub.view("ag_other").unwrap().revision, 1);
+        assert_eq!(
+            hub.store
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM failures WHERE endpoint='ag_other'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            10000
+        );
+        assert_eq!(hub.store.db.query_row("SELECT attempts FROM hub_invalid_receipt_overflow WHERE endpoint='ag_endpoint'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    }
+
+    #[test]
+    fn invalid_receipt_saturation_is_bounded_atomic_and_preserves_existing_holds() {
+        let (mut hub, _) = fixture();
+        activate(&mut hub);
+        hub.store.db.execute_batch("WITH RECURSIVE n(x) AS(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000) INSERT INTO failures(endpoint,generation,delivery,payload_bytes,reason,created_at) SELECT 'ag_endpoint',1,'del_old_'||x,3,0,1800000000 FROM n;").unwrap();
+        let d = delivery("del_overflow", "ag_endpoint", "bad receipt");
+        hub.store.db.execute_batch("CREATE TRIGGER fail_aggregate BEFORE INSERT ON hub_invalid_receipt_overflow BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        assert!(matches!(
+            hub.reject_invalid_receipt(&d, NOW),
+            Err(Error::Storage(_))
+        ));
+        assert!(!hub.view("ag_endpoint").unwrap().paused);
+        assert!(!hub.blocked().unwrap());
+        hub.store
+            .db
+            .execute_batch("DROP TRIGGER fail_aggregate;")
+            .unwrap();
+        hub.reject_invalid_receipt(&d, NOW).unwrap();
+        let rev = hub.view("ag_endpoint").unwrap().revision;
+        hub.reject_invalid_receipt(&d, NOW).unwrap();
+        assert_eq!(hub.view("ag_endpoint").unwrap().revision, rev);
+        assert!(hub.view("ag_endpoint").unwrap().paused);
+        assert_eq!(
+            hub.view("ag_endpoint").unwrap().reason,
+            "invalid_receipt_budget"
+        );
+        assert!(!hub.blocked().unwrap());
+        assert_eq!(
+            hub.store
+                .db
+                .query_row(
+                    "SELECT attempts FROM hub_invalid_receipt_overflow",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            2
+        );
+        hub.store.db.execute_batch("UPDATE hub_bindings SET reason='receipt_conflict'; DELETE FROM hub_invalid_receipt_overflow;
+        WITH RECURSIVE n(x) AS(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<128) INSERT INTO hub_invalid_receipt_overflow SELECT 'ag_slot_'||x,1,1800000000 FROM n;").unwrap();
+        hub.reject_invalid_receipt(&d, NOW).unwrap();
+        assert_eq!(hub.view("ag_endpoint").unwrap().reason, "receipt_conflict");
+        assert_eq!(
+            hub.store
+                .db
+                .query_row(
+                    "SELECT COUNT(*) FROM hub_invalid_receipt_overflow",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            128
+        );
+        assert_eq!(
+            hub.store
+                .db
+                .query_row(
+                    "SELECT attempts FROM hub_invalid_receipt_overflow_total",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        hub.store
+            .db
+            .execute_batch("UPDATE hub_identity SET blocked=1;")
+            .unwrap();
+        assert!(matches!(
+            hub.reject_invalid_receipt(&d, NOW),
+            Err(Error::FailureBudget)
+        ));
+        assert!(hub.blocked().unwrap());
+        assert_eq!(
+            hub.store
+                .db
+                .query_row(
+                    "SELECT attempts FROM hub_invalid_receipt_overflow_total",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+
     #[test]
     fn poison_is_committed_without_body_and_full_budget_blocks_without_ack() {
         let (mut hub, fake) = fixture();

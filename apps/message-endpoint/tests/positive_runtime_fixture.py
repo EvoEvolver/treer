@@ -20,12 +20,14 @@ if args[:3]==['token','create','svc_hub']:
    import urllib.request
    urllib.request.urlopen(urllib.request.Request((p/'fixture-origin').read_text()+'/fixture/revoke-member',data=b'{"revoked":true}',headers={'Content-Type':'application/json'}),timeout=2).read()
  print(json.dumps(dict(access_token='synthetic.app.signature',token_type='Bearer',audience='svc_hub',expires_in=300)))
-elif args[:3]==['agent','show','--'] and args[3] in ['app_hub','ag_endpoint','ag_recipient']:
+elif args[:3]==['agent','show','--'] and args[3] in ['app_hub','ag_endpoint','ag_recipient','ag_healthy']:
  print(json.dumps(dict(agent_id=args[3],workspace_id='ws_test',server_id='machine_fixture',kind='command',cwd='/private/fixture',status='running',path='/team/'+args[3])))
 elif args[:2]==['message','receive']:
  time.sleep(.05)
- print(json.dumps(dict(deliveries=[json.loads(r[0]) for r in db.execute('SELECT payload FROM inbox WHERE ack=0 AND recipient=? ORDER BY id LIMIT 10',(own,))],remaining_unacknowledged=0)))
+ print(json.dumps(dict(deliveries=[json.loads(r[0]) for r in db.execute('SELECT payload FROM inbox WHERE ack=0 AND recipient=? ORDER BY id LIMIT 10',(own,))],remaining_unacknowledged=max(0,db.execute('SELECT COUNT(*) FROM inbox WHERE ack=0 AND recipient=?',(own,)).fetchone()[0]-10))))
 elif args[:2]==['message','ack']:
+ if (p/'fail-ack').exists():
+  (p/'ack-refused').write_text(args[-1]);sys.exit(1)
  db.execute('UPDATE inbox SET ack=1 WHERE delivery=? AND recipient=?',(args[-1],own));db.commit()
  print(json.dumps(dict(acknowledged_delivery_ids=[args[-1]],already_acknowledged_delivery_ids=[])))
 elif args[:2]==['message','send']:
@@ -78,6 +80,10 @@ class Handler(BaseHTTPRequestHandler):
    member_revoked=bool(value['revoked']);return self.reply({})
   if self.path=='/fixture/update':
    with lock:updates.append(value)
+   return self.reply({})
+  if self.path=='/fixture/core-batch':
+   with sqlite3.connect(root/'core-fixture.sqlite3') as db:
+    for item in value:db.execute('INSERT INTO inbox(delivery,payload,recipient) VALUES(?,?,?)',(item['delivery_id'],json.dumps(item),item['recipient']['id']))
    return self.reply({})
   if self.path=='/fixture/core':
    with sqlite3.connect(root/'core-fixture.sqlite3') as db:db.execute('INSERT INTO inbox(delivery,payload,recipient) VALUES(?,?,?)',(value['delivery_id'],json.dumps(value),value['recipient']['id']))

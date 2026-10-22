@@ -146,3 +146,47 @@ The stopped snapshot importer is the existing Hub executable's
 requires preprovisioned exact paused binding/recipient/generation/placement,
 Bot pin, sender and native-target matches. Its receipt never grants activation.
 No live identity/drain/secret/poller or post-traffic reverse action is performed.
+
+## #203 receipt-shaped inbox poison correction
+
+Before parsing a receipt selector, the authenticated inbox dispatcher requires
+an Agent sender with an existing binding. Unknown sender/kind input uses the
+existing bounded aggregate rejection and ACK path. Bound malformed/unsupported,
+oversize, endpoint-mismatched or unmatched selectors commit an InvalidEnvelope
+rejection before ACK outside the Hub mutex. A never-initialized receipt schema
+or unleased/current-generation-mismatched job is an unmatched selector, without
+creating a job or importing history. Wrong scoped payload/digest assertions are
+rejected; durable receipt conflicts and storage/ACK failures retain their holds.
+
+Targeted actual Rust runtime regressions use synthetic local Core/Bot identities:
+`receipt_shaped_poison_from_unknown_and_bound_senders_does_not_starve_runtime`
+queues 11 unknown-Agent, 11 wrong-kind and 11 bound-endpoint poison messages,
+then a distinct endpoint normal fragment and real relay status. All 35 are ACKed, each rejection is durably accounted,
+the legitimate diagnostic arrives, and the drain failure streak is zero.
+`receipt_rejection_storage_and_ack_failure_remain_unacked_until_recovery` injects
+a rejection-write abort followed by an ACK failure: no premature ACK, one
+retained rejection, then recovery without duplicate rejection. The Telegram
+roundtrip additionally rejects a wrong digest for a real receipt-mode job,
+preserving the completed final ID before the terminal-disposition ACK test.
+No real Core/channel, deployment or release operation is used.
+
+The new deterministic receipt rejection path handles exact-ledger saturation
+without invoking the legacy global-block wrapper: at 1,000 local / 10,000 global
+records it commits a saturating attempt aggregate (at most 128 endpoint slots
+plus one overflow counter) and pauses only the offending endpoint. Aggregate
+counts include ACK retries and span generations; they are not unique-delivery
+counts. No payload, digest or unbounded delivery list is stored. Existing paused
+hold reasons and any pre-existing global blocked bit remain untouched. Aggregate
+commit failure still prevents ACK. Legacy rejection and valid receipt storage,
+disposition and confirmed-ACK behavior are unchanged.
+
+`receipt_poison_1001_keeps_other_endpoint_live_and_global_block_unchanged` queues
+1,001 actual bound-sender poison deliveries followed by a distinct active
+synthetic endpoint's normal fragment through the real paged CLI/Rust worker.
+It checks 1,002 ACKs, 1,000 exact records, one durable aggregate, offender-only
+pause, healthy endpoint transfer admission, zero drain failures and unchanged
+global blocked=0; the aggregate is read back after runtime stop. Focused tests
+also cover global capacity, aggregate write rollback, 128-slot overflow, existing
+hold/global-block preservation, and genuine storage/ACK recovery. All account,
+Core and Bot identities are local synthetic fixtures; no real send or service
+operation is involved.
