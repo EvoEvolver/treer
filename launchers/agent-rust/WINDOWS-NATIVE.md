@@ -14,6 +14,9 @@ state directory. Existing directories/files must have the current user's private
 DACL; the launcher checks them without repairing their permissions. Retained
 platform handles reject reparse points and hardlinks. An OS share-mode-zero
 lease prevents a second writer and survives as a file after holder exit.
+Private-state opening failures retain the underlying cause beneath the fixed
+`private_state_unavailable` label, with fixed directory-chain, canonicalization,
+security-query or identity stages where applicable.
 Checkpoint publication uses the platform's write-through atomic replacement;
 publication failure cannot authorize dispatch or recovery. Disk-only history
 remains bounded and never becomes recovery input.
