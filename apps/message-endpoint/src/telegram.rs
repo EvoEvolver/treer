@@ -2276,6 +2276,8 @@ print(json.dumps({'acknowledged_delivery_ids':['del_receipt'],'already_acknowled
         let shared = Arc::new(Mutex::new(Hub {
             store: h.store,
             mailbox: Local,
+            #[cfg(feature = "hub")]
+            email_workers_active: false,
             own_id: h.own_id,
             workspace: h.workspace,
         }));

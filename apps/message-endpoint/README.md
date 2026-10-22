@@ -1674,6 +1674,12 @@ There is **no production Proxy mail switch** in runtime configuration: unknown
 fields, including `email.mode`, fail closed. The Proxy sender remains an unused
 library helper until a later reviewed real-send increment.
 
+Email workers commit interrupted journal containment before spawning, and reject
+a second email supervisor on the same Hub. Failure to recover prevents startup.
+Normal shutdown releases ownership only after workers join; a supervisor panic
+keeps ownership latched until the process is stopped and its private store is
+reopened. Recovery retains uncertain reservations and never resends mail.
+
 On the dedicated owner settings page, create the ordinary paused endpoint
 binding, then bind an exact address and current workspace human stable ID under
 Configure endpoint. Email and Telegram targets are mutually exclusive and cannot
@@ -1697,3 +1703,14 @@ blockers are in [MIGRATION.md](MIGRATION.md). Retained email plaintext, quotas,
 missing purge/TTL and private outbox reconciliation remain production blockers,
 detailed in [EMAIL.md](EMAIL.md). Never remove live SQLite rows or outbox files
 to bypass a capacity or ambiguous-send condition.
+
+
+### Integrated hub recovery development (#203/#204)
+
+The channel branches are assembled in one native runtime. See
+[EMAIL-ACTIVATION.md](EMAIL-ACTIVATION.md#runnable-isolated-assembly) for the
+outbox/default-off Proxy transport, member replies, durable uncertain outcomes
+and owner recovery UI. [MIGRATION.md](MIGRATION.md#stopped-state-cutoff-journal)
+documents the offline paused-binding offset journal and pre-traffic reversal;
+it does not grant cutover authority or historical native reply continuity.
+No real send, deploy or existing poller switch is implied by these source tools.

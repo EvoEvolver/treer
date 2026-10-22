@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 const OUTPUT_LIMIT: usize = 1024 * 1024;
+pub(crate) const CLI_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("core_cli_unavailable")]
@@ -133,7 +134,7 @@ impl Core {
     }
     fn call(&self, arguments: &[String], input: Option<&[u8]>) -> Result<Value, Error> {
         self.integrity.check().map_err(|_| Error::Integrity)?;
-        run(&self.executable, arguments, input, Duration::from_secs(15))
+        run(&self.executable, arguments, input, CLI_TIMEOUT)
     }
 
     /// Mint a service-audience token only with this process's own injected

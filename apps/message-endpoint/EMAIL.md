@@ -19,7 +19,7 @@ old threads never transfer to a different contact. Agent JSON cannot choose a
 new destination or member. A thread's initiating Agent must be the fixed
 counterpart, so replies cannot turn the relay into an arbitrary recipient deputy.
 
-Management remains current-human-owner only. Thread reads/replies use a distinct
+Email journal inspection/recovery remains current-human-owner only; binding management uses the existing scoped manager API described in [AGENT-API.md](AGENT-API.md). Thread reads/replies use a distinct
 current-member verification path: injected identity first, invalid token never
 falls back to cookie; otherwise existing opaque OAuth session. Every request
 checks verify_app's active human identity, audience, workspace and expiry plus
@@ -32,6 +32,11 @@ Writes require the configured dedicated App Origin, Sec-Fetch-Site checks,
 Content-Type, custom CSRF header and bounded strict JSON. Embedded settings remain
 read-only. A guessed thread ID is not authority. Logout invalidates only the
 App's opaque session and never the Treer login.
+
+The integrated worker defaults to outbox; explicit operator-only `mode:"proxy"`
+uses the existing fixed recipient and committed single-use dispatch journal.
+See [EMAIL-ACTIVATION.md](EMAIL-ACTIVATION.md#runnable-isolated-assembly) for
+assembly commands, owner recovery and the remaining real-provider boundary.
 
 ## Persistence and sends
 
@@ -173,3 +178,9 @@ The current directory client accepts at most 1,000 principals / 256 KiB per
 response. Larger workspaces fail closed for email binding, resume and dispatch rather than trusting partial membership. Directory
 pagination is not implemented. The owner settings overview shows at most 20
 email targets with an explicit truncation notice; other settings remain usable.
+
+## Activation follow-up
+
+[Email activation plan](EMAIL-ACTIVATION.md) records #204 source gaps, the
+uncertain-send limitation and the separate review/activation requirements.
+Existing runtime remains outbox-only; the plan does not enable real sending.

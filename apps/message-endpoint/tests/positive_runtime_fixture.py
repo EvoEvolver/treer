@@ -39,7 +39,7 @@ else: sys.exit(1)
 '''); cli.chmod(0o700)
 relay_cli=root/'endpoint-cli';relay_cli.write_bytes(cli.read_bytes());relay_cli.chmod(0o700)
 db=sqlite3.connect(root/'core-fixture.sqlite3');db.executescript('CREATE TABLE inbox(id INTEGER PRIMARY KEY,delivery TEXT UNIQUE,payload TEXT,recipient TEXT NOT NULL,ack INTEGER DEFAULT 0);CREATE TABLE sent(id INTEGER PRIMARY KEY,key TEXT UNIQUE,payload TEXT,sender TEXT NOT NULL,recipient TEXT NOT NULL,contexts TEXT NOT NULL);');db.close()
-lock=threading.Lock();updates=[];sent=[];operations=[];member_revoked=False
+lock=threading.Lock();updates=[];sent=[];operations=[];member_revoked=False;emails=[];email_uncertain=False;poll_trace=[];active_pollers=0;max_pollers=0
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*_):pass
  def reply(self,value,status=200):
@@ -47,7 +47,7 @@ class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
   if self.path=='/api/apps/svc_hub/directory':return self.reply(dict(principals=[dict(id='user_owner',kind='human',role='owner')]+([] if member_revoked else [dict(id='user_member',kind='human',role='member')])))
   if self.path=='/fixture/status':
-   with lock: result=dict(operations=list(operations),sent=list(sent))
+   with lock: result=dict(operations=list(operations),sent=list(sent),emails=list(emails),poll_trace=list(poll_trace),active_pollers=active_pollers,max_pollers=max_pollers)
    with sqlite3.connect(root/'core-fixture.sqlite3') as db:
     result['core_sent']=[json.loads(r[0]) for r in db.execute('SELECT payload FROM sent WHERE sender="app_hub" ORDER BY id')]
     result['core_messages']=[dict(id='msg_fixture_'+str(r[0]),sender=r[1],recipient=r[2],envelope=json.loads(r[3]),context_ids=json.loads(r[4])) for r in db.execute('SELECT id,sender,recipient,payload,contexts FROM sent ORDER BY id')]
@@ -55,13 +55,19 @@ class Handler(BaseHTTPRequestHandler):
    return self.reply(result)
   return self.reply({},404)
  def do_POST(self):
-  global member_revoked
+  global member_revoked,email_uncertain,active_pollers,max_pollers
   size=int(self.headers.get('Content-Length','0'));assert size<1024*1024
   value=json.loads(self.rfile.read(size))
   if self.path=='/.treer/apps/identity/verify':
    assert value.get('audience')=='svc_hub'
    if value.get('token') not in ('synthetic.owner.token159','synthetic.member.token159'):return self.reply(dict(active=False))
    return self.reply(dict(active=True,claims=dict(sub='user_member' if value['token']=='synthetic.member.token159' else 'user_owner',principal_kind='human',workspace_id='ws_test',service_id='svc_hub',exp=int(time.time())+300)))
+  if self.path=='/fixture/email-uncertain':
+   email_uncertain=bool(value['uncertain']);return self.reply({})
+  if self.path=='/api/apps/svc_hub/email':
+   assert self.headers.get('Authorization')=='Bearer synthetic.app.signature'
+   with lock:emails.append(value)
+   return self.reply(dict(status='in_progress') if email_uncertain else dict(status='sent',email_id='email_fixture'),409 if email_uncertain else 200)
   if self.path=='/fixture/revoke-member':
    member_revoked=bool(value['revoked']);return self.reply({})
   if self.path=='/fixture/update':
@@ -73,6 +79,16 @@ class Handler(BaseHTTPRequestHandler):
   if not self.path.startswith('/TREER_TEST_ONLY_BOT_ORIGIN_159/bot12345:'):
    return self.reply({},404)
   operation=self.path.rsplit('/',1)[1]
+  if operation=='getUpdates':
+   with lock:
+    operations.append(operation);active_pollers+=1;max_pollers=max(max_pollers,active_pollers)
+    poll_trace.append(dict(actor=self.headers.get('X-Fixture-Poller','hub'),offset=value['offset']))
+   try:
+    time.sleep(0.04)
+    with lock:result=[u for u in updates if u['update_id']>=value['offset']]
+   finally:
+    with lock:active_pollers-=1
+   return self.reply(dict(ok=True,result=result))
   with lock:
    operations.append(operation)
    if operation=='getMe':result=dict(id=12345,is_bot=True)

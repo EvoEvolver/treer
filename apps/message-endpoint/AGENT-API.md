@@ -93,6 +93,11 @@ has a server-generated `X-Endpoint-Request-ID`. Never retry with invented curren
 revisions: read settings and preview again. A lost success response is ambiguous;
 create has its receipt key, while other mutations use compare-and-swap revisions.
 
+Email delivery journal inspection (`inspect_email_delivery`) and prepared-only
+abandonment (`abandon_prepared_email`) are human-owner-only configuration actions.
+They are not part of this Agent API; Agent callers receive403. See
+[the integrated email boundary](EMAIL-ACTIVATION.md#runnable-isolated-assembly).
+
 ## Audit, notifications and limits
 
 Agent mutation audit records contain the verified caller Agent ID, action,

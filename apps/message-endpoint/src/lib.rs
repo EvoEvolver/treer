@@ -31,6 +31,8 @@ pub mod scheduler;
 pub mod store;
 #[cfg(unix)]
 pub mod telegram;
+#[cfg(unix)]
+pub mod telegram_cutoff;
 pub mod transfers;
 
 #[cfg(all(unix, feature = "hub"))]

@@ -1,4 +1,4 @@
-//! Opt-in outbox-only email runtime. No external mail transport is activated.
+//! Email runtime defaults to private outbox; Proxy transport requires explicit configuration.
 //! All Core/directory calls and private file publication happen outside state.
 use crate::{
     core::Core,
@@ -22,6 +22,8 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub outbox_directory: PathBuf,
+    #[serde(default)]
+    pub mode: email::Mode,
 }
 impl Config {
     pub(crate) fn validate(&self) -> Result<(), ()> {
@@ -61,7 +63,11 @@ pub struct Target {
     pub revoked: bool,
 }
 impl Snapshot {
-    pub(crate) fn read(store: &crate::store::Store, worker: Option<&Workers>) -> Result<Self, ()> {
+    pub(crate) fn read(
+        store: &crate::store::Store,
+        worker: Option<&Workers>,
+        mode: email::Mode,
+    ) -> Result<Self, ()> {
         let mut q=store.db.prepare("SELECT t.endpoint,t.generation,t.address,t.member,t.revoked FROM email_targets t JOIN endpoints e ON e.id=t.endpoint AND e.generation=t.generation ORDER BY t.endpoint LIMIT 21").map_err(|_|())?;
         let mut targets = q
             .query_map([], |r| {
@@ -79,7 +85,10 @@ impl Snapshot {
         let targets_truncated = targets.len() > 20;
         targets.truncate(20);
         Ok(Self {
-            mode: "outbox",
+            mode: match mode {
+                email::Mode::Outbox => "outbox",
+                email::Mode::Proxy => "proxy",
+            },
             worker: worker.map(Workers::status),
             targets,
             targets_truncated,
@@ -89,6 +98,42 @@ impl Snapshot {
 pub struct Workers {
     state: Arc<State>,
     join: Option<JoinHandle<()>>,
+    startup: Option<StartupLease<Core>>,
+    mode: email::Mode,
+}
+
+/// Per-Hub worker ownership. Private-store process exclusion is separate.
+/// Acquire/recover under the state mutex before any worker thread is spawned.
+struct StartupLease<M> {
+    hub: SharedHub<M>,
+    release_on_drop: bool,
+}
+impl<M> StartupLease<M> {
+    fn acquire(hub: &SharedHub<M>) -> Result<Self, ()> {
+        let mut h = hub.lock().map_err(|_| ())?;
+        if h.email_workers_active {
+            return Err(());
+        }
+        h.store.recheck_private_storage().map_err(|_| ())?;
+        Queue::new(&mut h.store)
+            .map_err(|_| ())?
+            .recover_interrupted_proxy_deliveries()
+            .map_err(|_| ())?;
+        h.email_workers_active = true;
+        Ok(Self {
+            hub: hub.clone(),
+            release_on_drop: true,
+        })
+    }
+}
+impl<M> Drop for StartupLease<M> {
+    fn drop(&mut self) {
+        if self.release_on_drop {
+            if let Ok(mut h) = self.hub.lock() {
+                h.email_workers_active = false;
+            }
+        }
+    }
 }
 fn clock() -> Result<i64, ()> {
     SystemTime::now()
@@ -126,6 +171,9 @@ impl Workers {
         config
             .validate()
             .map_err(|_| std::io::Error::other("email_private_outbox_unavailable"))?;
+        let mode = config.mode;
+        let startup = StartupLease::acquire(&hub)
+            .map_err(|_| std::io::Error::other("email_startup_recovery_unavailable"))?;
         let state = Arc::new(State::default());
         let shared = state.clone();
         let join = thread::Builder::new()
@@ -161,17 +209,7 @@ impl Workers {
                             .name("hub-email-endpoint".into())
                             .spawn(move || {
                                 while !s.stop.load(Ordering::Acquire) {
-                                    if step(
-                                        &h,
-                                        &c,
-                                        &endpoint,
-                                        &cfg,
-                                        &url,
-                                        |member| d.current_member(&c, member).unwrap_or(false),
-                                        &s,
-                                    )
-                                    .is_err()
-                                    {
+                                    if step(&h, &c, &endpoint, &cfg, &url, &d, &s).is_err() {
                                         increment(&s.failures);
                                     }
                                     wait(&s);
@@ -199,11 +237,16 @@ impl Workers {
         Ok(Self {
             state,
             join: Some(join),
+            startup: Some(startup),
+            mode,
         })
     }
     pub fn status(&self) -> Status {
         Status {
-            mode: "outbox",
+            mode: match self.mode {
+                email::Mode::Outbox => "outbox",
+                email::Mode::Proxy => "proxy",
+            },
             published_outbox: self.state.published.load(Ordering::Relaxed),
             core_replies: self.state.replied.load(Ordering::Relaxed),
             failures: self.state.failures.load(Ordering::Relaxed),
@@ -215,10 +258,17 @@ impl Workers {
     }
     pub fn stop(&mut self) {
         self.request_stop();
+        let mut joined = true;
         if let Some(j) = self.join.take() {
             if j.join().is_err() {
                 increment(&self.state.failures);
+                joined = false;
             }
+        }
+        if let Some(mut startup) = self.startup.take() {
+            // A panicked supervisor may have detached endpoint threads. Never
+            // recover their in-flight reservations as if they had been joined.
+            startup.release_on_drop = joined;
         }
     }
 }
@@ -264,13 +314,51 @@ fn fence<M: Mailbox + Directory>(
     }
     Ok(())
 }
-fn step<M: Mailbox + Directory>(
-    hub: &SharedHub<M>,
-    core: &M,
+fn capacity_available<M>(
+    hub: &mut crate::hub::Hub<M>,
+    endpoint: &str,
+    generation: i64,
+) -> Result<bool, ()> {
+    if Queue::new(&mut hub.store)
+        .map_err(|_| ())?
+        .proxy_delivery_status(endpoint)
+        .map_err(|_| ())?
+        .at_capacity
+    {
+        contain_capacity(hub, endpoint, generation)?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+fn contain_capacity<M>(
+    hub: &mut crate::hub::Hub<M>,
+    endpoint: &str,
+    generation: i64,
+) -> Result<(), ()> {
+    let tx = hub
+        .store
+        .db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|_| ())?;
+    if tx
+        .execute(
+            "UPDATE endpoints SET paused=1 WHERE id=?1 AND generation=?2 AND paused=0",
+            rusqlite::params![endpoint, generation],
+        )
+        .map_err(|_| ())?
+        == 1
+    {
+        tx.execute("UPDATE hub_bindings SET revision=revision+1,reason='email_capacity_full' WHERE endpoint=?1",[endpoint]).map_err(|_|())?;
+    }
+    tx.commit().map_err(|_| ())
+}
+fn step(
+    hub: &SharedHub<Core>,
+    core: &Core,
     id: &str,
     config: &Config,
     url: &str,
-    member: impl Fn(&str) -> bool,
+    directory: &Sender,
     state: &State,
 ) -> Result<(), ()> {
     let (contact, generation, work) = {
@@ -281,6 +369,11 @@ fn step<M: Mailbox + Directory>(
         let Ok(view) = h.active(id, clock()?) else {
             return Ok(());
         };
+        if config.mode == email::Mode::Proxy
+            && !capacity_available(&mut h, id, view.binding.generation)?
+        {
+            return Ok(());
+        }
         Queue::new(&mut h.store).map_err(|_| ())?;
         let pending:bool=h.store.db.query_row("SELECT EXISTS(SELECT 1 FROM inbound WHERE endpoint=?1 AND generation=?2 AND pending=1) OR EXISTS(SELECT 1 FROM email_intents WHERE endpoint=?1 AND generation=?2 AND state=0 AND next_try<=?3)",rusqlite::params![id,view.binding.generation,clock()?],|r|r.get(0)).map_err(|_|())?;
         let work = pending || !h.ready_outbound(id, clock()?).map_err(|_| ())?.is_empty();
@@ -289,7 +382,10 @@ fn step<M: Mailbox + Directory>(
     if !work || state.stop.load(Ordering::Acquire) {
         return Ok(());
     }
-    if !member(&contact.member_id) {
+    if !directory
+        .current_member(core, &contact.member_id)
+        .unwrap_or(false)
+    {
         return Err(());
     }
     refresh(hub, core, id)?;
@@ -350,10 +446,12 @@ fn step<M: Mailbox + Directory>(
     }
     let intent = {
         let mut h = hub.lock().map_err(|_| ())?;
-        match Queue::new(&mut h.store)
-            .map_err(|_| ())?
-            .claim(id, generation, clock()?, &nonce()?)
-        {
+        let mut queue = Queue::new(&mut h.store).map_err(|_| ())?;
+        let claimed = match config.mode {
+            email::Mode::Outbox => queue.claim(id, generation, clock()?, &nonce()?),
+            email::Mode::Proxy => queue.claim_proxy(id, generation, clock()?, &nonce()?),
+        };
+        match claimed {
             Ok(v) => v,
             Err(email::Error::Rate | email::Error::Lease) => None,
             Err(_) => return Err(()),
@@ -363,23 +461,70 @@ fn step<M: Mailbox + Directory>(
         fence(hub, id, &contact)?;
         let dispatch = {
             let mut h = hub.lock().map_err(|_| ())?;
-            Queue::new(&mut h.store)
-                .map_err(|_| ())?
-                .dispatchable(&intent, clock()?)
-                .map_err(|_| ())?
+            config.mode == email::Mode::Proxy
+                || Queue::new(&mut h.store)
+                    .map_err(|_| ())?
+                    .dispatchable(&intent, clock()?)
+                    .map_err(|_| ())?
         };
         if !dispatch || state.stop.load(Ordering::Acquire) {
             return Ok(());
         }
-        let result = email::write_outbox(&intent, url, &config.outbox_directory);
-        let mut h = hub.lock().map_err(|_| ())?;
-        let mut q = Queue::new(&mut h.store).map_err(|_| ())?;
-        if result.is_ok() {
-            q.complete(&intent, email::Mode::Outbox).map_err(|_| ())?;
-            increment(&state.published);
-        } else {
-            q.failed(&intent, clock()?, false).map_err(|_| ())?;
-            return Err(());
+        match config.mode {
+            email::Mode::Outbox => {
+                let result = email::write_outbox(&intent, url, &config.outbox_directory);
+                let mut h = hub.lock().map_err(|_| ())?;
+                let mut q = Queue::new(&mut h.store).map_err(|_| ())?;
+                if result.is_ok() {
+                    q.complete(&intent, email::Mode::Outbox).map_err(|_| ())?;
+                    increment(&state.published);
+                } else {
+                    q.failed(&intent, clock()?, false).map_err(|_| ())?;
+                    return Err(());
+                }
+            }
+            email::Mode::Proxy => {
+                // Preparation is durable but still abandonable. Reservation is
+                // committed before obtaining the one-use transport capability.
+                let attempt = {
+                    let mut h = hub.lock().map_err(|_| ())?;
+                    let mut q = Queue::new(&mut h.store).map_err(|_| ())?;
+                    let prepared = q.prepare_proxy_delivery(&intent, url, clock()?);
+                    let reserved = prepared.and_then(|()| q.begin_proxy_delivery_now(&intent, url));
+                    match reserved {
+                        Ok(attempt) => attempt,
+                        Err(email::Error::Full) => {
+                            contain_capacity(&mut h, id, generation)?;
+                            return Err(());
+                        }
+                        Err(_) => return Err(()),
+                    }
+                };
+                let completion = directory.send_committed(core, attempt, || {
+                    if state.stop.load(Ordering::Acquire) {
+                        return false;
+                    }
+                    let Ok(mut h) = hub.lock() else {
+                        return false;
+                    };
+                    let Ok(now) = clock() else {
+                        return false;
+                    };
+                    if h.active(id, now).is_err()
+                        || h.blocked().unwrap_or(true)
+                        || email::contact(&h.store, id).ok().flatten().as_ref() != Some(&contact)
+                    {
+                        return false;
+                    }
+                    Queue::new(&mut h.store)
+                        .is_ok_and(|mut q| q.proxy_dispatch_allowed_now(&intent, url))
+                });
+                // Persist even if stop/pause occurred while HTTP was in flight.
+                let mut h = hub.lock().map_err(|_| ())?;
+                completion
+                    .commit(&mut Queue::new(&mut h.store).map_err(|_| ())?)
+                    .map_err(|_| ())?;
+            }
         }
     }
     let inbound = {
@@ -394,7 +539,10 @@ fn step<M: Mailbox + Directory>(
                 return Ok(());
             }
             // Revalidate a contact before each actual send. No state mutex spans I/O.
-            if !member(&contact.member_id) {
+            if !directory
+                .current_member(core, &contact.member_id)
+                .unwrap_or(false)
+            {
                 return Err(());
             }
             refresh(hub, core, id)?;
@@ -421,4 +569,241 @@ fn step<M: Mailbox + Directory>(
         increment(&state.replied);
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::{
+        core::{AgentMetadata, Delivery},
+        hub::Hub,
+        protocol::{Envelope, Sender as Principal, SenderKind},
+        store::{Limits, Store},
+    };
+    use std::sync::Mutex;
+
+    struct NoIo;
+    impl Directory for NoIo {
+        fn metadata(&self, _: &str) -> Result<AgentMetadata, crate::core::Error> {
+            panic!("startup containment must not call Core");
+        }
+    }
+    impl Mailbox for NoIo {
+        fn receive(&self, _: u32) -> Result<Vec<Delivery>, crate::core::Error> {
+            panic!("startup containment must not receive");
+        }
+        fn send(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+            _: Option<serde_json::Value>,
+        ) -> Result<String, crate::core::Error> {
+            panic!("startup containment must not send");
+        }
+        fn ack(&self, _: &str) -> Result<(), crate::core::Error> {
+            panic!("startup containment must not acknowledge");
+        }
+    }
+    /// Cross-module composition fixture: invoke the actual exclusive startup
+    /// recovery guard, without starting workers or making any Core call.
+    pub(crate) fn recover_private_store_with_startup_lease(store: Store) -> Store {
+        let hub = Arc::new(std::sync::Mutex::new(
+            Hub::new(store, NoIo, "ag_hub", "ws_test").unwrap(),
+        ));
+        let lease = StartupLease::acquire(&hub).unwrap();
+        drop(lease);
+        match Arc::try_unwrap(hub) {
+            Ok(mutex) => mutex.into_inner().unwrap().store,
+            Err(_) => panic!("startup lease retained the store"),
+        }
+    }
+    fn fixture() -> SharedHub<NoIo> {
+        fixture_state("dispatching")
+    }
+    fn fixture_state(initial: &str) -> SharedHub<NoIo> {
+        let mut h = Hub::new(
+            Store::memory(Limits::default()).unwrap(),
+            NoIo,
+            "ag_hub",
+            "ws_test",
+        )
+        .unwrap();
+        h.store
+            .register_paused("ag_email", 1, "ag_internal")
+            .unwrap();
+        Queue::new(&mut h.store)
+            .unwrap()
+            .bind_paused(
+                "ag_email",
+                1,
+                Contact {
+                    address: email::REAL_RECIPIENT.into(),
+                    member_id: "user_alice".into(),
+                },
+            )
+            .unwrap();
+        h.store
+            .db
+            .execute("UPDATE endpoints SET paused=0", [])
+            .unwrap();
+        let mut q = Queue::new(&mut h.store).unwrap();
+        let now = clock().unwrap();
+        q.admit(
+            "ag_email",
+            1,
+            &Envelope::Outbound {
+                delivery_id: "del_test".into(),
+                message_id: "msg_test".into(),
+                original_sender: Principal {
+                    kind: SenderKind::Agent,
+                    id: "ag_internal".into(),
+                },
+                body: "synthetic summary".into(),
+                context_ids: vec![],
+            },
+            now,
+        )
+        .unwrap();
+        let intent = q
+            .claim_proxy("ag_email", 1, now, &"a".repeat(64))
+            .unwrap()
+            .unwrap();
+        q.prepare_proxy_delivery(&intent, "https://hub.example/", now)
+            .unwrap();
+        if initial != "prepared" {
+            let attempt = q
+                .begin_proxy_delivery_now(&intent, "https://hub.example/")
+                .unwrap();
+            match initial {
+                "dispatching" => drop(attempt),
+                "provider_accepted" => q
+                    .finish_proxy_delivery(
+                        attempt,
+                        crate::email::delivery::Outcome::ProviderAccepted,
+                    )
+                    .unwrap(),
+                "uncertain" => q
+                    .finish_proxy_delivery(attempt, crate::email::delivery::Outcome::Uncertain)
+                    .unwrap(),
+                _ => panic!("unknown fixture state"),
+            }
+        }
+        Arc::new(Mutex::new(h))
+    }
+    fn state(hub: &SharedHub<NoIo>) -> String {
+        hub.lock()
+            .unwrap()
+            .store
+            .db
+            .query_row("SELECT state FROM email_dispatch", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn uncertainty_capacity_pauses_binding_once_without_releasing_or_posting() {
+        let shared = fixture_state("uncertain");
+        let mut h = shared.lock().unwrap();
+        let binding = crate::hub::Binding {
+            endpoint_id: "ag_email".into(),
+            generation: 1,
+            recipient: "ag_internal".into(),
+            expected_path: "/team/email".into(),
+            expected_cwd: "/workspace/email".into(),
+            expected_server_id: "machine_fixture".into(),
+        };
+        h.store
+            .db
+            .execute(
+                "INSERT INTO hub_bindings(endpoint,definition) VALUES('ag_email',?1)",
+                [serde_json::to_string(&binding).unwrap()],
+            )
+            .unwrap();
+        h.store.db.execute_batch("WITH RECURSIVE n(v) AS (SELECT 1 UNION ALL SELECT v+1 FROM n WHERE v<31) INSERT INTO email_intents(id,thread,endpoint,generation,state) SELECT 'capacity_'||n.v,i.thread,i.endpoint,i.generation,0 FROM n CROSS JOIN (SELECT * FROM email_intents LIMIT 1) i;
+        INSERT INTO email_dispatch(id,endpoint,generation,payload,state) SELECT i.id,i.endpoint,i.generation,d.payload,'uncertain' FROM email_intents i CROSS JOIN (SELECT payload FROM email_dispatch LIMIT 1) d WHERE i.id LIKE 'capacity_%';").unwrap();
+        assert!(!capacity_available(&mut h, "ag_email", 1).unwrap());
+        let view = h.view("ag_email").unwrap();
+        assert!(view.paused);
+        assert_eq!(view.reason, "email_capacity_full");
+        assert_eq!(view.revision, 2);
+        assert!(!capacity_available(&mut h, "ag_email", 1).unwrap());
+        assert_eq!(h.view("ag_email").unwrap().revision, 2);
+        assert_eq!(
+            Queue::new(&mut h.store)
+                .unwrap()
+                .proxy_delivery_status("ag_email")
+                .unwrap()
+                .uncertain,
+            32
+        );
+    }
+    #[test]
+    fn startup_recovers_before_ownership_and_duplicate_start_cannot_recover_live_work() {
+        let hub = fixture();
+        assert_eq!(state(&hub), "dispatching");
+        let lease = StartupLease::acquire(&hub).unwrap();
+        assert_eq!(state(&hub), "uncertain");
+        assert!(hub.lock().unwrap().email_workers_active);
+        // Simulate a later in-flight attempt while this supervisor owns workers.
+        hub.lock()
+            .unwrap()
+            .store
+            .db
+            .execute("UPDATE email_dispatch SET state='dispatching'", [])
+            .unwrap();
+        assert!(StartupLease::acquire(&hub).is_err());
+        assert_eq!(state(&hub), "dispatching");
+        drop(lease); // same release used only after workers are joined
+        assert!(!hub.lock().unwrap().email_workers_active);
+        let _restarted = StartupLease::acquire(&hub).unwrap();
+        assert_eq!(state(&hub), "uncertain");
+    }
+
+    #[test]
+    fn clean_restart_preserves_prepared_accepted_and_uncertain_rows() {
+        for initial in ["prepared", "provider_accepted", "uncertain"] {
+            let hub = fixture_state(initial);
+            let before: (Vec<u8>, i64) = {
+                let h = hub.lock().unwrap();
+                h.store.db.query_row("SELECT d.payload,i.state FROM email_dispatch d JOIN email_intents i ON i.id=d.id", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap()
+            };
+            for _ in 0..2 {
+                let lease = StartupLease::acquire(&hub).unwrap();
+                assert_eq!(state(&hub), initial);
+                let after: (Vec<u8>, i64) = {
+                    let h = hub.lock().unwrap();
+                    h.store.db.query_row("SELECT d.payload,i.state FROM email_dispatch d JOIN email_intents i ON i.id=d.id", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap()
+                };
+                assert_eq!(after, before);
+                drop(lease); // confirmed clean stop between worker generations
+            }
+        }
+    }
+
+    #[test]
+    fn failed_startup_commit_never_grants_worker_ownership() {
+        let hub = fixture();
+        hub.lock().unwrap().store.db.commit_hook(Some(|| true));
+        assert!(StartupLease::acquire(&hub).is_err());
+        assert!(!hub.lock().unwrap().email_workers_active);
+        assert_eq!(state(&hub), "dispatching");
+        hub.lock()
+            .unwrap()
+            .store
+            .db
+            .commit_hook(None::<fn() -> bool>);
+        let _lease = StartupLease::acquire(&hub).unwrap();
+        assert_eq!(state(&hub), "uncertain");
+    }
+
+    #[test]
+    fn unconfirmed_worker_stop_latches_ownership_instead_of_recovering() {
+        let hub = fixture();
+        let mut lease = StartupLease::acquire(&hub).unwrap();
+        lease.release_on_drop = false; // supervisor join returned Err
+        drop(lease);
+        assert!(hub.lock().unwrap().email_workers_active);
+        assert!(StartupLease::acquire(&hub).is_err());
+    }
 }

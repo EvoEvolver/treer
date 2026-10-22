@@ -4,8 +4,9 @@ This is a cutover plan, not permission to touch an existing bot or process.
 The disposable-bot roundtrip passed in #159 (user-confirmed on 2026-10-19).
 The test binding was subsequently paused at revision 4. That validates the
 sandbox text path, not production migration, native reply continuity, isolation,
-or recovery after an ambiguous external send. No production migration or
-offline offset/context importer is implemented yet.
+or recovery after an ambiguous external send. No production migration or historical context importer is implemented. The
+bounded stopped-state offset journal below requires preprovisioned paused
+bindings; it neither reads a legacy snapshot nor verifies operator assertions.
 
 ## Implementation plan (#203, for Core and security review)
 
@@ -823,3 +824,68 @@ composed ACK/marker wiring, real Core ACK-idempotence/process-death rehearsal,
 bounded dispatcher scheduling, owner-only masked visibility/recovery and
 production activation remain separate work. This increment changes no runtime
 activation, transport or credential configuration.
+
+
+## Stopped-state cutoff journal
+
+`treer-message-hub --telegram-cutoff-journal /absolute/private/request.json`
+uses the existing exclusive private Store lock. It never loads runtime config,
+bot tokens, environment credentials, starts a worker, invokes Treer or calls a
+network service. Only an existing hub state is accepted. This is an offline
+operator tool, not an owner HTTP/Agent API or a cutover authorization.
+
+The strict private JSON request contains `state_directory`, `hub_id`,
+`workspace_id`, `rollback` and `cutoff`. `cutoff` contains:
+
+- `inventory_sha256`, exact positive `bot_id` and `account_id` matching the
+  already-persisted bot pin; `expected_offset` and `legacy_last_update_id`.
+- `mappings`: 1–20 entries covering **every** target for this account, each with
+  exact persisted `binding`, `revision`, and `target`. Bindings must already be
+  provisioned, paused and have no activation or traffic history. The tool does
+  not import/create bindings or copy legacy messages, history or credentials.
+- Explicit `history_loss_accepted`, `app_asserted_receipts_accepted`,
+  `old_poller_stopped`, `senders_fenced`, `legacy_outbox_drained` booleans and
+  two increasing positive `old_mailbox_zero_samples` observation timestamps.
+
+These are **operator attestations**, not independently verified Core/OS facts.
+Keep the original read-only inventory and complete request privately with the
+release evidence. The inventory digest is an evidence pin, not proof that its
+contents or drain observations are true. The tool does not lift the planner's
+remaining blockers or permit activation. No production use is authorized by
+source completion or synthetic tests.
+
+One IMMEDIATE transaction writes the monotonic `last+1` offset and a bounded
+per-account journal fingerprint/pre/post offsets/state. No body/token is in the
+journal. Repeating the identical applied request is a no-op. Conflicting pins,
+mappings, offsets, missing acceptance, active bindings, or new work refuse.
+The real Store commit hook applies to this transaction as to other state writes.
+
+`rollback:true` with the original exact cutoff input reverses **only before
+traffic/activation**, after stopping the new hub. New offsets, ignored updates,
+inbound/outbound/transfers/chunks or activation history refuse rollback; retain
+containment and reconcile manually. A rolled-back journal remains a tombstone:
+it cannot be reused to reapply. The old bridge's database is untouched, so a
+permitted pre-traffic rollback resumes its own unchanged next offset rather than
+copying a new hub value into legacy state. This is not post-traffic reverse sync.
+
+Reproducible isolated checks:
+
+```sh
+cargo test --manifest-path apps/message-endpoint/Cargo.toml --locked --offline --all-features telegram_cutoff -- --nocapture
+cargo test --manifest-path apps/message-endpoint/Cargo.toml --locked --offline --all-features telegram_stopped_cutoff -- --nocapture
+```
+
+The latter joins a **synthetic legacy HTTP poller**, applies the actual private
+journal, starts the actual hub polling at offset42 while its binding stays
+paused, proves a live store refuses offline changes, joins the hub, reverses the
+pre-traffic journal, and resumes the synthetic old poller at its original42.
+The loopback server records max concurrent polls1 and no sends. It uses real
+SQLite/private lock/runtime worker paths, but no real legacy bridge, bot, Core
+identity/Policy, mailbox drain or production migration acceptance.
+
+Still required before a production cutover: closed snapshot-to-binding mapping
+validation, runtime receipt/capability negotiation and native-reply cutoff/error
+handling (current receipt helpers remain undispatched), actual old-identity
+drain/fence/process evidence, separately approved secret rotation/provisioning,
+exact release authorization and real staged round trip. Post-traffic rollback
+must remain containment until a separately reviewed reverse journal exists.

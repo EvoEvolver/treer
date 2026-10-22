@@ -237,6 +237,7 @@ fn run_assembled(
     let activation_enabled = config.activation_enabled;
     let account_ready = telegram.lock().map_err(|_| Error::Runtime)?.readiness();
     let snapshot_telegram = telegram.clone();
+    let configured_email_mode = config.email.as_ref().map(|c| c.mode).unwrap_or_default();
     let snapshot_handoffs = handoffs.clone();
     let snapshot_hub = hub.clone();
     let snapshot_workers = workers.clone();
@@ -263,6 +264,7 @@ fn run_assembled(
                 Some(crate::email_workers::Snapshot::read(
                     &hub.store,
                     snapshot_email.lock().map_err(|_| ())?.as_ref(),
+                    configured_email_mode,
                 )?)
             } else {
                 None

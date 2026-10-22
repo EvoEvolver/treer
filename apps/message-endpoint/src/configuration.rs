@@ -71,6 +71,15 @@ pub enum Command {
         operation: crate::recovery::Recovery,
         confirm: bool,
     },
+    InspectEmailDelivery {
+        endpoint_id: String,
+    },
+    AbandonPreparedEmail {
+        endpoint_id: String,
+        revision: i64,
+        intent_id: String,
+        confirm: bool,
+    },
     BindEmail {
         endpoint_id: String,
         revision: i64,
@@ -91,6 +100,7 @@ impl Command {
             Self::PreviewCreate { .. }
                 | Self::Pause { .. }
                 | Self::InspectRecovery { .. }
+                | Self::InspectEmailDelivery { .. }
                 | Self::ExportMetadata { .. }
                 | Self::PreviewResume { .. }
         )
@@ -128,6 +138,14 @@ pub enum Outcome {
     MetadataCleared,
     Deleted {
         endpoint_id: String,
+    },
+    EmailDeliveryStatus {
+        endpoint_id: String,
+        revision: i64,
+        paused: bool,
+        delivery: crate::email::delivery::DispatchStatus,
+        items: Vec<crate::email::delivery::RecoveryItem>,
+        truncated: bool,
     },
     RecoveryStatus {
         endpoint_id: String,
@@ -233,6 +251,33 @@ fn recovery_status<M: Mailbox + Directory>(
         receipts,
         audit,
         next_audit_before,
+    })
+}
+fn email_delivery_status<M: Mailbox + Directory>(
+    hub: &mut crate::hub::Hub<M>,
+    endpoint: &str,
+) -> Result<Outcome, Failure> {
+    let view = hub.view(endpoint).map_err(map_hub)?;
+    if crate::email::contact(&hub.store, endpoint)
+        .map_err(|_| Failure::Unavailable)?
+        .is_none()
+    {
+        return Err(Failure::Conflict);
+    }
+    let q = crate::email::Queue::new(&mut hub.store).map_err(|_| Failure::Unavailable)?;
+    let delivery = q
+        .proxy_delivery_status(endpoint)
+        .map_err(|_| Failure::Unavailable)?;
+    let (items, truncated) = q
+        .proxy_recovery_items(endpoint)
+        .map_err(|_| Failure::Unavailable)?;
+    Ok(Outcome::EmailDeliveryStatus {
+        endpoint_id: endpoint.into(),
+        revision: view.revision,
+        paused: view.paused,
+        delivery,
+        items,
+        truncated,
     })
 }
 #[derive(Clone, Copy, Debug)]
@@ -533,6 +578,32 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
             )
             .map_err(map_hub)?;
             recovery_status(&hub, &endpoint_id, None)
+        }
+        Command::InspectEmailDelivery { endpoint_id } => {
+            let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
+            check_owner(owner)?;
+            email_delivery_status(&mut hub, &endpoint_id)
+        }
+        Command::AbandonPreparedEmail {
+            endpoint_id,
+            revision,
+            intent_id,
+            confirm,
+        } => {
+            if !confirm {
+                return Err(Failure::Invalid);
+            }
+            let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
+            check_owner(owner)?;
+            hub.abandon_prepared_email_audited_now(&endpoint_id, revision, &intent_id, owner.id())
+                .map_err(|error| match error {
+                    crate::email::Error::Invalid => Failure::Invalid,
+                    crate::email::Error::Conflict | crate::email::Error::Denied => {
+                        Failure::Conflict
+                    }
+                    _ => Failure::Unavailable,
+                })?;
+            email_delivery_status(&mut hub, &endpoint_id)
         }
         Command::BindEmail {
             endpoint_id,

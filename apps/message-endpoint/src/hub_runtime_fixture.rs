@@ -97,10 +97,15 @@ impl Fixture {
         self.start_variant(enabled, false)
     }
     fn start_variant(&self, enabled: bool, email: bool) -> Running {
+        self.start_email_mode(enabled, email.then_some(crate::email::Mode::Outbox))
+    }
+    fn start_email_mode(&self, enabled: bool, mode: Option<crate::email::Mode>) -> Running {
+        let email = mode.is_some();
         let mut config = self.config(enabled);
-        if email {
+        if let Some(mode) = mode {
             config.email = Some(crate::email_workers::Config {
                 outbox_directory: self._root.path().canonicalize().unwrap().join("outbox"),
+                mode,
             });
         }
         config.validate("app_hub", Some("ws_test")).unwrap();
@@ -460,11 +465,25 @@ fn owner_activation_real_runtime_http_bot_core_sqlite_and_restart_keep_binding_a
 
 #[test]
 fn email_outbox_member_reply_traverses_real_runtime_and_relay_without_real_mail() {
+    email_runtime_chain(crate::email::Mode::Outbox, false);
+}
+#[test]
+fn email_proxy_runtime_commits_acceptance_and_restarts_without_another_post() {
+    email_runtime_chain(crate::email::Mode::Proxy, false);
+}
+#[test]
+fn email_proxy_runtime_holds_uncertain_after_restart_without_resend() {
+    email_runtime_chain(crate::email::Mode::Proxy, true);
+}
+fn email_runtime_chain(mode: crate::email::Mode, uncertain: bool) {
     let f = Fixture::new();
-    let running = f.start_variant(true, true);
+    if uncertain {
+        f.control("email-uncertain", json!({"uncertain":true}));
+    }
+    let running = f.start_email_mode(true, Some(mode));
     let preview=f.command(json!({"action":"preview_create","endpoint_id":"ag_endpoint","recipient":"ag_recipient","generation":1}))["preview"].clone();
     f.command(json!({"action":"create","endpoint_id":"ag_endpoint","recipient":"ag_recipient","generation":1,"expected":preview,"confirm":true}));
-    f.command(json!({"action":"bind_email","endpoint_id":"ag_endpoint","revision":1,"contact":{"address":"person@example.test","member_id":"user_member"},"confirm":true}));
+    f.command(json!({"action":"bind_email","endpoint_id":"ag_endpoint","revision":1,"contact":{"address":crate::email::REAL_RECIPIENT,"member_id":"user_member"},"confirm":true}));
     let root = f._root.path().canonicalize().unwrap();
     let cli = root.join("endpoint-cli");
     let config = crate::relay::Config {
@@ -485,23 +504,36 @@ fn email_outbox_member_reply_traverses_real_runtime_and_relay_without_real_mail(
     f.command(json!({"action":"resume","endpoint_id":"ag_endpoint","expected":p["preview"],"confirm":true,"evidence":{"profile_reviewed":true,"isolation":"reviewed","reference":"synthetic email test, no real Policy attestation","held_action":"discard","parked_count_ack":0}}));
     running.release_readbacks();
     f.control("core",json!({"delivery_id":"del_email_agent","recipient":{"kind":"agent","id":"ag_endpoint"},"message":{"message_id":"msg_email_agent","sender":{"kind":"agent","id":"ag_recipient"},"body":"<script>private original</script>","context_ids":[]}}));
-    let mut files = vec![];
-    wait_until(|| {
-        relay.tick(now()).unwrap();
-        files = std::fs::read_dir(root.join("outbox"))
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
-            .collect();
-        !files.is_empty()
-    });
-    assert_eq!(files.len(), 1);
-    let notification: Value =
-        serde_json::from_slice(&std::fs::read(files[0].path()).unwrap()).unwrap();
-    assert_eq!(notification["to"], "person@example.test");
+    let notification: Value = if mode == crate::email::Mode::Outbox {
+        let mut files = vec![];
+        wait_until(|| {
+            relay.tick(now()).unwrap();
+            files = std::fs::read_dir(root.join("outbox"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+                .collect();
+            !files.is_empty()
+        });
+        assert_eq!(files.len(), 1);
+        serde_json::from_slice(&std::fs::read(files[0].path()).unwrap()).unwrap()
+    } else {
+        wait_until(|| {
+            relay.tick(now()).unwrap();
+            f.status()["emails"].as_array().unwrap().len() == 1
+        });
+        f.status()["emails"][0].clone()
+    };
+    assert_eq!(notification["to"], crate::email::REAL_RECIPIENT);
     assert!(!notification.to_string().contains("private original"));
     let text = notification["text"].as_str().unwrap();
-    let thread = text.split("#email-thread=").nth(1).unwrap();
+    let thread = text
+        .split("#email-thread=")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
     assert_eq!(thread.len(), 64);
     let url = format!(
         "{}api/email/thread/{thread}",
@@ -590,4 +622,184 @@ fn email_outbox_member_reply_traverses_real_runtime_and_relay_without_real_mail(
     );
     assert!(f.status()["sent"].as_array().unwrap().is_empty());
     assert!(f.status()["operations"].as_array().unwrap().is_empty());
+    if mode == crate::email::Mode::Proxy {
+        let expected = if uncertain {
+            "uncertain"
+        } else {
+            "provider_accepted"
+        };
+        wait_until(|| {
+            f.command(json!({"action":"inspect_email_delivery","endpoint_id":"ag_endpoint"}))
+                ["delivery"][expected]
+                == 1
+        });
+        let paused = f.command(json!({"action":"pause","endpoint_id":"ag_endpoint","revision":f.command(json!({"action":"inspect_email_delivery","endpoint_id":"ag_endpoint"}))["revision"],"confirm":true}));
+        assert!(!paused.is_null());
+        let inspection =
+            f.command(json!({"action":"inspect_email_delivery","endpoint_id":"ag_endpoint"}));
+        assert_eq!(inspection["paused"], true);
+        if uncertain {
+            assert_eq!(inspection["items"][0]["abandonable"], false);
+        }
+        drop(running);
+        let restarted = f.start_email_mode(true, Some(mode));
+        restarted.release_readbacks();
+        let inspection =
+            f.command(json!({"action":"inspect_email_delivery","endpoint_id":"ag_endpoint"}));
+        assert_eq!(inspection["delivery"][expected], 1);
+        assert_eq!(f.status()["emails"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            f.status()["core_messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|m| m["recipient"] == "ag_recipient")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn telegram_stopped_cutoff_handoff_and_pretraffic_rollback_never_overlap_pollers() {
+    use crate::telegram_cutoff::{self, Cutoff, Mapping};
+    let f = Fixture::new();
+    let running = f.start(true);
+    let preview=f.command(json!({"action":"preview_create","endpoint_id":"ag_endpoint","recipient":"ag_recipient","generation":1}))["preview"].clone();
+    f.command(json!({"action":"create","endpoint_id":"ag_endpoint","recipient":"ag_recipient","generation":1,"expected":preview,"confirm":true}));
+    let target = crate::telegram::Target {
+        account_id: "bot_fixture".into(),
+        chat_id: -100,
+        topic_id: None,
+        allowed_senders: vec![42],
+    };
+    f.command(json!({"action":"bind_telegram","endpoint_id":"ag_endpoint","revision":1,"target":target,"confirm":true}));
+    let view = f.settings()["settings"]["endpoints"][0].clone();
+    let state = f._root.path().canonicalize().unwrap().join("state");
+    assert!(
+        Store::open(&state, Limits::default()).is_err(),
+        "live process lock must refuse offline import"
+    );
+    drop(running);
+    wait_until(|| f.status()["active_pollers"] == 0);
+    struct Poller {
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        join: Option<thread::JoinHandle<()>>,
+    }
+    impl Drop for Poller {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(join) = self.join.take() {
+                let _ = join.join();
+            }
+        }
+    }
+    let spawn_old = |actor: &'static str| {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal = stop.clone();
+        let client = f.client.clone();
+        let url = format!(
+            "{}/bot12345:{}/getUpdates",
+            f.data["bot_origin"].as_str().unwrap(),
+            "a".repeat(35)
+        );
+        let join = thread::spawn(move || {
+            while !signal.load(std::sync::atomic::Ordering::Acquire) {
+                client
+                    .post(&url)
+                    .header("X-Fixture-Poller", actor)
+                    .json(&json!({"offset":42}))
+                    .send()
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap();
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        Poller {
+            stop,
+            join: Some(join),
+        }
+    };
+    let old = spawn_old("legacy");
+    wait_until(|| {
+        f.status()["poll_trace"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["actor"] == "legacy")
+    });
+    drop(old);
+    assert_eq!(f.status()["active_pollers"], 0);
+    let cutoff = Cutoff {
+        inventory_sha256: "a".repeat(64),
+        bot_id: 12345,
+        account_id: "bot_fixture".into(),
+        expected_offset: 0,
+        legacy_last_update_id: 41,
+        mappings: vec![Mapping {
+            binding: crate::hub::Binding {
+                endpoint_id: "ag_endpoint".into(),
+                generation: 1,
+                recipient: "ag_recipient".into(),
+                expected_path: "/team/ag_endpoint".into(),
+                expected_cwd: "/private/fixture".into(),
+                expected_server_id: "machine_fixture".into(),
+            },
+            revision: view["revision"].as_i64().unwrap(),
+            target,
+        }],
+        history_loss_accepted: true,
+        app_asserted_receipts_accepted: true,
+        old_poller_stopped: true,
+        senders_fenced: true,
+        old_mailbox_zero_samples: [100, 103],
+        legacy_outbox_drained: true,
+    };
+    let request_path = f._root.path().canonicalize().unwrap().join("cutoff.json");
+    let write_request = |rollback| {
+        std::fs::write(&request_path,serde_json::to_vec(&json!({"state_directory":state,"hub_id":"app_hub","workspace_id":"ws_test","rollback":rollback,"cutoff":cutoff})).unwrap()).unwrap();
+        std::fs::set_permissions(&request_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    write_request(false);
+    assert_eq!(
+        telegram_cutoff::run_file(&request_path)
+            .unwrap()
+            .next_offset,
+        42
+    );
+    let new = f.start(true);
+    wait_until(|| {
+        f.status()["poll_trace"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["actor"] == "hub" && p["offset"] == 42)
+    });
+    assert!(telegram_cutoff::run_file(&request_path).is_err());
+    assert_eq!(f.settings()["settings"]["endpoints"][0]["paused"], true);
+    drop(new);
+    wait_until(|| f.status()["active_pollers"] == 0);
+    write_request(true);
+    assert_eq!(
+        telegram_cutoff::run_file(&request_path)
+            .unwrap()
+            .next_offset,
+        0
+    );
+    let old = spawn_old("legacy_rollback");
+    wait_until(|| {
+        f.status()["poll_trace"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["actor"] == "legacy_rollback" && p["offset"] == 42)
+    });
+    drop(old);
+    let status = f.status();
+    assert_eq!(status["active_pollers"], 0);
+    assert_eq!(status["max_pollers"], 1);
+    assert!(status["sent"].as_array().unwrap().is_empty());
+    assert!(status["core_messages"].as_array().unwrap().is_empty());
+    eprintln!("PASS local HTTP poller handoff: synthetic legacy join -> real stopped-store journal -> actual Hub polling offset42 paused -> joined Hub -> pretraffic journal reverse -> synthetic legacy offset42; max concurrent polls1; no real bot/Core/platform acceptance");
 }

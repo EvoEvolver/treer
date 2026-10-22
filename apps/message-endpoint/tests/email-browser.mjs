@@ -63,6 +63,10 @@ try {
  const saved=owner.waitForResponse(r=>r.url().endsWith('/api/settings')&&r.request().method()==='GET');await card.getByRole('button',{name:'Bind email target',exact:true}).click();
  const savedData=await (await saved).json();if(!savedData.settings.email.targets.some(t=>t.endpoint_id==='ag_new'&&t.member_id==='user_member'))throw new Error('owner binding did not persist');
  if(savedData.settings.endpoints.find(v=>v.binding.endpoint_id==='ag_new')?.paused!==true)throw new Error('email binding auto-activated');
+ await card.getByText('Email delivery recovery',{exact:true}).click();
+ await card.getByRole('button',{name:'Inspect email delivery',exact:true}).click();
+ await card.getByText('Prepared: 0 · Uncertain: 0 · Dispatching: 0 · Provider accepted: 0 · Abandoned: 0',{exact:true}).waitFor();
+ if(await card.getByRole('button',{name:'Abandon prepared item',exact:true}).count())throw new Error('empty journal offered abandonment');
  if(!await owner.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('email owner form overflow');await owner.screenshot({path:join(screenshots,'email-owner-binding-390.png'),fullPage:true});await owner.close();
  const login=await browser.newPage({locale:'en-US'});await login.goto(config.url+'#email-thread='+config.thread);
  const link=login.getByRole('link',{name:'Continue with Treer',exact:true});await link.waitFor();

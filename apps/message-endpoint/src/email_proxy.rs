@@ -1,11 +1,13 @@
 //! Existing Proxy email route, as this Managed App's own workload principal.
 //! No provider secrets, redirects, caller URLs, ambient HTTP proxies or raw
 //! reqwest/upstream errors. Construction alone never sends or mints a token.
+use super::delivery::{Attempt, Outcome};
 use super::{Intent, Mode};
 use crate::core::Core;
 use reqwest::{blocking::Client, redirect::Policy, Url};
 use serde_json::Value;
 use std::{io::Read, time::Duration};
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Error {
     #[error("email_proxy_configuration_invalid")]
@@ -14,13 +16,31 @@ pub enum Error {
     Unavailable,
     #[error("email_proxy_rejected")]
     Rejected,
+    /// Local fence refusal before POST; not a provider retry signal.
     #[error("email_proxy_retry_later")]
     Retry,
+    /// A POST was attempted. Do not retry or infer non-send from this result.
+    #[error("email_proxy_outcome_uncertain")]
+    Uncertain,
 }
 pub struct Sender {
     client: Client,
     url: Url,
     service: String,
+}
+/// A consumed dispatch capability and its conservative outcome. No accessor
+/// returns the Attempt, so the normal transport API cannot POST it twice.
+/// Dropping this value, or a failed commit, leaves startup recovery to contain
+/// the existing dispatching row. This is not permission to acknowledge work.
+#[must_use = "persist the completion; dropping it leaves an ambiguous dispatch"]
+pub struct Completion {
+    attempt: Attempt,
+    outcome: Outcome,
+}
+impl Completion {
+    pub fn commit(self, queue: &mut super::Queue<'_>) -> Result<(), super::Error> {
+        queue.finish_proxy_delivery(self.attempt, self.outcome)
+    }
 }
 impl Sender {
     /// All inputs come from reviewed startup configuration, never message JSON.
@@ -53,7 +73,7 @@ impl Sender {
             .no_proxy()
             .redirect(Policy::none())
             .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(20))
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|_| Error::Configuration)?;
         Ok(Self {
@@ -128,30 +148,61 @@ impl Sender {
         }
         self.post(&token, intent, public_url)
     }
+    /// Offline assembly primitive: consumes an already committed reservation
+    /// and posts its exact stored bytes once. Caller must establish fresh Core,
+    /// member, allowlist and activation checks; the post-mint fence must recheck
+    /// current pins/lease/pause, without holding a mutex across token mint/HTTP.
+    /// Even pre-POST refusal is conservatively uncertain after reservation; it
+    /// never returns the Attempt or a retry signal. The opt-in worker supplies these checks.
+    pub fn send_committed(
+        &self,
+        core: &Core,
+        attempt: Attempt,
+        fence: impl FnOnce() -> bool,
+    ) -> Completion {
+        let accepted = core
+            .app_service_token(&self.service)
+            .ok()
+            .filter(|_| fence())
+            .is_some_and(|token| self.post_bytes(&token, attempt.payload()).is_ok());
+        Completion {
+            attempt,
+            outcome: if accepted {
+                Outcome::ProviderAccepted
+            } else {
+                Outcome::Uncertain
+            },
+        }
+    }
     fn post(&self, token: &str, intent: &Intent, public_url: &str) -> Result<(), Error> {
         let notification = intent
             .notification(public_url, Mode::Proxy)
             .map_err(|_| Error::Rejected)?;
+        let payload = serde_json::to_vec(&notification).map_err(|_| Error::Rejected)?;
+        self.post_bytes(token, &payload)
+    }
+    fn post_bytes(&self, token: &str, payload: &[u8]) -> Result<(), Error> {
         let response = self
             .client
             .post(self.url.clone())
             .bearer_auth(token)
-            .json(&notification)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(payload.to_vec())
             .send()
-            .map_err(|_| Error::Retry)?;
+            .map_err(|_| Error::Uncertain)?;
         let status = response.status();
         if status.is_redirection() {
-            return Err(Error::Rejected);
+            return Err(Error::Uncertain);
         }
         let mut bytes = Vec::new();
         response
             .take(16385)
             .read_to_end(&mut bytes)
-            .map_err(|_| Error::Retry)?;
+            .map_err(|_| Error::Uncertain)?;
         if bytes.len() > 16384 {
-            return Err(Error::Retry);
+            return Err(Error::Uncertain);
         }
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| Error::Retry)?;
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| Error::Uncertain)?;
         if status.is_success() {
             if value.get("status").and_then(Value::as_str) != Some("sent")
                 || value
@@ -163,17 +214,14 @@ impl Sender {
                             || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
                     })
             {
-                return Err(Error::Retry);
+                return Err(Error::Uncertain);
             }
             return Ok(());
         }
-        match value.pointer("/error/code").and_then(Value::as_str) {
-            Some("email_not_configured") => Err(Error::Unavailable),
-            Some("email_in_progress") => Err(Error::Retry),
-            _ if status.is_redirection() => Err(Error::Rejected),
-            _ if status.is_server_error() || status.as_u16() == 429 => Err(Error::Retry),
-            _ => Err(Error::Rejected),
-        }
+        // No non-success response proves non-send under the existing route's
+        // contract. In particular, in_progress/stale reservations and HTTP 429
+        // must not trigger another POST, even after the 60-second Core window.
+        Err(Error::Uncertain)
     }
 }
 #[cfg(test)]
@@ -219,24 +267,45 @@ mod tests {
             (
                 200,
                 r#"{"status":"queued","email_id":"email_test"}"#,
-                Err(Error::Retry),
+                Err(Error::Uncertain),
             ),
             (
                 503,
                 r#"{"error":{"code":"email_not_configured","message":"SYNTHETIC_SECRET"}}"#,
-                Err(Error::Unavailable),
+                Err(Error::Uncertain),
             ),
             (
                 503,
                 r#"{"error":{"code":"email_in_progress"}}"#,
-                Err(Error::Retry),
+                Err(Error::Uncertain),
             ),
             (
                 403,
                 r#"{"error":{"code":"email_recipient_rejected","message":"SYNTHETIC_SECRET"}}"#,
-                Err(Error::Rejected),
+                Err(Error::Uncertain),
             ),
-            (302, r#"{}"#, Err(Error::Rejected)),
+            (302, r#"{}"#, Err(Error::Uncertain)),
+            (
+                429,
+                r#"{"error":{"code":"rate_limited"}}"#,
+                Err(Error::Uncertain),
+            ),
+            (
+                500,
+                r#"{"error":{"code":"email_delivery_failed"}}"#,
+                Err(Error::Uncertain),
+            ),
+            (
+                500,
+                r#"{"error":{"code":"email_storage_failed"}}"#,
+                Err(Error::Uncertain),
+            ),
+            (
+                200,
+                r#"{"status":"sent","email_id":"bad"}"#,
+                Err(Error::Uncertain),
+            ),
+            (200, "not json", Err(Error::Uncertain)),
         ] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let sender = Sender::new(
@@ -294,6 +363,62 @@ mod tests {
                     "https://hub.example/"
                 ),
                 expected
+            );
+            join.join().unwrap();
+        }
+    }
+    #[test]
+    fn post_transport_failure_and_unreadable_response_are_uncertain() {
+        for reply in [
+            String::new(),
+            "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}".into(),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: 17000\r\nConnection: close\r\n\r\n{}",
+                "x".repeat(17000)
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let sender = Sender::new(
+                &format!("http://{}/", listener.local_addr().unwrap()),
+                "svc_hub",
+            )
+            .unwrap();
+            let join = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    head.extend(byte);
+                    assert!(head.len() < 16384);
+                }
+                let head = String::from_utf8(head).unwrap();
+                let size = head
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .map(str::to_owned)
+                    })
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+                let mut data = vec![0; size];
+                stream.read_exact(&mut data).unwrap();
+                // Model connection loss, a truncated success, and an oversized
+                // response after the server has consumed the complete POST.
+                let _ = stream.write_all(reply.as_bytes());
+            });
+            assert_eq!(
+                sender.post(
+                    "synthetic.app.signature",
+                    &intent(super::super::REAL_RECIPIENT),
+                    "https://hub.example/"
+                ),
+                Err(Error::Uncertain)
             );
             join.join().unwrap();
         }

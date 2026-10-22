@@ -123,6 +123,8 @@ pub struct Hub<M> {
     pub(crate) mailbox: M,
     pub(crate) workspace: String,
     pub(crate) own_id: String,
+    #[cfg(feature = "hub")]
+    pub(crate) email_workers_active: bool,
 }
 fn stable(id: &str) -> bool {
     valid_id(id) && (id.starts_with("ag_") || id.starts_with("app_"))
@@ -193,6 +195,8 @@ impl<M: Mailbox + Directory> Hub<M> {
             mailbox,
             workspace: workspace.into(),
             own_id: own_id.into(),
+            #[cfg(feature = "hub")]
+            email_workers_active: false,
         };
         #[cfg(feature = "hub")]
         crate::management::schema(&hub.store.db)?;
