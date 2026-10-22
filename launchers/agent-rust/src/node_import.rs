@@ -343,7 +343,7 @@ fn prepare_inner(
     let mut state = crate::runtime::import_node_queue(&thread, &queue)?;
     if let Some(seed)=claude_seed {
         let seed=crate::bounded_json::decode(&read(seed,16*1024*1024)?)?;
-        let hash=backup.files.iter().find(|e|e.name=="queue.json").map(|e|e.sha256.as_str()).ok_or_else(||anyhow::anyhow!("claude_seed_queue_missing"))?;
+        let hash=backup.files.iter().find(|e|e.name=="queue.json").map(|e|e.sha256.as_str());
         crate::claude::import_history(&mut state,&seed,agent,cwd,hash)?;
     }
     // Recheck source after conversion, before the only publication. Same-account

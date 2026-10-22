@@ -10,6 +10,7 @@ mod model;
 mod node_import;
 mod rpc;
 mod claude;
+mod soul_terminal;
 mod runtime;
 mod store;
 mod transcript;

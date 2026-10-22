@@ -85,6 +85,7 @@ struct Record {
 }
 struct Runtime {
     claude:bool,
+    terminal_tasks: Value,
     rpc: Rpc,
     events: mpsc::Receiver<Value>,
     rpc_completed_turns: HashSet<String>,
@@ -171,6 +172,7 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
         rpc,
         events,
         rpc_completed_turns: HashSet::new(),
+        terminal_tasks: json!([]),
         store,
         thread: Value::Null,
         models: json!([]),
@@ -422,6 +424,9 @@ impl Runtime {
     }
     async fn start(&mut self, config: &Config, saved: Option<Value>) -> Result<()> {
         if let Some(saved) = &saved {
+            if self.claude {
+                self.terminal_tasks = crate::soul_terminal::validate(saved.get("claudeTerminalTasks").unwrap_or(&json!([])))?;
+            }
             self.records = decode_records(saved)?;
             self.dispatch_blocked = saved["dispatchBlocked"].as_bool().unwrap_or(true);
             self.goals = Goals::load(&saved["goals"])?;
@@ -549,6 +554,7 @@ impl Runtime {
             state["harness"]=json!("claude");state["claudeTurns"]=json!(&*self.turns);
             state["claudeHistoryStart"]=json!(self.history_start+self.turns.dropped);
             state["claudeHistoryTotal"]=json!(self.history_total);
+            state["claudeTerminalTasks"]=self.terminal_tasks.clone();
         }
         if let Err(error) = self.store.save(&state) {
             eprintln!("Rust spike: checkpoint_failure=1");
@@ -587,6 +593,7 @@ impl Runtime {
         snapshot["thread"] = thread;
         if self.claude {
             snapshot["harness"]=json!({"id":"claude","name":"Claude","capabilities":{"images":false,"steer":false,"backgroundTasks":false,"goal":null,"sessionTransfer":null}});
+            snapshot["backgroundTasks"]=self.terminal_tasks.clone();
             snapshot["attachmentsAvailable"]=json!(false);
             snapshot["attachmentStorageStatus"]=json!("unsupported");
         }

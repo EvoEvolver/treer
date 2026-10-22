@@ -24,7 +24,7 @@ pub fn import_history(
     seed: &Value,
     agent: &str,
     cwd: &std::path::Path,
-    queue_hash: &str,
+    queue_hash: Option<&str>,
 ) -> Result<()> {
     crate::runtime::node_fields(
         seed,
@@ -45,7 +45,7 @@ pub fn import_history(
         || seed["agent"] != agent
         || seed["cwd"] != cwd.to_string_lossy().as_ref()
         || seed["threadId"] != state["threadId"]
-        || seed["queueSha256"] != queue_hash
+        || seed.get("queueSha256") != Some(&json!(queue_hash))
         || snapshot["ready"] != true
         || snapshot["harness"]["id"] != "claude"
         || thread["id"] != state["threadId"]
@@ -54,12 +54,12 @@ pub fn import_history(
         || snapshot["runtime"]["state"] != "idle"
         || !snapshot["runtime"].get("error").is_some_and(Value::is_null)
         || snapshot["queue"] != json!([])
-        || snapshot["backgroundTasks"] != json!([])
         || !snapshot.get("goal").is_some_and(Value::is_null)
         || !snapshot.get("goalDelivery").is_some_and(Value::is_null)
     {
         bail!("claude_supported_snapshot_mismatch");
     }
+    let tasks = crate::soul_terminal::validate(&snapshot["backgroundTasks"])?;
     let turns = thread["turns"]
         .as_array()
         .filter(|t| t.len() <= 50)
@@ -120,6 +120,7 @@ pub fn import_history(
     state["claudeTurns"] = json!(turns);
     state["claudeHistoryStart"] = json!(total - turns.len() as u64);
     state["claudeHistoryTotal"] = json!(total);
+    state["claudeTerminalTasks"] = tasks;
     Ok(())
 }
 impl Adapter {
@@ -637,11 +638,16 @@ mod tests {
             &base,
             "ag_test",
             std::path::Path::new("/synthetic"),
-            "hash",
+            Some("hash"),
         )
         .unwrap();
         assert_eq!(state["harness"], "claude");
         assert_eq!(state["claudeHistoryStart"], 1);
+        let mut receiptless = base.clone();
+        receiptless["queueSha256"] = Value::Null;
+        import_history(&mut state, &receiptless, "ag_test", std::path::Path::new("/synthetic"), None).unwrap();
+        receiptless.as_object_mut().unwrap().remove("queueSha256");
+        assert!(import_history(&mut state, &receiptless, "ag_test", std::path::Path::new("/synthetic"), None).is_err());
         let mut faults = vec![];
         for path in [
             "/snapshot/goal",
@@ -679,7 +685,7 @@ mod tests {
                 &fault,
                 "ag_test",
                 std::path::Path::new("/synthetic"),
-                "hash"
+                Some("hash")
             )
             .is_err());
             assert_eq!(state, before);

@@ -1,5 +1,9 @@
 # Rust launcher experiment (#158)
 
+[Soul continuation](SOUL-CONTINUATION.md) covers receiptless legacy Claude
+imports and passive terminal task retention; it does not support active tasks
+or rerunning the original Soul restore wrapper.
+
 The isolated [Claude adapter increment](CLAUDE.md) (#231) adds a distinct
 stream-json backend and supported-snapshot import. Its explicit capability
 differences and remaining native artifact/target acceptance are documented there;
