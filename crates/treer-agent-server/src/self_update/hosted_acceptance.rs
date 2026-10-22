@@ -25,6 +25,11 @@ fn eligible(
         && uid != 0
 }
 
+fn private_root_name(name: &str) -> bool {
+    name.strip_prefix("tn-")
+        .is_some_and(|token| super::hex(token, 16))
+}
+
 fn root() -> Result<PathBuf> {
     if !eligible(
         std::env::var("TREER_DISPOSABLE_RUNNER").ok().as_deref(),
@@ -56,12 +61,13 @@ fn root() -> Result<PathBuf> {
             .ok_or_else(|| anyhow::anyhow!("hosted_update_root_unavailable"))?,
     );
     let physical = supplied.canonicalize()?;
-    let id = physical
+    let name = physical
         .file_name()
         .and_then(|name| name.to_str())
-        .and_then(|name| name.strip_prefix("treer-native-acceptance-"))
         .ok_or_else(|| anyhow::anyhow!("hosted_update_root_unavailable"))?;
-    super::job_id(id)?;
+    if !private_root_name(name) {
+        bail!("hosted_update_root_unavailable");
+    }
     if supplied != physical
         || physical.parent() != Some(home.as_path())
         || std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) != Some(physical.join("xdg"))
@@ -176,6 +182,19 @@ fn submit_inner() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn private_root_name_is_short_and_exact() {
+        assert!(private_root_name("tn-0123456789abcdef"));
+        for name in [
+            "tn-0123456789abcde",
+            "tn-0123456789abcdef0",
+            "tn-0123456789abcdeF",
+            "tn-../0123456789ab",
+            "treer-native-acceptance-0123456789abcdef",
+        ] {
+            assert!(!private_root_name(name));
+        }
+    }
     #[test]
     fn hosted_entry_requires_explicit_unmanaged_nonroot_disposable_context() {
         assert!(eligible(

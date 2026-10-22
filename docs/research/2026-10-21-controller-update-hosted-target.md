@@ -96,7 +96,11 @@ No environment HOME substitution, new account, service, VM, PATH-selected Node
 or production trust-rule weakening is part of this fixture.
 
 Create one NEW private physical directory directly under that HOME, named
-`treer-native-acceptance-<canonical UUID>`, with mode0700. Set
+`tn-<16 lowercase hexadecimal random digits>`, with mode0700 and exclusive
+creation (never reuse a root). The short physical name keeps the real nested
+job UUID/handoff.sock pathname within the platform's Unix socket limit; the
+fixture checks that address with the platform parser before launching processes.
+Do not relax the production socket limit or use an alias/redirected HOME. Set
 `TREER_ACCEPTANCE_ROOT` to it, `XDG_CONFIG_HOME` to its `xdg` child and
 `TREER_STATE_DIR` to its `state` child. Provision only these input files; the
 fixture exclusively creates all remaining config/state/workspace files:
