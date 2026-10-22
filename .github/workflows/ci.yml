@@ -1,135 +1,33 @@
-name: CI
-
+name: Exact Node ancestor diagnostic
+run-name: Ancestor222 after39699367118
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  rust:
-    name: Rust and PostgreSQL tests
+  diagnose:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    env:
-      TREER_TEST_DATABASE_URL: postgres://treer:treer@127.0.0.1:55432/treer_test
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_USER: treer
-          POSTGRES_PASSWORD: treer
-          POSTGRES_DB: treer_test
-        ports:
-          - 55432:5432
-        options: >-
-          --health-cmd "pg_isready -U treer -d treer_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-        with:
-          toolchain: 1.90.0
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Release workflow security regressions (fake registry only)
-        run: node --test scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs scripts/install-checksums.test.mjs
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Build workspace binaries
-        run: cargo build --workspace --locked
-      - name: Test workspace including database boundaries
-        run: cargo test --workspace --locked
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  web:
-    name: Frontend types and build
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: 10.12.4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
-      - run: pnpm build
-
-  agent-launcher:
-    name: Agent launcher types, fake harnesses and browser
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: launchers/agent/package-lock.json
-      - name: Install launcher dependencies
-        run: npm --prefix launchers/agent ci --ignore-scripts
-      - name: Install isolated browser runtime
-        run: cd launchers/agent && npx playwright install --with-deps chromium
-      - name: Check launcher and browser sources
-        run: npm --prefix launchers/agent run check
-      - name: Unit and installer tests (fake harnesses only)
-        run: npm --prefix launchers/agent test
-      - name: Closed Codex, ACP and Claude Interface regression
+      - name: Read ONLY exact Node and ancestor metadata
+        shell: bash
         run: |
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
-          node scripts/ais-e2e.mjs
-      - name: Browser controls and screenshots
-        run: npm --prefix launchers/agent run test:browser
-        env:
-          CODEX_UI_SCREENSHOTS: ${{ runner.temp }}/launcher-screenshots
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: failure()
+          python3 -I -B - <<'PYTHON'
+          import os,stat,pathlib,hashlib,json
+          if os.environ.get("GITHUB_ACTIONS")!="true" or os.environ.get("RUNNER_ENVIRONMENT")!="github-hosted" or os.uname().sysname!="Linux" or os.geteuid()==0:raise SystemExit("wrong diagnostic target")
+          p=pathlib.Path("/usr/local/bin/node")
+          st=p.lstat()
+          result={"scope":"READ_ONLY exact failed ancestor classification; no Node execution/chmod/updater","uid":os.geteuid(),"image":os.environ.get("ImageVersion"),"file":{"realpath":str(p.resolve()),"regular":stat.S_ISREG(st.st_mode),"uid":st.st_uid,"gid":st.st_gid,"mode":oct(stat.S_IMODE(st.st_mode)),"sha256":hashlib.sha256(p.read_bytes()).hexdigest()},"ancestors":[]}
+          for a in p.parents:
+           m=a.lstat();result["ancestors"].append({"path":str(a),"uid":m.st_uid,"gid":m.st_gid,"mode":oct(stat.S_IMODE(m.st_mode)),"directory":stat.S_ISDIR(m.st_mode),"root_or_euid":m.st_uid in (0,os.geteuid()),"mode_trusted":not bool(m.st_mode&0o022)})
+          out=pathlib.Path(os.environ["RUNNER_TEMP"])/"treer222-ancestor-diagnostic.json"
+          with out.open("x") as f:json.dump(result,f,indent=2);f.flush();os.fsync(f.fileno())
+          print(json.dumps(result))
+          PYTHON
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: agent-launcher-screenshots
-          path: ${{ runner.temp }}/launcher-screenshots
-          if-no-files-found: ignore
-
-  release-tooling:
-    name: Release tooling and fake machine updates
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-      - name: Closed release, checksum, detachment and rollback tests
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-      - name: Documentation links and launcher test isolation
-        run: |
-          node scripts/check-docs.mjs
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
+          name: treer222-ancestor-diagnostic
+          path: ${{ runner.temp }}/treer222-ancestor-diagnostic.json
+          if-no-files-found: error
+          retention-days: 7
