@@ -87,10 +87,11 @@ writer refuses, and restarts from the durable checkpoint. It reads no provider
 history/config/auth and touches no enrolled Agent. Cleanup terminates only its
 own child handles and removes only its fresh temporary root. The subprocess
 restart uses Windows termination, testing lease/Job cleanup on abrupt exit.
-Fixture setup replaces only its new private directory's DACL with the same
-protected current-user/System descriptor as `secure_directory`, then verifies
-protection, categorical owner and the two allow ACEs. It does not use a
-grant-only ACL update or repair an existing installed state directory.
+The Windows fixture-feature initializer exclusively creates its new private
+directory, using retained parent/root handles and the real platform
+`secure_directory` plus `private_path_is_secure` readback. A second creation
+attempt refuses. This hook is absent from the default artifact; it does not
+repair an existing directory or duplicate ACL logic in PowerShell.
 Startup refusal is reported immediately with the child exit/spawn status and at
 most 4096 bytes of synthetic-child stderr, with the owned temporary root
 redacted. This diagnostic is restricted to the suite's credential-free

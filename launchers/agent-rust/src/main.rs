@@ -71,6 +71,21 @@ fn env(name: &str) -> Option<String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    #[cfg(all(windows, feature = "fixture-harness"))]
+    if std::env::args().nth(1).as_deref() == Some("--fixture-create-private-state") {
+        let root = PathBuf::from(env("TREER_RUST_SPIKE_STATE_DIR")
+            .ok_or_else(|| anyhow::anyhow!("fixture_state_path_required"))?);
+        if !root.is_absolute() { bail!("fixture_state_path_required"); }
+        let parent = root.parent().ok_or_else(|| anyhow::anyhow!("fixture_state_parent_required"))?;
+        let _parent = treer_platform::machine_file::Root::open(parent, &[])?;
+        // Exclusive creation only; this hook cannot repair/adopt existing state.
+        std::fs::create_dir(&root)?;
+        let _owned = treer_platform::machine_file::Root::open(&root, &[])?;
+        treer_platform::secure_directory(&root)?;
+        if !treer_platform::private_path_is_secure(&root)? { bail!("fixture_state_security_refused"); }
+        println!("fixture_private_state_created");
+        return Ok(());
+    }
     if !cfg!(target_os = "macos") && !cfg!(target_os = "linux") && !cfg!(windows) {
         bail!("unsupported launcher platform")
     }
