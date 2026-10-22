@@ -132,6 +132,15 @@ image replacement requires different Controller digests. Same-source feature
 and normal builds can test physical replacement but are not evidence of a
 released version-to-version upgrade.
 
+Build the installed OLD feature Controller and matching CLI with the release
+profile as well. Profile names are not an image identity or handoff authority:
+the retained installed inode, actual bytes, source/version and receipt pins are.
+Record each of the six staged native copies' exact size and require
+`0 < bytes <= 134217728` before hashing/staging. The unchanged production image
+limit is128MiB; a larger debug build is an invalid fixture input, not permission
+to raise the limit. The test driver may use either profile with the same exact
+ignored test selection; it is not the installed submitting Controller image.
+
 The fixture starts its own real Host and its old Controller, with synthetic
 `ws_native_acceptance` / `srv_native_acceptance` identity and a loopback synthetic
 Proxy connection. Its explicit in-memory profile CRUD/readback and machine
