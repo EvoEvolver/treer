@@ -1084,6 +1084,90 @@ test('Rust journal restart never replays an uncertain turn and preserves queued 
 
 const faultEnv=mode=>({CODEX_BIN:process.execPath,RUST_SPIKE_CODEX_ARGS:JSON.stringify([resolve(import.meta.dirname,'fixtures/fault-codex.mjs')]),RUST_SPIKE_FAULT:mode});
 const providerCalls=async s=>(await readFile(join(s.root,'provider.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+const incomingNotice=(n,delivery='dlv_'+n)=>({delivery_id:delivery,recipient:{kind:'agent',id:'ag_contract'},message:{message_id:'msg_'+n,sender:{kind:'agent',id:'sender_'+n,name:'Sender '+n,path:'/team/sender-'+n},body:'Synthetic notice '+n,created_at:'2026-10-21T00:00:00Z'}});
+const messageFixtureEnv={AGENT_UI_MESSAGE_WATCH:'1',RUST_SPIKE_MESSAGE_INPUT:'incoming.json',PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH,CODEX_BIN:resolve(import.meta.dirname,'../../agent/tests/fake-codex.mjs'),FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_COMPLETE_TURNS:'1'};
+const messageJournal=s=>readFile(join(s.state,'rust-spike.json'),'utf8').then(JSON.parse);
+const messageAcks=async s=>(await readFile(join(s.root,'registration.json'),'utf8')).trim().split('\n').map(JSON.parse).filter(x=>x.ack);
+test('Rust message batching same poll is one real turn, durable before ack and redelivery deduplicated',{skip:useNode,timeout:20000},async t=>{
+  const s=await fixture(t,messageFixtureEnv);
+  const notices=[incomingNotice(1),incomingNotice(2),incomingNotice(3)];
+  await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify(notices));
+  const journal=await until(()=>messageJournal(s),j=>j.records.some(r=>r.source_messages?.length===3));
+  const batch=journal.records.find(r=>r.source_messages?.length===3);
+  assert.equal(batch.operation,'treer-message/msg_1');
+  assert.deepEqual(batch.source_messages.map(m=>[m.messageId,m.deliveryId,m.sender.id]),notices.map(d=>[d.message.message_id,d.delivery_id,d.message.sender.id]));
+  await until(()=>messageAcks(s),a=>a.length>=3);
+  for(const a of await messageAcks(s)){assert.equal(a.operation,'launcher-message-ack/'+a.ack);assert.equal(a.durable,true);}
+  await until(()=>messageJournal(s),j=>j.records.some(r=>r.operation===batch.operation&&r.submission.state==='done'));
+  const calls=await providerCalls(s),starts=calls.filter(x=>x.method==='turn/start');
+  assert.equal(starts.length,1);const text=starts[0].params.input[0].text;
+  for(const d of notices){assert.ok(text.includes(d.message.message_id));assert.ok(text.includes(d.message.sender.path));}
+  assert.ok(text.includes('[3/3]'));
+  // The same immutable message gets another delivery ID, not another prompt.
+  await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(1,'dlv_new')]));
+  await until(()=>messageAcks(s),a=>a.some(x=>x.ack==='dlv_new'));
+  assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
+  const final=await messageJournal(s);assert.equal(final.records.length,1);assert.equal(final.records[0].source_messages.length,4);
+});
+test('Rust message batching busy bursts merge queued tail but never merge an explicit user prompt',{skip:useNode,timeout:20000},async t=>{
+  const s=await fixture(t,{...messageFixtureEnv,FAKE_CODEX_COMPLETE_TURNS:''});
+  await s.post({text:'explicit running prompt',operation_id:'busy-user'});
+  await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(1),incomingNotice(2)]));
+  await until(()=>messageAcks(s),a=>a.some(x=>x.ack==='dlv_2'));
+  const initial=(await messageJournal(s)).records[1];
+  await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(3),incomingNotice(4)]));
+  await until(()=>messageAcks(s),a=>a.some(x=>x.ack==='dlv_4'));
+  let j=await messageJournal(s);assert.equal(j.records.length,2);assert.equal(j.records[1].source_messages.length,4);
+  const retry=await s.post({text:initial.text,operation_id:initial.operation}).then(r=>r.json());
+  assert.equal(retry.duplicate,true);assert.equal(retry.submission.id,initial.submission.id);
+  const receipt=await s.post({text:'explicit queued prompt',operation_id:'user-barrier'}).then(r=>r.json());
+  await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(5)]));
+  await until(()=>messageAcks(s),a=>a.some(x=>x.ack==='dlv_5'));
+  j=await messageJournal(s);assert.equal(j.records.length,4);assert.equal(j.records[2].submission.id,receipt.submission.id);
+  assert.equal(j.records[2].message_batch,undefined);assert.equal(j.records[3].source_messages.length,1);
+  assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
+});
+test('Rust message batching restart retries remote-success ack without replaying uncertain dispatch',{skip:useNode,timeout:20000},async t=>{
+  const s=await fixture(t,{...messageFixtureEnv,RUST_SPIKE_MESSAGE_ACK_GATE:'ack-release',FAKE_CODEX_COMPLETE_TURNS:''});
+  await s.post({text:'explicit running prompt',operation_id:'busy-user'});
+  await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(1),incomingNotice(2)]));
+  await until(()=>messageAcks(s),a=>a.some(x=>x.ack==='dlv_1'));
+  let j=await messageJournal(s);assert.equal(j.records[1].source_messages.every(m=>m.ackPending),true);
+  const id=j.records[1].submission.id, text=j.records[1].text;
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  await writeFile(join(s.root,'cwd/ack-release'),'');
+  await writeFile(join(s.root,'cwd/incoming.json'),'[]');
+  const restarted=await s.launch({});
+  await until(()=>messageJournal(s),j=>j.records[1].source_messages.every(m=>!m.ackPending));
+  const acks=await messageAcks(s);assert.equal(acks.filter(x=>x.ack==='dlv_1').length,2);assert.equal(acks.filter(x=>x.ack==='dlv_2').length,1);
+  j=await messageJournal(s);assert.equal(j.records[1].submission.id,id);assert.equal(j.records[1].text,text);assert.equal(j.records[1].submission.state,'queued');
+  assert.equal((await fetch(restarted.base+'/api/state').then(r=>r.json())).runtime.state,'blocked');
+  assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
+});
+test('Rust message batching failed durable publication does not acknowledge or dispatch the poll',{skip:useNode,timeout:15000},async t=>{
+  const s=await fixture(t,messageFixtureEnv);
+  const journal=join(s.state,'rust-spike.json'),backup=join(s.state,'saved-journal');
+  const before=await readFile(journal,'utf8');await rename(journal,backup);await mkdir(journal);
+  await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(1),incomingNotice(2)]));
+  await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked');
+  let acks=[];try{acks=await messageAcks(s);}catch{}assert.equal(acks.length,0);
+  assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,0);
+  assert.equal(await readFile(backup,'utf8'),before);
+  assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).queue.length,0);
+});
+test('Rust message batching admits a bounded multi-megabyte poll and splits previews without lost IDs',{skip:useNode,timeout:15000},async t=>{
+  const s=await fixture(t,{...messageFixtureEnv,FAKE_CODEX_COMPLETE_TURNS:''});
+  await s.post({text:'explicit running prompt',operation_id:'busy-user'});
+  const notices=Array.from({length:10},(_,n)=>({...incomingNotice(n),message:{...incomingNotice(n).message,body:'x'.repeat(210_000)}}));
+  const bytes=JSON.stringify(notices);assert.ok(Buffer.byteLength(bytes)>2_000_000);
+  await writeFile(join(s.root,'cwd/incoming.json'),bytes);
+  await until(()=>messageAcks(s),a=>a.filter(x=>x.ack).length===10);
+  const journal=await messageJournal(s),batches=journal.records.filter(r=>r.message_batch);
+  assert.equal(batches.length,10);assert.equal(batches.flatMap(r=>r.source_messages).length,10);
+  for(const r of batches){assert.ok(Buffer.byteLength(r.text)<=65536);assert.ok(r.text.includes('Long message: read the original'));}
+  assert.deepEqual(batches.flatMap(r=>r.source_messages).map(m=>m.messageId).sort(),notices.map(n=>n.message.message_id).sort());
+  assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
+});
 for(const kind of ['file','tool'])for(const change of ['empty','extend','shrink','conflict',...(kind==='tool'?['name','argument','duration']:['path'])])for(const observer of [false,true])test(`Rust terminal ${kind} detail survives summary or refuses ${change} (${observer?'observer':'event'})`,{skip:useNode,timeout:20000},async t=>{
   const s=await fixture(t,faultEnv(`final-${observer?'observer-':''}${kind}-${change}`));
   const receipt=await s.post({text:'synthetic tool detail',operation_id:'typed-final'}).then(r=>r.json());

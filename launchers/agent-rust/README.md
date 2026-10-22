@@ -1,5 +1,10 @@
 # Rust launcher experiment (#158)
 
+Incoming-message parity correction: [message batching](MESSAGE-BATCHING.md)
+documents atomic whole-poll admission, busy queued-tail coalescing, durable
+delivery ACK checkpoints, bounds and remaining concrete ingress differences.
+This offline successor does not update any running runtime or authorize expansion.
+
 Release migration compatibility: the importer may preserve a strictly inert
 `agent-ui.json.goal-usage.json` (or matching legacy `codex-ui.json` suffix)
 as backup-only bytes. It must contain exactly the known Claude usage fields,
