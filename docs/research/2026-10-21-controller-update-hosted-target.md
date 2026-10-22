@@ -41,3 +41,28 @@ signal a saved unverified PID or operate an enrolled/general Treer service.
 Any actual unsupported operation must be returned with the smallest additional
 disposable-target requirement and leader as allocation owner. Neither a
 prepare-only manager plan nor passing negative/death tests closes this work.
+
+## Measured Ubuntu target and exact provisioning decision
+
+Inventory-only run `39697055173` measured the hosted Ubuntu22 image
+`20261018.327.1`: effective UID1001, matching passwd/environment HOME
+`/home/runner` owned by that account with mode0750, and successful actual
+systemd user environment/unit-list queries. This establishes query reachability,
+not manager survival. The only existing fixed Node candidate was a regular
+root-owned `/usr/local/bin/node`, version22.23.3, mode0777, SHA256
+`fde6a4bf8d0562f7751d1a2d6cb9b417c4cfe107bbcb0aa3e9a24e125e348f48`.
+It fails the unchanged production `trusted_file` writable-component check.
+
+Leader decision #222/7762 authorizes only a **new disposable hosted Ubuntu22.04
+job** to change that exact existing pinned file from0777 to0755. Release owns
+the provisioning receipt and embeds it in the positive job, without another
+inventory-only dispatch. Before mutation require hosted/Linux/nonroot job scope,
+fixed canonical pathname, lstat regular/root-owned image, exact realpath,
+inode/hash/version and full ancestor owner/mode inventory. After the narrowly
+scoped sudo operation, require the same inode/hash/root owner and mode0755;
+then run unchanged production trust checks across every component. No other
+file or ancestor repair, recursive chmod/chown, link, download, PATH fallback,
+account creation, linger or trust-rule relaxation is authorized. A changed pin
+or untrusted ancestor is a concrete unsupported prerequisite, not permission
+to broaden provisioning. This decision does not apply to an enrolled machine
+or the shared development account, and does not enable the product capability.
