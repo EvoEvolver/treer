@@ -31,7 +31,10 @@ if (runtime === "node") {
     if (mapping[key]) env[mapping[key]] = value;
   }
   const binding = nativeRuntime(root, [harness]);
-  env.AGENT_UI_HARNESS = harness; env.AGENT_UI_CWD ||= process.cwd();
+  env.AGENT_UI_HARNESS = harness; env.AGENT_UI_CWD ||= env.CODEX_UI_CWD || process.cwd();
+  // A parent's port observation file belongs to that invocation. Rust owns
+  // its own registration, so no outer-wrapper port file is required here.
+  delete env.AGENT_UI_PORT_FILE;
   env.AGENT_UI_PUBLIC_DIR = binding.public_dir; env.RUST_SPIKE_REGISTER = "1";
   const child = spawnProvider(binding.executable.path, [], { env, stdio: "inherit" });
   child.on("error", () => { process.exitCode = 1; });
