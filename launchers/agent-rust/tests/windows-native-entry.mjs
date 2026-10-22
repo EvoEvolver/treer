@@ -17,15 +17,14 @@ for(const harness of ['codex','claude'])test(`Windows native ${harness}: text qu
   await mkdir(cwd);await mkdir(state);
   const children=[];
   t.after(async()=>{for(const child of children)if(child.exitCode===null&&child.signalCode===null){const exit=once(child,'exit');child.kill();await exit;}await rm(root,{recursive:true,force:true,maxRetries:30,retryDelay:100});});
-  // Replace the DACL of this newly created, owned fixture directory with the
-  // exact secure_directory descriptor. icacls grant:r only replaces one
-  // principal's grants and can retain unrelated explicit ACEs.
+  // Use mapped file rights: GA can split into applied/inherit-only ACEs when
+  // persisted by .NET. FA preserves this exact protected two-principal DACL.
   execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',`
     $ErrorActionPreference='Stop'
     $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
     $sid=$identity.User.Value
     $acl=[IO.Directory]::GetAccessControl($env:TREER_FIXTURE_STATE)
-    $acl.SetSecurityDescriptorSddlForm("D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;$sid)",[Security.AccessControl.AccessControlSections]::Access)
+    $acl.SetSecurityDescriptorSddlForm("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;$sid)",[Security.AccessControl.AccessControlSections]::Access)
     [IO.Directory]::SetAccessControl($env:TREER_FIXTURE_STATE,$acl)
     $actual=[IO.Directory]::GetAccessControl($env:TREER_FIXTURE_STATE)
     if (-not $actual.AreAccessRulesProtected) { throw 'fixture_dacl_not_protected' }
