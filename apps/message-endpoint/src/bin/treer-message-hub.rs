@@ -3,6 +3,17 @@ fn main() -> std::process::ExitCode {
     use treer_message_endpoint::hub_runtime::{Config, Error};
     let run = || -> Result<(), Error> {
         let args: Vec<_> = std::env::args_os().skip(1).collect();
+        if args.len() == 2 && args[0] == "--telegram-import-snapshot" {
+            let result = treer_message_endpoint::telegram_snapshot_import::run_file(
+                std::path::Path::new(&args[1]),
+            )
+            .map_err(|_| Error::Storage)?;
+            println!(
+                "{}",
+                serde_json::to_string(&result).map_err(|_| Error::Storage)?
+            );
+            return Ok(());
+        }
         if args.len() == 2 && args[0] == "--telegram-cutoff-journal" {
             let result =
                 treer_message_endpoint::telegram_cutoff::run_file(std::path::Path::new(&args[1]))

@@ -225,20 +225,31 @@ impl Core {
         workspace: &str,
         wait_ms: u32,
     ) -> Result<Vec<AuthenticatedDelivery>, Error> {
-        if !valid_id(workspace) || wait_ms > 1000 {
+        Ok(self.receive_authenticated_page(workspace, wait_ms)?.0)
+    }
+
+    pub(crate) fn receive_authenticated_page(
+        &self,
+        workspace: &str,
+        wait_ms: u32,
+    ) -> Result<(Vec<AuthenticatedDelivery>, u64), Error> {
+        if !valid_id(workspace)
+            || wait_ms > 1000
+            || self.agent_metadata(&self.own_id)?.workspace_id != workspace
+        {
             return Err(Error::Invalid);
         }
-        if self.agent_metadata(&self.own_id)?.workspace_id != workspace {
-            return Err(Error::Invalid);
-        }
-        Ok(self
-            .receive(wait_ms)?
-            .into_iter()
-            .map(|delivery| AuthenticatedDelivery {
-                delivery,
-                workspace: workspace.into(),
-            })
-            .collect())
+        let page = self.receive_batch(wait_ms)?;
+        Ok((
+            page.deliveries
+                .into_iter()
+                .map(|delivery| AuthenticatedDelivery {
+                    delivery,
+                    workspace: workspace.into(),
+                })
+                .collect(),
+            page.remaining_unacknowledged,
+        ))
     }
 
     /// Exact backlog metadata from Core; the scheduler can drain a bounded number

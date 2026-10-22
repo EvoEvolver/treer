@@ -115,6 +115,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         let code = match code.as_str() {
             "transport_rejected" => NoticeCode::TransportRejected,
             "transport_retries_exhausted" => NoticeCode::TransportRetriesExhausted,
+            "history_unavailable" => NoticeCode::HistoryUnavailable,
             _ => return Err(Error::Binding),
         };
         let source = format!(

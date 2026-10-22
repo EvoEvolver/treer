@@ -236,7 +236,10 @@ fn telegram_roundtrip_traverses_hub_and_actual_rust_relay_with_endpoint_identity
         state_directory: root.join("relay-state"),
         release_sha256: crate::relay::hash_executable(&std::env::current_exe().unwrap()).unwrap(),
     };
-    let (mut relay, _) = crate::relay::Relay::open(config, "ag_endpoint").unwrap();
+    let (mut relay, actual) = crate::relay::Relay::open(config, "ag_endpoint").unwrap();
+    relay
+        .report_binary(&actual, "fixture-receipt-negotiation")
+        .unwrap();
     wait_until(|| {
         f.status()["operations"]
             .as_array()
@@ -268,7 +271,11 @@ fn telegram_roundtrip_traverses_hub_and_actual_rust_relay_with_endpoint_identity
         db.query_row("SELECT EXISTS(SELECT 1 FROM telegram_accounts WHERE account='bot_fixture' AND offset>=2)", [], |r| r.get::<_, bool>(0)).unwrap_or(false)
     });
     relay.tick(now()).unwrap();
-    assert!(f.status()["core_messages"].as_array().unwrap().is_empty());
+    assert!(!f.status()["core_messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["recipient"] == "ag_recipient"));
     let p = f.command(json!({"action":"preview_resume","endpoint_id":"ag_endpoint"}));
     assert_eq!(p["account_ready"], true);
     f.command(json!({"action":"resume","endpoint_id":"ag_endpoint","expected":p["preview"],"confirm":true,"evidence":{"profile_reviewed":true,"isolation":"reviewed","reference":"synthetic relay roundtrip; no live Policy attestation","held_action":"discard","parked_count_ack":0}}));
@@ -305,6 +312,15 @@ fn telegram_roundtrip_traverses_hub_and_actual_rust_relay_with_endpoint_identity
         delivered["envelope"]["external_source"]["metadata"]["endpoint_id"],
         "ag_endpoint"
     );
+    // Receipt completion, not fragment delivery, establishes the final ID.
+    wait_until(|| {
+        let db = rusqlite::Connection::open_with_flags(
+            root.join("state/hub.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        db.query_row("SELECT EXISTS(SELECT 1 FROM inbound i JOIN telegram_handoff_modes m ON m.job=i.id WHERE i.pending=0 AND m.mode='receipt' AND i.core_id=?1)",[delivered["id"].as_str().unwrap()],|r|r.get::<_,bool>(0)).unwrap()
+    });
     // A normal recipient reply is routed by the relay, not constructed as a
     // transport fragment by the test. Context references the delivered message.
     f.control("core",json!({"delivery_id":"del_recipient_reply","recipient":{"kind":"agent","id":"ag_endpoint"},"message":{"message_id":"msg_recipient_reply","sender":{"kind":"agent","id":"ag_recipient"},"body":"synthetic reply","context_ids":[delivered["id"]]}}));
@@ -329,7 +345,112 @@ fn telegram_roundtrip_traverses_hub_and_actual_rust_relay_with_endpoint_identity
         .contains("[External Telegram message;"));
     relay.tick(now()).unwrap();
     assert_eq!(f.status()["sent"], accepted["sent"]);
+    assert_eq!(accepted["sent"][0]["reply_parameters"]["message_id"], 2);
+    assert_eq!(
+        accepted["sent"][0]["reply_parameters"]["allow_sending_without_reply"],
+        false
+    );
+    // The actual accepted native output is mapped back to its fixed Core message.
+    wait_until(|| {
+        let db = rusqlite::Connection::open_with_flags(
+            root.join("state/hub.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        db.query_row("SELECT EXISTS(SELECT 1 FROM telegram_reply_mappings WHERE native_id=101 AND core_id='msg_recipient_reply')",[],|r|r.get::<_,bool>(0)).unwrap()
+    });
+    f.control("update",json!({"update_id":3,"message":{"message_id":3,"reply_to_message":{"message_id":101},"date":now(),"chat":{"id":-100},"from":{"id":42,"is_bot":false},"text":"known native reply"}}));
+    wait_until(|| {
+        relay.tick(now()).unwrap();
+        f.status()["core_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| {
+                m["recipient"] == "ag_recipient"
+                    && m["context_ids"] == json!(["msg_recipient_reply"])
+            })
+    });
+    let before = f.status()["core_messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["recipient"] == "ag_recipient")
+        .count();
+    f.control("update",json!({"update_id":4,"message":{"message_id":4,"reply_to_message":{"message_id":999999},"date":now(),"chat":{"id":-100},"from":{"id":42,"is_bot":false},"text":"OLD SECRET BODY MUST NOT BECOME TOP LEVEL"}}));
+    wait_until(|| {
+        f.status()["sent"].as_array().unwrap().iter().any(|m| {
+            m["text"]
+                .as_str()
+                .is_some_and(|s| s.contains("history_unavailable"))
+        })
+    });
+    let after = f.status();
+    assert_eq!(
+        after["core_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["recipient"] == "ag_recipient")
+            .count(),
+        before
+    );
+    assert!(!after["sent"].to_string().contains("OLD SECRET BODY"));
+    // Route an exact changed final-ID assertion through the real authenticated
+    // inbox worker, local disposition commit, Core ACK and confirmed marker.
+    let wire = after["core_messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| {
+            m["recipient"] == "app_hub"
+                && m["envelope"]["body"].as_str().is_some_and(|b| {
+                    serde_json::from_str::<Value>(b)
+                        .ok()
+                        .is_some_and(|v| v["protocol"] == crate::telegram_receipts::CAPABILITY)
+                })
+        })
+        .unwrap()["envelope"]["body"]
+        .as_str()
+        .unwrap();
+    let mut receipt: Value = serde_json::from_str(wire).unwrap();
+    receipt["final_core_message_id"] = json!("msg_changed_final");
+    f.control("core",json!({"delivery_id":"del_terminal_changed","recipient":{"kind":"agent","id":"app_hub"},"message":{"message_id":"msg_terminal_changed","sender":{"kind":"agent","id":"ag_endpoint"},"body":receipt.to_string(),"context_ids":[]}}));
+    wait_until(|| {
+        let db = rusqlite::Connection::open_with_flags(
+            root.join("state/hub.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        db.query_row("SELECT EXISTS(SELECT 1 FROM telegram_terminal_dispositions WHERE acked=1 AND conflict=0)",[],|r|r.get::<_,bool>(0)).unwrap()
+    });
     drop(running);
+    let resumed = f.start(true);
+    resumed.release_readbacks();
+    // Terminal queue and confirmed discard survive the real runtime restart.
+    let db = rusqlite::Connection::open_with_flags(
+        root.join("state/hub.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM telegram_terminal_dispositions WHERE acked=1",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert!(db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM inbound WHERE pending=0 AND core_id=?1)",
+            [delivered["id"].as_str().unwrap()],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap());
+    drop(db);
+    drop(resumed);
 }
 #[test]
 fn owner_activation_real_runtime_http_bot_core_sqlite_and_restart_keep_binding_active() {

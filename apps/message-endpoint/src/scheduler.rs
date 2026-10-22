@@ -19,10 +19,52 @@ use std::{
 pub type SharedHub<M> = Arc<Mutex<Hub<M>>>;
 pub trait CoreInbox: Mailbox + Directory + Clone + Send + 'static {
     fn receive_batch(&self, wait_ms: u32) -> Result<ReceiveBatch, crate::core::Error>;
+    fn authenticated_page(
+        &self,
+        _workspace: &str,
+        _wait_ms: u32,
+    ) -> Result<Option<(Vec<crate::core::AuthenticatedDelivery>, u64)>, crate::core::Error> {
+        Ok(None)
+    }
+    fn dispatch_authenticated(
+        &self,
+        _hub: &SharedHub<Self>,
+        _delivery: &crate::core::AuthenticatedDelivery,
+        _now: i64,
+    ) -> Result<(), crate::hub::Error>
+    where
+        Self: Sized,
+    {
+        Err(crate::hub::Error::Binding)
+    }
 }
 impl CoreInbox for Core {
     fn receive_batch(&self, wait_ms: u32) -> Result<ReceiveBatch, crate::core::Error> {
         Core::receive_batch(self, wait_ms)
+    }
+    fn authenticated_page(
+        &self,
+        workspace: &str,
+        wait_ms: u32,
+    ) -> Result<Option<(Vec<crate::core::AuthenticatedDelivery>, u64)>, crate::core::Error> {
+        Core::receive_authenticated_page(self, workspace, wait_ms).map(Some)
+    }
+    fn dispatch_authenticated(
+        &self,
+        hub: &SharedHub<Self>,
+        delivery: &crate::core::AuthenticatedDelivery,
+        now: i64,
+    ) -> Result<(), crate::hub::Error> {
+        if crate::telegram_receipt_completion::dispatch(hub, self, delivery, now)? {
+            return Ok(());
+        }
+        {
+            hub.lock()
+                .map_err(|_| crate::hub::Error::Binding)?
+                .admit_core_delivery(delivery.delivery(), now)?;
+        }
+        self.ack(&delivery.delivery().delivery_id)?;
+        Ok(())
     }
 }
 const MAX_PAGES: usize = 10;
@@ -285,6 +327,58 @@ fn drain<M: CoreInbox>(
     for page in 0..max_pages {
         if c.stopping.load(Ordering::Acquire) {
             break;
+        }
+        let workspace = match state.lock() {
+            Ok(h) => h.workspace.clone(),
+            Err(_) => return false,
+        };
+        match backend.authenticated_page(&workspace, if page == 0 { 1000 } else { 0 }) {
+            Ok(Some((deliveries, remaining))) => {
+                increment(&c.pages);
+                if deliveries.len() > 10 {
+                    c.last_inbox_failure.store(7, Ordering::Relaxed);
+                    return false;
+                }
+                let empty = deliveries.is_empty();
+                observe(
+                    c,
+                    deliveries
+                        .first()
+                        .map(|d| d.delivery().delivery_id.as_str()),
+                    true,
+                );
+                for delivery in deliveries {
+                    if c.stopping.load(Ordering::Acquire) {
+                        return good;
+                    }
+                    let id = &delivery.delivery().delivery_id;
+                    observe(c, Some(id), false);
+                    match backend.dispatch_authenticated(state, &delivery, unix_now()) {
+                        Ok(()) => {
+                            increment(&c.acked);
+                            observed_ack(c, id);
+                        }
+                        Err(e) => {
+                            good = false;
+                            c.last_inbox_failure
+                                .store(hub_failure(e), Ordering::Relaxed);
+                        }
+                    }
+                    if started.elapsed() >= budget {
+                        return good;
+                    }
+                }
+                if empty || remaining == 0 || started.elapsed() >= budget {
+                    break;
+                }
+                thread::yield_now();
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                c.last_inbox_failure.store(1, Ordering::Relaxed);
+                return false;
+            }
         }
         let batch = match backend.receive_batch(if page == 0 { 1000 } else { 0 }) {
             Ok(b) => b,

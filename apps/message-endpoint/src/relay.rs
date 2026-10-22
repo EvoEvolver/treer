@@ -11,6 +11,15 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 const FORWARDED_TTL: i64 = 48 * 60 * 60;
 
+/// Bounded production status renewal. The injected clock also drives regression
+/// tests; failed attempts consume their interval rather than spin on Core.
+#[derive(Default)]
+pub struct StatusRenewal {
+    last_attempt: Option<i64>,
+    sequence: u64,
+}
+const STATUS_RENEW_SECONDS: i64 = 120;
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("relay_configuration_unavailable")]
@@ -188,6 +197,7 @@ impl<M: Mailbox> Relay<M> {
         }
         let transaction = store.db.transaction().map_err(StoreError::from)?;
         transaction.execute_batch("CREATE TABLE IF NOT EXISTS relay_pins (singleton INTEGER PRIMARY KEY CHECK(singleton=1), pins TEXT NOT NULL); CREATE TABLE IF NOT EXISTS relay_status (singleton INTEGER PRIMARY KEY CHECK(singleton=1), failure_budget_exhausted INTEGER NOT NULL DEFAULT 0); INSERT OR IGNORE INTO relay_status(singleton) VALUES(1)").map_err(StoreError::from)?;
+        transaction.execute_batch("CREATE TABLE IF NOT EXISTS relay_delivery_receipts(transfer TEXT PRIMARY KEY,digest TEXT NOT NULL,wire TEXT NOT NULL);").map_err(StoreError::from)?;
         transaction.execute_batch("CREATE TABLE IF NOT EXISTS relay_forwarded(transfer TEXT PRIMARY KEY,digest TEXT NOT NULL,recipient TEXT,accepted INTEGER NOT NULL DEFAULT 0,notified INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL);").map_err(StoreError::from)?;
         let columns = transaction
             .prepare("PRAGMA table_info(relay_forwarded)")
@@ -286,7 +296,8 @@ impl<M: Mailbox> Relay<M> {
         let body =
             json!({"protocol":"treer.endpoint.status/v1","state":state,"generation":self.config.generation,
             "release_sha256":self.config.release_sha256,"actual_sha256":actual,
-            "version":env!("CARGO_PKG_VERSION"),"forwarded_evictions":evictions})
+            "version":env!("CARGO_PKG_VERSION"),"forwarded_evictions":evictions,
+            "capabilities":[crate::telegram_receipts::CAPABILITY]})
             .to_string();
         let key = protocol::digest_id(
             "startup-status",
@@ -304,10 +315,56 @@ impl<M: Mailbox> Relay<M> {
         Ok(())
     }
 
+    /// A fresh idempotency key per renewal is essential: replaying the startup
+    /// key would return its old Core delivery without refreshing Hub freshness.
+    pub fn renew_binary(
+        &self,
+        actual: &str,
+        boot_nonce: &str,
+        now: i64,
+        renewal: &mut StatusRenewal,
+    ) -> Result<bool, Error> {
+        if now < crate::transfers::TOMBSTONE_TTL
+            || renewal.last_attempt.is_some_and(|last| now < last)
+        {
+            return Err(Error::Configuration);
+        }
+        if renewal
+            .last_attempt
+            .is_some_and(|last| now - last < STATUS_RENEW_SECONDS)
+        {
+            return Ok(false);
+        }
+        renewal.sequence = renewal
+            .sequence
+            .checked_add(1)
+            .ok_or(Error::Configuration)?;
+        renewal.last_attempt = Some(now);
+        self.report_binary(actual, &format!("{boot_nonce}-renew-{}", renewal.sequence))?;
+        Ok(true)
+    }
+
+    fn retire_delivery_receipts(&self) -> Result<(), Error> {
+        // Completion is durable before retirement. A crash between these steps
+        // must not consume capacity forever; never evict a live ready transfer's
+        // receipt (it is the recovery evidence preventing another downstream send).
+        self.store
+            .db
+            .execute(
+                "DELETE FROM relay_delivery_receipts WHERE NOT EXISTS (
+                SELECT 1 FROM transfers t WHERE t.transfer=relay_delivery_receipts.transfer
+                AND t.endpoint=?1 AND t.generation=?2 AND t.direction=1 AND t.state<>2)",
+                rusqlite::params![self.config.endpoint_id, self.config.generation],
+            )
+            .map_err(StoreError::from)?;
+        Ok(())
+    }
+
     pub fn tick(&mut self, now: i64) -> Result<(), Error> {
         // Every loop and before any capacity retry: wrong clock/permissions is
         // visible as a fixed error, and admissions/acks stop until corrected.
         self.store.recheck_private_storage()?;
+        self.retire_delivery_receipts()?;
         self.store.cleanup_transfers(now)?;
         self.store.prune_completed(now)?;
         self.store
@@ -600,23 +657,133 @@ impl<M: Mailbox> Relay<M> {
                         .map_err(StoreError::from)?;
                 }
             } else if let Envelope::Deliver {
+                receipt_scope,
                 recipient,
                 body,
                 context_ids,
                 source,
-                ..
+                job_id,
             } = envelope
             {
                 let external = json!({"channel":source.channel,"account_id":source.account_id,
                     "conversation_id":source.conversation_id,"message_id":source.message_id,
                     "metadata":{"endpoint_id":self.config.endpoint_id,"binding_generation":self.config.generation.to_string()}});
-                self.mailbox.send(
-                    &recipient,
-                    &format!("ep-deliver-{transfer}"),
-                    &body,
-                    &context_ids,
-                    Some(external),
-                )?;
+                let receipt = if let Some(scope) = receipt_scope {
+                    if scope.endpoint_id != self.config.endpoint_id
+                        || scope.generation != self.config.generation
+                    {
+                        return Err(Error::Configuration);
+                    }
+                    let frame = envelope_digest(
+                        &job_id,
+                        &recipient,
+                        &body,
+                        &context_ids,
+                        &source,
+                        &scope,
+                        &self.config,
+                    )?;
+                    let existing: Option<(String, String)> = self
+                        .store
+                        .db
+                        .query_row(
+                            "SELECT digest,wire FROM relay_delivery_receipts WHERE transfer=?1",
+                            [&transfer],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )
+                        .optional()
+                        .map_err(StoreError::from)?;
+                    if let Some((digest, wire)) = existing {
+                        if digest != frame {
+                            return Err(Error::Configuration);
+                        }
+                        crate::telegram_receipts::Receipt::parse_for(
+                            wire.as_bytes(),
+                            &self.config.endpoint_id,
+                            crate::telegram_receipts::Expected {
+                                scope: &scope,
+                                job_id: &job_id,
+                                payload_digest: &frame,
+                                native_message_id: source
+                                    .message_id
+                                    .parse()
+                                    .map_err(|_| Error::Configuration)?,
+                            },
+                        )
+                        .map_err(|_| Error::Configuration)?;
+                        Some(wire)
+                    } else {
+                        self.retire_delivery_receipts()?;
+                        let count: i64 = self
+                            .store
+                            .db
+                            .query_row("SELECT count(*) FROM relay_delivery_receipts", [], |r| {
+                                r.get(0)
+                            })
+                            .map_err(StoreError::from)?;
+                        if count >= 1000 {
+                            return Err(StoreError::Full.into());
+                        }
+                        let final_id = self.mailbox.send(
+                            &recipient,
+                            &format!("ep-deliver-{transfer}"),
+                            &body,
+                            &context_ids,
+                            Some(external),
+                        )?;
+                        let receipt = crate::telegram_receipts::Receipt {
+                            protocol: crate::telegram_receipts::CAPABILITY.into(),
+                            verification: crate::telegram_receipts::Verification::AppAsserted,
+                            native_message_id: source
+                                .message_id
+                                .parse()
+                                .map_err(|_| Error::Configuration)?,
+                            scope,
+                            job_id,
+                            payload_digest: frame.clone(),
+                            final_core_message_id: final_id,
+                        };
+                        let wire =
+                            serde_json::to_string(&receipt).map_err(|_| Error::Configuration)?;
+                        crate::telegram_receipts::Receipt::parse_for(
+                            wire.as_bytes(),
+                            &self.config.endpoint_id,
+                            crate::telegram_receipts::Expected {
+                                scope: &receipt.scope,
+                                job_id: &receipt.job_id,
+                                payload_digest: &frame,
+                                native_message_id: receipt.native_message_id,
+                            },
+                        )
+                        .map_err(|_| Error::Configuration)?;
+                        self.store
+                            .db
+                            .execute(
+                                "INSERT INTO relay_delivery_receipts VALUES(?1,?2,?3)",
+                                rusqlite::params![transfer, frame, wire],
+                            )
+                            .map_err(StoreError::from)?;
+                        Some(wire)
+                    }
+                } else {
+                    self.mailbox.send(
+                        &recipient,
+                        &format!("ep-deliver-{transfer}"),
+                        &body,
+                        &context_ids,
+                        Some(external),
+                    )?;
+                    None
+                };
+                if let Some(wire) = receipt {
+                    self.mailbox.send(
+                        &self.config.hub_id,
+                        &format!("ep-receipt-{transfer}"),
+                        &wire,
+                        &[],
+                        None,
+                    )?;
+                }
             } else {
                 return Err(Error::Configuration);
             }
@@ -629,10 +796,47 @@ impl<M: Mailbox> Relay<M> {
                 &transfer,
                 now,
             )?;
+            self.store
+                .db
+                .execute(
+                    "DELETE FROM relay_delivery_receipts WHERE transfer=?1",
+                    [&transfer],
+                )
+                .map_err(StoreError::from)?;
         }
         Ok(())
     }
 }
+fn envelope_digest(
+    job_id: &str,
+    recipient: &str,
+    body: &str,
+    contexts: &[String],
+    source: &crate::protocol::ExternalSource,
+    scope: &crate::telegram_receipts::Scope,
+    config: &Config,
+) -> Result<String, Error> {
+    let envelope = Envelope::Deliver {
+        job_id: job_id.into(),
+        recipient: recipient.into(),
+        body: body.into(),
+        context_ids: contexts.to_vec(),
+        source: crate::protocol::ExternalSource {
+            channel: crate::protocol::Channel::Telegram,
+            account_id: source.account_id.clone(),
+            conversation_id: source.conversation_id.clone(),
+            message_id: source.message_id.clone(),
+        },
+        receipt_scope: Some(scope.clone()),
+    };
+    let frames = envelope
+        .fragments(&config.endpoint_id, config.generation as u64)
+        .map_err(|_| Error::Configuration)?;
+    Ok(Fragment::parse(&frames[0])
+        .map_err(|_| Error::Configuration)?
+        .payload_digest)
+}
+
 use rusqlite::OptionalExtension;
 
 #[cfg(test)]
@@ -717,6 +921,7 @@ mod tests {
     }
     fn inbound(recipient: &str) -> Vec<String> {
         Envelope::Deliver {
+            receipt_scope: None,
             job_id: "job_external".into(),
             recipient: recipient.into(),
             body: "external body".into(),
@@ -1034,6 +1239,367 @@ mod tests {
         assert!(invalid.validate("ag_endpoint").is_err());
         assert!(config().validate("ag_other").is_err());
     }
+    #[cfg(feature = "hub")]
+    impl crate::hub::Directory for Fake {
+        fn metadata(&self, id: &str) -> Result<crate::core::AgentMetadata, crate::core::Error> {
+            Ok(crate::core::AgentMetadata {
+                agent_id: id.into(),
+                workspace_id: "ws".into(),
+                server_id: "machine".into(),
+                kind: "command".into(),
+                cwd: "/workspace/endpoint".into(),
+                status: "running".into(),
+                path: Some("/team/endpoint".into()),
+            })
+        }
+    }
+    #[cfg(feature = "hub")]
+    #[test]
+    fn production_renewal_keeps_receipt_negotiation_fresh_beyond_five_minutes() {
+        use crate::{
+            hub::{Binding, Hub},
+            telegram::{Incoming, Target, Update},
+        };
+        let relay = fixture();
+        let mut hub = Hub::new(
+            Store::memory(Limits::default()).unwrap(),
+            Fake::default(),
+            "app_hub",
+            "ws",
+        )
+        .unwrap();
+        hub.add_binding(Binding {
+            endpoint_id: "ag_endpoint".into(),
+            generation: 1,
+            recipient: "ag_target".into(),
+            expected_path: "/team/endpoint".into(),
+            expected_cwd: "/workspace/endpoint".into(),
+            expected_server_id: "machine".into(),
+        })
+        .unwrap();
+        hub.bind_telegram(
+            "ag_endpoint",
+            1,
+            Target {
+                account_id: "bot_test".into(),
+                chat_id: -100,
+                topic_id: Some(7),
+                allowed_senders: vec![42],
+            },
+        )
+        .unwrap();
+        hub.resume("ag_endpoint", 2, NOW).unwrap();
+        hub.store.db.execute_batch("CREATE TABLE telegram_snapshot_imports(account TEXT PRIMARY KEY); INSERT INTO telegram_snapshot_imports VALUES('bot_test'); CREATE TABLE telegram_cutoff_journal(account TEXT PRIMARY KEY,state TEXT); INSERT INTO telegram_cutoff_journal VALUES('bot_test','applied');").unwrap();
+        assert!(hub
+            .ensure_import_receipt_capability("ag_endpoint", NOW)
+            .is_err());
+        let mut renewal = StatusRenewal::default();
+        let mut keys = HashSet::new();
+        for elapsed in [0, 120, 240, 360, 480, 600, 720] {
+            assert!(relay
+                .renew_binary(&"a".repeat(64), "boot", NOW + elapsed, &mut renewal)
+                .unwrap());
+            assert!(!relay
+                .renew_binary(&"a".repeat(64), "boot", NOW + elapsed + 1, &mut renewal)
+                .unwrap());
+            let sent = relay.mailbox.sent.borrow();
+            let (_, key, body) = sent.last().unwrap();
+            assert!(
+                keys.insert(key.clone()),
+                "Core renewal must not replay the startup operation"
+            );
+            let mut status = delivery(&format!("del_status_{elapsed}"), "ag_endpoint", body);
+            status.recipient.id = "app_hub".into();
+            hub.admit_core_delivery(&status, NOW + elapsed).unwrap();
+            hub.ensure_import_receipt_capability("ag_endpoint", NOW + elapsed + 119)
+                .unwrap();
+            assert!(hub
+                .telegram_receipt_capable("ag_endpoint", NOW + elapsed + 119)
+                .unwrap());
+        }
+        // The real preparation path must negotiate receipt, not legacy, after
+        // twelve minutes of normal production renewal (no fixture-only report).
+        hub.refresh("ag_endpoint", NOW + 721).unwrap();
+        hub.admit_telegram(
+            "bot_test",
+            vec![Update {
+                update_id: 1,
+                message: Some(Incoming {
+                    date: NOW + 721,
+                    message_id: 1,
+                    chat_id: -100,
+                    topic_id: Some(7),
+                    sender_id: 42,
+                    text: "fresh".into(),
+                    reply_to_message_id: None,
+                }),
+            }],
+            NOW + 721,
+        )
+        .unwrap();
+        let intent = hub
+            .prepare_telegram_forward("ag_endpoint", NOW + 721, &"a".repeat(64))
+            .unwrap()
+            .unwrap();
+        let mode: String = hub
+            .store
+            .db
+            .query_row(
+                "SELECT mode FROM telegram_handoff_modes WHERE job=?1",
+                [intent.job],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode, "receipt");
+        // Failed/missing renewal expires; an old, wrong-generation, or wrong
+        // outer peer never extends the current binding's negotiated authority.
+        for (sender, generation, capabilities) in [
+            ("ag_other", 1, vec![crate::telegram_receipts::CAPABILITY]),
+            ("ag_endpoint", 2, vec![crate::telegram_receipts::CAPABILITY]),
+            (
+                "ag_endpoint",
+                1,
+                vec!["treer.telegram.app-asserted-receipts.v0"],
+            ),
+        ] {
+            let mut status = delivery(
+                "del_mixed",
+                sender,
+                &json!({"protocol":"treer.endpoint.status/v1","generation":generation,
+                "release_sha256":"a".repeat(64),"actual_sha256":"a".repeat(64),"version":"0.1.0",
+                "state":"running","capabilities":capabilities})
+                .to_string(),
+            );
+            status.recipient.id = "app_hub".into();
+            let _ = hub.admit_core_delivery(&status, NOW + 1100);
+            assert!(hub
+                .ensure_import_receipt_capability("ag_endpoint", NOW + 1100)
+                .is_err());
+            assert!(!hub
+                .telegram_receipt_capable("ag_endpoint", NOW + 1100)
+                .unwrap());
+        }
+        assert!(relay
+            .renew_binary(&"a".repeat(64), "boot", NOW + 700, &mut renewal)
+            .is_err());
+    }
+
+    #[test]
+    fn renewal_failure_is_bounded_and_recovery_uses_a_fresh_core_key() {
+        let relay = fixture();
+        let mut renewal = StatusRenewal::default();
+        relay.mailbox.fail_send.set(true);
+        assert!(relay
+            .renew_binary(&"a".repeat(64), "boot", NOW, &mut renewal)
+            .is_err());
+        for elapsed in 1..120 {
+            assert!(!relay
+                .renew_binary(&"a".repeat(64), "boot", NOW + elapsed, &mut renewal)
+                .unwrap());
+        }
+        assert_eq!(relay.mailbox.sent.borrow().len(), 1);
+        relay.mailbox.fail_send.set(false);
+        assert!(relay
+            .renew_binary(&"a".repeat(64), "boot", NOW + 120, &mut renewal)
+            .unwrap());
+        let sent = relay.mailbox.sent.borrow();
+        assert_ne!(sent[0].1, sent[1].1);
+    }
+
+    #[test]
+    fn normal_receipt_drain_does_not_exhaust_capacity_after_one_thousand_messages() {
+        let mut relay = fixture();
+        for n in 1..=1005 {
+            let envelope = Envelope::Deliver {
+                job_id: format!("job_{n}"),
+                recipient: "ag_target".into(),
+                body: "message".into(),
+                context_ids: vec![],
+                source: ExternalSource {
+                    channel: Channel::Telegram,
+                    account_id: "bot_test".into(),
+                    conversation_id: "-100:7".into(),
+                    message_id: n.to_string(),
+                },
+                receipt_scope: Some(crate::telegram_receipts::Scope {
+                    account_id: "bot_test".into(),
+                    chat_id: -100,
+                    topic_id: Some(7),
+                    endpoint_id: "ag_endpoint".into(),
+                    generation: 1,
+                    recipient_id: "ag_target".into(),
+                }),
+            };
+            for (part, wire) in envelope
+                .fragments("ag_endpoint", 1)
+                .unwrap()
+                .iter()
+                .enumerate()
+            {
+                relay
+                    .handle(delivery(&format!("del_{n}_{part}"), "app_hub", wire), NOW)
+                    .unwrap();
+            }
+            relay.drain_ready(NOW).unwrap();
+            let count: i64 = relay
+                .store
+                .db
+                .query_row("SELECT count(*) FROM relay_delivery_receipts", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+        let sent = relay.mailbox.sent.borrow();
+        assert_eq!(
+            sent.iter().filter(|(to, _, _)| to == "ag_target").count(),
+            1005
+        );
+        assert_eq!(
+            sent.iter().filter(|(to, _, _)| to == "app_hub").count(),
+            1005
+        );
+    }
+
+    #[test]
+    fn receipt_capacity_refuses_send_but_completed_crash_backlog_releases_capacity() {
+        let mut relay = fixture();
+        let envelope = Envelope::Deliver {
+            job_id: "job_after_capacity".into(),
+            recipient: "ag_target".into(),
+            body: "message".into(),
+            context_ids: vec![],
+            source: ExternalSource {
+                channel: Channel::Telegram,
+                account_id: "bot_test".into(),
+                conversation_id: "-100:7".into(),
+                message_id: "1".into(),
+            },
+            receipt_scope: Some(crate::telegram_receipts::Scope {
+                account_id: "bot_test".into(),
+                chat_id: -100,
+                topic_id: Some(7),
+                endpoint_id: "ag_endpoint".into(),
+                generation: 1,
+                recipient_id: "ag_target".into(),
+            }),
+        };
+        for wire in envelope.fragments("ag_endpoint", 1).unwrap() {
+            relay
+                .handle(delivery("del_after_capacity", "app_hub", &wire), NOW)
+                .unwrap();
+        }
+        for n in 0..1000 {
+            let id = format!("pending_{n}");
+            relay
+                .store
+                .db
+                .execute(
+                    "INSERT INTO transfers VALUES('ag_endpoint',1,1,?1,'digest',1,0,?2,NULL)",
+                    rusqlite::params![id, NOW + 600],
+                )
+                .unwrap();
+            relay
+                .store
+                .db
+                .execute(
+                    "INSERT INTO relay_delivery_receipts VALUES(?1,'digest','recovery')",
+                    [&id],
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            relay.drain_ready(NOW),
+            Err(Error::Storage(StoreError::Full))
+        ));
+        assert!(relay.mailbox.sent.borrow().is_empty());
+        // Reconstruct a persisted post-completion/pre-retirement crash backlog.
+        relay
+            .store
+            .db
+            .execute(
+                "UPDATE transfers SET state=2,terminal_at=?1 WHERE transfer LIKE 'pending_%'",
+                [NOW],
+            )
+            .unwrap();
+        relay.drain_ready(NOW).unwrap();
+        assert_eq!(relay.mailbox.sent.borrow().len(), 2);
+        let count: i64 = relay
+            .store
+            .db
+            .query_row("SELECT count(*) FROM relay_delivery_receipts", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn completed_receipts_retire_past_capacity_and_after_completion_crash() {
+        let mut relay = fixture();
+        // A ready receipt must survive retirement even at capacity: losing it
+        // would resend a downstream delivery after restart.
+        relay
+            .store
+            .db
+            .execute(
+                "INSERT INTO transfers VALUES('ag_endpoint',1,1,'live','digest',1,1,?1,NULL)",
+                [NOW + 600],
+            )
+            .unwrap();
+        relay
+            .store
+            .db
+            .execute(
+                "INSERT INTO relay_delivery_receipts VALUES('live','digest','retained')",
+                [],
+            )
+            .unwrap();
+        for n in 0..1005 {
+            let transfer = format!("done_{n}");
+            relay
+                .store
+                .db
+                .execute(
+                    "INSERT INTO transfers VALUES('ag_endpoint',1,1,?1,'digest',1,1,?2,NULL)",
+                    rusqlite::params![transfer, NOW + 600],
+                )
+                .unwrap();
+            relay
+                .store
+                .db
+                .execute(
+                    "INSERT INTO relay_delivery_receipts VALUES(?1,'digest','receipt')",
+                    [&transfer],
+                )
+                .unwrap();
+            relay
+                .store
+                .finish_transfer("ag_endpoint", 1, Direction::Inbound, &transfer, NOW)
+                .unwrap();
+            // Emulates restart before the normal post-finish receipt delete.
+            relay.retire_delivery_receipts().unwrap();
+            let count: i64 = relay
+                .store
+                .db
+                .query_row("SELECT count(*) FROM relay_delivery_receipts", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1);
+        }
+        let wire: String = relay
+            .store
+            .db
+            .query_row(
+                "SELECT wire FROM relay_delivery_receipts WHERE transfer='live'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(wire, "retained");
+    }
+
     #[test]
     fn startup_hash_is_status_only_and_does_not_change_recipient_pins() {
         let relay = fixture();
@@ -1095,6 +1661,7 @@ mod tests {
     fn scheduler_runs_expiry_and_pruning_before_next_receive() {
         let mut relay = fixture();
         let long = Envelope::Deliver {
+            receipt_scope: None,
             job_id: "job_expiring".into(),
             recipient: "ag_target".into(),
             body: "a".repeat(30000),
@@ -1163,6 +1730,7 @@ mod tests {
         let mut relay = fixture();
         for index in 0..100 {
             let envelope = Envelope::Deliver {
+                receipt_scope: None,
                 job_id: format!("job_{index}"),
                 recipient: "ag_target".into(),
                 body: "external body".into(),

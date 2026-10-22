@@ -69,6 +69,7 @@ pub struct Update {
 pub struct Incoming {
     pub date: i64,
     pub message_id: i64,
+    pub reply_to_message_id: Option<i64>,
     pub chat_id: i64,
     pub topic_id: Option<i64>,
     pub sender_id: i64,
@@ -78,6 +79,12 @@ pub struct Incoming {
 /// redirects, body/deadline limits and fixed errors. Never put tokens in errors.
 pub trait Transport {
     fn send(&self, target: &Target, text: &str) -> Result<i64, Error>;
+    fn send_reply(&self, target: &Target, text: &str, reply: Option<i64>) -> Result<i64, Error> {
+        if reply.is_some() {
+            return Err(Error::Rejected);
+        }
+        self.send(target, text)
+    }
 }
 
 /// Owned work leaves the SQLite actor before any network call. Lease fields are
@@ -115,6 +122,8 @@ pub struct ChunkIntent {
     last: bool,
     pub target: Target,
     pub text: String,
+    pub reply_to_message_id: Option<i64>,
+    core_message_id: Option<String>,
 }
 fn lease_token_valid(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit())
@@ -200,6 +209,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             return Err(crate::store::Error::PrivateStorage);
         }
         migration.commit()?;
+        self.store.db.execute_batch("CREATE TABLE IF NOT EXISTS telegram_reply_contexts(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,external_id TEXT NOT NULL,contexts TEXT NOT NULL,PRIMARY KEY(endpoint,generation,external_id));")?;
         self.store.db.execute_batch("CREATE TABLE IF NOT EXISTS telegram_accounts(account TEXT PRIMARY KEY,offset INTEGER NOT NULL,ignored INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS telegram_targets(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),account TEXT NOT NULL REFERENCES telegram_accounts(account),chat INTEGER NOT NULL,topic INTEGER NOT NULL,definition TEXT NOT NULL,UNIQUE(account,chat,topic));
         CREATE TABLE IF NOT EXISTS telegram_sources(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,external_id TEXT NOT NULL,source TEXT NOT NULL,PRIMARY KEY(endpoint,generation,external_id));
@@ -223,12 +233,18 @@ impl<M: Mailbox + Directory> Hub<M> {
                 "ALTER TABLE telegram_chunks ADD COLUMN failure_class INTEGER NOT NULL DEFAULT 0;",
             )?;
         }
+        if !columns.iter().any(|name| name == "reply_id") {
+            self.store
+                .db
+                .execute_batch("ALTER TABLE telegram_chunks ADD COLUMN reply_id INTEGER;")?;
+        }
         Ok(())
     }
     /// Call after the store's 30-day terminal pruning. Pending jobs/receipts
     /// retain their metadata; transport offsets are never reset automatically.
     pub fn cleanup_telegram(&self) -> Result<(), Error> {
         self.store.db.execute_batch("DELETE FROM telegram_sources WHERE NOT EXISTS(SELECT 1 FROM inbound i WHERE i.endpoint=telegram_sources.endpoint AND i.generation=telegram_sources.generation AND i.external_id=telegram_sources.external_id);
+        DELETE FROM telegram_reply_contexts WHERE NOT EXISTS(SELECT 1 FROM inbound i WHERE i.endpoint=telegram_reply_contexts.endpoint AND i.generation=telegram_reply_contexts.generation AND i.external_id=telegram_reply_contexts.external_id);
         DELETE FROM telegram_chunks WHERE NOT EXISTS(SELECT 1 FROM transfers t WHERE t.endpoint=telegram_chunks.endpoint AND t.generation=telegram_chunks.generation AND t.direction=0 AND t.transfer=telegram_chunks.transfer);")?;
         Ok(())
     }
@@ -308,6 +324,39 @@ impl<M: Mailbox + Directory> Hub<M> {
                             };
                             let source =
                                 serde_json::to_string(&source).map_err(|_| Error::Invalid)?;
+                            let pinned_context:Option<String>=self.store.db.query_row("SELECT contexts FROM telegram_reply_contexts WHERE endpoint=?1 AND generation=?2 AND external_id=?3",params![endpoint,view.binding.generation,external_id],|r|r.get(0)).optional()?;
+                            let context = if let Some(pinned) = pinned_context {
+                                serde_json::from_str::<Vec<String>>(&pinned)
+                                    .map_err(|_| Error::Invalid)?
+                            } else if let Some(parent) = message.reply_to_message_id {
+                                let scope = crate::telegram_receipts::Scope {
+                                    account_id: account.into(),
+                                    chat_id: message.chat_id,
+                                    topic_id: message.topic_id,
+                                    endpoint_id: endpoint.clone(),
+                                    generation: view.binding.generation,
+                                    recipient_id: view.binding.recipient.clone(),
+                                };
+                                match crate::telegram_reply_store::Mappings::new(&mut self.store)?
+                                    .context(&scope, parent)
+                                {
+                                    Ok(id) => vec![id],
+                                    Err(crate::store::Error::Unavailable) => {
+                                        self.queue_history_unavailable(
+                                            &endpoint,
+                                            view.binding.generation,
+                                            &external_id,
+                                            now,
+                                        )?;
+                                        offset = update.update_id + 1;
+                                        self.store.db.execute("UPDATE telegram_accounts SET offset=?2,ignored=MIN(ignored+1,9223372036854775807) WHERE account=?1",params![account,offset])?;
+                                        continue;
+                                    }
+                                    Err(e) => return Err(e.into()),
+                                }
+                            } else {
+                                vec![]
+                            };
                             self.store.enqueue(Inbound {
                                 endpoint: &endpoint,
                                 generation: view.binding.generation,
@@ -319,6 +368,16 @@ impl<M: Mailbox + Directory> Hub<M> {
                             // Crash before this commit leaves offset unchanged; retry
                             // deduplicates enqueue and completes metadata first.
                             let tx = self.store.db.transaction()?;
+                            let context =
+                                serde_json::to_string(&context).map_err(|_| Error::Invalid)?;
+                            tx.execute(
+                                "INSERT OR IGNORE INTO telegram_reply_contexts VALUES(?1,?2,?3,?4)",
+                                params![endpoint, view.binding.generation, external_id, context],
+                            )?;
+                            let previous:String=tx.query_row("SELECT contexts FROM telegram_reply_contexts WHERE endpoint=?1 AND generation=?2 AND external_id=?3",params![endpoint,view.binding.generation,external_id],|r|r.get(0))?;
+                            if previous != context {
+                                return Err(Error::Conflict);
+                            }
                             let inserted=tx.execute("INSERT OR IGNORE INTO telegram_sources(endpoint,generation,external_id,source) VALUES(?1,?2,?3,?4)",params![endpoint,view.binding.generation,external_id,source])?;
                             let existing:String=tx.query_row("SELECT source FROM telegram_sources WHERE endpoint=?1 AND generation=?2 AND external_id=?3",params![endpoint,view.binding.generation,external_id],|r|r.get(0))?;
                             if existing != source {
@@ -347,7 +406,20 @@ impl<M: Mailbox + Directory> Hub<M> {
         now: i64,
         lease_token: &str,
     ) -> Result<Option<CoreIntent>, Error> {
-        self.prepare_telegram_forward_mode(endpoint, now, lease_token, CompletionMode::Legacy)
+        let pinned: Option<String> = self.store.db.query_row(
+            "SELECT m.mode FROM inbound i JOIN telegram_handoff_modes m ON m.job=i.id WHERE i.endpoint=?1 AND i.pending=1 ORDER BY i.id LIMIT 1",
+            [endpoint], |r| r.get(0),
+        ).optional()?;
+        self.ensure_import_receipt_capability(endpoint, now)?;
+        let capable = self.telegram_receipt_capable(endpoint, now)?;
+        let mode = match pinned.as_deref() {
+            Some("receipt") => CompletionMode::Receipt,
+            Some("legacy") => CompletionMode::Legacy,
+            Some(_) => return Err(Error::Invalid),
+            None if capable => CompletionMode::Receipt,
+            None => CompletionMode::Legacy,
+        };
+        self.prepare_telegram_forward_mode(endpoint, now, lease_token, mode)
     }
     pub(crate) fn prepare_telegram_forward_mode(
         &mut self,
@@ -426,12 +498,31 @@ impl<M: Mailbox + Directory> Hub<M> {
             |r| r.get(0),
         )?;
         let source:String=self.store.db.query_row("SELECT source FROM telegram_sources WHERE endpoint=?1 AND generation=?2 AND external_id=?3",params![endpoint,view.binding.generation,external_id],|r|r.get(0))?;
+        let source: ExternalSource = serde_json::from_str(&source).map_err(|_| Error::Invalid)?;
+        let receipt_scope =
+            matches!(mode, CompletionMode::Receipt).then(|| crate::telegram_receipts::Scope {
+                account_id: source.account_id.clone(),
+                chat_id: source
+                    .conversation_id
+                    .split_once(':')
+                    .and_then(|(c, _)| c.parse().ok())
+                    .unwrap_or(0),
+                topic_id: source
+                    .conversation_id
+                    .split_once(':')
+                    .and_then(|(_, t)| t.parse::<i64>().ok())
+                    .filter(|t| *t != 0),
+                endpoint_id: endpoint.into(),
+                generation: view.binding.generation,
+                recipient_id: job.recipient.clone(),
+            });
         let envelope = Envelope::Deliver {
+            receipt_scope,
             job_id: job.idempotency_key,
             recipient: job.recipient,
             body: job.body,
-            context_ids: vec![],
-            source: serde_json::from_str(&source).map_err(|_| Error::Invalid)?,
+            context_ids: self.telegram_contexts(endpoint, view.binding.generation, &external_id)?,
+            source,
         };
         let parts = envelope
             .fragments(endpoint, view.binding.generation as u64)
@@ -450,6 +541,77 @@ impl<M: Mailbox + Directory> Hub<M> {
             token: lease_token.into(),
             parts,
         }))
+    }
+    pub(crate) fn telegram_receipt_capable(&self, endpoint: &str, now: i64) -> Result<bool, Error> {
+        let at: Option<i64> = self.store.db.query_row(
+            "SELECT diagnostic_at FROM hub_bindings WHERE endpoint=?1",
+            [endpoint],
+            |r| r.get(0),
+        )?;
+        Ok(
+            at.is_some_and(|at| at <= now && now.saturating_sub(at) <= 300)
+                && self.view(endpoint)?.diagnostic.is_some_and(|d| {
+                    d.state == "running"
+                        && d.capabilities
+                            .iter()
+                            .any(|c| c == crate::telegram_receipts::CAPABILITY)
+                }),
+        )
+    }
+    pub(crate) fn ensure_import_receipt_capability(
+        &self,
+        endpoint: &str,
+        now: i64,
+    ) -> Result<(), HubError> {
+        let exists: bool = self.store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='telegram_snapshot_imports')",
+            [],
+            |r| r.get(0),
+        )?;
+        if exists {
+            let required:bool=self.store.db.query_row("SELECT EXISTS(SELECT 1 FROM telegram_targets t JOIN telegram_snapshot_imports i ON i.account=t.account JOIN telegram_cutoff_journal j ON j.account=t.account AND j.state='applied' WHERE t.endpoint=?1)",[endpoint],|r|r.get(0))?;
+            if required
+                && !self
+                    .telegram_receipt_capable(endpoint, now)
+                    .map_err(|_| HubError::Binding)?
+            {
+                return Err(HubError::Binding);
+            }
+        }
+        Ok(())
+    }
+    pub(crate) fn telegram_contexts(
+        &self,
+        endpoint: &str,
+        generation: i64,
+        external: &str,
+    ) -> Result<Vec<String>, Error> {
+        let row:Option<String>=self.store.db.query_row("SELECT contexts FROM telegram_reply_contexts WHERE endpoint=?1 AND generation=?2 AND external_id=?3",params![endpoint,generation,external],|r|r.get(0)).optional()?;
+        serde_json::from_str(row.as_deref().unwrap_or("[]")).map_err(|_| Error::Invalid)
+    }
+    fn queue_history_unavailable(
+        &mut self,
+        endpoint: &str,
+        generation: i64,
+        external: &str,
+        now: i64,
+    ) -> Result<(), Error> {
+        let envelope=Envelope::Outbound { delivery_id:format!("history-{external}"),message_id:format!("history-{external}"),
+            original_sender:crate::protocol::Sender {kind:crate::protocol::SenderKind::Service,id:"treer_endpoint_status".into()},
+            body:"history_unavailable: This reply references unavailable history. Send a new message without replying, or ask the workspace owner to review the binding.".into(),context_ids:vec![] };
+        for wire in envelope
+            .fragments(endpoint, generation as u64)
+            .map_err(|_| Error::Invalid)?
+        {
+            self.store.save_fragment(
+                endpoint,
+                generation,
+                crate::protocol::Direction::Outbound,
+                &wire,
+                now,
+            )?;
+        }
+        Ok(())
     }
     /// Count an actual failed Core send once per private lease, never idle polls.
     /// One bounded row per binding survives process restart. Queue data remains
@@ -578,19 +740,50 @@ impl<M: Mailbox + Directory> Hub<M> {
         let target: Target = serde_json::from_str(&target).map_err(|_| Error::Invalid)?;
         let Envelope::Outbound {
             original_sender,
+            message_id,
             body,
+            context_ids,
             ..
         } = envelope
         else {
             return Err(Error::Invalid);
         };
+        let pinned:Option<Option<i64>>=self.store.db.query_row("SELECT reply_id FROM telegram_chunks WHERE endpoint=?1 AND generation=?2 AND transfer=?3 ORDER BY part LIMIT 1",params![endpoint,view.binding.generation,transfer],|r|r.get(0)).optional()?;
+        let reply_id = if let Some(pinned) = pinned {
+            pinned
+        } else if context_ids.is_empty() {
+            None
+        } else {
+            let mut found = None;
+            for context in &context_ids {
+                let native:Option<i64>=self.store.db.query_row(
+                    "SELECT native_id FROM telegram_reply_mappings WHERE endpoint=?1 AND generation=?2 AND recipient=?3 AND account=?4 AND chat=?5 AND topic=?6 AND core_id=?7 ORDER BY created_at DESC LIMIT 1",
+                    params![endpoint,view.binding.generation,view.binding.recipient,target.account_id,target.chat_id,target.topic_id.unwrap_or(0),context],|r|r.get(0)).optional()?;
+                if let Some(native) = native {
+                    found = Some(native);
+                    break;
+                }
+            }
+            if found.is_none() {
+                self.park_transport(
+                    endpoint,
+                    view.binding.generation,
+                    &transfer,
+                    crate::failures::FailureReason::HistoryUnavailable,
+                    now,
+                )?;
+                return Ok(None);
+            }
+            found
+        };
         let chunks = framed_chunks(&original_sender, &body)?;
         for (part, text) in chunks.iter().enumerate() {
             let digest = Sha256::digest(text.as_bytes()).to_vec();
             let tx = self.store.db.transaction()?;
-            tx.execute("INSERT OR IGNORE INTO telegram_chunks(endpoint,generation,transfer,part,digest) VALUES(?1,?2,?3,?4,?5)",params![endpoint,view.binding.generation,transfer,part as i64,digest])?;
+            tx.execute("INSERT OR IGNORE INTO telegram_chunks(endpoint,generation,transfer,part,digest,reply_id) VALUES(?1,?2,?3,?4,?5,?6)",params![endpoint,view.binding.generation,transfer,part as i64,digest,reply_id])?;
             let (old,message,lease,attempts,next,class):(Vec<u8>,Option<i64>,Option<i64>,i64,i64,i64)=tx.query_row("SELECT digest,message_id,lease_until,attempts,next_attempt,failure_class FROM telegram_chunks WHERE endpoint=?1 AND generation=?2 AND transfer=?3 AND part=?4",params![endpoint,view.binding.generation,transfer,part as i64],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))?;
-            if old != digest {
+            let pinned_reply:Option<i64>=tx.query_row("SELECT reply_id FROM telegram_chunks WHERE endpoint=?1 AND generation=?2 AND transfer=?3 AND part=?4",params![endpoint,view.binding.generation,transfer,part as i64],|r|r.get(0))?;
+            if old != digest || pinned_reply != reply_id {
                 return Err(Error::Conflict);
             }
             if message.is_some() {
@@ -628,6 +821,8 @@ impl<M: Mailbox + Directory> Hub<M> {
                 last: part + 1 == chunks.len(),
                 target,
                 text: text.clone(),
+                reply_to_message_id: pinned_reply,
+                core_message_id: message_id.starts_with("msg_").then_some(message_id),
             }));
         }
         // Recovery after last result committed but before transfer retirement.
@@ -674,6 +869,42 @@ impl<M: Mailbox + Directory> Hub<M> {
         )?;
         if previous.is_none() {
             tx.execute("UPDATE hub_activity SET outbound_chunks=MIN(outbound_chunks+1,9223372036854775807) WHERE endpoint=?1 AND generation=?2 AND activated_at=?3",params![intent.endpoint,intent.generation,intent.activation_at])?;
+        }
+        if let Some(core_id) = &intent.core_message_id {
+            let recipient: String = tx.query_row(
+                "SELECT recipient FROM endpoints WHERE id=?1 AND generation=?2",
+                params![intent.endpoint, intent.generation],
+                |r| r.get(0),
+            )?;
+            let receipt = crate::telegram_receipts::Receipt {
+                protocol: crate::telegram_receipts::CAPABILITY.into(),
+                verification: crate::telegram_receipts::Verification::AppAsserted,
+                scope: crate::telegram_receipts::Scope {
+                    account_id: intent.target.account_id.clone(),
+                    chat_id: intent.target.chat_id,
+                    topic_id: intent.target.topic_id,
+                    endpoint_id: intent.endpoint.clone(),
+                    generation: intent.generation,
+                    recipient_id: recipient,
+                },
+                job_id: format!("native-{}-{}", intent.transfer, intent.part),
+                payload_digest: intent.digest.iter().map(|b| format!("{b:02x}")).collect(),
+                native_message_id: message,
+                final_core_message_id: core_id.clone(),
+            };
+            if crate::telegram_reply_store::record_in_transaction(
+                &tx,
+                &receipt,
+                crate::telegram_reply_store::HandoffState::AwaitingReceipt,
+                now,
+            )? == crate::telegram_reply_store::Recorded::ConflictHeld
+            {
+                tx.execute(
+                    "UPDATE endpoints SET paused=1 WHERE id=?1",
+                    [&intent.endpoint],
+                )?;
+                tx.execute("UPDATE hub_bindings SET reason='receipt_conflict',revision=revision+1 WHERE endpoint=?1 AND reason!='receipt_conflict'",[&intent.endpoint])?;
+            }
         }
         tx.commit()?;
         if intent.last {
@@ -974,6 +1205,7 @@ mod tests {
         Update {
             update_id: id,
             message: Some(Incoming {
+                reply_to_message_id: None,
                 date: NOW,
                 message_id: id.checked_add(1).unwrap_or(1),
                 chat_id: -100,
@@ -1104,6 +1336,63 @@ mod tests {
         .unwrap()
         .unwrap()
     }
+    #[test]
+    fn native_reply_retry_retains_pinned_target_after_mapping_eviction() {
+        let (mut h, fake) = fixture(Limits::default());
+        let receipt = receipt_job(&mut h);
+        h.complete_test_telegram_receipt(receipt_delivery(&receipt, "msg_final"), &receipt, NOW)
+            .unwrap();
+        let envelope = Envelope::Outbound {
+            delivery_id: "del_reply".into(),
+            message_id: "msg_reply".into(),
+            original_sender: Sender {
+                kind: SenderKind::Agent,
+                id: "ag_recipient".into(),
+            },
+            body: "reply".into(),
+            context_ids: vec!["msg_final".into()],
+        };
+        for (n, wire) in envelope
+            .fragments("ag_endpoint", 1)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+        {
+            fake.deliveries.borrow_mut().push(Delivery {
+                delivery_id: format!("del_reply_{n}"),
+                recipient: Principal {
+                    kind: SenderKind::Agent,
+                    id: "app_hub".into(),
+                },
+                message: Message {
+                    message_id: format!("msg_reply_{n}"),
+                    sender: Principal {
+                        kind: SenderKind::Agent,
+                        id: "ag_endpoint".into(),
+                    },
+                    body: wire,
+                    context_ids: vec![],
+                },
+            });
+        }
+        h.receive_once(NOW).unwrap();
+        let first = h
+            .prepare_telegram_chunk("ag_endpoint", NOW, &"a".repeat(64))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.reply_to_message_id, Some(2));
+        h.release_telegram_chunk(&first).unwrap();
+        h.store
+            .db
+            .execute("DELETE FROM telegram_reply_mappings", [])
+            .unwrap();
+        let retry = h
+            .prepare_telegram_chunk("ag_endpoint", NOW + 6, &"b".repeat(64))
+            .unwrap()
+            .unwrap();
+        assert_eq!(retry.reply_to_message_id, first.reply_to_message_id);
+    }
+
     #[test]
     fn receipt_ack_requires_committed_completion_and_replays_only_ack() {
         use std::{
@@ -1574,22 +1863,23 @@ print(json.dumps({'acknowledged_delivery_ids':['del_receipt'],'already_acknowled
                     receipt_delivery(&intent, "msg_changed"),
                     "ws",
                 );
-                assert!(matches!(
+                assert_eq!(
                     crate::telegram_receipt_completion::commit_and_ack(
                         &hub,
                         &core,
                         &bad,
                         &intent,
                         NOW + round,
-                    ),
-                    Err(HubError::Binding)
-                ));
+                    )
+                    .unwrap(),
+                    crate::telegram_reply_store::Recorded::DiscardedTerminal
+                );
                 let calls = root.join("acks.jsonl");
                 let before = std::fs::read_to_string(&calls).unwrap_or_default();
                 assert_eq!(
                     before.lines().count(),
-                    round as usize,
-                    "changed receipt cannot ack"
+                    round as usize * 2 + 1,
+                    "exact recorded discard confirms ACK without changing final ID"
                 );
                 let good = crate::core::AuthenticatedDelivery::fixture(
                     receipt_delivery(&intent, "msg_final"),
@@ -1608,7 +1898,7 @@ print(json.dumps({'acknowledged_delivery_ids':['del_receipt'],'already_acknowled
                 );
                 assert_eq!(
                     std::fs::read_to_string(&calls).unwrap().lines().count(),
-                    round as usize + 1
+                    round as usize * 2 + 2
                 );
                 h = hub.into_inner().unwrap();
                 assert_eq!(

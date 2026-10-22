@@ -45,7 +45,7 @@ fn invalid<T>() -> Result<T, Error> {
     Err(Error::Invalid)
 }
 impl Cutoff {
-    fn fingerprint(&self) -> Result<String, Error> {
+    pub(crate) fn fingerprint(&self) -> Result<String, Error> {
         if self.inventory_sha256.len() != 64
             || !self
                 .inventory_sha256
@@ -91,6 +91,16 @@ pub fn apply<M: Mailbox + Directory>(
         .store
         .db
         .transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let result = apply_in_transaction(&tx, cutoff, rollback, &fingerprint)?;
+    tx.commit()?;
+    Ok(result)
+}
+pub(crate) fn apply_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    cutoff: &Cutoff,
+    rollback: bool,
+    fingerprint: &str,
+) -> Result<ResultMetadata, Error> {
     let bot: i64 = tx.query_row(
         "SELECT bot_id FROM telegram_bot_pins WHERE account=?1",
         [&cutoff.account_id],
@@ -112,7 +122,7 @@ pub fn apply<M: Mailbox + Directory>(
         )
         .optional()?;
     let next = cutoff.legacy_last_update_id + 1;
-    if journal.as_ref().is_some_and(|(f, _)| f != &fingerprint) {
+    if journal.as_ref().is_some_and(|(f, _)| f != fingerprint) {
         return invalid();
     }
     let target_count: i64 = tx.query_row(
@@ -194,11 +204,10 @@ pub fn apply<M: Mailbox + Directory>(
         }
         _ => return invalid(),
     }
-    tx.commit()?;
     Ok(ResultMetadata {
         state,
         next_offset: desired,
-        fingerprint,
+        fingerprint: fingerprint.into(),
         activation_authorized: false,
     })
 }
@@ -230,7 +239,7 @@ pub fn run_file(path: &std::path::Path) -> Result<ResultMetadata, Error> {
 #[path = "telegram_cutoff_tests.rs"]
 mod tests;
 
-struct Offline;
+pub(crate) struct Offline;
 impl Directory for Offline {
     fn metadata(&self, _: &str) -> Result<crate::core::AgentMetadata, crate::core::Error> {
         Err(crate::core::Error::Unavailable)

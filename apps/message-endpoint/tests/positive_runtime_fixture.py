@@ -20,7 +20,7 @@ if args[:3]==['token','create','svc_hub']:
    import urllib.request
    urllib.request.urlopen(urllib.request.Request((p/'fixture-origin').read_text()+'/fixture/revoke-member',data=b'{"revoked":true}',headers={'Content-Type':'application/json'}),timeout=2).read()
  print(json.dumps(dict(access_token='synthetic.app.signature',token_type='Bearer',audience='svc_hub',expires_in=300)))
-elif args[:3]==['agent','show','--'] and args[3] in ['ag_endpoint','ag_recipient']:
+elif args[:3]==['agent','show','--'] and args[3] in ['app_hub','ag_endpoint','ag_recipient']:
  print(json.dumps(dict(agent_id=args[3],workspace_id='ws_test',server_id='machine_fixture',kind='command',cwd='/private/fixture',status='running',path='/team/'+args[3])))
 elif args[:2]==['message','receive']:
  time.sleep(.05)

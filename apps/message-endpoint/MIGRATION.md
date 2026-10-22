@@ -5,8 +5,9 @@ The disposable-bot roundtrip passed in #159 (user-confirmed on 2026-10-19).
 The test binding was subsequently paused at revision 4. That validates the
 sandbox text path, not production migration, native reply continuity, isolation,
 or recovery after an ambiguous external send. No production migration or historical context importer is implemented. The
-bounded stopped-state offset journal below requires preprovisioned paused
-bindings; it neither reads a legacy snapshot nor verifies operator assertions.
+stopped-state snapshot metadata validator below requires preprovisioned exact
+paused bindings and reuses the bounded offset journal; it does not verify
+operator declarations of old process death, drain or sender fencing.
 
 ## Implementation plan (#203, for Core and security review)
 
@@ -16,7 +17,7 @@ fake Core/Telegram transports and private temporary directories. Production
 snapshot creation and cutover stay with the owner/release operator after a
 separate authorization. Keep the old bridge working until that decision.
 
-### Current gaps confirmed in source
+### Original planning inventory (superseded by selected cutoff implementation below)
 
 | Boundary | Legacy bridge | Current hub/relay | Required before a continuity-preserving cutover |
 | --- | --- | --- | --- |
@@ -883,9 +884,62 @@ The loopback server records max concurrent polls1 and no sends. It uses real
 SQLite/private lock/runtime worker paths, but no real legacy bridge, bot, Core
 identity/Policy, mailbox drain or production migration acceptance.
 
-Still required before a production cutover: closed snapshot-to-binding mapping
-validation, runtime receipt/capability negotiation and native-reply cutoff/error
-handling (current receipt helpers remain undispatched), actual old-identity
+Local closed-snapshot metadata validation and scoped runtime receipt/confirmed
+ACK/native unknown-history handling are now implemented as described below.
+Still required before a production cutover: actual old-identity
 drain/fence/process evidence, separately approved secret rotation/provisioning,
 exact release authorization and real staged round trip. Post-traffic rollback
 must remain containment until a separately reviewed reverse journal exists.
+
+## Selected cutoff: executable local metadata importer
+
+Decision 5777 remains **new-context cutoff**. Historical native reply continuity,
+historical message bodies, Core grants/read APIs and post-traffic automatic
+reverse are excluded. New-binding scoped mappings come only from new accepted
+native sends or validated App-asserted final-recipient receipts. An unavailable
+reply context yields fixed `history_unavailable` guidance; its original body is
+not silently delivered as a top-level message. Outbound sends pin the native
+reply target durably and set `allow_sending_without_reply:false`; retries retain
+that target even after bounded mapping eviction.
+
+Run only against a closed synthetic/private snapshot and stopped fresh Hub:
+
+```sh
+treer-message-hub --telegram-import-snapshot /absolute/private/request.json
+```
+
+The strict request contains `state_directory`, `hub_id`, `workspace_id`,
+`snapshot`, `snapshot_sha256`, `legacy_account`, `rollback` and the unchanged
+`cutoff` object documented for the pretraffic journal above. JSON is private
+0600, directories0700. This command validates **existing** paused bindings; it
+does not create identities or activate polling. The immutable source must be a
+same-owner, single-link private regular SQLite file (<=64MiB), have no WAL/SHM
+or rollback-journal sidecars, pass quick-check and supported legacy schema
+(`user_version=0` and the fixed legacy tables). Bot ID, last-completed offset,
+selected-account binding targets/recipients and enabled senders must match
+exactly. Only `acked` deliveries, `sent` chunks and `completed` processed updates
+are terminal. Inventories are bounded; history rows are counted but never copied
+or used to grant context.
+
+The source checked handle/hash/identity is rechecked before one destination
+transaction writes the source-bound import fingerprint and the existing cutoff
+journal/offset. The actual Store lock, private-storage commit checks and existing
+pretraffic rollback guards still apply. Exact repeat is idempotent; changed
+snapshot/mapping/offset, unfinished work, active state or traffic refuse. A
+rolled-back journal stays a tombstone. Imported binding activation and new
+handoffs require fresh current-peer receipt capability; expiry or mixed peers
+cannot silently fall back to legacy. This is local source metadata validation,
+not proof that the production old identity has stopped or drained.
+
+Focused local reproduction:
+
+```sh
+cargo test --manifest-path apps/message-endpoint/Cargo.toml --locked --offline --all-features --lib telegram_snapshot_import
+cargo test --manifest-path apps/message-endpoint/Cargo.toml --locked --offline --all-features --lib telegram_roundtrip_traverses
+cargo test --manifest-path apps/message-endpoint/Cargo.toml --locked --offline --all-features --lib relay::tests
+```
+
+No production snapshot, credentials, real Bot/Core endpoint, secret rotation,
+old/new poller switching, service mutation, release or deployment is authorized
+or exercised by these synthetic local tests. Post-traffic rollback remains
+containment/manual reconciliation.

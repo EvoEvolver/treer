@@ -75,6 +75,8 @@ pub enum Envelope {
         body: String,
         context_ids: Vec<String>,
         source: ExternalSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt_scope: Option<crate::telegram_receipts::Scope>,
     },
     FailureNotice {
         job_id: String,
@@ -88,6 +90,7 @@ pub enum Envelope {
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NoticeCode {
+    HistoryUnavailable,
     TransportRejected,
     TransportRetriesExhausted,
 }
@@ -96,6 +99,7 @@ impl NoticeCode {
         match self {
             Self::TransportRejected => "transport_rejected",
             Self::TransportRetriesExhausted => "transport_retries_exhausted",
+            Self::HistoryUnavailable => "history_unavailable",
         }
     }
 }
@@ -167,6 +171,28 @@ impl Envelope {
                 Err(Error::Invalid)
             };
         }
+        if let Self::Deliver {
+            recipient,
+            source,
+            receipt_scope: Some(scope),
+            ..
+        } = self
+        {
+            if !scope.valid()
+                || !matches!(source.channel, Channel::Telegram)
+                || scope.recipient_id != *recipient
+                || scope.account_id != source.account_id
+                || source.conversation_id
+                    != format!("{}:{}", scope.chat_id, scope.topic_id.unwrap_or(0))
+                || source
+                    .message_id
+                    .parse::<i64>()
+                    .ok()
+                    .is_none_or(|id| id <= 0)
+            {
+                return Err(Error::Invalid);
+            }
+        }
         let (body, contexts, ids) = match self {
             Self::Outbound {
                 delivery_id,
@@ -185,6 +211,7 @@ impl Envelope {
                 body,
                 context_ids,
                 source,
+                ..
             } => (
                 body,
                 context_ids,

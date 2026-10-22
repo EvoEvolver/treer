@@ -13,6 +13,7 @@ pub enum FailureReason {
     TransferExpired,
     TransportRetriesExhausted,
     TransportRejected,
+    HistoryUnavailable,
 }
 impl FailureReason {
     fn code(self) -> i64 {
@@ -23,6 +24,7 @@ impl FailureReason {
             Self::TransferExpired => 3,
             Self::TransportRetriesExhausted => 4,
             Self::TransportRejected => 5,
+            Self::HistoryUnavailable => 6,
         }
     }
     pub(crate) fn from_code(code: i64) -> rusqlite::Result<Self> {
@@ -33,6 +35,7 @@ impl FailureReason {
             3 => Ok(Self::TransferExpired),
             4 => Ok(Self::TransportRetriesExhausted),
             5 => Ok(Self::TransportRejected),
+            6 => Ok(Self::HistoryUnavailable),
             _ => Err(rusqlite::Error::InvalidQuery),
         }
     }

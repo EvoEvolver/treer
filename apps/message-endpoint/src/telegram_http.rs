@@ -151,6 +151,12 @@ impl BotClient {
 }
 impl Transport for BotClient {
     fn send(&self, target: &Target, text: &str) -> Result<i64, Error> {
+        self.send_reply(target, text, None)
+    }
+    fn send_reply(&self, target: &Target, text: &str, reply: Option<i64>) -> Result<i64, Error> {
+        if reply.is_some_and(|id| id <= 0) {
+            return Err(Error::Invalid);
+        }
         if !self.verified.load(std::sync::atomic::Ordering::Acquire)
             || target.account_id != self.account_id
             || target.chat_id == 0
@@ -163,6 +169,9 @@ impl Transport for BotClient {
         let mut body = json!({"chat_id":target.chat_id,"text":text,"link_preview_options":{"is_disabled":true}});
         if let Some(topic) = target.topic_id {
             body["message_thread_id"] = topic.into();
+        }
+        if let Some(id) = reply {
+            body["reply_parameters"] = json!({"message_id":id,"allow_sending_without_reply":false});
         }
         let result = self.request("sendMessage", body)?;
         if result
@@ -255,6 +264,10 @@ fn normalize_message(message: &Value) -> Option<Incoming> {
         .into();
     let date = message.get("date")?.as_i64().filter(|n| *n > 0)?;
     Some(Incoming {
+        reply_to_message_id: match message.get("reply_to_message") {
+            None => None,
+            Some(parent) => Some(parent.get("message_id")?.as_i64().filter(|id| *id > 0)?),
+        },
         date,
         message_id,
         chat_id,

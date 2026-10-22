@@ -93,6 +93,7 @@ fn forged_body_never_selects_inbound_path() {
 #[test]
 fn local_recipient_pin_is_independent_of_hub_envelope() {
     let mut envelope = Envelope::Deliver {
+        receipt_scope: None,
         job_id: "job1".into(),
         recipient: "ag_allowed".into(),
         body: "hello".into(),

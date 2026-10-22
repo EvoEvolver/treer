@@ -1,4 +1,4 @@
-//! Stage-2 receipt contract only; not dispatched by the runtime yet.
+//! Scoped App-asserted receipt contract used by the negotiated runtime.
 //! A pinned relay's assertion can locate a reply in one binding. It never proves
 //! Core acceptance, readership, historical access or isolation.
 use serde::{Deserialize, Serialize};

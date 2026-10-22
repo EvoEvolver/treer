@@ -93,6 +93,8 @@ pub struct View {
 pub struct Status {
     #[serde(default)]
     forwarded_evictions: u64,
+    #[serde(default)]
+    pub(crate) capabilities: Vec<String>,
     protocol: String,
     generation: i64,
     release_sha256: String,
@@ -107,7 +109,12 @@ impl Status {
                 && s.bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         };
-        self.protocol == "treer.endpoint.status/v1"
+        self.capabilities.len() <= 8
+            && self
+                .capabilities
+                .iter()
+                .all(|c| c.len() <= 128 && !c.chars().any(char::is_control))
+            && self.protocol == "treer.endpoint.status/v1"
             && self.generation == generation
             && hash(&self.release_sha256)
             && hash(&self.actual_sha256)
@@ -482,6 +489,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         discard_held: bool,
     ) -> Result<(), Error> {
         self.ensure_not_terminal_held(id)?;
+        self.ensure_import_receipt_capability(id, now)?;
         self.hold_schema()?;
         if self.blocked()? {
             return Err(Error::FailureBudget);
@@ -793,6 +801,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         let code = match reason {
             FailureReason::TransportRejected => "transport_rejected",
             FailureReason::TransportRetriesExhausted => "transport_retries_exhausted",
+            FailureReason::HistoryUnavailable => "history_unavailable",
             _ => return Err(Error::Binding),
         };
         let envelope =
@@ -838,6 +847,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         let added=tx.execute("INSERT OR IGNORE INTO hub_parked(endpoint,generation,transfer,reason,created_at) VALUES(?1,?2,?3,?4,?5)",params![id,generation,transfer,code,now])?;
         let notice_code = match reason {
             FailureReason::TransportRejected => crate::protocol::NoticeCode::TransportRejected,
+            FailureReason::HistoryUnavailable => crate::protocol::NoticeCode::HistoryUnavailable,
             _ => crate::protocol::NoticeCode::TransportRetriesExhausted,
         };
         if added == 1 {

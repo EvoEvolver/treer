@@ -1,6 +1,6 @@
-//! Local stage-2 storage, not yet dispatched by the runtime. There is no
+//! Bounded local storage used by scoped runtime receipt/reply dispatch. There is no
 //! authorization here: expected handoff and outer Core principal/workspace must
-//! be checked by the eventual caller. Parsed receipts remain App assertions.
+//! be checked by the authenticated caller. Parsed receipts remain App assertions.
 use crate::{
     store::{Error, Store},
     telegram_receipts::{Expected, Receipt, Scope},
@@ -18,6 +18,8 @@ pub enum Recorded {
     Replay,
     /// The durable handoff already completed. Never recreate evicted history.
     IgnoredTerminal,
+    /// Exact terminal mismatch durably recorded; dispatcher confirms and marks ACK.
+    DiscardedTerminal,
     /// Reserved history slots are full; primary delivery must continue.
     NotRetained,
     /// Transactional caller must retain the job and expose a recovery hold.

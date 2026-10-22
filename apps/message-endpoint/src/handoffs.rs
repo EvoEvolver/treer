@@ -271,8 +271,23 @@ fn step<M: Mailbox + Directory>(
     let mut hub = state.lock().map_err(|_| ())?;
     match work {
         Work::Inbound(intent) => {
-            hub.complete_telegram_forward(&intent, &last)
+            let mode: String = hub
+                .store
+                .db
+                .query_row(
+                    "SELECT mode FROM telegram_handoff_modes WHERE job=?1",
+                    [intent.job],
+                    |r| r.get(0),
+                )
                 .map_err(|_| ())?;
+            if mode == "legacy" {
+                hub.complete_telegram_forward(&intent, &last)
+                    .map_err(|_| ())?;
+            } else if mode != "receipt" {
+                return Err(());
+            }
+            // Receipt mode retains the pending handoff; fragment acceptance is
+            // not the final recipient's Core ID. Only authenticated receipt dispatch completes it.
             increment(&c.inbound);
         }
         Work::Notice(intent) => {
@@ -412,6 +427,7 @@ mod tests {
                     Update {
                         update_id: 1,
                         message: Some(Incoming {
+                            reply_to_message_id: None,
                             date: time,
                             message_id: 1,
                             chat_id: 10,
@@ -423,6 +439,7 @@ mod tests {
                     Update {
                         update_id: 2,
                         message: Some(Incoming {
+                            reply_to_message_id: None,
                             date: time,
                             message_id: 2,
                             chat_id: 20,

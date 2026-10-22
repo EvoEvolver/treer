@@ -247,6 +247,7 @@ impl<M: crate::relay::Mailbox + crate::hub::Directory> crate::hub::Hub<M> {
         };
         let (thread,reply,context):(String,String,String)=self.store.db.query_row("SELECT thread,id,context FROM email_replies WHERE job=?1 AND endpoint=?2 AND generation=?3",params![job.job_id,endpoint,view.binding.generation],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
         let envelope = Envelope::Deliver {
+            receipt_scope: None,
             job_id: job.idempotency_key,
             recipient: job.recipient,
             body: job.body,

@@ -617,7 +617,10 @@ fn send_round<M: Mailbox + Directory>(state: &SharedHub<M>, account: &Account, s
         if stop.load(Ordering::Acquire) || !account.ready() {
             return;
         }
-        match account.client.send(&intent.target, &intent.text) {
+        match account
+            .client
+            .send_reply(&intent.target, &intent.text, intent.reply_to_message_id)
+        {
             Ok(message) => {
                 let committed = state
                     .lock()
@@ -870,6 +873,7 @@ mod tests {
         bot.polls.lock().unwrap().push_back(Ok(vec![Update {
             update_id: 1,
             message: Some(Incoming {
+                reply_to_message_id: None,
                 date: now().unwrap(),
                 message_id: 1,
                 chat_id: 100,

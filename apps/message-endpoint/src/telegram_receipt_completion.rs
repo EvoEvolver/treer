@@ -1,5 +1,4 @@
-//! Atomic queue completion boundary for negotiated receipt mode. Not dispatched
-//! by Core workers until mixed-peer capability negotiation is implemented.
+//! Atomic queue completion and confirmed-disposition ACK for negotiated runtime receipt mode.
 //! Core deliveries are obtained from this hub's authenticated workspace mailbox;
 //! no HTTP body or client-supplied principal may construct this authority.
 use crate::{
@@ -13,8 +12,7 @@ use crate::{
 };
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
-/// Completion stage for a future negotiated dispatcher; not called by current
-/// workers. Its input must come from Core::receive_authenticated, never JSON or
+/// Completion stage for the negotiated production inbox dispatcher. Its input must come from Core::receive_authenticated, never JSON or
 /// generic Mailbox values. No CLI work runs while the hub mutex is held.
 pub fn commit_and_ack<M: Mailbox + Directory>(
     hub: &std::sync::Mutex<Hub<M>>,
@@ -23,17 +21,74 @@ pub fn commit_and_ack<M: Mailbox + Directory>(
     intent: &CoreIntent,
     now: i64,
 ) -> Result<Recorded, Error> {
-    let recorded = {
+    let (recorded, disposition) = {
         let mut hub = hub.lock().map_err(|_| Error::Binding)?;
         if !core.is_identity(&hub.own_id) {
             return Err(Error::Binding);
         }
-        hub.complete_telegram_receipt(authenticated, intent, now)?
+        hub.complete_telegram_receipt_dispatch(authenticated, intent, now, true)?
     }; // Commit returned Ok and the mutex is released before Core/CLI ack.
        // Ack failure keeps the committed result. Redelivery revalidates the exact
        // receipt and retries only its idempotent ack, never external delivery.
-    core.ack(&authenticated.delivery().delivery_id)?;
+    if let Some(pending) = disposition {
+        let confirmed = pending.confirm(core)?;
+        let mut hub = hub.lock().map_err(|_| Error::Binding)?;
+        confirmed.mark(&mut hub.store)?;
+    } else {
+        core.ack(&authenticated.delivery().delivery_id)?;
+    }
     Ok(recorded)
+}
+
+/// The receipt body is only a bounded selector. Durable job, scope, source,
+/// generation and digest are reconstructed and revalidated by completion.
+/// Receipt-shaped invalid input never falls through to ordinary outbound text.
+pub(crate) fn dispatch(
+    hub: &std::sync::Mutex<Hub<crate::core::Core>>,
+    core: &crate::core::Core,
+    authenticated: &AuthenticatedDelivery,
+    now: i64,
+) -> Result<bool, Error> {
+    let body = &authenticated.delivery().message.body;
+    let value: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    match value.get("protocol").and_then(|v| v.as_str()) {
+        Some(crate::telegram_receipts::CAPABILITY) => {}
+        Some(p) if p.starts_with("treer.telegram.app-asserted-receipts.") => {
+            return Err(Error::Binding)
+        }
+        _ => return Ok(false),
+    }
+    if body.len() > 4096 {
+        return Err(Error::Binding);
+    }
+    let receipt: Receipt = serde_json::from_value(value).map_err(|_| Error::Binding)?;
+    let intent = {
+        let h = hub.lock().map_err(|_| Error::Binding)?;
+        if receipt.scope.endpoint_id != authenticated.delivery().message.sender.id {
+            return Err(Error::Binding);
+        }
+        let row: Option<(i64,String)> = h.store.db.query_row(
+            "SELECT i.id,i.lease_token FROM inbound i JOIN telegram_handoff_modes m ON m.job=i.id AND m.mode='receipt'
+             JOIN telegram_sources s ON s.endpoint=i.endpoint AND s.generation=i.generation AND s.external_id=i.external_id
+             WHERE i.endpoint=?1 AND i.generation=?2 AND i.recipient=?3
+             AND json_extract(s.source,'$.message_id')=?4",
+            params![receipt.scope.endpoint_id,receipt.scope.generation,receipt.scope.recipient_id,receipt.native_message_id.to_string()],
+            |r| Ok((r.get(0)?,r.get(1)?)),
+        ).optional()?;
+        let (job, token) = row.ok_or(Error::Binding)?;
+        CoreIntent {
+            endpoint: receipt.scope.endpoint_id.clone(),
+            generation: receipt.scope.generation,
+            job,
+            token,
+            parts: vec![],
+        }
+    };
+    commit_and_ack(hub, core, authenticated, &intent, now)?;
+    Ok(true)
 }
 
 impl<M: Mailbox + Directory> Hub<M> {
@@ -59,6 +114,23 @@ impl<M: Mailbox + Directory> Hub<M> {
         intent: &CoreIntent,
         now: i64,
     ) -> Result<Recorded, Error> {
+        self.complete_telegram_receipt_dispatch(authenticated, intent, now, false)
+            .map(|(recorded, _)| recorded)
+    }
+
+    fn complete_telegram_receipt_dispatch<'a>(
+        &mut self,
+        authenticated: &'a AuthenticatedDelivery,
+        intent: &CoreIntent,
+        now: i64,
+        allow_discard: bool,
+    ) -> Result<
+        (
+            Recorded,
+            Option<crate::telegram_disposition_ack::PendingAck<'a>>,
+        ),
+        Error,
+    > {
         let delivery = authenticated.delivery();
         if authenticated.workspace() != self.workspace
             || now < crate::transfers::TOMBSTONE_TTL
@@ -149,10 +221,11 @@ impl<M: Mailbox + Directory> Hub<M> {
             )
         );
         let envelope = Envelope::Deliver {
+            receipt_scope: Some(scope.clone()),
             job_id: job_id.clone(),
             recipient: row.recipient,
             body: row.body,
-            context_ids: vec![],
+            context_ids: serde_json::from_str(&tx.query_row("SELECT contexts FROM telegram_reply_contexts WHERE endpoint=?1 AND generation=?2 AND external_id=?3",params![intent.endpoint,intent.generation,row.external],|r|r.get::<_,String>(0)).optional()?.unwrap_or_else(||"[]".into())).map_err(|_|Error::Binding)?,
             source,
         };
         let frames = envelope
@@ -191,15 +264,36 @@ impl<M: Mailbox + Directory> Hub<M> {
                         native_message_id: native_id,
                     },
                 )?;
-            let _admission = crate::telegram_disposition_admission::record_and_hold_in_transaction(
+            let admission = crate::telegram_disposition_admission::record_and_hold_in_transaction(
                 &tx,
                 &disposition_identity,
                 now,
             )?;
-            // Deliberately still no ACK: a separate reviewed delta must add the
-            // confirmed-ACK marker and recorded-discard return contract.
             tx.commit()?;
-            return Err(Error::Binding);
+            if !allow_discard
+                || !matches!(
+                    admission,
+                    crate::telegram_disposition_admission::Admission::Inserted
+                        | crate::telegram_disposition_admission::Admission::Replay
+                )
+            {
+                return Err(Error::Binding);
+            }
+            // The committed disposition is only local evidence. Prepare a
+            // borrowed exact-delivery capability; the caller releases this Hub
+            // before confirming Core's ACK and re-locks only to mark its ordinal.
+            let pending = crate::telegram_disposition_ack::prepare(
+                &mut self.store,
+                authenticated,
+                intent.job,
+                Expected {
+                    scope: &scope,
+                    job_id: &job_id,
+                    payload_digest: &digest,
+                    native_message_id: native_id,
+                },
+            )?;
+            return Ok((Recorded::DiscardedTerminal, Some(pending)));
         }
         let state = if row.pending {
             HandoffState::AwaitingReceipt
@@ -234,7 +328,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             )?;
         }
         tx.commit()?;
-        Ok(result)
+        Ok((result, None))
     }
 }
 

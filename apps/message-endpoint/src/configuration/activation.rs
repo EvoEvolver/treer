@@ -619,8 +619,11 @@ mod tests {
         assert_eq!(
             h.store
                 .db
-                .query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| r
-                    .get::<_, i64>(0))
+                .query_row(
+                    "SELECT count(*) FROM telegram_reply_mappings WHERE account='fixture'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
                 .unwrap(),
             3
         );
@@ -654,8 +657,11 @@ mod tests {
         assert_eq!(
             h.store
                 .db
-                .query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| r
-                    .get::<_, i64>(0))
+                .query_row(
+                    "SELECT count(*) FROM telegram_reply_mappings WHERE account='fixture'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
                 .unwrap(),
             3
         );
@@ -680,7 +686,7 @@ mod tests {
             h.store
                 .db
                 .query_row(
-                    "SELECT count(*) FROM telegram_reply_mappings WHERE endpoint='ag_empty'",
+                    "SELECT count(*) FROM telegram_reply_mappings WHERE account='fixture' AND endpoint='ag_empty'",
                     [],
                     |r| r.get::<_, i64>(0)
                 )
@@ -691,7 +697,7 @@ mod tests {
             h.store
                 .db
                 .query_row(
-                    "SELECT count(*) FROM telegram_reply_mappings WHERE endpoint='ag_other'",
+                    "SELECT count(*) FROM telegram_reply_mappings WHERE account='fixture' AND endpoint='ag_other'",
                     [],
                     |r| r.get::<_, i64>(0)
                 )

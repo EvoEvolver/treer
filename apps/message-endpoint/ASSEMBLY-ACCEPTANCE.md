@@ -63,9 +63,9 @@ No listener or test process is intentionally retained.
 
 ## Remaining development and external actions
 
-#203 remains in progress: runtime receipt/capability negotiation and native
-reply cutoff/error handling remain undispatched; closed snapshot-to-binding
-import is not supplied by the attested offset journal. Post-traffic reverse sync
+#203 now has local runtime receipt/confirmed-ACK/native-reply cutoff composition
+and closed snapshot metadata validation against exact paused bindings. These
+local checks do not authorize production migration. Post-traffic reverse sync
 is not implemented. Actual old-identity mailbox drain, sender fencing, PID/birth
 stop evidence, secret rotation/provisioning, release and real round trip need
 separately named operator scope. An offset journal result always says
@@ -107,3 +107,42 @@ separate logs, never relabeled PASS. The initial whole-thread count cap was
 replaced with restartable batches after the 21+ availability finding. Terminal
 retention fixtures age only their OWN stopped/new synthetic state; no clock or
 live mailbox is changed. No full release/Core gate was repeated.
+
+## #203 runtime renewal and receipt retirement
+
+The production `treer-endpoint` loop renews its current-generation status every
+120 seconds, including a fresh boot-scoped Core operation key per renewal.
+Attempts are rate bounded even on Core failure; backward clocks refuse renewal.
+The Hub retains its 300-second freshness limit, outer sender/generation checks,
+and receipt-dependent migration activation checks. Renewals advertise App
+capability only: they do not activate a binding or prove binary integrity.
+
+Completed relay delivery receipts are retired after durable transfer completion.
+The normal tick and receipt-capacity admission also retire completion/crash
+orphans; ready/incomplete transfers retain their receipt for recovery. Capacity
+is checked before a new downstream send. Local regressions advance the actual
+renewal/preparation path beyond 300 seconds, reject mixed peers, and cover more
+than 1,000 normal completions and completion-before-retirement crash windows.
+These are local fake-Core/SQLite checks, not production cutover acceptance.
+
+## #203 selected new-context composition
+
+Receipt-mode handoffs are pinned per durable job. The endpoint advertises scoped
+`treer.telegram.app-asserted-receipts.v1`; the Hub authenticates the outer Core
+workspace/sender and revalidates generation, recipient, native source, payload
+and job before committing the final ID. Terminal mismatches use the existing
+durable disposition plus exact confirmed ACK boundary, outside the state mutex.
+Legacy jobs cannot complete through the receipt path or change mode on retry.
+Unsupported receipt protocol versions do not fall through as ordinary text.
+
+The actual local Telegram fixture exercises native inbound -> real Hub worker ->
+Rust relay -> fixed Core recipient -> native reply, known-context reply back to
+Core, unknown-history fixed error without body forwarding, terminal-disposition
+confirmed ACK and runtime restart. Only mappings created in this new binding
+are usable; there is no historical grant or continuity import.
+
+The stopped snapshot importer is the existing Hub executable's
+`--telegram-import-snapshot` mode. It reuses the pretraffic cutoff journal and
+requires preprovisioned exact paused binding/recipient/generation/placement,
+Bot pin, sender and native-target matches. Its receipt never grants activation.
+No live identity/drain/secret/poller or post-traffic reverse action is performed.

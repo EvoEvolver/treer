@@ -33,6 +33,8 @@ pub mod store;
 pub mod telegram;
 #[cfg(unix)]
 pub mod telegram_cutoff;
+#[cfg(unix)]
+pub mod telegram_snapshot_import;
 pub mod transfers;
 
 #[cfg(all(unix, feature = "hub"))]
