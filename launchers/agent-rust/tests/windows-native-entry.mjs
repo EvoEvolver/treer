@@ -24,10 +24,10 @@ for(const harness of ['codex','claude'])test(`Windows native ${harness}: text qu
     $ErrorActionPreference='Stop'
     $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
     $sid=$identity.User.Value
-    $acl=Get-Acl -LiteralPath $env:TREER_FIXTURE_STATE
+    $acl=[IO.Directory]::GetAccessControl($env:TREER_FIXTURE_STATE)
     $acl.SetSecurityDescriptorSddlForm("D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;$sid)",[Security.AccessControl.AccessControlSections]::Access)
-    Set-Acl -LiteralPath $env:TREER_FIXTURE_STATE -AclObject $acl
-    $actual=Get-Acl -LiteralPath $env:TREER_FIXTURE_STATE
+    [IO.Directory]::SetAccessControl($env:TREER_FIXTURE_STATE,$acl)
+    $actual=[IO.Directory]::GetAccessControl($env:TREER_FIXTURE_STATE)
     if (-not $actual.AreAccessRulesProtected) { throw 'fixture_dacl_not_protected' }
     $rules=@($actual.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
     if ($rules.Count -ne 2) { throw 'fixture_dacl_wrong_ace_count' }
