@@ -1,135 +1,96 @@
-name: CI
-
+name: Dedicated Windows Rust default
+run-name: Windows Rust default ${{ inputs.source_sha }}
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
-
+    inputs:
+      source_sha:
+        required: true
+        type: string
 permissions:
   contents: read
-
+  actions: read
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
+  group: rust-default-windows-cause-${{ inputs.source_sha }}
+  cancel-in-progress: false
 jobs:
-  rust:
-    name: Rust and PostgreSQL tests
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    env:
-      TREER_TEST_DATABASE_URL: postgres://treer:treer@127.0.0.1:55432/treer_test
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_USER: treer
-          POSTGRES_PASSWORD: treer
-          POSTGRES_DB: treer_test
-        ports:
-          - 55432:5432
-        options: >-
-          --health-cmd "pg_isready -U treer -d treer_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-        with:
-          toolchain: 1.90.0
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Release workflow security regressions (fake registry only)
-        run: node --test scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs scripts/install-checksums.test.mjs
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Build workspace binaries
-        run: cargo build --workspace --locked
-      - name: Test workspace including database boundaries
-        run: cargo test --workspace --locked
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  web:
-    name: Frontend types and build
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
+  native:
+    runs-on: windows-2022
+    timeout-minutes: 35
     defaults:
       run:
-        working-directory: web
+        shell: pwsh
+    env:
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.rust-default-build
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: ${{ inputs.source_sha }}
           persist-credentials: false
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: 10.12.4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
-      - run: pnpm build
-
-  agent-launcher:
-    name: Agent launcher types, fake harnesses and browser
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: launchers/agent/package-lock.json
-      - name: Install launcher dependencies
-        run: npm --prefix launchers/agent ci --ignore-scripts
-      - name: Install isolated browser runtime
-        run: cd launchers/agent && npx playwright install --with-deps chromium
-      - name: Check launcher and browser sources
-        run: npm --prefix launchers/agent run check
-      - name: Unit and installer tests (fake harnesses only)
-        run: npm --prefix launchers/agent test
-      - name: Closed Codex, ACP and Claude Interface regression
+      - name: Bind exact source
         run: |
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
-          node scripts/ais-e2e.mjs
-      - name: Browser controls and screenshots
-        run: npm --prefix launchers/agent run test:browser
+          $ErrorActionPreference='Stop'
+          if ($env:SOURCE_SHA -cnotmatch '^[0-9a-f]{40}$' -or (git rev-parse HEAD) -cne $env:SOURCE_SHA) { throw 'source pin refused' }
+          New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/rust-default-evidence" | Out-Null
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: '12385027799'
+          run-id: '39680629554'
+          github-token: ${{ github.token }}
+          path: accepted-c7cf
+          merge-multiple: true
+      - name: Bind native provider and CLI bytes
+        run: |
+          $ErrorActionPreference='Stop'
+          $tools=Join-Path $env:RUNNER_TEMP 'rust-default-tools'
+          npm install --prefix $tools --ignore-scripts --no-audit --no-fund @openai/codex@0.163.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $codex=Get-ChildItem -LiteralPath "$tools/node_modules/@openai" -Recurse -File -Filter codex.exe
+          if (@($codex).Count -ne 1 -or (Get-FileHash -Algorithm SHA256 -LiteralPath $codex.FullName).Hash.ToLower() -ne '2692c8c7bb2cf8b0aefe638741fc90236f4b824c59578ce84994f9de58200993') { throw 'Codex native pin refused' }
+          $cli=Join-Path $env:RUNNER_TEMP 'rust-default-tools/treer.exe'
+          Copy-Item -LiteralPath accepted-c7cf/treer -Destination $cli
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $cli).Hash.ToLower() -ne '4c00a5ec6dd66a39401ba7e287b255085c60e9e7456cadf1a0afcfa9874aeb76') { throw 'accepted CLI pin refused' }
+          "TREER_SPIKE_BUILD_CODEX=$($codex.FullName)" >> $env:GITHUB_ENV
+          "TREER_SPIKE_BUILD_TREER=$cli" >> $env:GITHUB_ENV
+          'TREER_SPIKE_TARGET_CODEX=C:\Users\dooms\AppData\Local\pi-node\current\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe' >> $env:GITHUB_ENV
+          'TREER_SPIKE_TARGET_TREER=C:\Users\dooms\AppData\Local\Treer\bin\treer.exe' >> $env:GITHUB_ENV
+      - name: Select native MSVC compiler
+        run: |
+          rustup toolchain install 1.90.0-x86_64-pc-windows-msvc --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default 1.90.0-x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --version --verbose | Tee-Object -FilePath "$env:RUNNER_TEMP/rust-default-evidence/rustc-version.txt"
+      - name: Changed actual native entry diagnostics only
+        working-directory: launchers/agent-rust
         env:
-          CODEX_UI_SCREENSHOTS: ${{ runner.temp }}/launcher-screenshots
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: failure()
-        with:
-          name: agent-launcher-screenshots
-          path: ${{ runner.temp }}/launcher-screenshots
-          if-no-files-found: ignore
-
-  release-tooling:
-    name: Release tooling and fake machine updates
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-      - name: Closed release, checksum, detachment and rollback tests
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-      - name: Documentation links and launcher test isolation
+          CARGO_TARGET_DIR: ${{ runner.temp }}/rust-default-fixture-build
         run: |
-          node scripts/check-docs.mjs
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
+          $ErrorActionPreference='Stop'
+          $env:TREER_WINDOWS_TEST_NODE=(Get-Command node.exe -ErrorAction Stop).Source
+          cargo build --locked --release --features fixture-harness --bin treer-agent-rust-spike
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:RUST_SPIKE_BIN=Join-Path $env:CARGO_TARGET_DIR 'release/treer-agent-rust-spike.exe'
+          node --test tests/windows-native-entry.mjs 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/rust-default-evidence/entry-diagnostic.log"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Bind diagnostic source only
+        if: always()
+        run: |
+          $ErrorActionPreference='Stop'
+          $out=Join-Path $env:RUNNER_TEMP 'rust-default-evidence'
+          $leaves=@{}
+          foreach ($leaf in @('Cargo.lock','Cargo.toml','build.rs','src/windows_store.rs','tests/windows-native-entry.mjs')) {
+            $leaves[$leaf]=(Get-FileHash -Algorithm SHA256 -LiteralPath "launchers/agent-rust/$leaf").Hash.ToLower()
+          }
+          @{source=$env:SOURCE_SHA;source_leaves=$leaves;platform='windows-x86_64-msvc';scope='fixture diagnostics only';installed=$false;fixture_image_shipped=$false;prior_backend_run='39860007368'} | ConvertTo-Json -Depth 6 | Set-Content "$out/diagnostic-binding.json"
+      - name: Preserve only safe diagnostic evidence; no binary upload
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rust-default-windows-cause-${{ inputs.source_sha }}
+          path: ${{ runner.temp }}/rust-default-evidence/
+          if-no-files-found: error
+          retention-days: 14
