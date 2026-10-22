@@ -1350,6 +1350,8 @@ mod tests {
         let app = app("https://proxy.example/")
             .with_virtual_host("message-hub.treer")
             .unwrap()
+            .with_virtual_host("svc_0123456789abcdef0123456789abcdef.treer")
+            .unwrap()
             .with_virtual_host("svc-0123456789abcdef0123456789abcdef.internal")
             .unwrap()
             .with_loopback_listener("127.0.0.1:8786".parse().unwrap())
@@ -1358,6 +1360,7 @@ mod tests {
             "hub.example",
             "hub.example:443",
             "message-hub.treer",
+            "svc_0123456789abcdef0123456789abcdef.treer",
             "svc-0123456789abcdef0123456789abcdef.internal",
             "SVC-0123456789ABCDEF0123456789ABCDEF.INTERNAL",
             "127.0.0.1:8786",
@@ -1376,6 +1379,8 @@ mod tests {
         }
         for host in [
             "evil.example",
+            "svc_unconfigured.treer",
+            "svc_0123456789abcdef0123456789abcdef.treer.evil",
             "svc-unconfigured.internal",
             "svc-0123456789abcdef0123456789abcdef.internal.evil",
             "127.0.0.1:9999",
@@ -1635,6 +1640,28 @@ mod tests {
                 (
                     "origin",
                     "https://svc-0123456789abcdef0123456789abcdef.internal",
+                ),
+                ("x-endpoint-request", "1"),
+            ]),
+        );
+        assert_eq!(result.status(), StatusCode::FORBIDDEN);
+    }
+    #[test]
+    fn managed_service_host_does_not_grant_csrf_origin() {
+        let host = "svc_0123456789abcdef0123456789abcdef.treer";
+        let app = app("https://proxy.example/")
+            .with_virtual_host(host)
+            .unwrap();
+        let result = invoke(
+            &app,
+            Method::POST,
+            "/api/endpoint/auth/logout",
+            None,
+            &headers(&[
+                ("host", host),
+                (
+                    "origin",
+                    "http://svc_0123456789abcdef0123456789abcdef.treer",
                 ),
                 ("x-endpoint-request", "1"),
             ]),

@@ -978,12 +978,15 @@ identity rejection are covered. Tests do not contact real machines or bots.
 closed environment. Native RSS, executable Policy isolation and live bot
 acceptance remain release-owned/unverified; no product-readiness claim is made.
 
-The trusted config can name the App's registered `virtual_hostname` (`NAME.treer`).
-Core replaces Host with that name for both workspace ingress and the embedded
-tunnel. Settings requests accept only this explicit virtual name, the configured
-dedicated public host (with its configured/default port), or the exact configured
-loopback listener address. Other/missing/duplicate Host values fail before
-verification; health is a fixed liveness exception. No X-Forwarded-Host is trusted.
+The trusted config can name the App's registered `virtual_hostname` (the platform
+`svc-<32 lowercase hex>.internal` name for workspace ingress and the embedded
+tunnel). The workload HTTP proxy instead sets Host to `<service_id>.treer`;
+the Hub derives and allows that exact authority from its configured service ID.
+Settings requests accept these exact names, the configured dedicated public host
+(with its configured/default port), or the exact configured loopback listener
+address. These transport hosts do not become accepted CSRF origins. Other,
+missing or duplicate Host values fail before verification; health is a fixed
+liveness exception. No X-Forwarded-Host or caller-supplied identity is trusted.
 The `access:workspace` file field is an **operator assertion**, not evidence of the
 actual Proxy ingress setting: release must separately confirm the Managed App is
 workspace-only; the preview does not claim an ingress self-check.

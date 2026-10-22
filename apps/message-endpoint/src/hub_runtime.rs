@@ -314,6 +314,10 @@ fn run_assembled(
             .with_tokens(token_mutation)
             .with_loopback_listener(config.listen)
             .map_err(|_| Error::Configuration)?
+            // The workload HTTP proxy uses the stable service authority, while
+            // workspace ingress uses the separately configured virtual host.
+            .with_virtual_host(&format!("{}.treer", config.service_id))
+            .map_err(|_| Error::Configuration)?
             .with_assets(
                 include_str!("../dist/app.js"),
                 include_str!("../dist/app.css"),
