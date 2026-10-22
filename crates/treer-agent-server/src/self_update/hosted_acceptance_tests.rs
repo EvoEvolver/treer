@@ -12,6 +12,29 @@ struct Input {
     host_sha256: String,
 }
 
+fn preflight_socket_path(root: &std::path::Path, operation_id: &str) -> Result<()> {
+    super::super::job_id(operation_id)?;
+    std::os::unix::net::SocketAddr::from_pathname(
+        root.join("state/self-update/jobs")
+            .join(operation_id)
+            .join("handoff.sock"),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn socket_geometry_is_checked_without_creating_job_or_process() {
+    let id = "01234567-89ab-4def-8123-456789abcdef";
+    assert!(preflight_socket_path(std::path::Path::new("/h/tn-0123456789abcdef"), id).is_ok());
+    assert!(
+        preflight_socket_path(std::path::Path::new(&format!("/h/{}", "x".repeat(150))), id)
+            .is_err()
+    );
+    assert!(
+        preflight_socket_path(std::path::Path::new("/h/tn-0123456789abcdef"), "../other").is_err()
+    );
+}
+
 fn read_json<T: serde::de::DeserializeOwned>(
     directory: &PrivateDirectory,
     name: &str,
@@ -178,6 +201,11 @@ async fn hosted_complete_native_fixture() {
             "preexisting launcher shim or uncertain account state"
         );
     }
+    // Use the actual platform parser used by PrivateDirectory's production
+    // handoff preflight, before config creation or any process launch. Do not
+    // create the job directory: admission must still create it exclusively.
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    preflight_socket_path(&root, &operation_id).unwrap();
     let xdg = directory.create_child("xdg").unwrap();
     let config = xdg
         .create_child("treer")
@@ -295,7 +323,7 @@ async fn hosted_complete_native_fixture() {
         })
         .await??;
         let mut binding = DispatchBinding {
-            operation_id: uuid::Uuid::new_v4().to_string(),
+            operation_id: operation_id.clone(),
             workspace_id: "ws_native_acceptance".into(),
             server_id: "srv_native_acceptance".into(),
             current: input.current.clone(),
