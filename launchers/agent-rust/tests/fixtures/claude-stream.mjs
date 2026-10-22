@@ -25,6 +25,7 @@ createInterface({input:process.stdin}).on('line',line=>{
   emit({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'text',text:''}}});
   emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'thinking first'}}});
   emit({type:'assistant',message:{id,content:[{type:'text',text:'thinking first'},{type:'tool_use',id:'tool-'+id,name:'Bash',input:{command:'synthetic readonly probe'}}]}});
+  if(process.env.CLAUDE_FIXTURE_DISTINCT_FINAL)emit({type:'assistant',message:{id:id+'-different',content:[{type:'text',text:'thinking first'}]}});
   emit({type:'user',message:{role:'user',content:[{type:'tool_result',tool_use_id:'tool-'+id,content:'synthetic retained output',is_error:false}]}});
   // Provider idle can precede result; acceptance of another user here is a bug.
   emit({type:'system',subtype:'session_state_changed',state:'idle'});

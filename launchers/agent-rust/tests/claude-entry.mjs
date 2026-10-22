@@ -31,6 +31,17 @@ async function fixture(t,extra={},setup=async()=>({})){
   return {...await launch(initial.env,initial.args),launch,state,root,logs:()=>logs};
 }
 async function stop(child){const exit=once(child,'exit');child.kill('SIGTERM');assert.equal((await exit)[0],0);}
+test('same text in a final-only different assistant message retains both identities after restart',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_DISTINCT_FINAL:'1'});
+  assert.equal((await f.post({prompt:'two distinct assistant messages'})).status,200);
+  let state=await until(f.snapshot,s=>s.thread.turns.length===1&&s.thread.status==='idle');
+  const matching=state.thread.turns[0].items.filter(i=>i.text==='thinking first');
+  assert.equal(matching.length,2);assert.equal(new Set(matching.map(i=>i.id)).size,2);
+  assert.ok(matching[1].id.endsWith('-different:0'));
+  await stop(f.child);const resumed=await f.launch();state=await resumed.snapshot();
+  assert.deepEqual(state.thread.turns[0].items.filter(i=>i.text==='thinking first'),matching);
+  assert.equal((await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').length,1);
+});
 test('actual Claude entry queues two turns across early idle and retains tools after result/restart',async t=>{
   const f=await fixture(t);let state=await f.snapshot();assert.equal(state.harness.id,'claude');assert.equal(state.harness.capabilities.steer,false);
   assert.equal((await f.post({prompt:'first'})).status,200);

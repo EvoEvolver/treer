@@ -17,7 +17,10 @@ No native history, configuration or credential files are inspected by this code.
 Initialize and interrupt use correlated `control_request`/`control_response`
 IDs. A user input is dispatched only after the existing durable receipt intent,
 and its accepted turn identity is captured before waiting on stdin. Stream
-message/block identities update stable items in arrival order. Tool results
+message/block identities update stable items in arrival order.
+Final-only messages reuse streamed text blocks only within the same message ID;
+equal text in different assistant messages retains distinct item identities.
+Tool results
 enrich their original `tool_use.id`; they never introduce a phantom user turn.
 Local user insertion covers providers that do not echo input. Final assistant
 summaries retain completed tool output; conflicting terminal identity/content

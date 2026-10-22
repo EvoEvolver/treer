@@ -436,15 +436,17 @@ impl Adapter {
                             if self.active.is_none() {
                                 bail!("claude_unowned_assistant");
                             }
-                            let streamed = self
-                                .blocks
-                                .values()
-                                .find(|(_, old, _)| old == b)
-                                .map(|(id, _, _)| id.clone());
                             let message = event["message"]["id"]
                                 .as_str()
                                 .filter(|s| !s.is_empty() && s.len() <= 512)
                                 .ok_or_else(|| anyhow::anyhow!("claude_message_id"))?;
+                            // A final-only message can repeat another message's
+                            // body. Only this same message owns streamed blocks.
+                            let streamed = (message == self.message)
+                                .then(|| self.blocks.values()
+                                    .find(|(_, old, _)| old == b)
+                                    .map(|(id, _, _)| id.clone()))
+                                .flatten();
                             let id = b["id"]
                                 .as_str()
                                 .map(str::to_owned)
@@ -612,6 +614,19 @@ mod tests {
         ] {
             assert!(line(&mut tokio::io::BufReader::new(bytes)).await.is_err());
         }
+    }
+    #[test]
+    fn equal_body_final_only_message_does_not_reuse_another_message_block() {
+        let mut a = Adapter::new("session".into()).unwrap();
+        a.request(1, "turn/start", &json!({"input":[{"type":"text","text":"prompt"}]})).unwrap();
+        a.consume(json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"message-a"}}})).unwrap();
+        a.consume(json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"same"}}})).unwrap();
+        for id in ["message-a", "message-a", "message-b"] {
+            a.consume(json!({"type":"assistant","message":{"id":id,"content":[{"type":"text","text":"same"}]}})).unwrap();
+        }
+        assert_eq!(a.order, vec!["message-a:0", "message-b:0"]);
+        assert_eq!(a.items["message-a:0"]["text"], "same");
+        assert_eq!(a.items["message-b:0"]["text"], "same");
     }
     #[test]
     fn supported_import_requires_same_claude_idle_snapshot_and_queue_binding() {
