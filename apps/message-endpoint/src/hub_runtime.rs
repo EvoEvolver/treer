@@ -395,10 +395,19 @@ mod tests {
         serde_json::from_value(json!({"hub_id":"app_hub","workspace_id":"ws_test","service_id":"svc_hub","proxy_url":"https://proxy.example/","public_url":"https://hub.example/","access":"workspace","cli":"/private/cli","cli_sha256":"a".repeat(64),"state_directory":"/private/state"})).unwrap()
     }
     #[test]
-    fn email_defaults_absent_and_cannot_enable_a_proxy_transport() {
-        assert!(config().email.is_none());
+    fn email_defaults_absent_and_proxy_transport_requires_explicit_configuration() {
+        let c = config();
+        assert!(c.email.is_none());
+        assert!(!c.activation_enabled);
+        let outbox: crate::email_workers::Config =
+            serde_json::from_value(json!({"outbox_directory":"/private/outbox"})).unwrap();
+        assert_eq!(outbox.mode, crate::email::Mode::Outbox);
+        let proxy: crate::email_workers::Config =
+            serde_json::from_value(json!({"outbox_directory":"/private/outbox","mode":"proxy"}))
+                .unwrap();
+        assert_eq!(proxy.mode, crate::email::Mode::Proxy);
         assert!(serde_json::from_value::<crate::email_workers::Config>(
-            json!({"outbox_directory":"/private/outbox","mode":"proxy"})
+            json!({"outbox_directory":"/private/outbox","mode":"smtp"}),
         )
         .is_err());
     }
