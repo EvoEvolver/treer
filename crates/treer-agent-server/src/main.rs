@@ -243,6 +243,18 @@ fn main() -> Result<()> {
         return self_update::web_adapter::run_worker(worker)
             .map_err(|_| anyhow::anyhow!("update_recovery_required"));
     }
+    // Only a dedicated non-release acceptance build contains this entry. The
+    // ordinary capability gate is unchanged; no remote route invokes it.
+    #[cfg(all(unix, feature = "native-update-acceptance"))]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--hosted-native-update-acceptance"))
+    {
+        if std::env::args_os().len() != 2 {
+            anyhow::bail!("hosted_update_acceptance_refused");
+        }
+        return self_update::hosted_acceptance::submit();
+    }
+
     // The fixed internal probe needs neither Tokio worker stacks nor any
     // Controller configuration/credentials. Parent provides a private locked
     // salt descriptor as stdin and a cleared environment.

@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Dedicated disposable hosted native acceptance build only; never a release default.
+native-update-acceptance = []
 # Opt-in test measurement only; the allocator dependency is never runtime.
 metrics-allocation-measurement = []
 

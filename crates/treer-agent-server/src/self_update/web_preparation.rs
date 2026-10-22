@@ -52,6 +52,23 @@ impl PreparedSubmission {
 }
 
 pub(super) async fn prepare(binding: DispatchBinding) -> Result<PreparedSubmission> {
+    prepare_inner(binding, None).await
+}
+
+// Dedicated acceptance builds may supply already downloaded operator-pinned
+// artifacts. This is NOT distributor/network acceptance or a production API.
+#[cfg(feature = "native-update-acceptance")]
+pub(super) async fn prepare_local(
+    binding: DispatchBinding,
+    local: PrivateDirectory,
+) -> Result<PreparedSubmission> {
+    prepare_inner(binding, Some(local)).await
+}
+
+async fn prepare_inner(
+    binding: DispatchBinding,
+    local: Option<PrivateDirectory>,
+) -> Result<PreparedSubmission> {
     if !binding.validate() || binding.plan_digest != binding.expected_plan_digest()? {
         bail!("controller_update_preview_changed");
     }
@@ -67,11 +84,17 @@ pub(super) async fn prepare(binding: DispatchBinding) -> Result<PreparedSubmissi
     let (selected, locks) = catalog.select(&binding.workspace_id, &binding.server_id)?;
     let current = catalog.current(&selected, &locks).await?;
     let target = catalog.target(&binding, current)?;
-    let distributor = Distributor::new(
-        target.artifact_base.clone(),
-        selected.proxy(),
-        target.allow_artifact_origin,
-    )?;
+    let source = match local {
+        #[cfg(feature = "native-update-acceptance")]
+        Some(directory) => ArtifactInput::Local(directory),
+        #[cfg(not(feature = "native-update-acceptance"))]
+        Some(_) => bail!("controller_update_unsupported"),
+        None => ArtifactInput::Network(Distributor::new(
+            target.artifact_base.clone(),
+            selected.proxy(),
+            target.allow_artifact_origin,
+        )?),
+    };
     // Resolve only fixed Controller-owned roots. Existing private parents may
     // be opened, but an existing UUID is never adopted, overwritten or resumed.
     let state_path = crate::service::state_dir()?;
@@ -110,22 +133,17 @@ pub(super) async fn prepare(binding: DispatchBinding) -> Result<PreparedSubmissi
     // original worker must revalidate these exact catalog bytes under its SAME
     // transferred locks before publication; a Proxy plan is not that authority.
     catalog.admission(&binding)?.persist(&journal)?;
-    let checksums = distributor.pinned_checksums(&target.sums_sha256).await?;
+    let checksums = source.checksums(&target.sums_sha256).await?;
     if checksums.digest(Binary::Controller) != receipt.controller_sha256
         || checksums.digest(Binary::Cli) != receipt.cli_sha256
     {
         bail!("controller_update_target_unavailable");
     }
-    let controller = distributor
-        .stage(
-            &journal.directory,
-            Binary::Controller,
-            &receipt.controller_sha256,
-            None,
-        )
+    let controller = source
+        .stage(&journal, Binary::Controller, &receipt.controller_sha256)
         .await?;
-    let cli = distributor
-        .stage(&journal.directory, Binary::Cli, &receipt.cli_sha256, None)
+    let cli = source
+        .stage(&journal, Binary::Cli, &receipt.cli_sha256)
         .await?;
     let host = Observation::capture(&selected).await?;
     let initial = Monitor::new()?
@@ -135,13 +153,13 @@ pub(super) async fn prepare(binding: DispatchBinding) -> Result<PreparedSubmissi
         .await?;
     super::startup_backup::capture(&state, &journal, 0)?;
     let activator = ActivatorImage::prepare(&selected, &locks, &journal)?;
-    for artifact in [&controller, &cli] {
+    for (binary, file) in [(Binary::Controller, &controller), (Binary::Cli, &cli)] {
         super::images::prepare(
-            locks.directory(&selected, artifact.binary())?,
+            locks.directory(&selected, binary)?,
             &journal,
             0,
-            artifact.binary(),
-            artifact.file(),
+            binary,
+            file,
         )?;
     }
     // Retain BOTH authenticated staged executable handles across BOTH probes.
@@ -185,6 +203,51 @@ pub(super) async fn prepare(binding: DispatchBinding) -> Result<PreparedSubmissi
     prepared.receipt()?;
     Ok(prepared)
 }
+enum ArtifactInput {
+    Network(Distributor),
+    #[cfg(feature = "native-update-acceptance")]
+    Local(PrivateDirectory),
+}
+impl ArtifactInput {
+    async fn checksums(&self, digest: &str) -> Result<super::artifacts::PinnedChecksums> {
+        match self {
+            Self::Network(distributor) => distributor.pinned_checksums(digest).await,
+            #[cfg(feature = "native-update-acceptance")]
+            Self::Local(directory) => {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                directory
+                    .read_file("SHA256SUMS")?
+                    .take(8193)
+                    .read_to_end(&mut bytes)?;
+                super::artifacts::PinnedChecksums::parse(&bytes, digest)
+            }
+        }
+    }
+    async fn stage(
+        &self,
+        journal: &Journal,
+        binary: Binary,
+        digest: &str,
+    ) -> Result<std::fs::File> {
+        match self {
+            Self::Network(distributor) => Ok(distributor
+                .stage(&journal.directory, binary, digest, None)
+                .await?
+                .file()
+                .try_clone()?),
+            #[cfg(feature = "native-update-acceptance")]
+            Self::Local(directory) => {
+                let file = directory.read_file(binary.name())?;
+                if super::images::digest_file(&file)? != digest {
+                    bail!("update_artifact_pin_mismatch");
+                }
+                Ok(file)
+            }
+        }
+    }
+}
+
 fn child(parent: &PrivateDirectory, name: &str) -> Result<PrivateDirectory> {
     // An unsafe existing entry is never removed/replaced to make this succeed.
     Ok(parent
@@ -336,6 +399,70 @@ impl PreparedSubmission {
 mod tests {
     use super::*;
     use treer_protocol::controller_update as wire;
+
+    #[cfg(feature = "native-update-acceptance")]
+    #[tokio::test]
+    async fn hosted_local_artifacts_require_exact_document_and_image_pins() {
+        use sha2::{Digest, Sha256};
+        let f = super::super::selection::tests::Fixture::new();
+        let root = PrivateDirectory::open(&f.path).unwrap();
+        let artifacts = root.create_child("acceptance-artifacts").unwrap();
+        let image = b"inert pinned native fixture; never executed";
+        let pin = format!("{:x}", Sha256::digest(image));
+        artifacts
+            .create_file("treer-agent-server")
+            .unwrap()
+            .write_all(image)
+            .unwrap();
+        let sums = format!("{pin}  treer-agent-server\n{pin}  treer\n{pin}  treer-agent-host\n");
+        artifacts
+            .create_file("SHA256SUMS")
+            .unwrap()
+            .write_all(sums.as_bytes())
+            .unwrap();
+        let digest = format!("{:x}", Sha256::digest(sums.as_bytes()));
+        let input = ArtifactInput::Local(artifacts);
+        assert!(input.checksums(&"0".repeat(64)).await.is_err());
+        assert_eq!(
+            input
+                .checksums(&digest)
+                .await
+                .unwrap()
+                .digest(Binary::Controller),
+            pin
+        );
+        let journal = Journal::create(
+            &root.create_child("jobs").unwrap(),
+            &super::super::tests::receipt(),
+        )
+        .unwrap();
+        assert!(input
+            .stage(&journal, Binary::Controller, &"0".repeat(64))
+            .await
+            .is_err());
+        assert_eq!(
+            super::super::images::digest_file(
+                &input
+                    .stage(&journal, Binary::Controller, &pin)
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            pin
+        );
+        // Tampering after document verification is checked from the actual held
+        // image again at stage/publication; the listed digest is not authority.
+        std::fs::write(
+            f.path.join("acceptance-artifacts/treer-agent-server"),
+            b"changed",
+        )
+        .unwrap();
+        assert!(input
+            .stage(&journal, Binary::Controller, &pin)
+            .await
+            .is_err());
+        assert!(journal.directory.read_file("activator").is_err());
+    }
 
     #[test]
     fn fresh_submission_is_exclusive_and_readable_after_restart_without_replay() {
