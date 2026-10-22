@@ -1,18 +1,23 @@
-mod attachments;
+#[cfg(unix)] mod attachments;
+#[cfg(windows)] #[path="windows_attachments.rs"] mod attachments;
 use treer_agent_rust_spike::bounded_json;
-mod files;
+#[cfg(unix)] mod files;
+#[cfg(windows)] #[path="windows_files.rs"] mod files;
 mod goals;
-mod disk_history;
+#[cfg(unix)] mod disk_history;
+#[cfg(windows)] #[path="windows_disk_history.rs"] mod disk_history;
 mod provider_stream;
 mod http;
 mod image_format;
 mod model;
-mod node_import;
+#[cfg(unix)] mod node_import;
+#[cfg(windows)] #[path="windows_node_import.rs"] mod node_import;
 mod rpc;
 mod claude;
 mod soul_terminal;
 mod runtime;
-mod store;
+#[cfg(unix)] mod store;
+#[cfg(windows)] #[path="windows_store.rs"] mod store;
 mod transcript;
 
 use anyhow::{bail, Result};
@@ -66,8 +71,8 @@ fn env(name: &str) -> Option<String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    if !cfg!(target_os = "macos") && !cfg!(target_os = "linux") {
-        bail!("POSIX experiment only")
+    if !cfg!(target_os = "macos") && !cfg!(target_os = "linux") && !cfg!(windows) {
+        bail!("unsupported launcher platform")
     }
     let configured_cwd = match env("AGENT_UI_CWD") {
         Some(path) => PathBuf::from(path),
@@ -120,7 +125,7 @@ async fn main() -> Result<()> {
     } else {node_import::prepare(&private_root, &cwd, &agent,
         env("AGENT_UI_SESSION_ID").or_else(|| env("CODEX_UI_THREAD_ID")).as_deref(),
         std::env::args().any(|arg| arg == "--import-node-state"))?;}
-    let attachments = if !agent.is_empty() {
+    let attachments = if !agent.is_empty() && !cfg!(windows) {
         Some(Arc::new(tokio::sync::Mutex::new(
             attachments::Attachments::open(
                 &private_root,
@@ -174,14 +179,20 @@ async fn main() -> Result<()> {
     })?;
     if let Some(file) = env("AGENT_UI_PORT_FILE") {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(file)?
-            .write_all(port.to_string().as_bytes())?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)] {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)] {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
+        }
+        let mut output = options.open(&file)?;
+        #[cfg(windows)] treer_platform::secure_file(std::path::Path::new(&file))?;
+        output.write_all(port.to_string().as_bytes())?;
+        output.sync_all()?;
     }
     let app = App {
         runtime: handle.clone(),

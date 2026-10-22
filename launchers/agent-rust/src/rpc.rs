@@ -18,13 +18,18 @@ use crate::provider_stream::{Reader, Selections};
 
 pub struct ProviderChild {
     child: Child,
+    #[cfg(unix)]
     group: Option<rustix::process::Pid>,
+    #[cfg(windows)]
+    job: Option<treer_platform::ProcessTreeGuard>,
     readers: Vec<tokio::task::AbortHandle>,
     diagnostics: Arc<std::sync::Mutex<Value>>,
     stderr_tail: Arc<std::sync::Mutex<VecDeque<u8>>>,
 }
 impl ProviderChild {
     fn kill_group(&mut self) {
+        #[cfg(windows)] { self.job.take(); }
+        #[cfg(unix)]
         if let Some(group) = self.group.take() {
             // This is the group created for this child, never the launcher's
             // inherited process group. Deliberately detached children are not
@@ -33,9 +38,12 @@ impl ProviderChild {
         }
     }
     pub async fn kill(&mut self) -> std::io::Result<()> {
-        use std::os::unix::process::ExitStatusExt;
         let observed = match self.child.try_wait() {
-            Ok(Some(status)) => json!({"state":"exited","code":status.code(),"signal":status.signal()}),
+            Ok(Some(status)) => {
+                #[cfg(unix)] let signal = { use std::os::unix::process::ExitStatusExt; status.signal() };
+                #[cfg(windows)] let signal: Option<i32> = None;
+                json!({"state":"exited","code":status.code(),"signal":signal})
+            },
             Ok(None) => json!({"state":"running","code":null,"signal":null}),
             Err(_) => json!({"state":"unverified","code":null,"signal":null}),
         };
@@ -97,15 +105,19 @@ impl Rpc {
         Self::spawn_backend(command,args,cwd,capture_stderr,Some(crate::claude::Adapter::new(session)?))
     }
     fn spawn_backend(command:&str,args:&[String],cwd:&std::path::Path,capture_stderr:bool,adapter:Option<crate::claude::Adapter>)->Result<(Self,ProviderChild,mpsc::Receiver<Value>)>{
-        let mut child = Command::new(command)
-            .args(args)
+        let mut command_builder = Command::new(command);
+        command_builder.args(args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .kill_on_drop(true)
-            .spawn()?;
+            .stderr(Stdio::piped()).kill_on_drop(true);
+        #[cfg(unix)] command_builder.process_group(0);
+        let mut child = command_builder.spawn()?;
+        #[cfg(windows)]
+        let job = match treer_platform::ProcessTreeGuard::for_process(child.id().ok_or_else(|| anyhow!("provider_process_missing"))?) {
+            Ok(Some(job)) => Some(job),
+            _ => { let _ = child.start_kill(); bail!("provider_job_assignment_failed"); }
+        };
         let rpc = Self {
             input: Arc::new(Mutex::new(child.stdin.take().unwrap())),
             pending: Arc::default(),
@@ -176,11 +188,12 @@ impl Rpc {
             reader_rpc.pending.lock().await.clear();
             let _ = events.send(json!({"method":"spike/provider-exit","params":{"reason":reason}})).await;
         });
+        #[cfg(unix)]
         let group = child
             .id()
             .and_then(|id| rustix::process::Pid::from_raw(id as i32));
         let diagnostics = rpc.diagnostics.clone();
-        Ok((rpc, ProviderChild { child, group, diagnostics, stderr_tail, readers: vec![stderr_reader.abort_handle(), stdout_reader.abort_handle()] }, receiver))
+        Ok((rpc, ProviderChild { child, #[cfg(unix)] group, #[cfg(windows)] job, diagnostics, stderr_tail, readers: vec![stderr_reader.abort_handle(), stdout_reader.abort_handle()] }, receiver))
     }
 
     pub fn diagnostics(&self) -> Value { self.diagnostics.lock().unwrap().clone() }
@@ -274,6 +287,30 @@ impl Rpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_provider_job_terminates_owned_descendant() {
+        let node = std::env::var("TREER_WINDOWS_TEST_NODE").expect("native Windows test requires pinned Node executable");
+        let root = std::env::temp_dir().join(format!("treer-rust-job-{}", uuid::Uuid::new_v4()));
+        treer_platform::secure_directory(&root).unwrap();
+        let script = "const fs=require('fs'),cp=require('child_process');setTimeout(()=>{const child=cp.spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.writeFileSync('descendant.pid',String(child.pid));},100);setInterval(()=>{},1000)";
+        let (_, mut child, _) = Rpc::spawn(&node, &["-e".into(),script.into()], &root, false).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let pid = loop {
+            if let Ok(value) = std::fs::read_to_string(root.join("descendant.pid")) { break value.parse::<u32>().unwrap(); }
+            assert!(tokio::time::Instant::now() < deadline, "owned descendant startup deadline");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let birth = treer_platform::process_created_at(pid).unwrap().expect("descendant exists");
+        let _ = child.kill().await;
+        loop {
+            if treer_platform::process_created_at(pid).unwrap() != Some(birth) { break; }
+            assert!(tokio::time::Instant::now() < deadline, "owned descendant cleanup deadline");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        drop(child);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn history_authority_requires_full_request_contract() {
         assert!(full_history_request("thread/resume", &json!({})));

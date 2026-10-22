@@ -1,5 +1,10 @@
 # Rust launcher experiment (#158)
 
+[Windows native entry](WINDOWS-NATIVE.md) documents the Windows text-only
+backend, platform storage and child ownership, exact native checks, and the
+separate provider/artifact/installation prerequisites. Unix backends remain
+selected on macOS/Linux; Windows does not substitute Node for this executable.
+
 [Soul continuation](SOUL-CONTINUATION.md) covers receiptless legacy Claude
 imports and passive terminal task retention; it does not support active tasks
 or rerunning the original Soul restore wrapper.

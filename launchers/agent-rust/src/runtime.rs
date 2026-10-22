@@ -1606,9 +1606,11 @@ pub(crate) fn node_fields(value: &Value, allowed: &[&str]) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(any(unix, test))]
 fn node_nullable_string(value: Option<&Value>, limit: usize) -> bool {
     value.is_some_and(|v| v.is_null() || v.as_str().is_some_and(|s| s.len() <= limit))
 }
+#[cfg(any(unix, test))]
 fn validate_node_record(r: &Value) -> Result<()> {
     node_fields(r, &["operationId", "fingerprint", "text", "delivery", "notify", "receipt", "submission", "notification", "turnScope", "priorTurnId", "sourceMessage", "sourceMessages", "attachmentIds", "attachmentSession"])?;
     let s = &r["submission"];
@@ -1646,6 +1648,7 @@ fn validate_node_record(r: &Value) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(any(unix, test))]
 pub(crate) fn import_node_queue(thread: &Value, queue: &Value) -> Result<Value> {
     node_fields(thread, &["threadId"])?;
     node_fields(queue, &["version", "records"])?;
