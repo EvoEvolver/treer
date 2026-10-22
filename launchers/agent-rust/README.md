@@ -404,8 +404,10 @@ by these checks.
 
 Managed execution requires the Controller's explicit
 `TREER_AGENT_PRIVATE_STATE_DIR`, an available `agent.private-state.v1` status
-from the bound loopback Controller, and private physical ancestors outside the
-working directory and VCS. The status is rechecked before HTTP prompt admission;
+from the bound loopback Controller, and physical private placement outside VCS.
+Like the Controller, placement below cwd requires a hidden first component;
+cwd itself and ordinary subdirectories remain refused. See [HOME cwd](HOME-CWD.md).
+The status is rechecked before HTTP prompt admission;
 local placement is rechecked before each journal write. Standalone hermetic
 tests may use `TREER_RUST_SPIKE_STATE_DIR`. No cwd fallback is permitted.
 Journal publication or placement failure makes the runtime read-only, blocks

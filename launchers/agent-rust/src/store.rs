@@ -58,8 +58,17 @@ impl Store {
         }
         let root = fs::canonicalize(root)?;
         let cwd = fs::canonicalize(cwd)?;
-        if root.starts_with(&cwd) {
-            bail!("spike private root must be outside cwd");
+        // Match Controller private_directory_placement: HOME cwd may contain
+        // hidden OS state, but never ordinary cwd data or cwd itself. The
+        // ancestor VCS/no-follow/owner/mode checks below still apply, including
+        // on every save and to nested history/image stores.
+        if let Ok(relative) = root.strip_prefix(&cwd) {
+            let hidden_first = relative.components().next()
+                .and_then(|part| part.as_os_str().to_str())
+                .is_some_and(|name| name.starts_with('.') && name != "." && name != "..");
+            if !hidden_first {
+                bail!("private state inside non-hidden cwd path");
+            }
         }
         for ancestor in root.ancestors() {
             let metadata = fs::symlink_metadata(ancestor)?;
@@ -216,6 +225,50 @@ fn fixture_checkpoint_failure(state: &Value) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn controller_hidden_non_vcs_placement_and_write_recheck() {
+        let home = fs::canonicalize(std::env::temp_dir()).unwrap()
+            .join(format!("rust-home-placement-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = home.join(".local/state/agent-private/ag_synthetic");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let store = Store::open(&root, &home).unwrap();
+        store.save(&serde_json::json!({"records":[]})).unwrap();
+        let original = fs::read(root.join("rust-spike.json")).unwrap();
+        assert!(Store::open(&home, &home).is_err());
+        let visible = home.join("ordinary/private");
+        fs::create_dir_all(&visible).unwrap();
+        fs::set_permissions(&visible, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(Store::open(&visible, &home).is_err());
+        for marker in [".git", ".hg", ".jj", ".svn", ".bzr", ".sl"] {
+            fs::write(home.join(marker), b"synthetic marker").unwrap();
+            assert!(Store::open(&root, &home).is_err(), "{marker}");
+            assert!(store.save(&serde_json::json!({"changed":true})).is_err());
+            assert_eq!(fs::read(root.join("rust-spike.json")).unwrap(), original);
+            fs::remove_file(home.join(marker)).unwrap();
+        }
+        store.save(&serde_json::json!({"restored":true})).unwrap();
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn hidden_placement_does_not_admit_links_or_unsafe_private_modes() {
+        use std::os::unix::fs::symlink;
+        let home = fs::canonicalize(std::env::temp_dir()).unwrap()
+            .join(format!("rust-home-unsafe-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = home.join(".private");fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let alias = home.join(".linked");symlink(&root, &alias).unwrap();
+        assert!(Store::open(&alias, &home).is_err());
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(Store::open(&root, &home).is_err());
+        fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn ambiguous_or_oversized_json_is_refused_without_rewriting_source() {
