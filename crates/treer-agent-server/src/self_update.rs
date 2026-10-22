@@ -24,6 +24,8 @@ pub mod handoff;
 pub mod health;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod host;
+#[cfg(feature = "native-update-acceptance")]
+pub(crate) mod hosted_acceptance;
 pub mod images;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod launcher_arbitration;
