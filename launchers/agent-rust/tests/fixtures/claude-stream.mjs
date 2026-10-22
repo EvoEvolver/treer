@@ -2,6 +2,7 @@
 import { createInterface } from 'node:readline';
 import { appendFileSync, existsSync } from 'node:fs';
 const args=process.argv.slice(2), session=args.at(-1);
+if(process.env.CLAUDE_FIXTURE_SPAWN_LOG)appendFileSync(process.env.CLAUDE_FIXTURE_SPAWN_LOG,'spawned\n');
 const emit=event=>process.stdout.write(JSON.stringify({session_id:session,...event})+'\n');
 let active=false, timer;
 const finish=()=>{active=false;emit({type:'result',subtype:'success',is_error:false,result:'synthetic answer'});};

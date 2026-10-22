@@ -88,7 +88,11 @@ Focused checks use `tests/claude-entry.mjs` with the synthetic producer
 tool retention and ordinary restart, restart between tool result/result with
 uncertainty preserved, correlated interrupt, and supported-snapshot import with
 same-session new turn and exact Node queue backup. No installed provider or live
-Agent is invoked. Protocol unit tests cover terminal/identity conflict, malformed
+Agent is invoked. Five actual-entry import refusals cover a different session,
+wrong queue hash, active turn, duplicate turn and51-turn snapshot. Each preserves
+source and exact backup bytes, publishes no Rust journal and never starts the
+fixture provider (a separate spawn marker verifies this boundary).
+Protocol unit tests cover terminal/identity conflict, malformed
 frames and idle/import admission. Exact native artifact freeze, focused peer
 review, current Security target compatibility and operational migration acceptance
 remain separate delivery steps; source/fixture results do not imply them.
