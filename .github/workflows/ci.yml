@@ -1,135 +1,245 @@
-name: CI
-
+# Frozen source-bound manager fixture workflow; dedicated disposable hosted job only.
+name: Dedicated hosted native update
+run-name: Native222 c56b8920 bounded release-profile images
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  rust:
-    name: Rust and PostgreSQL tests
+  native:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
-      TREER_TEST_DATABASE_URL: postgres://treer:treer@127.0.0.1:55432/treer_test
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_USER: treer
-          POSTGRES_PASSWORD: treer
-          POSTGRES_DB: treer_test
-        ports:
-          - 55432:5432
-        options: >-
-          --health-cmd "pg_isready -U treer -d treer_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
+      TREER_BUILD_COMMIT: c56b89203cf062d3f03d30ab144dfcb50401a38a
+      RUST_VERSION: 1.90.0
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-        with:
-          toolchain: 1.90.0
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Release workflow security regressions (fake registry only)
-        run: node --test scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs scripts/install-checksums.test.mjs
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Build workspace binaries
-        run: cargo build --workspace --locked
-      - name: Test workspace including database boundaries
-        run: cargo test --workspace --locked
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  web:
-    name: Frontend types and build
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: 10.12.4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
-      - run: pnpm build
-
-  agent-launcher:
-    name: Agent launcher types, fake harnesses and browser
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: launchers/agent/package-lock.json
-      - name: Install launcher dependencies
-        run: npm --prefix launchers/agent ci --ignore-scripts
-      - name: Install isolated browser runtime
-        run: cd launchers/agent && npx playwright install --with-deps chromium
-      - name: Check launcher and browser sources
-        run: npm --prefix launchers/agent run check
-      - name: Unit and installer tests (fake harnesses only)
-        run: npm --prefix launchers/agent test
-      - name: Closed Codex, ACP and Claude Interface regression
+          ref: c56b89203cf062d3f03d30ab144dfcb50401a38a
+      - name: Provision ONLY leader7776 two exact pinned paths
+        shell: bash
         run: |
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
-          node scripts/ais-e2e.mjs
-      - name: Browser controls and screenshots
-        run: npm --prefix launchers/agent run test:browser
-        env:
-          CODEX_UI_SCREENSHOTS: ${{ runner.temp }}/launcher-screenshots
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: failure()
-        with:
-          name: agent-launcher-screenshots
-          path: ${{ runner.temp }}/launcher-screenshots
-          if-no-files-found: ignore
-
-  release-tooling:
-    name: Release tooling and fake machine updates
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-      - name: Closed release, checksum, detachment and rollback tests
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-      - name: Documentation links and launcher test isolation
+          set -euo pipefail
+          python3 -I -B - <<'PYTHON'
+          #!/usr/bin/env python3
+          """222:7776: two exact mode changes, disposable hosted target only."""
+          import os, stat, pathlib, hashlib, subprocess, json, sys
+          if sys.flags.optimize != 0:
+           raise SystemExit('refused: optimized Python')
+          NODE=pathlib.Path('/usr/local/bin/node')
+          DIRECTORY=NODE.parent
+          EXPECTED='fde6a4bf8d0562f7751d1a2d6cb9b417c4cfe107bbcb0aa3e9a24e125e348f48'
+          assert os.environ.get('GITHUB_ACTIONS')=='true'
+          assert os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted'
+          assert os.uname().sysname=='Linux' and os.geteuid()!=0
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'treer222-node-provisioning.json'
+          receipt={'decision':'222:7776','status':'preflight','before':[],'after':[],'mutations':[], 'native_trusted_file':'required independently by original native fixture'}
+          fds={}
+          def meta(p, s):
+           return {'path':str(p),'device':s.st_dev,'inode':s.st_ino,'uid':s.st_uid,'gid':s.st_gid,'mode':oct(stat.S_IMODE(s.st_mode)),'directory':stat.S_ISDIR(s.st_mode),'regular':stat.S_ISREG(s.st_mode)}
+          def save():
+           with out.open('w') as f:
+            json.dump(receipt,f,indent=2);f.flush();os.fsync(f.fileno())
+          def identity(s):return (s.st_dev,s.st_ino)
+          def digest():
+           os.lseek(fds[NODE],0,os.SEEK_SET);h=hashlib.sha256()
+           while True:
+            b=os.read(fds[NODE],1048576)
+            if not b:break
+            h.update(b)
+           return h.hexdigest()
+          def retained(p,mode):
+           s=p.lstat();held=os.fstat(fds[p])
+           assert identity(s)==identity(held)==identities[p], 'held path identity changed: '+str(p)
+           assert s.st_uid==0 and s.st_gid==0 and stat.S_IMODE(s.st_mode)==mode, 'owner/mode changed: '+str(p)
+           assert stat.S_ISREG(s.st_mode) if p==NODE else stat.S_ISDIR(s.st_mode)
+           return s
+          try:
+           assert not out.exists()
+           # Inventory all physical components before any mutation; hold every directory.
+           for p in reversed(NODE.parents):
+            assert p.resolve(strict=True)==p, 'nonphysical directory'
+            s=p.lstat();receipt['before'].append(meta(p,s));save()
+            assert stat.S_ISDIR(s.st_mode) and s.st_uid==0 and s.st_gid==0
+            assert stat.S_IMODE(s.st_mode)==(0o777 if p==DIRECTORY else 0o755), 'unexpected ancestor mode: '+str(p)
+            fds[p]=os.open(p,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            assert identity(os.fstat(fds[p]))==identity(s)
+           assert NODE.resolve(strict=True)==NODE
+           s=NODE.lstat();receipt['before'].append(meta(NODE,s));save()
+           assert stat.S_ISREG(s.st_mode) and s.st_uid==0 and s.st_gid==0 and stat.S_IMODE(s.st_mode)==0o777
+           fds[NODE]=os.open('node',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=fds[DIRECTORY])
+           assert identity(os.fstat(fds[NODE]))==identity(s)
+           identities={p:identity(os.fstat(fd)) for p,fd in fds.items()}
+           assert digest()==EXPECTED
+           receipt['node_sha256']=EXPECTED
+           assert subprocess.check_output([str(NODE),'--version'],text=True,timeout=8).strip()=='v22.23.3'
+           receipt['node_version']='v22.23.3';save()
+           for target in (DIRECTORY,NODE):
+            for p in fds:retained(p,0o755 if p not in (DIRECTORY,NODE) or str(p) in receipt['mutations'] else 0o777)
+            assert digest()==EXPECTED
+            receipt['pending_chmod']=str(target);save()
+            subprocess.run(['/usr/bin/sudo','-n','/usr/bin/chmod','0755','--',str(target)],check=True,timeout=8)
+            receipt['mutations'].append(str(target));receipt.pop('pending_chmod',None)
+            receipt['after'].append(meta(target,retained(target,0o755)));save()
+           for p in fds:
+            s=retained(p,0o755)
+            assert not s.st_mode&0o022
+           assert digest()==EXPECTED
+           assert subprocess.check_output([str(NODE),'--version'],text=True,timeout=8).strip()=='v22.23.3'
+           receipt['status']='PROVISIONED_TWO_PATHS_ONLY';save()
+           print(json.dumps(receipt))
+          except BaseException as e:
+           receipt['status']='REFUSED_OR_FAILED';receipt['failure_type']=type(e).__name__;receipt['failure']=str(e)[:512]
+           save();print(json.dumps(receipt));raise
+          finally:
+           for fd in fds.values():os.close(fd)
+          PYTHON
+      - name: Build verified portable launcher payload
+        shell: bash
         run: |
-          node scripts/check-docs.mjs
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/treer222-evidence"
+          test "$(git rev-parse HEAD)" = "$TREER_BUILD_COMMIT"
+          /usr/local/bin/node --version
+          npm --prefix launchers/agent ci --ignore-scripts
+          /usr/local/bin/node scripts/prepare-launcher-release.mjs --output "$RUNNER_TEMP/treer222-launcher-payload" --source-commit "$TREER_BUILD_COMMIT"
+      - name: Build exact old feature submitter and NEW portable native images
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          cargo build --locked --release --target-dir target/acceptance-old --features native-update-acceptance -p treer-agent-server -p treer-cli 2>&1 | tee "$RUNNER_TEMP/treer222-evidence/old-build.log"
+          cargo build --locked --release --target-dir target/acceptance-new -p treer-agent-server -p treer-cli -p treer-agent-host 2>&1 | tee "$RUNNER_TEMP/treer222-evidence/new-build.log"
+      - name: Create ONE fresh private input root from source-bound artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -B - <<'PYTHON'
+          import os,pwd,pathlib,uuid,shutil,hashlib,json,subprocess,stat,re
+          source="c56b89203cf062d3f03d30ab144dfcb50401a38a"
+          assert subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()==source
+          home=pathlib.Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve(strict=True)
+          assert home==pathlib.Path(os.environ["HOME"]).resolve(strict=True)
+          root=home/("tn-"+uuid.uuid4().hex[:16])
+          root.mkdir(mode=0o700);(root/"bin").mkdir(mode=0o700);(root/"artifacts").mkdir(mode=0o700)
+          assert root.resolve(strict=True)==root and re.fullmatch(r"tn-[0-9a-f]{16}",root.name)
+          assert root.stat().st_uid==os.geteuid() and stat.S_IMODE(root.stat().st_mode)==0o700
+          prospective_handoff=root/"state/self-update/jobs"/("0"*36)/"handoff.sock"
+          assert len(os.fsencode(prospective_handoff))<=107, "fixture root cannot fit unchanged Linux Unix socket bound"
+          old=pathlib.Path("target/acceptance-old/release");new=pathlib.Path("target/acceptance-new/release")
+          evidence=pathlib.Path(os.environ["RUNNER_TEMP"])/"treer222-evidence";evidence.mkdir(exist_ok=True)
+          with (evidence/"fixture-root-preflight.json").open("x") as f:json.dump({"source":source,"root":str(root),"mode":"0700","owner_uid":os.geteuid(),"new_exclusive_root":True,"handoff_path_bytes":len(os.fsencode(prospective_handoff)),"linux_path_limit":107,"production_preflight":"source fixture must execute unchanged production preflight before Host/config"},f,indent=2);f.flush();os.fsync(f.fileno())
+          build_sizes=[]
+          for group,builddir in [("bin",old),("artifacts",new)]:
+           for name in ["treer","treer-agent-server","treer-agent-host"]:
+            original=new/name if name=="treer-agent-host" else builddir/name;s=original.lstat()
+            build_sizes.append({"destination":group+"/"+name,"build_path":str(original),"size_bytes":s.st_size,"regular":stat.S_ISREG(s.st_mode),"nlink":s.st_nlink})
+          with (evidence/"native-build-size-preflight.json").open("x") as f:json.dump({"source":source,"limit_bytes":134217728,"files":build_sizes},f,indent=2);f.flush();os.fsync(f.fileno())
+          assert all(x["regular"] and 0<x["size_bytes"]<=134217728 for x in build_sizes), "build images must be regular and within unchanged128MiB bound; no copies staged"
+          for name in ["treer","treer-agent-server"]:shutil.copyfile(old/name,root/"bin"/name)
+          # Preserve SAME actual Host image across the update; the fixture never updates Host.
+          shutil.copyfile(new/"treer-agent-host",root/"bin/treer-agent-host")
+          for name in ["treer","treer-agent-host","treer-agent-server"]:
+           shutil.copyfile(new/name,root/"artifacts"/name)
+           for folder in ["bin","artifacts"]:(root/folder/name).chmod(0o700)
+          def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+          native_modes={}
+          evidence=pathlib.Path(os.environ["RUNNER_TEMP"])/"treer222-evidence";evidence.mkdir(exist_ok=True)
+          size_receipt={"source":source,"run_id":os.environ["GITHUB_RUN_ID"],"unchanged_product_limit":128*1024*1024,"old_profile":"release/nondefaultfeature","new_profile":"release/defaultfeature","files":[]}
+          for group,builddir in [("bin",old),("artifacts",new)]:
+           for name in ["treer","treer-agent-server","treer-agent-host"]:
+            path=root/group/name;s=path.lstat()
+            size_receipt["files"].append({"path":group+"/"+name,"size_bytes":s.st_size,"mode":oct(stat.S_IMODE(s.st_mode)),"uid":s.st_uid,"nlink":s.st_nlink})
+            with (evidence/"native-size-preflight.json").open("w") as f:json.dump(size_receipt,f,indent=2);f.flush();os.fsync(f.fileno())
+            assert 0<s.st_size<=128*1024*1024, "native image outside unchanged128MiB bound"
+            assert stat.S_ISREG(s.st_mode) and s.st_uid==os.geteuid() and s.st_nlink==1
+            assert stat.S_IMODE(s.st_mode)==0o700
+            original=new/name if name=="treer-agent-host" else builddir/name
+            assert digest(path)==digest(original), "copy bytes changed"
+            native_modes[group+"/"+name]={"mode":"0700","uid":s.st_uid,"nlink":s.st_nlink,"size_bytes":s.st_size,"sha256":digest(path)}
+          version_outputs={}
+          for group in ["bin","artifacts"]:
+           for name in ["treer","treer-agent-server","treer-agent-host"]:
+            text=subprocess.check_output([str(root/group/name),"--version"],text=True,timeout=8).strip()
+            assert source in text, "actual native version must match source"
+            version_outputs[group+"/"+name]=text
+          sums="".join(digest(root/"artifacts"/n)+"  "+n+"\n" for n in ["treer","treer-agent-host","treer-agent-server"])
+          (root/"artifacts/SHA256SUMS").write_text(sums);(root/"artifacts/SHA256SUMS").chmod(0o600)
+          def identity(group):return {"release_sha":source,"artifact_source_sha":source,"controller_sha256":digest(root/group/"treer-agent-server"),"cli_sha256":digest(root/group/"treer")}
+          assert identity("bin")["controller_sha256"]!=identity("artifacts")["controller_sha256"]
+          input={"current":identity("bin"),"target":{"target_id":"acceptance-normal-c56b8920","identity":identity("artifacts"),"platform":"linux-x86_64","version_label":"same-source feature-to-normal physical replacement"},"sums_sha256":digest(root/"artifacts/SHA256SUMS"),"host_sha256":digest(root/"bin/treer-agent-host")}
+          with (root/"acceptance-input.json").open("x") as f:json.dump(input,f,indent=2)
+          (root/"acceptance-input.json").chmod(0o600)
+          evidence=pathlib.Path(os.environ["RUNNER_TEMP"])/"treer222-evidence";evidence.mkdir(exist_ok=True)
+          with (evidence/"source-artifact-binding.json").open("x") as f:json.dump({"source":source,"run_id":os.environ["GITHUB_RUN_ID"],"same_source_physical_replacement_only":True,"version_outputs":version_outputs,"native_modes":native_modes,"input":input,"root":str(root)},f,indent=2)
+          with open(os.environ["GITHUB_ENV"],"a") as f:
+           f.write("TREER_ACCEPTANCE_ROOT="+str(root)+"\nXDG_CONFIG_HOME="+str(root/"xdg")+"\nTREER_STATE_DIR="+str(root/"state")+"\nTREER_DISPOSABLE_RUNNER=1\n")
+          PYTHON
+      - name: Execute ONE exact ignored hosted native transaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release --target-dir target/acceptance-old -p treer-agent-server --features native-update-acceptance --bin treer-agent-server -- --exact self_update::hosted_acceptance::fixture_tests::hosted_systemd_native_fixture --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/treer222-evidence/actual-native.log"
+          python3 -I -B - <<'PYTHON'
+          import os,pathlib,json,re
+          evidence=pathlib.Path(os.environ["RUNNER_TEMP"])/"treer222-evidence"
+          text=(evidence/"actual-native.log").read_text()
+          if not re.search(r"test result: ok\. 1 passed; 0 failed;",text):raise SystemExit("exact hosted test did not run once")
+          root=pathlib.Path(os.environ["TREER_ACCEPTANCE_ROOT"])
+          result=json.loads((root/"native-acceptance-result.json").read_text())
+          cleanup=json.loads((root/"fixture-cleanup.json").read_text())
+          if result["native_update_acceptance"]!="passed" or result["capability_enabled"] is not False:raise SystemExit("actual native result missing")
+          if cleanup["host_reaped_and_socket_absent"] is not True:raise SystemExit("owned fixture cleanup unproven")
+          manager=json.loads((root/"native-manager-result.json").read_text())
+          worker=json.loads((root/"native-manager-worker.json").read_text())
+          if manager.get("schema")!=1 or manager.get("manager_lifecycle_acceptance")!="passed":raise SystemExit("manager acceptance unproven")
+          for name in ["host_main_pid_identity_retained","controller_replaced_and_healthy","authenticated_worker_in_unit","unit_stopped_and_cgroup_empty","observed_zero_manager_restarts"]:
+           if manager.get(name) is not True:raise SystemExit("required manager witness missing")
+          if manager.get("capability_enabled") is not False or manager.get("production_service_install_and_reboot")!="not_run":raise SystemExit("manager scope mismatch")
+          if worker.get("schema")!=1 or worker.get("recovery_authority") is not False:raise SystemExit("worker evidence scope mismatch")
+          for name in ["authenticated_worker_image","same_unit_cgroup","private_session"]:
+           if worker.get(name) is not True:raise SystemExit("required worker witness missing")
+          PYTHON
+      - name: Collect bounded result metadata without credentials or state archives
+        if: always()
+        shell: bash
+        run: |
+          python3 -I -B - <<'PYTHON'
+          import os,pathlib,shutil,stat,json
+          evidence=pathlib.Path(os.environ["RUNNER_TEMP"])/"treer222-evidence";evidence.mkdir(exist_ok=True)
+          pin=pathlib.Path(os.environ["RUNNER_TEMP"])/"treer222-node-provisioning.json"
+          if pin.is_file():shutil.copyfile(pin,evidence/pin.name)
+          raw=os.environ.get("TREER_ACCEPTANCE_ROOT")
+          if raw:
+           root=pathlib.Path(raw)
+           for name in ["acceptance-input.json","native-acceptance-result.json","fixture-cleanup.json"]:
+            p=root/name
+            if p.is_file() and p.stat().st_size<=65536:shutil.copyfile(p,evidence/name)
+           # Exact stage labels must be rebound to the final source enum before dispatch.
+           stage_labels=["binding","selection","intent","runtime","catalog","current","target","state","claim","admission","checksums","artifacts","host","baseline","startup_backup","activator","images","probes","reattest","prepared","handoff","observation","completion"]
+           names=["native-stage-"+stage+".json" for stage in stage_labels]+["native-submit-failure.json","native-fixture-failure.json","native-manager-worker.json","native-manager-result.json"]
+           assert len(stage_labels)==23 and len(names)==27 and len(set(names))==27
+           for name in names:
+            leaf=root/name
+            try:s=leaf.lstat()
+            except FileNotFoundError:continue
+            assert stat.S_ISREG(s.st_mode) and s.st_uid==os.geteuid() and s.st_nlink==1 and stat.S_IMODE(s.st_mode)==0o600 and 0<s.st_size<=65536, "unsafe diagnostic leaf"
+            fd=os.open(leaf,os.O_RDONLY|os.O_NOFOLLOW)
+            try:
+             held=os.fstat(fd)
+             assert (held.st_dev,held.st_ino)==(s.st_dev,s.st_ino)
+             data=os.read(fd,65537);assert len(data)<=65536
+             value=json.loads(data);assert isinstance(value,dict)
+            finally:os.close(fd)
+            dest=evidence/name
+            with dest.open("xb") as out:out.write(data);out.flush();os.fsync(out.fileno())
+          PYTHON
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: treer222-native-c56b8920
+          path: ${{ runner.temp }}/treer222-evidence/
+          if-no-files-found: error
+          retention-days: 14
