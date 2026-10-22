@@ -51,3 +51,60 @@ startup intent. This fixture does not reproduce the historical provider outage,
 prove a live recovery, or authorize changes to the active machine. Exact historical
 provider failure cause remains unknown; no live restart, deployment, fail-open,
 credential inspection or automatic reenrollment is part of this change.
+
+## Private real-Policy cold-restore entry
+
+`scripts/docker-core-e2e.mjs` now has a narrow
+`TREER_E2E_SCENARIO=cold-policy-recovery-226` mode. It reuses the ordinary
+Docker harness's fresh PostgreSQL/NATS, two Proxy containers, synthetic account
+and two new non-root machines. It does not accept an existing machine or enroll
+against an external Proxy. An explicit image is required, its revision label
+must match the checked-out commit, and Proxy startup uses its immutable image ID.
+Use a clean committed checkout when building and running:
+
+```sh
+revision=$(git rev-parse HEAD)
+docker build --build-arg TREER_BUILD_COMMIT="$revision" -t "treer-recovery226:$revision" .
+TREER_E2E_IMAGE="treer-recovery226:$revision" \
+  TREER_E2E_SCENARIO=cold-policy-recovery-226 node scripts/docker-core-e2e.mjs
+```
+
+The entry saves a real Agent startup declaration on machine A and installs the
+bundled default Policy App on machine B. The provider is configured fail-closed
+with zero stale allowance. It pauses only B and restarts both new Proxies to
+remove compiled Policy cache, then cold-stops and starts A. It requires the
+missing-Host `restart-controller` diagnostic, one explicit `restore` refusal
+with `policy_provider_unavailable`, and an actual newly started nohup Host and
+connected Controller. After unpausing B, actual provider HTTP readiness and a
+bounded cache-expiry wait, it invokes `restore` once more. That separate call
+must restore/attach the selected workload, load a fresh Policy revision, keep
+the machine IDs and saved registration hashes, and reuse the Host started by
+the refused call. The receipt counts CLI invocations, not captured HTTP POSTs;
+the existing service unit tests cover no automatic POST retry.
+
+The read-only fingerprint helper runs only with explicit synthetic-container
+opt-in. It emits hashes of this fixture's generated Controller/Host configs and
+machine identity, presence booleans and matched Host PID/birth metadata; it never
+emits credentials or config bodies. It refuses ambiguous, aliased, nonregular or
+oversized files. It neither adopts nor writes a service PID/birth record. A
+failure finalizer unpauses only the new provider container; the outer harness
+stops only its exact new containers and retains stopped containers/network/logs.
+`recovery226.json` is a success receipt, `results.json` records check outcomes,
+and `resources.json` identifies retained resources. A failed run is not a
+successful recovery or proof of historical incident cause.
+
+Focused entry controls (no Docker or managed configuration needed):
+
+```sh
+node --test scripts/docker-core-e2e/cold-policy-recovery.test.mjs
+python3 -B -m unittest discover -s scripts/docker-core-e2e -p recovery_fingerprint_test.py
+```
+
+These controls exercise orchestration refusal, bounded projection and explicit
+retry sequencing with synthetic adapters/files. They are not real Policy or
+cold-restore acceptance. At authoring, Docker daemon access failed before any
+fixture startup, so the new real entry remains **NOT_RUN**. Previously accepted
+mock-HTTP, private Host and delivered hot-update evidence remains separate.
+Even a passing new entry would establish Linux/private nohup recovery with a
+remote fixture provider, not the historical same-machine dependency cycle,
+physical reboot, service-manager boot behavior or enrolled-machine recovery.

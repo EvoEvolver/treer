@@ -481,6 +481,12 @@ inspection; `resources.json` lists their exact names. It does not deploy Canary
 or touch existing containers. Fixtures use Python services, without vendor Agent
 CLIs. Browser, public DNS/TLS, and OS boot-manager checks remain separate.
 
+For the separate #226 cold Host-loss and real fail-closed Policy recovery
+scenario, use the source-bound image command and receipt contract in
+[the recovery investigation](research/2026-10-21-reboot-recovery-226.md#private-real-policy-cold-restore-entry).
+It starts a fresh private stack; mock orchestration controls and existing hot
+update evidence do not establish its real cold-recovery result.
+
 Proxy persistence tests require an isolated `TREER_TEST_DATABASE_URL`. Set
 `TREER_TEST_NATS_URL` to an isolated broker for cross-Proxy tests; without it,
 a test that returns early is not distributed-path evidence. Configured raw-TCP

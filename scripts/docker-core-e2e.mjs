@@ -9,12 +9,16 @@ import {fileURLToPath} from 'node:url';
 import http from 'node:http';
 import assert from 'node:assert/strict';
 
+import {scenario, runColdPolicyRecovery} from './docker-core-e2e/cold-policy-recovery.mjs';
+
+const selectedScenario = scenario(process.env.TREER_E2E_SCENARIO);
+if (selectedScenario !== 'full') assert(process.env.TREER_E2E_IMAGE, 'explicit source-bound fixture image required');
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
 const fixtures = path.join(root, 'scripts/docker-core-e2e');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'treer-core-e2e-'));
 const prefix = `treer-core-${path.basename(dir).slice(-6).toLowerCase()}`;
-const image = process.env.TREER_E2E_IMAGE || 'treer-local-e2e:fixed';
+let image = process.env.TREER_E2E_IMAGE || 'treer-local-e2e:fixed';
 const names = suffix => `${prefix}-${suffix}`;
 const containers = [];
 const results = [];
@@ -95,7 +99,13 @@ const probe = (agent, label, mode, target) => command(agent,label,[],{program:['
 let networkCreated = false;
 console.log(`Evidence: ${dir}\nDocker prefix: ${prefix}\nImage: ${image}`);
 try {
-  await docker('image','inspect',image);
+  const inspected = JSON.parse(await docker('image','inspect',image))[0];
+  if (selectedScenario !== 'full') {
+    const source = (await exec('git', ['rev-parse', 'HEAD'], {cwd: root})).stdout.trim();
+    assert.equal(inspected.Config.Labels?.['org.opencontainers.image.revision'], source, 'image/source mismatch');
+    image = inspected.Id; // All new Proxy containers use the inspected immutable image.
+    fs.writeFileSync(path.join(dir, 'source-image.json'), JSON.stringify({source, image, scenario: selectedScenario}));
+  }
   await docker('build','-t',names('fixture'),fixtures);
   await docker('network','create',names('net')); networkCreated = true;
   await run('pg','--network-alias','pg','-e','POSTGRES_PASSWORD=e2e-only','-e','POSTGRES_USER=treer','-e','POSTGRES_DB=treer','postgres:17-alpine');
@@ -138,6 +148,20 @@ try {
     assert(!(await cli(side,'message','send','--help')).includes('--body-file'));
     assert((await cli(side,'--skill')).includes('Exchange durable Messages'));
   });
+  if (selectedScenario === 'cold-policy-recovery-226') {
+    const server = (await snapshot()).servers.find(s => s.name === 'docker-a').server_id;
+    const receipt = await runColdPolicyRecovery({api, cli, command, docker, names, snapshot, wait, check, sleep, workspace: ws,
+      fingerprint: async () => JSON.parse(await docker('exec', '-e', 'TREER_SYNTHETIC_RECOVERY_226=1',
+        names('machine-a'), 'python3', '/fixtures/recovery_fingerprint.py', ws, server)),
+      proxyReady: async () => {
+        for (const side of ['a', 'b']) {
+          const url = 'http://' + await docker('port', names('proxy-' + side), '8787/tcp');
+          await wait('226 restarted Proxy ' + side, async () => (await fetch(url + '/api/health')).ok);
+        }
+      },
+    });
+    fs.writeFileSync(path.join(dir, 'recovery226.json'), JSON.stringify(receipt, null, 2));
+  } else {
   for (const [side,port] of [['a',8200],['b',8300]]) await check(`Agent identity/startup ${side}`,async()=>{
     const agent=await cli(side,'agent','admin','create','--machine','docker-'+side,'--kind','command','--name','worker-'+side,'--','python3','/fixtures/worker.py',side,String(port));
     agents[side]=(agent.agent??agent).agent_id;
@@ -343,6 +367,7 @@ try {
     assert.equal((await api(`/api/workspaces/${ws}/apps/${apps.private.app_id}`,undefined,{raw:true})).status,404);
     assert(!(await api(`/api/workspaces/${ws}/services`)).data.services.some(s=>s.service_id===apps.private.service_id));
   });
+  }
   console.log(`All ${results.length} checks passed. Evidence: ${dir}`);
 } finally {
   // Leave stopped containers and logs for inspection; never touch other stacks.
