@@ -52,7 +52,13 @@ impl PreparedSubmission {
 }
 
 pub(super) async fn prepare(binding: DispatchBinding) -> Result<PreparedSubmission> {
-    prepare_inner(binding, None).await
+    prepare_inner(
+        binding,
+        None,
+        #[cfg(feature = "native-update-acceptance")]
+        None,
+    )
+    .await
 }
 
 // Dedicated acceptance builds may supply already downloaded operator-pinned
@@ -61,13 +67,17 @@ pub(super) async fn prepare(binding: DispatchBinding) -> Result<PreparedSubmissi
 pub(super) async fn prepare_local(
     binding: DispatchBinding,
     local: PrivateDirectory,
+    diagnostic: &super::hosted_acceptance::diagnostics::Diagnostic,
 ) -> Result<PreparedSubmission> {
-    prepare_inner(binding, Some(local)).await
+    prepare_inner(binding, Some(local), Some(diagnostic)).await
 }
 
 async fn prepare_inner(
     binding: DispatchBinding,
     local: Option<PrivateDirectory>,
+    #[cfg(feature = "native-update-acceptance")] diagnostic: Option<
+        &super::hosted_acceptance::diagnostics::Diagnostic,
+    >,
 ) -> Result<PreparedSubmission> {
     if !binding.validate() || binding.plan_digest != binding.expected_plan_digest()? {
         bail!("controller_update_preview_changed");
@@ -80,9 +90,21 @@ async fn prepare_inner(
     {
         bail!("controller_update_preview_changed");
     }
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::Catalog);
+    }
     let catalog = Catalog::local()?;
     let (selected, locks) = catalog.select(&binding.workspace_id, &binding.server_id)?;
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::Current);
+    }
     let current = catalog.current(&selected, &locks).await?;
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::Target);
+    }
     let target = catalog.target(&binding, current)?;
     let source = match local {
         #[cfg(feature = "native-update-acceptance")]
@@ -97,6 +119,10 @@ async fn prepare_inner(
     };
     // Resolve only fixed Controller-owned roots. Existing private parents may
     // be opened, but an existing UUID is never adopted, overwritten or resumed.
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::State);
+    }
     let state_path = crate::service::state_dir()?;
     let state = PrivateDirectory::open(&state_path)?;
     let updates = child(&state, "self-update")?;
@@ -128,16 +154,32 @@ async fn prepare_inner(
         created_at: binding.created_at,
         updated_at: now.max(binding.created_at),
     };
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::Claim);
+    }
     let journal = create_bound(&jobs, &receipt, &binding)?;
     // Preserve the local trust/ordering evidence before any download. The
     // original worker must revalidate these exact catalog bytes under its SAME
     // transferred locks before publication; a Proxy plan is not that authority.
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::Admission);
+    }
     catalog.admission(&binding)?.persist(&journal)?;
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::Checksums);
+    }
     let checksums = source.checksums(&target.sums_sha256).await?;
     if checksums.digest(Binary::Controller) != receipt.controller_sha256
         || checksums.digest(Binary::Cli) != receipt.cli_sha256
     {
         bail!("controller_update_target_unavailable");
+    }
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::Artifacts);
     }
     let controller = source
         .stage(&journal, Binary::Controller, &receipt.controller_sha256)
@@ -145,14 +187,34 @@ async fn prepare_inner(
     let cli = source
         .stage(&journal, Binary::Cli, &receipt.cli_sha256)
         .await?;
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::Host);
+    }
     let host = Observation::capture(&selected).await?;
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::Baseline);
+    }
     let initial = Monitor::new()?
         .observe_initial(&selected, &locks, &journal, &host)
         .await?;
     host.save_initial(&selected, &locks, &journal, 0, &initial)
         .await?;
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::StartupBackup);
+    }
     super::startup_backup::capture(&state, &journal, 0)?;
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::Activator);
+    }
     let activator = ActivatorImage::prepare(&selected, &locks, &journal)?;
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::Images);
+    }
     for (binary, file) in [(Binary::Controller, &controller), (Binary::Cli, &cli)] {
         super::images::prepare(
             locks.directory(&selected, binary)?,
@@ -175,6 +237,10 @@ async fn prepare_inner(
         &cli_path,
         &receipt.cli_sha256,
     )?;
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::Probes);
+    }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
     let a = super::probe::version_retained(&controller, Binary::Controller, deadline).await?;
     let b = super::probe::version_retained(&cli, Binary::Cli, deadline).await?;
@@ -186,12 +252,20 @@ async fn prepare_inner(
     }
     drop(cli);
     drop(controller);
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::Reattest);
+    }
     host.verify().await?;
     // Reattest the original pair after all potentially slow IO/probes.
     super::web_adapter::inspect_pair(&selected, &locks, &binding.current).await?;
     let job_directory = state_path
         .join("self-update/jobs")
         .join(&binding.operation_id);
+    #[cfg(feature = "native-update-acceptance")]
+    if let Some(diagnostic) = diagnostic {
+        diagnostic.mark(super::hosted_acceptance::diagnostics::Stage::Prepared);
+    }
     Endpoint::mark_prepared(&journal, &job_directory)?;
     let prepared = PreparedSubmission {
         selected,

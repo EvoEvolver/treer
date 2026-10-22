@@ -11,6 +11,10 @@ use anyhow::{bail, Result};
 use treer_platform::private_directory::PrivateDirectory;
 use treer_protocol::{controller_update as wire, controller_update_runtime::DispatchBinding};
 
+#[path = "hosted_diagnostics.rs"]
+pub(super) mod diagnostics;
+use diagnostics::{Diagnostic, Stage};
+
 fn eligible(
     disposable: Option<&str>,
     actions: Option<&str>,
@@ -82,12 +86,21 @@ fn root() -> Result<PathBuf> {
 /// Exact private entry: the executing binary must be the old installed image.
 /// All arbitrary errors collapse to a fixed diagnostic before main prints them.
 pub(crate) fn submit() -> Result<()> {
-    submit_inner().map_err(|_| anyhow::anyhow!("hosted_update_acceptance_failed"))
+    let result = (|| {
+        let root = root()?;
+        let directory = PrivateDirectory::open(&root)?;
+        let diagnostic = Diagnostic::new(PrivateDirectory::open(&root)?);
+        let result = submit_inner(root, directory, &diagnostic);
+        if let Err(error) = &result {
+            diagnostic.failed(error);
+        }
+        result
+    })();
+    result.map_err(|_: anyhow::Error| anyhow::anyhow!("hosted_update_acceptance_failed"))
 }
 
-fn submit_inner() -> Result<()> {
-    let root = root()?;
-    let directory = PrivateDirectory::open(&root)?;
+fn submit_inner(root: PathBuf, directory: PrivateDirectory, diagnostic: &Diagnostic) -> Result<()> {
+    diagnostic.mark(Stage::Binding);
     let mut bytes = Vec::new();
     directory
         .read_file("binding.json")?
@@ -103,6 +116,7 @@ fn submit_inner() -> Result<()> {
     {
         bail!("hosted_update_binding_invalid");
     }
+    diagnostic.mark(Stage::Selection);
     let selected =
         super::selection::Inventory::local()?.select(Some(&binding.workspace_id), true)?;
     if selected.controller_path() != root.join("bin/treer-agent-server")
@@ -113,6 +127,7 @@ fn submit_inner() -> Result<()> {
     }
     // Exclusive synced intent before any preflight, staging or spawn. Any
     // existing/partial intent is an ambiguous prior invocation, never retried.
+    diagnostic.mark(Stage::Intent);
     let mut intent = directory.create_file("acceptance-submit-intent.json")?;
     intent.write_all(&serde_json::to_vec(
         &serde_json::json!({"schema":1,"operation_id":binding.operation_id}),
@@ -130,20 +145,24 @@ fn submit_inner() -> Result<()> {
         bail!("hosted_update_intent_unconfirmed");
     }
     let artifacts = directory.open_child("artifacts")?;
+    diagnostic.mark(Stage::Runtime);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async {
         // The real fixed Node/HOME recipe runs in finish_launcher; do not
         // substitute PATH Node, ambient HOME or a fabricated CoreHealthy.
-        let prepared = super::web_preparation::prepare_local(binding.clone(), artifacts).await?;
+        let prepared = super::web_preparation::prepare_local(binding.clone(), artifacts, diagnostic).await?;
+        diagnostic.mark(Stage::Handoff);
         let operation = tokio::task::spawn_blocking(move || prepared.handoff()).await??;
         if operation.operation_id != binding.operation_id { bail!("hosted_update_binding_invalid"); }
+        diagnostic.mark(Stage::Observation);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(360);
         loop {
             // Read-only observation: no second prepare, POST, child or handoff.
             if let Ok(operation) = super::web_adapter::operation(&binding.workspace_id, &binding.server_id, &binding.operation_id) {
                 if operation.state == wire::State::Succeeded {
+                    diagnostic.mark(Stage::Completion);
                     let jobs = PrivateDirectory::open(&root.join("state/self-update/jobs"))?;
                     let journal = super::Journal::open(&jobs, &binding.operation_id)?;
                     if journal.read()?.phase != super::Phase::Complete {

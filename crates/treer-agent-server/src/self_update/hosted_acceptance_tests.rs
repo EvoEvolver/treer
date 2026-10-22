@@ -332,6 +332,9 @@ async fn hosted_complete_native_fixture() {
         Ok(())
     }
     .await;
+    if outcome.is_err() {
+        diagnostics::fixture_failure(&directory);
+    }
     // Only this retained, still-owned child is signalled. Host SIGTERM performs
     // its real Controller shutdown/reap. No manager/account state is deleted.
     let mut cleanup = false;

@@ -189,3 +189,26 @@ The fixture final image check uses retained `InstallationDirectory` /
 `VerifiedImage` authentication for both installed target Controller and CLI.
 Production publication intentionally uses mode0755; that final check must not
 reuse the mode0700 private-input reader or chmod the published images.
+
+## Bounded feature-only failure evidence
+
+The dedicated acceptance build emits exclusive `native-stage-<stage>.json`
+markers for fixed binding/selection/intent/runtime, catalog/current/target/state,
+claim/admission/checksums/artifacts, Host/baseline/startup-backup/activator/images,
+probes/reattest/prepared, handoff/observation/completion boundaries. The names
+use serialized enum labels (for example `startup_backup`), never external text.
+A submitter failure writes `native-submit-failure.json`; the fixture parent
+writes `native-fixture-failure.json` before owned Host cleanup on failure, even
+when the submitter cannot produce its own receipt. Release may collect only
+these named leaves plus the existing result/cleanup/input receipts, each at
+most64KiB; do not archive state, config, journal, stdout or raw child errors.
+
+Failure evidence reports a fixed stage/category and the selected operation's
+validated UUID, journal phase, claim observation and recorded worker creation
+identity observation. It never exports raw errors, paths, credentials, argv,
+PID or creation-identity strings. A recorded creation match does not attest the
+worker image; failed observation does not prove death. Every snapshot retains
+`quiescence: unproven` and grants no recovery or claim-release authority. An
+absent claim at one observation is not a whole-process cleanup proof. Evidence
+write failure remains unknown; it does not retry submission or replace an old
+receipt. Production/default builds contain no diagnostic entry or stage hooks.
