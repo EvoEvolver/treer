@@ -19,6 +19,7 @@ use tokio::{
 mod messages;
 mod receipts;
 mod message_retry;
+mod recovery;
 
 pub struct Request {
     pub method: String,
@@ -458,6 +459,10 @@ impl Runtime {
         for turn in result["thread"]["turns"].as_array().into_iter().flatten() {
             self.turns.insert(model::turn(turn))?;
         }
+        // Only freshly resumed provider turns can reconcile acknowledged work.
+        // Claude's retained journal history below is a display checkpoint, not
+        // independent evidence that an uncertain provider operation finished.
+        let recovery_blocked = recovery::reconcile(&mut self.records, &self.turns);
         if self.claude {
             if let Some(saved)=&saved {
                 let turns=saved["claudeTurns"].as_array().filter(|turns|turns.len()<=50).ok_or_else(||anyhow!("claude_history_checkpoint_invalid"))?;
@@ -482,16 +487,12 @@ impl Runtime {
             self.thread["status"] = json!("running");
             self.thread["activeTurnId"] = active["id"].clone();
         }
-        // A crash between dispatch and receipt is ambiguous: never silently replay.
-        for record in &mut self.records {
-            if record.submission["state"] == "running" {
-                self.dispatch_blocked = true;
-                record.submission["state"] = json!("failed");
-                record.submission["error"] = json!("Experiment restarted; dispatch outcome uncertain; inspect transcript before retry");
-            }
-        }
+        // Resume has validated the same provider thread and its history. An
+        // acknowledged turn is recoverable by identity, never by resending its
+        // input. Legacy launchers also marked these receipts failed on restart.
+        self.dispatch_blocked = recovery_blocked;
         if self.dispatch_blocked {
-            self.thread["lastError"] = json!("Dispatch outcome uncertain; queue paused; no automatic recovery in this experiment");
+            self.thread["lastError"] = json!("Dispatch outcome uncertain; no matching provider turn; queued work preserved without replay");
         }
         if let Ok(result) = self.provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
             .await
