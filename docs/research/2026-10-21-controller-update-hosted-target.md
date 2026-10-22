@@ -101,6 +101,13 @@ Create one NEW private physical directory directly under that HOME, named
 `TREER_STATE_DIR` to its `state` child. Provision only these input files; the
 fixture exclusively creates all remaining config/state/workspace files:
 
+Both `bin` and `artifacts` are private0700 directories. Stage each native
+executable copy with mode0700, current effective-UID ownership and one link;
+use0600 for JSON and SHA256SUMS. The fixture reads executable pins through
+`PrivateDirectory`, which rejects all group/other permission bits, including
+0755. Mode0700 also retains the owner-execute bit required by the real image
+reader and probes. Changing staged modes does not change image bytes or pins.
+
 - `bin/treer-agent-server`: OLD dedicated feature build, executable and pinned.
 - `bin/treer`: matching OLD CLI, executable and pinned.
 - `bin/treer-agent-host`: actual compatible Host, executable and independently pinned.
