@@ -233,6 +233,7 @@ fn admit(records: &VecDeque<Record>, deliveries: &Value, agent: &str) -> Result<
                 found = Some(index);
             }
         }
+        let previous_pressure = receipts::pressure(view());
         // Preserve the supported identity fields, not arbitrary extra response
         // metadata that could bypass the bounded sender/checkpoint budget.
         let sender = &d["message"]["sender"];
@@ -292,12 +293,7 @@ fn admit(records: &VecDeque<Record>, deliveries: &Value, agent: &str) -> Result<
                 refresh(record);
             } else {
                 if records.len() + appended.len() >= 4096
-                    || records
-                        .iter()
-                        .chain(appended.iter())
-                        .filter(|r| r.submission["state"] == "queued")
-                        .count()
-                        >= 256
+                    || previous_pressure >= receipts::PENDING_LIMIT
                 {
                     bail!("message_queue_limit");
                 }
@@ -314,6 +310,15 @@ fn admit(records: &VecDeque<Record>, deliveries: &Value, agent: &str) -> Result<
                     source_messages:vec![checkpoint], message_batch:Some(Batch { sections:vec![next], initial_count:1 }),
                 });
             }
+        }
+        let proposed = records
+            .iter()
+            .enumerate()
+            .map(|(i, r)| changed.iter().find(|(n, _)| *n == i).map_or(r, |(_, r)| r))
+            .chain(appended.iter());
+        let proposed_pressure = receipts::pressure(proposed);
+        if proposed_pressure > receipts::PENDING_LIMIT && proposed_pressure > previous_pressure {
+            bail!("message_queue_limit");
         }
         if !ack.iter().any(|s| s == did) {
             ack.push(did.to_owned());
@@ -338,6 +343,7 @@ impl Runtime {
             .as_str()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow!("message_batch_invalid"))?;
+        self.prepare_admission()?;
         let (changed, appended, ack) = admit(&self.records, &body["deliveries"], agent)?;
         if !changed.is_empty() || !appended.is_empty() {
             for (index, record) in changed {
@@ -521,6 +527,36 @@ mod tests {
         }
         assert!(admit(&records, &json!([delivery(2), delivery(3)]), "agent").is_err());
         assert_eq!(records.len(), 256);
+    }
+    #[test]
+    fn pending_ack_pressure_allows_dedup_but_not_new_obligations() {
+        let mut records = VecDeque::new();
+        apply(&mut records, json!([delivery(0)]));
+        records[0].submission["state"] = json!("done");
+        for n in 1..256 {
+            let mut r = records[0].clone();
+            r.operation = format!("terminal-{n}");
+            r.source_messages[0]["messageId"] = json!(format!("old-{n}"));
+            r.source_messages[0]["deliveryId"] = json!(format!("old-delivery-{n}"));
+            records.push_back(r);
+        }
+        assert_eq!(receipts::pressure(records.iter()), 256);
+        // A retained redelivery does not dispatch or allocate another record.
+        apply(&mut records, json!([delivery(0)]));
+        assert_eq!(records.len(), 256);
+        assert!(admit(&records, &json!([delivery(900)]), "agent").is_err());
+        // A settled retained receipt cannot acquire a new ACK obligation when
+        // all 256 pending slots are occupied by other records.
+        let mut settled = records[0].clone();
+        settled.source_messages[0]["ackPending"] = json!(false);
+        records[0].source_messages[0]["messageId"] = json!("different");
+        records[0].source_messages[0]["deliveryId"] = json!("different-delivery");
+        records.push_back(settled);
+        let mut redelivery = delivery(0);
+        redelivery["delivery_id"] = json!("new-delivery");
+        let before = json!(records);
+        assert!(admit(&records, &json!([redelivery]), "agent").is_err());
+        assert_eq!(json!(records), before);
     }
     #[test]
     fn quoted_framing_and_journal_tampering_are_bounded() {

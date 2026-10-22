@@ -17,6 +17,7 @@ use tokio::{
     time::{timeout, Duration},
 };
 mod messages;
+mod receipts;
 
 pub struct Request {
     pub method: String,
@@ -491,6 +492,7 @@ impl Runtime {
             (self.records, self.goals) = self.checkpoint.clone();
             bail!("private_state_write_failed");
         }
+        receipts::prune(&mut self.records, self.dispatch_blocked, &self.thread["activeTurnId"]);
         if let Err(error) = self.store
             .save(&json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records,"goals":self.goals})) {
             eprintln!("Rust spike: checkpoint_failure=1");
@@ -918,10 +920,11 @@ impl Runtime {
         if !self.ready {
             bail!("runtime unavailable")
         }
-        let text = body["text"].as_str().unwrap_or("").trim();
+        let supplied_text = body["text"].as_str().unwrap_or("");
+        let text = supplied_text.trim();
         let ids = body.get("attachment_ids").cloned().unwrap_or(json!([]));
         let has_images = ids.as_array().is_some_and(|ids| !ids.is_empty());
-        if text.len() > 100_000 || text.is_empty() && !has_images {
+        if text.is_empty() && !has_images {
             bail!("text or images required");
         }
         let images = if has_images {
@@ -966,12 +969,11 @@ impl Runtime {
                 json!({"accepted":true,"operation_id":operation,"duplicate":true,"submission":receipt(prior)}),
             );
         }
-        if self
-            .records
-            .iter()
-            .filter(|r| r.submission["state"] == "queued")
-            .count()
-            >= 256
+        // Old journals/retained operation retries keep their original <=100000
+        // byte compatibility; only NEW submissions adopt Node's raw UTF-8 cap.
+        if supplied_text.len() > 65_536 { bail!("prompt exceeds 64 KiB"); }
+        self.prepare_admission()?;
+        if receipts::pressure(self.records.iter()) >= receipts::PENDING_LIMIT
             || self.records.len() >= 4096
         {
             bail!("experiment queue/receipt limit reached");

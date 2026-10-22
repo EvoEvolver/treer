@@ -202,6 +202,7 @@ fn fixture_checkpoint_failure(state: &Value) -> bool {
         "dispatch-intent" => record["submission"]["state"] == "running" && record["submission"]["turn_id"].is_null(),
         "dispatch-result" => record["submission"]["turn_id"].is_string(),
         "completion" => record["submission"]["state"] == "done",
+        "completion-prune" => state["records"].as_array().is_some_and(|records| records.iter().any(|r| r["operation"] == "prune-fault" && r["submission"]["state"] == "done")),
         "notification-ack" => record["notified"] == true,
         "goal-applying" => edit["applying"] == true,
         "goal-applied" => edit["applied"] == true,

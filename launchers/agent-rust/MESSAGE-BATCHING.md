@@ -41,9 +41,9 @@ of dispatching another turn. Completed tool retention, history normalization,
 | Durable source checkpoints, redelivery dedup, restart ACK retry | Implemented, including multiple deliveries for one message |
 | Explicit prompt/running/steer/image/notification barriers | Explicit prompts have no message-batch metadata and cannot merge |
 | Untrusted framing and 64 KiB message prompt bound | Implemented using Node's framing and preview limits |
-| Normal explicit prompt byte limit | Existing Rust 100,000 vs Node 65,536; not changed by this message-only increment |
-| Queue/receipt pressure | Existing Rust 256 queued / 4,096 lifetime records; Node also accounts for running and pending ACK/notification pressure and prunes terminal records. Rust remains bounded but is not identical |
-| Retry diagnostics/backoff | Pending ACK now blocks further receive; fixed-category logs only. Existing fixed two-second retry differs from Node's categorized auth stop / exponential jitter |
+| Normal explicit prompt byte limit | Batching-only `74806250` kept 100,000. Separate [receipt successor](RECEIPT-RETENTION.md) aligns new admission to Node's 65,536 raw bytes while preserving retained legacy retries |
+| Queue/receipt pressure | Separate receipt successor prunes safe terminals to 1,024 and counts queued/running/ACK/notification obligations toward 256; protects uncertainty and keeps the 4,096 recovery ceiling |
+| Retry diagnostics/backoff | `INGRESS-AUTH-RETRY` remains: pending ACK blocks further receive; fixed-category logs and two-second retry still differ from Node's categorized auth stop / exponential jitter |
 
 ## Operational rollout delta
 

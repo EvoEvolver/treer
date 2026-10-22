@@ -3,7 +3,7 @@ import test from 'node:test';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, chmod, readdir, unlink, symlink, lstat, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
@@ -1086,6 +1086,69 @@ const faultEnv=mode=>({CODEX_BIN:process.execPath,RUST_SPIKE_CODEX_ARGS:JSON.str
 const providerCalls=async s=>(await readFile(join(s.root,'provider.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
 const incomingNotice=(n,delivery='dlv_'+n)=>({delivery_id:delivery,recipient:{kind:'agent',id:'ag_contract'},message:{message_id:'msg_'+n,sender:{kind:'agent',id:'sender_'+n,name:'Sender '+n,path:'/team/sender-'+n},body:'Synthetic notice '+n,created_at:'2026-10-21T00:00:00Z'}});
 const messageFixtureEnv={AGENT_UI_MESSAGE_WATCH:'1',RUST_SPIKE_MESSAGE_INPUT:'incoming.json',PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH,CODEX_BIN:resolve(import.meta.dirname,'../../agent/tests/fake-codex.mjs'),FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_COMPLETE_TURNS:'1'};
+const receiptFixtureEnv={CODEX_BIN:resolve(import.meta.dirname,'../../agent/tests/fake-codex.mjs'),FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_COMPLETE_TURNS:'1'};
+async function seededReceipts(t,count,edit=()=>{}) {
+  const s=await fixture(t,receiptFixtureEnv);
+  await s.post({text:'synthetic seed',operation_id:'seed'});
+  await until(()=>messageJournal(s),j=>j.records[0]?.submission.state==='done');
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const saved=await messageJournal(s),template=saved.records[0];
+  saved.records=Array.from({length:count},(_,n)=>{
+    const r=structuredClone(template),id=randomUUID();r.operation='retained-'+n;
+    r.submission.id=id;r.receipt.id=id;r.submission.turn_id='synthetic-old-'+n;
+    edit(r,n);return r;
+  });
+  await writeFile(join(s.state,'rust-spike.json'),JSON.stringify(saved));
+  return {s,saved};
+}
+test('Rust receipt pruning recovers full4096 journal, preserves recent retries and admits a new real turn',{skip:useNode,timeout:15000},async t=>{
+  const {s,saved}=await seededReceipts(t,4096);
+  const restarted=await s.launch({});
+  const journal=await messageJournal(s);assert.equal(journal.records.length,1024);
+  assert.equal(journal.records[0].operation,'retained-3072');assert.equal(journal.records.at(-1).operation,'retained-4095');
+  const post=body=>fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify(body)});
+  const duplicate=await post({text:'synthetic seed',operation_id:'retained-4095'}).then(r=>r.json());
+  assert.equal(duplicate.duplicate,true);assert.equal(duplicate.submission.id,saved.records[4095].submission.id);
+  assert.equal((await fetch(restarted.base+'/v1/submissions/'+saved.records[0].submission.id,{headers:s.headers})).status,404,'evicted receipt is outside the declared dedup window');
+  assert.equal((await post({text:'new after lifetime4096',operation_id:'after4096'})).status,202);
+  await until(()=>messageJournal(s),j=>j.records.some(r=>r.operation==='after4096'&&r.submission.state==='done'));
+  assert.equal((await messageJournal(s)).records.length,1024);
+  assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,2);
+});
+test('Rust receipt pressure protects256 terminal pending ACKs and refuses new admission before dispatch',{skip:useNode,timeout:15000},async t=>{
+  const {s}=await seededReceipts(t,4096,(r,n)=>{if(n<256)r.source_messages=[{messageId:'msg_'+n,deliveryId:'dlv_'+n,ackPending:true}];});
+  const restarted=await s.launch({}),j=await messageJournal(s);
+  assert.equal(j.records.length,1280);assert.equal(j.records.filter(r=>r.source_messages?.some(m=>m.ackPending)).length,256);
+  const response=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'must not dispatch',operation_id:'pressure-refused'})});
+  assert.notEqual(response.status,202);assert.equal((await response.json()).error.code,'operation_refused');
+  assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
+  assert.equal((await messageJournal(s)).records.some(r=>r.operation==='pressure-refused'),false);
+});
+test('Rust receipt pruning failed completion publication restores the evicted receipt and durable running intent',{skip:useNode,timeout:15000},async t=>{
+  const {s,saved}=await seededReceipts(t,1024);
+  const restarted=await s.launch({RUST_SPIKE_CHECKPOINT_FAIL:'completion-prune'});
+  await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'completion fails',operation_id:'prune-fault'})});
+  await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked');
+  const j=await messageJournal(s);assert.equal(j.records.length,1025);
+  assert.equal(j.records[0].submission.id,saved.records[0].submission.id);
+  assert.equal(j.records.find(r=>r.operation==='prune-fault').submission.state,'running');
+  const old=await fetch(restarted.base+'/v1/submissions/'+saved.records[0].submission.id,{headers:s.headers}).then(r=>r.json());
+  assert.equal(old.submission.id,saved.records[0].submission.id);
+});
+test('Rust explicit prompt limit uses raw UTF8 bytes while retained oversized operations stay retryable',{skip:useNode,timeout:15000},async t=>{
+  const {s,saved}=await seededReceipts(t,1,r=>{
+    r.text='x'.repeat(70_000);r.fingerprint=JSON.stringify([r.text,'queue',null,null]);
+  });
+  const restarted=await s.launch({});
+  const post=body=>fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify(body)});
+  const retry=await post({text:'x'.repeat(70_000),operation_id:'retained-0'}).then(r=>r.json());
+  assert.equal(retry.duplicate,true);assert.equal(retry.submission.id,saved.records[0].submission.id);
+  for(const text of ['界'.repeat(21846),'x'.repeat(65537),' '.repeat(65536)+'x']) {
+    const response=await post({text,operation_id:'oversized-'+Buffer.byteLength(text)});
+    assert.notEqual(response.status,202);assert.equal((await response.json()).error.code,'operation_refused');
+  }
+  assert.equal((await post({text:'界'.repeat(21845)+'x',operation_id:'exact65536'})).status,202);
+});
 const messageJournal=s=>readFile(join(s.state,'rust-spike.json'),'utf8').then(JSON.parse);
 const messageAcks=async s=>(await readFile(join(s.root,'registration.json'),'utf8')).trim().split('\n').map(JSON.parse).filter(x=>x.ack);
 test('Rust message batching same poll is one real turn, durable before ack and redelivery deduplicated',{skip:useNode,timeout:20000},async t=>{
