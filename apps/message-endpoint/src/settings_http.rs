@@ -206,8 +206,17 @@ impl Settings {
     /// Explicit trusted configuration, never a forwarded header. Core replaces
     /// ingress/tunnel Host with the App's registered virtual hostname.
     pub fn with_virtual_host(mut self, host: &str) -> Result<Self, Error> {
+        let platform_host = host
+            .strip_prefix("svc-")
+            .and_then(|value| value.strip_suffix(".internal"))
+            .is_some_and(|id| {
+                id.len() == 32
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            });
         if host.len() > 253
-            || !(host.ends_with(".treer") || host.ends_with(".internal"))
+            || !(host.ends_with(".treer") || platform_host)
             || !host.split('.').all(|label| {
                 !label.is_empty()
                     && label.len() <= 63
@@ -1350,6 +1359,7 @@ mod tests {
             "hub.example:443",
             "message-hub.treer",
             "svc-0123456789abcdef0123456789abcdef.internal",
+            "SVC-0123456789ABCDEF0123456789ABCDEF.INTERNAL",
             "127.0.0.1:8786",
         ] {
             assert_eq!(
@@ -1599,6 +1609,37 @@ mod tests {
         assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
         let missing = invoke(&app, Method::GET, "/api/settings", None, &HeaderMap::new());
         assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+    }
+    #[test]
+    fn internal_virtual_host_is_registered_form_only_and_never_a_csrf_origin() {
+        for host in [
+            "localhost.internal",
+            "svc-short.internal",
+            "svc-0123456789abcdef0123456789abcdef.internal:80",
+            "svc-0123456789ABCDEF0123456789ABCDEF.internal",
+        ] {
+            assert!(app("https://proxy.example/")
+                .with_virtual_host(host)
+                .is_err());
+        }
+        let app = app("https://proxy.example/")
+            .with_virtual_host("svc-0123456789abcdef0123456789abcdef.internal")
+            .unwrap();
+        let result = invoke(
+            &app,
+            Method::POST,
+            "/api/endpoint/auth/logout",
+            None,
+            &headers(&[
+                ("host", "svc-0123456789abcdef0123456789abcdef.internal"),
+                (
+                    "origin",
+                    "https://svc-0123456789abcdef0123456789abcdef.internal",
+                ),
+                ("x-endpoint-request", "1"),
+            ]),
+        );
+        assert_eq!(result.status(), StatusCode::FORBIDDEN);
     }
     #[test]
     fn logout_needs_csrf_but_clears_expired_session_without_proxy_authority() {
