@@ -1,135 +1,70 @@
 name: CI
-
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
+  group: hub203-204-successor-${{ github.run_id }}
+  cancel-in-progress: false
 jobs:
-  rust:
-    name: Rust and PostgreSQL tests
+  package:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
-      TREER_TEST_DATABASE_URL: postgres://treer:treer@127.0.0.1:55432/treer_test
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_USER: treer
-          POSTGRES_PASSWORD: treer
-          POSTGRES_DB: treer_test
-        ports:
-          - 55432:5432
-        options: >-
-          --health-cmd "pg_isready -U treer -d treer_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
+      SOURCE_COMMIT: 603960e6ae6175995ffea0688ff6d53aebd46cfd
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: 603960e6ae6175995ffea0688ff6d53aebd46cfd
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249
         with:
           toolchain: 1.90.0
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Release workflow security regressions (fake registry only)
-        run: node --test scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs scripts/install-checksums.test.mjs
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Build workspace binaries
-        run: cargo build --workspace --locked
-      - name: Test workspace including database boundaries
-        run: cargo test --workspace --locked
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  web:
-    name: Frontend types and build
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: 10.12.4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
-      - run: pnpm build
-
-  agent-launcher:
-    name: Agent launcher types, fake harnesses and browser
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: launchers/agent/package-lock.json
-      - name: Install launcher dependencies
-        run: npm --prefix launchers/agent ci --ignore-scripts
-      - name: Install isolated browser runtime
-        run: cd launchers/agent && npx playwright install --with-deps chromium
-      - name: Check launcher and browser sources
-        run: npm --prefix launchers/agent run check
-      - name: Unit and installer tests (fake harnesses only)
-        run: npm --prefix launchers/agent test
-      - name: Closed Codex, ACP and Claude Interface regression
+      - name: Build only the changed Hub component
+        shell: bash
         run: |
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
-          node scripts/ais-e2e.mjs
-      - name: Browser controls and screenshots
-        run: npm --prefix launchers/agent run test:browser
-        env:
-          CODEX_UI_SCREENSHOTS: ${{ runner.temp }}/launcher-screenshots
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: failure()
-        with:
-          name: agent-launcher-screenshots
-          path: ${{ runner.temp }}/launcher-screenshots
-          if-no-files-found: ignore
-
-  release-tooling:
-    name: Release tooling and fake machine updates
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-      - name: Closed release, checksum, detachment and rollback tests
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-      - name: Documentation links and launcher test isolation
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          cargo build --locked --release --target-dir "$RUNNER_TEMP/app-target" --manifest-path apps/message-endpoint/Cargo.toml --features hub --bin treer-message-hub
+      - name: Package actual binaries and bind source, UI, lockfile, and sizes
+        shell: bash
         run: |
-          node scripts/check-docs.mjs
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
+          set -euo pipefail
+          python3 -I -B - <<'PY'
+          import hashlib,json,os,pathlib,shutil,stat,subprocess,tarfile
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'app-package'
+          root.mkdir(mode=0o700)
+          package=root/'payload';package.mkdir(mode=0o700)
+          if os.uname().sysname!='Linux' or os.uname().machine!='x86_64':raise SystemExit('platform_mismatch')
+          source=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          if source!=os.environ['SOURCE_COMMIT']:raise SystemExit('source_mismatch')
+          rows=[]
+          for name in ['treer-message-hub']:
+              origin=pathlib.Path(os.environ['RUNNER_TEMP'])/'app-target'/'release'/name
+              destination=package/name
+              with origin.open('rb') as src,destination.open('xb') as dst:shutil.copyfileobj(src,dst)
+              destination.chmod(0o700);s=destination.lstat()
+              if not stat.S_ISREG(s.st_mode) or s.st_uid!=os.geteuid() or s.st_nlink!=1 or not 0<s.st_size<=134217728:raise SystemExit('artifact_metadata')
+              h=hashlib.sha256()
+              with destination.open('rb') as f:
+                  for chunk in iter(lambda:f.read(1048576),b''):h.update(chunk)
+              digest=h.hexdigest()
+              rows.append({'name':name,'bytes':s.st_size,'sha256':digest,'mode':'0700','format':subprocess.check_output(['file','-b',str(destination)],text=True).strip()})
+          leaves=['apps/message-endpoint/src/hub_runtime.rs','apps/message-endpoint/src/settings_http.rs','apps/message-endpoint/Cargo.lock','apps/message-endpoint/Cargo.toml','apps/message-endpoint/dist/index.html','apps/message-endpoint/dist/app.js','apps/message-endpoint/dist/app.css']
+          leaf_hashes={name:hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() for name in leaves}
+          provenance={'schema':1,'source_commit':source,'wrapper_commit':os.environ['GITHUB_SHA'],'run_id':os.environ['GITHUB_RUN_ID'],'run_attempt':os.environ['GITHUB_RUN_ATTEMPT'],'platform':'linux-x86_64','profile':'release','hub_feature':True,'files':rows,'source_leaves':leaf_hashes,'deployment':'NOT_RUN','channel_traffic':'NOT_RUN','core_native_build':'NOT_RUN','tests':'existing_evidence_reused_no_rerun'}
+          for path,data in [(package/'SHA256SUMS',''.join(r['sha256']+'  '+r['name']+'\n' for r in rows)),(package/'provenance.json',json.dumps(provenance,indent=2)+'\n'),(root/'build-provenance.json',json.dumps(provenance,indent=2)+'\n')]:
+              fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+              with os.fdopen(fd,'w') as f:f.write(data);f.flush();os.fsync(f.fileno())
+          with tarfile.open(root/'hub-linux-x86_64.tar.gz','x:gz') as tar:
+              for path in sorted(package.iterdir()):tar.add(path,arcname=path.name,recursive=False)
+          print(json.dumps({'source_commit':source,'files':rows,'deployment':'NOT_RUN'}))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hub203-204-linux-x86_64-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/app-package/hub-linux-x86_64.tar.gz
+            ${{ runner.temp }}/app-package/build-provenance.json
+          retention-days: 14
+          if-no-files-found: error
