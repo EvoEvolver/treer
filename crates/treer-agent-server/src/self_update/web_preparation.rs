@@ -447,6 +447,8 @@ impl PreparedSubmission {
             }
             std::thread::sleep(Duration::from_millis(10));
         };
+        #[cfg(feature = "native-update-acceptance")]
+        super::hosted_acceptance::diagnostics::manager_worker(child.id(), self.activator.image())?;
         let accepted = peer.offer_ownership(&self.journal, &self.selected, &self.locks)?;
         if accepted.prepared().job_id != self.journal.read()?.job_id {
             bail!("update_recovery_required");

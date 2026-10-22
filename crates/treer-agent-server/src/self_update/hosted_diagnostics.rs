@@ -374,3 +374,106 @@ mod tests {
         std::fs::remove_dir_all(path).unwrap();
     }
 }
+
+/// Feature-only, read-only observation after actual peer authentication and
+/// before SAME-lock transfer. It cannot grant ownership or retry authority.
+pub(in crate::self_update) fn manager_cgroup(pid: u32) -> Result<String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(format!("/proc/{pid}/cgroup"))?
+        .take(4097)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 {
+        bail!("hosted_manager_cgroup_invalid");
+    }
+    parse_manager_cgroup(std::str::from_utf8(&bytes)?)
+}
+fn parse_manager_cgroup(text: &str) -> Result<String> {
+    let mut lines = text.lines();
+    let group = lines
+        .next()
+        .and_then(|line| line.strip_prefix("0::"))
+        .ok_or_else(|| anyhow::anyhow!("hosted_manager_cgroup_v2_required"))?;
+    if lines.next().is_some()
+        || !group.starts_with('/')
+        || group.len() > 2048
+        || group.split('/').skip(1).any(|c| {
+            c.is_empty()
+                || c == "."
+                || c == ".."
+                || !c
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.:@\\".contains(&b))
+        })
+    {
+        bail!("hosted_manager_cgroup_invalid");
+    }
+    Ok(group.to_owned())
+}
+pub(in crate::self_update) fn manager_worker(pid: u32, image: &std::fs::File) -> Result<()> {
+    if std::env::var_os("TREER_ACCEPTANCE_SYSTEMD").is_none() {
+        return Ok(());
+    }
+    if std::env::var("TREER_ACCEPTANCE_SYSTEMD").as_deref() != Ok("1") || !cfg!(target_os = "linux")
+    {
+        bail!("hosted_manager_context_invalid");
+    }
+    let root = super::root()?;
+    let directory = PrivateDirectory::open(&root)?;
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Expected {
+        schema: u32,
+        unit: String,
+        control_group: String,
+    }
+    let expected: Expected = read(&directory, "native-manager-expected.json")?;
+    let unit = format!(
+        "treer-native-{}.service",
+        &root.file_name().unwrap().to_str().unwrap()[3..]
+    );
+    if expected.schema != 1
+        || expected.unit != unit
+        || !expected.control_group.ends_with(&format!("/{unit}"))
+    {
+        bail!("hosted_manager_binding_invalid");
+    }
+    let child = treer_platform::process_image::ProcessImage::capture(pid)?;
+    if !child.matches_file(image)? {
+        bail!("hosted_manager_worker_image_invalid");
+    }
+    child.verify_private_session()?;
+    if manager_cgroup(std::process::id())? != expected.control_group
+        || manager_cgroup(pid)? != expected.control_group
+    {
+        bail!("hosted_manager_worker_cgroup_invalid");
+    }
+    child.verify_current()?;
+    write(
+        &directory,
+        "native-manager-worker.json",
+        &serde_json::json!({"schema":1,
+        "authenticated_worker_image":true,"same_unit_cgroup":true,"private_session":true,"recovery_authority":false}),
+    )
+}
+#[cfg(test)]
+mod manager_tests {
+    use super::*;
+    #[test]
+    fn manager_cgroup_parser_refuses_unsupported_or_ambiguous_observations() {
+        assert_eq!(
+            parse_manager_cgroup("0::/user.slice/fixture.service\n").unwrap(),
+            "/user.slice/fixture.service"
+        );
+        for invalid in [
+            "",
+            "1:cpu:/unit",
+            "0::/unit\n0::/other",
+            "0::/../unit",
+            "0:://unit",
+            "0::relative",
+            "0::/unit bad",
+        ] {
+            assert!(parse_manager_cgroup(invalid).is_err());
+        }
+    }
+}

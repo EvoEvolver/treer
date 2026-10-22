@@ -156,6 +156,19 @@ async fn profile_api(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "explicit hosted disposable effective-account actual native update; never local/enrolled"]
 async fn hosted_complete_native_fixture() {
+    run_native_fixture(false).await;
+}
+
+#[path = "hosted_manager_tests.rs"]
+mod manager;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "explicit hosted disposable systemd account only; never local/enrolled"]
+async fn hosted_systemd_native_fixture() {
+    run_native_fixture(true).await;
+}
+
+async fn run_native_fixture(systemd: bool) {
     let root = root().expect("hosted effective-account eligibility required");
     let directory = PrivateDirectory::open(&root).unwrap();
     let input: Input = read_json(&directory, "acceptance-input.json").unwrap();
@@ -294,17 +307,42 @@ async fn hosted_complete_native_fixture() {
              "artifact_base":"https://native-acceptance.invalid/", "allow_pinned":true,"allow_artifact_origin":true}
         ]
     })).unwrap();
-    let mut host = clean_command(&root.join("bin/treer-agent-host"), &root)
-        .args(["run", "--config"])
-        .arg(root.join("xdg/treer/agent-servers/srv_native_acceptance-host.json"))
-        .spawn()
-        .unwrap();
-    let host_image = ProcessImage::capture(host.id()).unwrap();
+    let mut binding = DispatchBinding {
+        operation_id: operation_id.clone(),
+        workspace_id: "ws_native_acceptance".into(),
+        server_id: "srv_native_acceptance".into(),
+        current: input.current.clone(),
+        target: input.target.clone(),
+        catalog_revision: 1,
+        plan_digest: "0".repeat(64),
+        created_at: chrono::Utc::now(),
+    };
+    binding.plan_digest = binding.expected_plan_digest().unwrap();
+    write_json(
+        &directory,
+        "binding.json",
+        &serde_json::to_value(&binding).unwrap(),
+    )
+    .unwrap();
+    let mut host = manager::FixtureHost::start(&root, systemd).unwrap_or_else(|_| {
+        if systemd {
+            let _ = write_json(&directory,"native-manager-result.json",&serde_json::json!({
+                "schema":1,"manager_lifecycle_acceptance":"unproven","stage":"unit_start",
+                "cleanup":"inspect_owned_unit_intent_before_job_teardown","capability_enabled":false,
+                "recovery_authority":false}));
+        }
+        panic!("fixture Host start failed; preserve owned unit intent, no retry")
+    });
+    let host_image = host.image().unwrap();
+    let mut old_controller = None;
     let outcome: Result<()> = async {
+        if super::super::images::digest_file(host_image.executable())? != input.host_sha256 {
+            bail!("hosted_manager_host_image_mismatch");
+        }
         let http = reqwest::Client::builder().no_proxy().build()?;
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                if host.try_wait()?.is_some() {
+                if host.exited()? {
                     bail!("hosted_fixture_host_exited");
                 }
                 if let Ok(response) = http
@@ -322,34 +360,41 @@ async fn hosted_complete_native_fixture() {
             }
         })
         .await??;
-        let mut binding = DispatchBinding {
-            operation_id: operation_id.clone(),
-            workspace_id: "ws_native_acceptance".into(),
-            server_id: "srv_native_acceptance".into(),
-            current: input.current.clone(),
-            target: input.target.clone(),
-            catalog_revision: 1,
-            plan_digest: "0".repeat(64),
-            created_at: chrono::Utc::now(),
-        };
-        binding.plan_digest = binding.expected_plan_digest()?;
-        write_json(&directory, "binding.json", &serde_json::to_value(&binding)?)?;
-        // This subprocess is the exact installed old image. No shell updater,
-        // fake CoreHealthy, copied ownership or test engine is substituted.
-        let mut child = tokio::process::Command::from(clean_command(
-            &root.join("bin/treer-agent-server"),
-            &root,
-        ));
-        let status = tokio::time::timeout(
-            Duration::from_secs(420),
-            child
-                .arg("--hosted-native-update-acceptance")
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await??;
-        if !status.success() {
-            bail!("hosted_native_fixture_failed");
+        if systemd {
+            old_controller = Some(host.controller(&host_image, &input.current.controller_sha256)?);
+            host.release_submit(&directory)?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(420);
+            loop {
+                host.verify(&host_image)?;
+                if directory.read_file("native-acceptance-result.json").is_ok() {
+                    break;
+                }
+                if directory.read_file("native-submit-failure.json").is_ok() {
+                    bail!("hosted_native_fixture_failed");
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    bail!("hosted_manager_completion_timeout");
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            host.wait_active().await?;
+        } else {
+            // The exact installed old image remains the submitter.
+            let mut child = tokio::process::Command::from(clean_command(
+                &root.join("bin/treer-agent-server"),
+                &root,
+            ));
+            let status = tokio::time::timeout(
+                Duration::from_secs(420),
+                child
+                    .arg("--hosted-native-update-acceptance")
+                    .kill_on_drop(true)
+                    .status(),
+            )
+            .await??;
+            if !status.success() {
+                bail!("hosted_native_fixture_failed");
+            }
         }
         let result: serde_json::Value = read_json(&directory, "native-acceptance-result.json")?;
         if result["native_update_acceptance"] != "passed" || result["capability_enabled"] != false {
@@ -357,37 +402,47 @@ async fn hosted_complete_native_fixture() {
         }
         verify_installed_target(&root.join("bin"), &input.target.identity)?;
         host_image.verify_current()?;
+        if let Some(old) = &old_controller {
+            let new = host.controller(&host_image, &input.target.identity.controller_sha256)?;
+            if old.creation_identity() == new.creation_identity() && old.pid() == new.pid() {
+                bail!("hosted_manager_controller_not_replaced");
+            }
+            if old.verify_current().is_ok() {
+                bail!("hosted_manager_old_controller_alive");
+            }
+            host.verify(&host_image)?;
+            let worker: serde_json::Value = read_json(&directory, "native-manager-worker.json")?;
+            if worker
+                != serde_json::json!({"schema":1,"authenticated_worker_image":true,
+                "same_unit_cgroup":true,"private_session":true,"recovery_authority":false})
+            {
+                bail!("hosted_manager_worker_unproven");
+            }
+        }
         Ok(())
     }
     .await;
     if outcome.is_err() {
         diagnostics::fixture_failure(&directory);
     }
-    // Only this retained, still-owned child is signalled. Host SIGTERM performs
-    // its real Controller shutdown/reap. No manager/account state is deleted.
-    let mut cleanup = false;
-    if host.try_wait().unwrap().is_some() {
-        cleanup = !root.join("host.sock").exists();
-    } else if host_image.verify_current().is_ok() {
-        rustix::process::kill_process(
-            rustix::process::Pid::from_raw(host.id() as i32).unwrap(),
-            rustix::process::Signal::TERM,
-        )
-        .unwrap();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while tokio::time::Instant::now() < deadline {
-            if host.try_wait().unwrap().is_some() {
-                cleanup = !root.join("host.sock").exists();
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
+    // Stop only the retained child or the acknowledged task-owned unit.
+    let cleanup = host.stop(&host_image).await.unwrap_or(false) && !root.join("host.sock").exists();
     proxy.abort();
     let _ = proxy.await;
     write_json(&directory, "fixture-cleanup.json", &serde_json::json!({"host_reaped_and_socket_absent":cleanup,
         "launcher_account_state":"retained_for_job_teardown", "worker_and_claim_reconciliation":"inspect_durable_job_before_teardown",
-        "manager_lifecycle_acceptance":"not_run", "native_result_available":outcome.is_ok()})).unwrap();
+        "manager_lifecycle_acceptance":if systemd && cleanup && outcome.is_ok() {"passed"} else if systemd {"unproven"} else {"not_run"},
+        "native_result_available":outcome.is_ok()})).unwrap();
+    if systemd {
+        write_json(&directory, "native-manager-result.json", &serde_json::json!({
+            "schema":1,"host_main_pid_identity_retained":outcome.is_ok(),
+            "controller_replaced_and_healthy":outcome.is_ok(),
+            "authenticated_worker_in_unit":outcome.is_ok(),
+            "unit_stopped_and_cgroup_empty":cleanup,"observed_zero_manager_restarts":outcome.is_ok(),
+            "capability_enabled":false,"manager_lifecycle_acceptance":if cleanup && outcome.is_ok() {"passed"} else {"unproven"},
+            "scope":"transient_systemd_user_host_and_exec_start_post_submit",
+            "production_service_install_and_reboot":"not_run"})).unwrap();
+    }
     assert!(
         cleanup,
         "owned Host cleanup unconfirmed; preserve fixture for job teardown"
