@@ -34,10 +34,13 @@ function image(binding, executable = false) {
   finally { closeSync(fd); }
   if (hash.digest("hex") !== binding.sha256) fail();
 }
-export function nativeRuntime(root, harnesses = ["codex", "claude"]) {
+function readBinding(root) {
   const info = physical(join(root, "native-runtime.json"));
   if (info.size > 65536) fail();
-  const value = JSON.parse(readFileSync(join(root, "native-runtime.json"), "utf8"));
+  return JSON.parse(readFileSync(join(root, "native-runtime.json"), "utf8"));
+}
+export function nativeRuntime(root, harnesses = ["codex", "claude"]) {
+  const value = readBinding(root);
   if (value.schema !== "treer.native-launcher/v1" || value.platform !== process.platform || value.arch !== process.arch || !/^[a-f0-9]{40}$/.test(value.source_commit || "") || !Array.isArray(value.assets) || value.assets.length < 1 || value.assets.length > 64) fail();
   image(value.executable, true); physical(value.public_dir, true);
   const names = new Set();
@@ -58,7 +61,7 @@ export function runtimeStatus(root) {
     const nativeRequired = existsSync(join(root, "scripts/native-runtime.mjs"));
     return { default: nativeRequired ? "unconfigured" : "node", codex: nativeRequired ? "unconfigured" : "node", claude: nativeRequired ? "unconfigured" : "node", acp: "explicit-node" };
   }
-  const metadata = JSON.parse(readFileSync(join(root, "native-runtime.json"), "utf8"));
+  const metadata = readBinding(root);
   const value = nativeRuntime(root, ["codex", "claude"].filter(name => metadata.tools?.[name]));
   return { default: "rust", codex: value.tools.codex ? "rust" : "unavailable-provider", claude: value.tools.claude ? "rust" : "unavailable-provider", acp: "explicit-node", source_commit: value.source_commit, executable: value.executable, platform: value.platform, arch: value.arch, providers: Object.fromEntries(Object.entries(value.tools).map(([name, tool]) => [name, { path: tool.path, version: tool.version, sha256: tool.sha256 }])) };
 }

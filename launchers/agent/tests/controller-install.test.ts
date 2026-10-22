@@ -86,6 +86,17 @@ test("isolated skip-profiles installation does not create or redirect a per-user
   assert.equal(existsSync(join(f.root, "Treer/bin/treer-agent.exe")), false);
   assert.equal(existsSync(join(f.base, "profiles-receipt.json")), false);
 });
+test("a native-default payload without its binding refuses before pointer/profile/default changes", t => {
+  const f = fixture(t), path = join(f.bundle, "bundle-manifest.json");
+  const manifest = JSON.parse(readFileSync(path, "utf8"));
+  manifest.files = manifest.files.filter((file: any) => file.path !== "native-runtime.json");
+  rmSync(join(f.bundle, "native-runtime.json")); writeFileSync(path, JSON.stringify(manifest));
+  f.request.version = `sha256-${digest(readFileSync(path))}`;
+  assert.throws(() => f.call(), /requires a verified machine-specific native-runtime/);
+  assert.equal(existsSync(join(f.base, "current.json")), false);
+  assert.equal(existsSync(join(f.root, "Codex + UI.json")), false);
+  assert.equal(existsSync(join(f.root, ".local/bin/treer-agent")), false);
+});
 test("recognized profiles from another machine converge to one portable profile through update and rollback", (t) => {
   const f = fixture(t), profiles = JSON.parse(readFileSync(join(f.bundle, "profiles.json"), "utf8")).profiles;
   for (const profile of profiles) writeFileSync(join(f.root, profile.name + ".json"), JSON.stringify({ command: "/Users/mac/.treer/launchers/agent/current/launchers/agent/scripts/treer-agent.sh", cwd: "treer", args: profile.args }));
