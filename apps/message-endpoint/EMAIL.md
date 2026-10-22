@@ -165,12 +165,19 @@ does not erase old records. Retained messages and replies count against the
 quota. Referenced accepted Core receipt rows are retained with email replies,
 so normal terminal pruning still works for other channels without breaking
 thread context/idempotency or aborting on the reply foreign key. There is
-**no TTL, owner purge UI or automated private outbox
-reconciliation yet**. Cap-full state refuses new work. Do not deploy this
-increment for sustained production or delete rows/files to clear capacity while
-work is pending. These are explicit blockers for the later real-mail increment,
-as are the wired author gate, security/Core approval and separate owner/release
-authorization. Runtime tests use fake loopback Proxy/CLI plus the actual Rust
+owner-triggered, audited payload retirement is now available in the recovery UI.
+It closes a fully terminal conversation only after every terminal intent has
+been observed terminal for seven days. Each call clears at most 20 source
+messages, 20 replies and 20 notification payloads; repeat against the refreshed
+revision until complete. Pending replies, unresolved uncertainty and leases
+refuse retirement. IDs, digests, receipts and count quota remain as tombstones;
+bytes can be reclaimed but tombstone count capacity is not reset. Outbox files
+are durably queued for the configured worker to unlink in batches of 20, including
+after restart. No automatic TTL, physical secure-erasure, backup cleanup or
+indefinite-capacity guarantee is claimed. SQLite WAL/free pages and backups can
+retain old bytes. See `EMAIL-ACTIVATION.md` for owner-observed uncertainty and
+`ASSEMBLY-ACCEPTANCE.md` for exact local evidence. Real-send activation remains
+separate. Runtime tests use fake loopback Proxy/CLI plus the actual Rust
 relay; browser tests use a native binary and synthetic identities, never a live
 bot or provider.
 

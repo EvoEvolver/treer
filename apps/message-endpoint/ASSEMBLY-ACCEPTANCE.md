@@ -61,7 +61,7 @@ the caller. The fixture kills/joins its own children and removes its temporary
 state; runtime test Drop guards join the native runtime and synthetic poller.
 No listener or test process is intentionally retained.
 
-## Still incomplete / not authorized
+## Remaining development and external actions
 
 #203 remains in progress: runtime receipt/capability negotiation and native
 reply cutoff/error handling remain undispatched; closed snapshot-to-binding
@@ -71,9 +71,39 @@ stop evidence, secret rotation/provisioning, release and real round trip need
 separately named operator scope. An offset journal result always says
 `activation_authorized:false`; owner attestations are not Core/OS verification.
 
-#204 remains in progress: no real-platform identity/Policy/provider or deployed
-browser acceptance, no real mail sent. Retained uncertain items stay held;
-owner-asserted outcome resolution and payload/outbox purge are not implemented
-and are not guessed by this recovery UI. Any real-send configuration/activation
-requires its existing separate authorization. No release/deploy or real-channel
-operation is authorized tonight.
+#204 owner-observed resolution, bounded terminal payload/outbox retirement and
+supervised stop deadline are implemented by the successor below. Real-platform
+identity/Policy/provider and deployed-browser acceptance remain unrun; real mail,
+release/deploy and channel activation are prohibited tonight.
+
+## Owner recovery and post-token revocation successor
+
+New local evidence is recorded under the canonical worktree's ignored
+`.treer/reviews/email-recovery-204/`:
+
+| Boundary | Entry / log |
+| --- | --- |
+| Human owner vs Agent/expired owner, wrong/colliding reference, stale revision, audit rollback, no resend, retained provider uncertainty | `recovery-freeze.log`, 17 focused tests |
+| 25 notifications + 25 messages in one thread | `twenty_one_plus_terminal_records_retire_in_batches_across_restart_without_losing_dedupe`: first batch leaves 5 payloads, restart + second clears all; all 25 IDs and receipt tombstones retained |
+| Actual owner HTTP + Rust worker + SQLite, uncertain -> restart -> owner assertion -> restart -> payload retirement | `assembly-final.log`; synthetic Core and mail transport, exactly one local POST |
+| Actual outbox worker cleanup and restart | `outbox-worker-retention.log`; no network email or republish |
+| Post-token member removal (Core reproduction `7465ba32`) | `post-token-revocation.log`; zero POST, consumed attempt uncertain across restart |
+| Bounded stop and ownership latch | `stop-deadline.log` |
+| Native UI owner reference/confirmation + fresh terminal retention refusal | `browser-verified.log`, mobile dark screenshot manually inspected; no real identity/provider claim |
+
+Focused reproduction (from this checkout, offline Cargo cache installed):
+
+```sh
+cargo test --manifest-path apps/message-endpoint/Cargo.toml --locked --offline --all-features email::abandon::tests -- --nocapture
+cargo test --manifest-path apps/message-endpoint/Cargo.toml --locked --offline --all-features email_owner_observation_and_retirement -- --nocapture
+cargo test --manifest-path apps/message-endpoint/Cargo.toml --locked --offline --all-features email_outbox_retirement_worker -- --nocapture
+cargo test --manifest-path apps/message-endpoint/Cargo.toml --locked --offline --all-features email_proxy_review_revoked -- --nocapture
+cargo test --manifest-path apps/message-endpoint/Cargo.toml --locked --offline --all-features bounded_stop_returns -- --nocapture
+```
+
+The earlier new-test failures (private path not canonical, missing test method,
+audit schema not initialized before a commit-veto assertion) are retained in
+separate logs, never relabeled PASS. The initial whole-thread count cap was
+replaced with restartable batches after the 21+ availability finding. Terminal
+retention fixtures age only their OWN stopped/new synthetic state; no clock or
+live mailbox is changed. No full release/Core gate was repeated.

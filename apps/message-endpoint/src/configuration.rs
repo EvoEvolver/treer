@@ -74,6 +74,19 @@ pub enum Command {
     InspectEmailDelivery {
         endpoint_id: String,
     },
+    PurgeEmailPayload {
+        endpoint_id: String,
+        revision: i64,
+        intent_id: String,
+        confirm: bool,
+    },
+    ResolveEmailObserved {
+        endpoint_id: String,
+        revision: i64,
+        intent_id: String,
+        reference: String,
+        confirm: bool,
+    },
     AbandonPreparedEmail {
         endpoint_id: String,
         revision: i64,
@@ -582,6 +595,53 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
         Command::InspectEmailDelivery { endpoint_id } => {
             let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
             check_owner(owner)?;
+            email_delivery_status(&mut hub, &endpoint_id)
+        }
+        Command::PurgeEmailPayload {
+            endpoint_id,
+            revision,
+            intent_id,
+            confirm,
+        } => {
+            if !confirm {
+                return Err(Failure::Invalid);
+            }
+            let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
+            check_owner(owner)?;
+            hub.purge_email_payload_now(&endpoint_id, revision, &intent_id, owner.id())
+                .map_err(|e| match e {
+                    crate::email::Error::Invalid => Failure::Invalid,
+                    crate::email::Error::Conflict | crate::email::Error::Denied => {
+                        Failure::Conflict
+                    }
+                    _ => Failure::Unavailable,
+                })?;
+            email_delivery_status(&mut hub, &endpoint_id)
+        }
+        Command::ResolveEmailObserved {
+            endpoint_id,
+            revision,
+            intent_id,
+            reference,
+            confirm,
+        } => {
+            if !confirm {
+                return Err(Failure::Invalid);
+            }
+            let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
+            check_owner(owner)?;
+            hub.resolve_email_observed_now(
+                &endpoint_id,
+                revision,
+                &intent_id,
+                &reference,
+                owner.id(),
+            )
+            .map_err(|error| match error {
+                crate::email::Error::Invalid => Failure::Invalid,
+                crate::email::Error::Conflict | crate::email::Error::Denied => Failure::Conflict,
+                _ => Failure::Unavailable,
+            })?;
             email_delivery_status(&mut hub, &endpoint_id)
         }
         Command::AbandonPreparedEmail {

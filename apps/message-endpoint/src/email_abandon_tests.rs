@@ -630,3 +630,431 @@ fn owner_configuration_inspects_masked_journal_and_abandons_but_agents_cannot() 
         1
     );
 }
+
+fn uncertain_fixture() -> (tempfile::TempDir, PathBuf, Hub<Core>, Intent, String) {
+    let (d, p, mut h, i) = fixture();
+    h.store
+        .db
+        .execute("UPDATE endpoints SET paused=0", [])
+        .unwrap();
+    let mut q = Queue::new(&mut h.store).unwrap();
+    let a = q.begin_proxy_delivery(&i, URL, 61).unwrap();
+    q.finish_proxy_delivery(a, Outcome::Uncertain).unwrap();
+    q.store
+        .db
+        .execute("UPDATE endpoints SET paused=1", [])
+        .unwrap();
+    let reference = super::super::delivery::reference(&row(&h, &i.id).5).unwrap();
+    (d, p, h, i, reference)
+}
+#[test]
+fn owner_observation_is_not_provider_acceptance_and_releases_only_exact_uncertainty() {
+    use crate::{
+        configuration::{self, Command, Failure},
+        owner_auth::BindingManager,
+    };
+    let (_d, p, h, i, reference) = uncertain_fixture();
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(h));
+    let core = Core::new(std::path::Path::new("/usr/bin/false"), "app_hub").unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let command = |reference: String| Command::ResolveEmailObserved {
+        endpoint_id: "ag_email".into(),
+        revision: 1,
+        intent_id: i.id.clone(),
+        reference,
+        confirm: true,
+    };
+    for denied in [
+        BindingManager::synthetic_agent("ag_untrusted", now + 60),
+        BindingManager::synthetic("user_owner", now - 1),
+    ] {
+        assert!(configuration::execute(
+            &shared,
+            &core,
+            "ws_test",
+            &denied,
+            command(reference.clone())
+        )
+        .is_err());
+    }
+    let owner = BindingManager::synthetic("user_owner", now + 60);
+    assert!(matches!(
+        configuration::execute(
+            &shared,
+            &core,
+            "ws_test",
+            &owner,
+            command("0000000000000000".into())
+        ),
+        Err(Failure::Conflict)
+    ));
+    assert_eq!(
+        Queue::new(&mut shared.lock().unwrap().store)
+            .unwrap()
+            .proxy_delivery_status("ag_email")
+            .unwrap()
+            .uncertain,
+        1
+    );
+    let result = configuration::execute(
+        &shared,
+        &core,
+        "ws_test",
+        &owner,
+        command(reference.clone()),
+    )
+    .unwrap();
+    let value = serde_json::to_value(result).unwrap();
+    assert_eq!(value["delivery"]["uncertain"], 0);
+    assert_eq!(value["delivery"]["provider_accepted"], 0);
+    assert_eq!(value["items"][0]["state"], "owner_observed_receipt");
+    assert_eq!(value["paused"], true);
+    assert!(configuration::execute(&shared, &core, "ws_test", &owner, command(reference)).is_err());
+    let h = std::sync::Arc::try_unwrap(shared)
+        .ok()
+        .unwrap()
+        .into_inner()
+        .unwrap();
+    assert_eq!(row(&h, &i.id).4, "uncertain"); // provider history never rewritten
+    assert!(!crate::email::delivery::reserved(&h.store.db, &i.id).unwrap());
+    assert_eq!(row(&h, &i.id).1.as_deref(), Some("proxy_owner_observed"));
+    assert_eq!(audit(&h), 1);
+    drop(h);
+    let mut h = hub(Store::open(&p, Limits::default()).unwrap());
+    let mut q = Queue::new(&mut h.store).unwrap();
+    assert_eq!(q.recover_interrupted_proxy_deliveries().unwrap(), 0);
+    assert_eq!(q.receipt("ag_email", 1, "msg_fixture").unwrap(), Some(1));
+    q.store
+        .db
+        .execute("UPDATE endpoints SET paused=0", [])
+        .unwrap();
+    assert!(q
+        .claim_proxy("ag_email", 1, 2000, &"f".repeat(64))
+        .unwrap()
+        .is_none());
+}
+#[test]
+fn observation_audit_commit_failure_keeps_reservation_and_original_payload() {
+    let (_d, _p, mut h, i, reference) = uncertain_fixture();
+    h.recovery_schema().unwrap();
+    let original = row(&h, &i.id);
+    h.store.db.commit_hook(Some(|| true));
+    assert!(h
+        .resolve_email_observed_now("ag_email", 1, &i.id, &reference, "user_owner")
+        .is_err());
+    h.store.db.commit_hook(None::<fn() -> bool>);
+    assert_eq!(row(&h, &i.id), original);
+    assert_eq!(audit(&h), 0);
+    assert_eq!(
+        Queue::new(&mut h.store)
+            .unwrap()
+            .proxy_delivery_status("ag_email")
+            .unwrap()
+            .uncertain,
+        1
+    );
+}
+#[test]
+fn terminal_payload_retirement_preserves_dedup_and_refuses_uncertainty_or_new_work() {
+    let (_d, p, mut h, i, reference) = uncertain_fixture();
+    assert!(h
+        .purge_email_payload_now("ag_email", 1, &i.id, "user_owner")
+        .is_err());
+    h.resolve_email_observed_now("ag_email", 1, &i.id, &reference, "user_owner")
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    // Synthetic fixture timestamp, no running transport or real mailbox.
+    h.store
+        .db
+        .execute("UPDATE email_messages SET at=?1", [now])
+        .unwrap();
+    assert!(h
+        .purge_email_payload_now("ag_email", 2, &i.id, "user_owner")
+        .is_err());
+    h.store
+        .db
+        .execute("UPDATE email_messages SET at=61", [])
+        .unwrap();
+    Queue::new(&mut h.store).unwrap();
+    h.store
+        .db
+        .execute("UPDATE email_terminal_retention SET at=61", [])
+        .unwrap();
+    h.purge_email_payload_now("ag_email", 2, &i.id, "user_owner")
+        .unwrap();
+    assert!(row(&h, &i.id).5.is_empty());
+    assert_eq!(row(&h, &i.id).4, "uncertain");
+    let bodies: i64 = h
+        .store
+        .db
+        .query_row("SELECT sum(length(body)) FROM email_messages", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(bodies, 0);
+    assert_eq!(audit(&h), 2);
+    assert!(h
+        .purge_email_payload_now("ag_email", 2, &i.id, "user_owner")
+        .is_err());
+    drop(h);
+    let mut h = hub(Store::open(&p, Limits::default()).unwrap());
+    let mut q = Queue::new(&mut h.store).unwrap();
+    assert_eq!(q.receipt("ag_email", 1, "msg_fixture").unwrap(), Some(1));
+    q.store
+        .db
+        .execute("UPDATE endpoints SET paused=0", [])
+        .unwrap();
+    assert!(q
+        .claim_proxy("ag_email", 1, now, &"f".repeat(64))
+        .unwrap()
+        .is_none());
+    let outbound = |body: &str| Envelope::Outbound {
+        delivery_id: "delivery_fixture".into(),
+        message_id: "msg_fixture".into(),
+        original_sender: Sender {
+            kind: SenderKind::Agent,
+            id: "ag_internal".into(),
+        },
+        body: body.into(),
+        context_ids: vec![],
+    };
+    assert!(q
+        .admit("ag_email", 1, &outbound("synthetic body"), now)
+        .is_ok());
+    assert!(matches!(
+        q.admit("ag_email", 1, &outbound("changed"), now),
+        Err(Error::Conflict)
+    ));
+    let count: i64 = q
+        .store
+        .db
+        .query_row("SELECT count(*) FROM email_messages", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1); // tombstone continues consuming count capacity
+}
+#[test]
+fn retired_outbox_cleanup_is_idempotent_and_never_follows_links() {
+    use std::os::unix::fs::symlink;
+    let (d, _p, mut h, i) = fixture();
+    let out = d.path().canonicalize().unwrap().join("outbox");
+    fs::create_dir(&out).unwrap();
+    fs::set_permissions(&out, fs::Permissions::from_mode(0o700)).unwrap();
+    crate::email::write_outbox(&i, URL, &out).unwrap();
+    h.store
+        .db
+        .execute(
+            "UPDATE email_intents SET state=1,mode='outbox',nonce=NULL,lease_until=NULL",
+            [],
+        )
+        .unwrap();
+    Queue::new(&mut h.store).unwrap();
+    h.store
+        .db
+        .execute("UPDATE email_terminal_retention SET at=61", [])
+        .unwrap();
+    h.purge_email_payload_now("ag_email", 1, &i.id, "user_owner")
+        .unwrap();
+    let name = out.join(format!("{}.json", i.id));
+    let outside = d.path().join("outside");
+    fs::write(&outside, b"keep").unwrap();
+    fs::remove_file(&name).unwrap();
+    symlink(&outside, &name).unwrap();
+    assert!(Queue::new(&mut h.store)
+        .unwrap()
+        .purge_retired_outbox(&out)
+        .is_err());
+    assert_eq!(fs::read(&outside).unwrap(), b"keep");
+    fs::remove_file(&name).unwrap();
+    let mut q = Queue::new(&mut h.store).unwrap();
+    assert_eq!(q.purge_retired_outbox(&out).unwrap(), 1);
+    assert_eq!(q.purge_retired_outbox(&out).unwrap(), 0);
+}
+
+#[test]
+fn twenty_one_plus_terminal_records_retire_in_batches_across_restart_without_losing_dedupe() {
+    let (_d, p, mut h, i) = fixture();
+    // 25 terminal notifications and source messages in ONE normal-sized thread.
+    h.store
+        .db
+        .execute(
+            "UPDATE email_intents SET state=1,mode='outbox',nonce=NULL,lease_until=NULL",
+            [],
+        )
+        .unwrap();
+    for n in 0..24 {
+        let id = format!("{n:064x}");
+        h.store
+            .db
+            .execute(
+                "INSERT INTO email_messages VALUES(?1,?2,'synthetic retained payload',?3,61)",
+                params![i.thread, format!("msg_{n}"), format!("digest_{n}")],
+            )
+            .unwrap();
+        h.store.db.execute("INSERT INTO email_intents(id,thread,endpoint,generation,state,mode) VALUES(?1,?2,'ag_email',1,1,'outbox')",params![id,i.thread]).unwrap();
+    }
+    Queue::new(&mut h.store).unwrap();
+    // New terminal history cannot immediately bypass the fixed retention age.
+    assert!(h
+        .purge_email_payload_now("ag_email", 1, &i.id, "user_owner")
+        .is_err());
+    h.store
+        .db
+        .execute("UPDATE email_terminal_retention SET at=61", [])
+        .unwrap();
+    h.purge_email_payload_now("ag_email", 1, &i.id, "user_owner")
+        .unwrap();
+    let counts = |h: &Hub<Core>| {
+        h.store.db.query_row("SELECT (SELECT count(*) FROM email_messages WHERE body<>''),(SELECT count(*) FROM email_retired_intents),(SELECT count(*) FROM email_messages),(SELECT count(*) FROM email_intents)",[],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?))).unwrap()
+    };
+    assert_eq!(counts(&h), (5, 20, 25, 25));
+    assert!(
+        Queue::new(&mut h.store)
+            .unwrap()
+            .proxy_recovery_items("ag_email")
+            .unwrap()
+            .1
+    );
+    drop(h);
+    let mut h = hub(Store::open(&p, Limits::default()).unwrap());
+    h.purge_email_payload_now("ag_email", 2, &i.id, "user_owner")
+        .unwrap();
+    assert_eq!(counts(&h), (0, 25, 25, 25));
+    assert_eq!(
+        h.store
+            .db
+            .query_row("SELECT count(*) FROM email_outbox_purge", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        25
+    );
+    assert!(Queue::new(&mut h.store)
+        .unwrap()
+        .proxy_recovery_items("ag_email")
+        .unwrap()
+        .0
+        .is_empty());
+    assert!(h
+        .purge_email_payload_now("ag_email", 3, &i.id, "user_owner")
+        .is_err());
+    assert_eq!(audit(&h), 2);
+    assert_eq!(
+        Queue::new(&mut h.store)
+            .unwrap()
+            .receipt("ag_email", 1, "msg_fixture")
+            .unwrap(),
+        Some(1)
+    );
+}
+
+#[test]
+fn payload_purge_agent_expired_owner_pending_reply_and_commit_failure_are_refused() {
+    use crate::{
+        configuration::{self, Command},
+        owner_auth::BindingManager,
+    };
+    let (_d, _p, mut h, i) = fixture();
+    h.store
+        .db
+        .execute(
+            "UPDATE email_intents SET state=1,mode='outbox',nonce=NULL,lease_until=NULL",
+            [],
+        )
+        .unwrap();
+    Queue::new(&mut h.store).unwrap();
+    h.store
+        .db
+        .execute("UPDATE email_terminal_retention SET at=61", [])
+        .unwrap();
+    let shared = std::sync::Arc::new(std::sync::Mutex::new(h));
+    let core = Core::new(std::path::Path::new("/usr/bin/false"), "app_hub").unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    for actor in [
+        BindingManager::synthetic_agent("ag_untrusted", now + 60),
+        BindingManager::synthetic("user_owner", now - 1),
+    ] {
+        let c = Command::PurgeEmailPayload {
+            endpoint_id: "ag_email".into(),
+            revision: 1,
+            intent_id: i.id.clone(),
+            confirm: true,
+        };
+        assert!(configuration::execute(&shared, &core, "ws_test", &actor, c).is_err());
+    }
+    let mut h = std::sync::Arc::try_unwrap(shared)
+        .ok()
+        .unwrap()
+        .into_inner()
+        .unwrap();
+    h.recovery_schema().unwrap();
+    let original = row(&h, &i.id);
+    // Commit veto rolls back audit, closed-thread flag, payload and revision.
+    h.store.db.commit_hook(Some(|| true));
+    assert!(h
+        .purge_email_payload_now("ag_email", 1, &i.id, "user_owner")
+        .is_err());
+    h.store.db.commit_hook(None::<fn() -> bool>);
+    assert_eq!(row(&h, &i.id), original);
+    assert_eq!(audit(&h), 0);
+    assert_eq!(h.view("ag_email").unwrap().revision, 1);
+    assert_eq!(
+        h.store
+            .db
+            .query_row("SELECT count(*) FROM email_purged_threads", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    h.store
+        .db
+        .execute("UPDATE email_intents SET lease_until=9999999999", [])
+        .unwrap();
+    assert!(h
+        .purge_email_payload_now("ag_email", 1, &i.id, "user_owner")
+        .is_err());
+    h.store
+        .db
+        .execute("UPDATE email_intents SET lease_until=NULL", [])
+        .unwrap();
+    h.store.db.execute("INSERT INTO inbound(endpoint,generation,external_id,recipient,body,digest,pending) VALUES('ag_email',1,'reply_pending','ag_internal','pending private body',x'01',1)",[]).unwrap();
+    let job = h.store.db.last_insert_rowid();
+    h.store.db.execute("INSERT INTO email_replies VALUES('reply_pending',?1,'ag_email',1,'user_alice','pending private body','digest_pending',?2,61,'[]')",params![i.thread,job]).unwrap();
+    assert!(h
+        .purge_email_payload_now("ag_email", 1, &i.id, "user_owner")
+        .is_err());
+    assert_eq!(row(&h, &i.id), original);
+}
+
+#[test]
+fn colliding_frozen_reference_never_resolves_or_releases_uncertainty() {
+    let (_d, _p, mut h, i, reference) = uncertain_fixture();
+    let payload = row(&h, &i.id).5;
+    h.store.db.execute("INSERT INTO email_intents(id,thread,endpoint,generation,state) VALUES('collision',?1,'ag_email',1,0)",[&i.thread]).unwrap();
+    h.store
+        .db
+        .execute(
+            "INSERT INTO email_dispatch VALUES('collision','ag_email',1,?1,'uncertain')",
+            [&payload],
+        )
+        .unwrap();
+    assert!(h
+        .resolve_email_observed_now("ag_email", 1, &i.id, &reference, "user_owner")
+        .is_err());
+    assert!(crate::email::delivery::reserved(&h.store.db, &i.id).unwrap());
+    assert_eq!(
+        Queue::new(&mut h.store)
+            .unwrap()
+            .proxy_delivery_status("ag_email")
+            .unwrap()
+            .uncertain,
+        2
+    );
+}

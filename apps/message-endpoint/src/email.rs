@@ -12,6 +12,8 @@ use thiserror::Error;
 
 #[path = "email_abandon.rs"]
 mod abandon;
+#[path = "email_retention.rs"]
+mod retention;
 
 #[path = "email_delivery.rs"]
 pub mod delivery;
@@ -340,6 +342,11 @@ impl<'a> Queue<'a> {
         CREATE TABLE IF NOT EXISTS email_messages(thread TEXT NOT NULL REFERENCES email_threads(id),source TEXT NOT NULL,body TEXT NOT NULL,digest TEXT NOT NULL,at INTEGER NOT NULL,PRIMARY KEY(thread,source));
         CREATE TABLE IF NOT EXISTS email_intents(id TEXT PRIMARY KEY,thread TEXT NOT NULL REFERENCES email_threads(id),endpoint TEXT NOT NULL,generation INTEGER NOT NULL,state INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,next_try INTEGER NOT NULL DEFAULT 0,nonce TEXT,lease_until INTEGER,mode TEXT);
         CREATE TABLE IF NOT EXISTS email_replies(id TEXT PRIMARY KEY,thread TEXT NOT NULL REFERENCES email_threads(id),endpoint TEXT NOT NULL,generation INTEGER NOT NULL,member TEXT NOT NULL,body TEXT NOT NULL,digest TEXT NOT NULL,job INTEGER NOT NULL REFERENCES inbound(id),at INTEGER NOT NULL,context TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS email_purged_threads(thread TEXT PRIMARY KEY REFERENCES email_threads(id),at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS email_retired_intents(id TEXT PRIMARY KEY REFERENCES email_intents(id));
+        CREATE TABLE IF NOT EXISTS email_terminal_retention(id TEXT PRIMARY KEY REFERENCES email_intents(id),at INTEGER NOT NULL);
+        INSERT OR IGNORE INTO email_terminal_retention SELECT id,CAST(strftime('%s','now') AS INTEGER) FROM email_intents WHERE state<>0;
+        CREATE TABLE IF NOT EXISTS email_outbox_purge(id TEXT PRIMARY KEY REFERENCES email_intents(id));
         CREATE TABLE IF NOT EXISTS email_attempts(id INTEGER PRIMARY KEY,endpoint TEXT NOT NULL,at INTEGER NOT NULL);")?;
         delivery::schema(&store.db)?;
         Ok(Self { store })
@@ -448,6 +455,14 @@ impl<'a> Queue<'a> {
             }
             return Ok(old);
         }
+        let retired: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM email_purged_threads WHERE thread=?1)",
+            [&thread],
+            |r| r.get(0),
+        )?;
+        if retired {
+            return Err(Error::Denied);
+        }
         capacity(&tx, self.store.limits, endpoint, body.len())?;
         tx.execute(
             "INSERT OR IGNORE INTO email_threads VALUES(?1,?2,?3,?4,?5,?6)",
@@ -491,6 +506,14 @@ impl<'a> Queue<'a> {
         self.thread_for(id, member.id())
     }
     fn thread_for(&self, id: &str, verified_member: &str) -> Result<Thread, Error> {
+        let retired: bool = self.store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM email_purged_threads WHERE thread=?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if retired {
+            return Err(Error::Denied);
+        }
         let (endpoint,generation,recipient,address,member):(String,i64,String,String,String)=self.store.db.query_row("SELECT endpoint,generation,recipient,address,member FROM email_threads WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?.ok_or(Error::Denied)?;
         let current:bool=self.store.db.query_row("SELECT EXISTS(SELECT 1 FROM email_targets t JOIN endpoints e ON e.id=t.endpoint AND e.generation=t.generation WHERE t.endpoint=?1 AND t.generation=?2 AND t.address=?3 AND t.member=?4 AND t.revoked=0)",params![endpoint,generation,address,member],|r|r.get(0))?;
         if !current || member != verified_member {

@@ -13,6 +13,12 @@ own='ag_endpoint' if Path(__file__).name=='endpoint-cli' else 'app_hub'
 args=sys.argv[1:]
 db=sqlite3.connect(p/'core-fixture.sqlite3',timeout=2)
 if args[:3]==['token','create','svc_hub']:
+ if (p/'revoke-on-reserved-token').exists():
+  with sqlite3.connect(p/'state'/'hub.sqlite3',timeout=2) as state:
+   reserved=state.execute("SELECT EXISTS(SELECT 1 FROM email_dispatch WHERE state='dispatching')").fetchone()[0]
+  if reserved:
+   import urllib.request
+   urllib.request.urlopen(urllib.request.Request((p/'fixture-origin').read_text()+'/fixture/revoke-member',data=b'{"revoked":true}',headers={'Content-Type':'application/json'}),timeout=2).read()
  print(json.dumps(dict(access_token='synthetic.app.signature',token_type='Bearer',audience='svc_hub',expires_in=300)))
 elif args[:3]==['agent','show','--'] and args[3] in ['ag_endpoint','ag_recipient']:
  print(json.dumps(dict(agent_id=args[3],workspace_id='ws_test',server_id='machine_fixture',kind='command',cwd='/private/fixture',status='running',path='/team/'+args[3])))
@@ -47,7 +53,7 @@ class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
   if self.path=='/api/apps/svc_hub/directory':return self.reply(dict(principals=[dict(id='user_owner',kind='human',role='owner')]+([] if member_revoked else [dict(id='user_member',kind='human',role='member')])))
   if self.path=='/fixture/status':
-   with lock: result=dict(operations=list(operations),sent=list(sent),emails=list(emails),poll_trace=list(poll_trace),active_pollers=active_pollers,max_pollers=max_pollers)
+   with lock: result=dict(member_revoked=member_revoked,operations=list(operations),sent=list(sent),emails=list(emails),poll_trace=list(poll_trace),active_pollers=active_pollers,max_pollers=max_pollers)
    with sqlite3.connect(root/'core-fixture.sqlite3') as db:
     result['core_sent']=[json.loads(r[0]) for r in db.execute('SELECT payload FROM sent WHERE sender="app_hub" ORDER BY id')]
     result['core_messages']=[dict(id='msg_fixture_'+str(r[0]),sender=r[1],recipient=r[2],envelope=json.loads(r[3]),context_ids=json.loads(r[4])) for r in db.execute('SELECT id,sender,recipient,payload,contexts FROM sent ORDER BY id')]
@@ -99,6 +105,7 @@ class Handler(BaseHTTPRequestHandler):
    else:raise AssertionError('Unexpected Bot API operation')
   self.reply(dict(ok=True,result=result))
 server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.daemon_threads=True
+(root/'fixture-origin').write_text('http://127.0.0.1:'+str(server.server_port))
 thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
 with socket.socket() as reservation:
  reservation.bind(('127.0.0.1',0));port=reservation.getsockname()[1]

@@ -465,17 +465,37 @@ fn owner_activation_real_runtime_http_bot_core_sqlite_and_restart_keep_binding_a
 
 #[test]
 fn email_outbox_member_reply_traverses_real_runtime_and_relay_without_real_mail() {
-    email_runtime_chain(crate::email::Mode::Outbox, false);
+    email_runtime_chain(crate::email::Mode::Outbox, false, false);
 }
 #[test]
 fn email_proxy_runtime_commits_acceptance_and_restarts_without_another_post() {
-    email_runtime_chain(crate::email::Mode::Proxy, false);
+    email_runtime_chain(crate::email::Mode::Proxy, false, false);
 }
 #[test]
 fn email_proxy_runtime_holds_uncertain_after_restart_without_resend() {
-    email_runtime_chain(crate::email::Mode::Proxy, true);
+    email_runtime_chain(crate::email::Mode::Proxy, true, false);
 }
-fn email_runtime_chain(mode: crate::email::Mode, uncertain: bool) {
+#[test]
+fn email_owner_observation_and_retirement_http_worker_restart_chain() {
+    email_runtime_chain(crate::email::Mode::Proxy, true, true);
+}
+#[test]
+fn email_outbox_retirement_worker_unlinks_only_retired_files_after_restart() {
+    email_runtime_chain(crate::email::Mode::Outbox, false, true);
+}
+#[test]
+fn email_proxy_review_revoked_during_reserved_token_must_not_post() {
+    email_runtime_chain_review(crate::email::Mode::Proxy, false, false, true);
+}
+fn email_runtime_chain(mode: crate::email::Mode, uncertain: bool, recover: bool) {
+    email_runtime_chain_review(mode, uncertain, recover, false);
+}
+fn email_runtime_chain_review(
+    mode: crate::email::Mode,
+    uncertain: bool,
+    recover: bool,
+    review_revoke: bool,
+) {
     let f = Fixture::new();
     if uncertain {
         f.control("email-uncertain", json!({"uncertain":true}));
@@ -503,7 +523,37 @@ fn email_runtime_chain(mode: crate::email::Mode, uncertain: bool) {
     assert_eq!(p["preview"]["target"]["channel"], "email");
     f.command(json!({"action":"resume","endpoint_id":"ag_endpoint","expected":p["preview"],"confirm":true,"evidence":{"profile_reviewed":true,"isolation":"reviewed","reference":"synthetic email test, no real Policy attestation","held_action":"discard","parked_count_ack":0}}));
     running.release_readbacks();
+    if review_revoke {
+        std::fs::write(root.join("revoke-on-reserved-token"), b"1").unwrap();
+    }
     f.control("core",json!({"delivery_id":"del_email_agent","recipient":{"kind":"agent","id":"ag_endpoint"},"message":{"message_id":"msg_email_agent","sender":{"kind":"agent","id":"ag_recipient"},"body":"<script>private original</script>","context_ids":[]}}));
+    if review_revoke {
+        wait_until(|| {
+            relay.tick(now()).unwrap();
+            f.status()["member_revoked"] == true
+        });
+        wait_until(|| {
+            f.command(json!({"action":"inspect_email_delivery","endpoint_id":"ag_endpoint"}))
+                ["delivery"]["uncertain"]
+                == 1
+        });
+        assert!(
+            f.status()["emails"].as_array().unwrap().is_empty(),
+            "POST after member revoked during dispatch token mint"
+        );
+        f.control("revoke-member", json!({"revoked":false}));
+        drop(running);
+        let restarted = f.start_email_mode(true, Some(mode));
+        restarted.release_readbacks();
+        assert_eq!(
+            f.command(json!({"action":"inspect_email_delivery","endpoint_id":"ag_endpoint"}))
+                ["delivery"]["uncertain"],
+            1
+        );
+        assert!(f.status()["emails"].as_array().unwrap().is_empty());
+        eprintln!("PASS: Core review 7465ba32 reproduction now refuses POST after post-token member revocation; consumed reservation uncertain across restart, no resend");
+        return;
+    }
     let notification: Value = if mode == crate::email::Mode::Outbox {
         let mut files = vec![];
         wait_until(|| {
@@ -622,6 +672,53 @@ fn email_runtime_chain(mode: crate::email::Mode, uncertain: bool) {
     );
     assert!(f.status()["sent"].as_array().unwrap().is_empty());
     assert!(f.status()["operations"].as_array().unwrap().is_empty());
+    if recover && mode == crate::email::Mode::Outbox {
+        let snapshot =
+            f.command(json!({"action":"inspect_email_delivery","endpoint_id":"ag_endpoint"}));
+        f.command(json!({"action":"pause","endpoint_id":"ag_endpoint","revision":snapshot["revision"],"confirm":true}));
+        let snapshot =
+            f.command(json!({"action":"inspect_email_delivery","endpoint_id":"ag_endpoint"}));
+        let item = snapshot["items"][0].clone();
+        drop(running);
+        let root = f._root.path().canonicalize().unwrap();
+        let store = Store::open(&root.join("state"), Limits::default()).unwrap();
+        for sql in [
+            "UPDATE email_messages SET at=61",
+            "UPDATE email_replies SET at=61",
+            "UPDATE email_terminal_retention SET at=61",
+        ] {
+            store.db.execute(sql, []).unwrap();
+        }
+        drop(store);
+        let running = f.start_email_mode(true, Some(mode));
+        running.release_readbacks();
+        let snapshot =
+            f.command(json!({"action":"inspect_email_delivery","endpoint_id":"ag_endpoint"}));
+        f.command(json!({"action":"purge_email_payload","endpoint_id":"ag_endpoint","revision":snapshot["revision"],"intent_id":item["intent_id"],"confirm":true}));
+        wait_until(|| {
+            std::fs::read_dir(root.join("outbox"))
+                .unwrap()
+                .next()
+                .is_none()
+        });
+        drop(running);
+        let restarted = f.start_email_mode(true, Some(mode));
+        restarted.release_readbacks();
+        assert!(std::fs::read_dir(root.join("outbox"))
+            .unwrap()
+            .next()
+            .is_none());
+        assert!(
+            f.command(json!({"action":"inspect_email_delivery","endpoint_id":"ag_endpoint"}))
+                ["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(f.status()["emails"].as_array().unwrap().is_empty());
+        eprintln!("PASS: real owner HTTP terminal retirement + supervised worker outbox unlink + restart, synthetic Core/member, no real mail, no republish");
+        return;
+    }
     if mode == crate::email::Mode::Proxy {
         let expected = if uncertain {
             "uncertain"
@@ -647,6 +744,43 @@ fn email_runtime_chain(mode: crate::email::Mode, uncertain: bool) {
         let inspection =
             f.command(json!({"action":"inspect_email_delivery","endpoint_id":"ag_endpoint"}));
         assert_eq!(inspection["delivery"][expected], 1);
+        if recover {
+            let item = inspection["items"][0].clone();
+            let result=f.command(json!({"action":"resolve_email_observed","endpoint_id":"ag_endpoint","revision":inspection["revision"],"intent_id":item["intent_id"],"reference":item["reference"],"confirm":true}));
+            assert_eq!(result["delivery"]["uncertain"], 0);
+            assert_eq!(result["delivery"]["provider_accepted"], 0);
+            assert_eq!(result["paused"], true);
+            drop(restarted);
+            let root = f._root.path().canonicalize().unwrap();
+            // Only this stopped, new synthetic fixture's timestamps are aged.
+            let store = Store::open(&root.join("state"), Limits::default()).unwrap();
+            store
+                .db
+                .execute("UPDATE email_messages SET at=61", [])
+                .unwrap();
+            store
+                .db
+                .execute("UPDATE email_replies SET at=61", [])
+                .unwrap();
+            store
+                .db
+                .execute("UPDATE email_terminal_retention SET at=61", [])
+                .unwrap();
+            drop(store);
+            let final_run = f.start_email_mode(true, Some(mode));
+            final_run.release_readbacks();
+            let inspection =
+                f.command(json!({"action":"inspect_email_delivery","endpoint_id":"ag_endpoint"}));
+            let purged=f.command(json!({"action":"purge_email_payload","endpoint_id":"ag_endpoint","revision":inspection["revision"],"intent_id":item["intent_id"],"confirm":true}));
+            assert_eq!(purged["items"].as_array().unwrap().len(), 0);
+            assert_eq!(purged["paused"], true);
+            assert_eq!(f.status()["emails"].as_array().unwrap().len(), 1);
+            drop(final_run);
+            let store = Store::open(&root.join("state"), Limits::default()).unwrap();
+            let retained:(i64,i64,i64)=store.db.query_row("SELECT (SELECT count(*) FROM email_owner_resolutions),(SELECT count(*) FROM email_purged_threads),(SELECT sum(length(body)) FROM email_messages)",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+            assert_eq!(retained, (1, 1, 0));
+            eprintln!("PASS: synthetic Core/mail transport, real owner HTTP + Rust worker + SQLite: uncertain POST once, restart, owner observation (not provider acceptance), restart, terminal payload purge, retained tombstones; zero resend");
+        }
         assert_eq!(f.status()["emails"].as_array().unwrap().len(), 1);
         assert_eq!(
             f.status()["core_messages"]

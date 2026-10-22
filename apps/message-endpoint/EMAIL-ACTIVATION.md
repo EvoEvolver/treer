@@ -545,3 +545,58 @@ retention slice's first purge target is these abandoned payloads, via explicit
 owner-triggered purge while retaining minimal dedupe tombstones; sustained
 production remains blocked on that separately reviewed operation. No indefinite
 production retention or payload-purge implementation is claimed here.
+
+
+## Implemented owner recovery successor (#204, 2026-10-22)
+
+This section supersedes the earlier proposed/unimplemented status for the
+following bounded development slice; it does not authorize real mail.
+
+The existing freshly verified human-owner configuration API adds
+`resolve_email_observed` and `purge_email_payload`, with exact endpoint, revision,
+intent and confirmation. The Agent binding-management exception grants neither.
+The first also requires the 16-character reference positively observed by the
+owner in the intended mailbox. Missing/wrong/colliding reference, stale revision,
+unpaused binding, dispatching state and audit/commit failure refuse. Only the
+`owner_observed_receipt` evidence class is implemented: provider `uncertain`
+history stays unchanged in `email_dispatch`; a separate durable owner resolution
+and terminal intent release its uncertainty reservation atomically with audit
+and revision. No provider verification, non-send inference, retry or resume is
+introduced. Inconclusive observations take no mutation and keep capacity held.
+
+Retirement refuses any unfinished notification, live lease, pending Core reply,
+or messages/replies/terminal intents younger than seven days. Terminal age is
+conservatively first observed by Queue initialization, including legacy rows;
+request JSON cannot select a clock or backdate it. The first successful batch
+permanently closes the thread to member reads/replies and new context admission.
+Each call clears at most 20 messages, 20 replies (and completed inbound bodies),
+and 20 notification payloads; refreshed API/UI metadata retains partially retired
+threads so long conversations progress across calls/restarts. It retains source
+IDs, digests, receipts, intent states and count-quota tombstones. An exact old
+message/reply key remains deduped and conflicting content remains refused. No
+pending/uncertain state is deleted. Current contact configuration, Core records,
+SQLite historical pages/WAL, external copies and backups are not erased.
+
+Outbox paths never come from requests. A durable bounded queue tells the worker
+to remove only terminal intent `<64hex>.json` files beneath its existing private
+configured outbox directory, using no-follow file checks and directory fsync.
+Missing files complete cleanup idempotently; symlink/hardlink/private-storage
+failures retain the queued cleanup. Batches are 20 and restart-safe. UI completion
+means logical database payload retirement; file cleanup needs a running worker.
+No automatic TTL or unlimited capacity is claimed: tombstones still consume the
+existing count budget, and audit-full mutations fail closed.
+
+Worker stop now waits at most 60 seconds for its supervisor. A timeout is exposed
+as `stop_timed_out`, keeps the startup ownership latch set and never reclassifies
+in-flight work as safely stopped. Detached jobs retain their Hub/Store ownership;
+process termination and subsequent exclusive startup recovery remain necessary
+for unknown jobs. Accepted HTTP completion can still persist after stop request.
+
+Core review 7926 / test-only `7465ba32` demonstrated a post-token membership gap.
+The worker now performs fresh directory membership and Core metadata checks
+AFTER token mint, outside the Hub mutex; only afterwards does it acquire the
+current local stop/pause/contact/generation/lease fence. The final lease must
+still cover the 20-second POST plus 10-second margin. Slow/denied checks leave
+the consumed attempt uncertain without POST or resend. These checks cannot make
+remote revocation atomic with the later HTTP request; provider authorization
+remains independently required. Tests use only new synthetic identities/transport.

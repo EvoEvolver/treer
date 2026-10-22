@@ -6,7 +6,9 @@ use sha2::{Digest, Sha256};
 
 const PER_BINDING: i64 = 32;
 const GLOBAL: i64 = 640;
-// Core token mint (15s) + HTTP request (20s) + scheduling margin (10s).
+// Initial reservation floor: token mint (15s) + POST (20s) + margin (10s).
+// Remote post-mint checks consume the lease too; the final fence below must
+// still retain POST + margin. Slow checks refuse and leave uncertainty.
 const MIN_RESERVATION_LEASE: i64 = 45;
 
 fn wall_time() -> Result<i64, Error> {
@@ -32,7 +34,8 @@ pub(super) fn schema(db: &Connection) -> Result<(), Error> {
         endpoint TEXT NOT NULL, generation INTEGER NOT NULL,
         payload BLOB NOT NULL CHECK(length(payload)<=4096),
         state TEXT NOT NULL CHECK(state IN ('prepared','dispatching','uncertain','provider_accepted'))
-    ); CREATE INDEX IF NOT EXISTS email_dispatch_capacity ON email_dispatch(state,endpoint);")?;
+    ); CREATE INDEX IF NOT EXISTS email_dispatch_capacity ON email_dispatch(state,endpoint);
+    CREATE TABLE IF NOT EXISTS email_owner_resolutions(id TEXT PRIMARY KEY REFERENCES email_dispatch(id), actor TEXT NOT NULL, at INTEGER NOT NULL, reference TEXT NOT NULL, decision TEXT NOT NULL CHECK(decision='owner_observed_receipt'));")?;
     Ok(())
 }
 pub(super) fn exists(db: &Connection, id: &str) -> Result<bool, Error> {
@@ -44,7 +47,7 @@ pub(super) fn exists(db: &Connection, id: &str) -> Result<bool, Error> {
 }
 pub(super) fn reserved(db: &Connection, id: &str) -> Result<bool, Error> {
     Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM email_dispatch WHERE id=?1 AND state IN ('dispatching','uncertain'))",
+        "SELECT EXISTS(SELECT 1 FROM email_dispatch WHERE id=?1 AND state IN ('dispatching','uncertain') AND id NOT IN (SELECT id FROM email_owner_resolutions))",
         [id],
         |r| r.get(0),
     )?)
@@ -101,6 +104,24 @@ pub struct RecoveryItem {
     pub generation: i64,
     pub state: String,
     pub abandonable: bool,
+    pub reference: Option<String>,
+    pub terminal: bool,
+}
+pub(super) fn reference(payload: &[u8]) -> Result<String, Error> {
+    let value: serde_json::Value = serde_json::from_slice(payload).map_err(|_| Error::Invalid)?;
+    let text = value
+        .get("text")
+        .and_then(|v| v.as_str())
+        .ok_or(Error::Invalid)?;
+    let (_, marker) = text.rsplit_once("\n\nReference: ").ok_or(Error::Invalid)?;
+    if marker.len() != 16
+        || !marker
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(Error::Invalid);
+    }
+    Ok(marker.to_owned())
 }
 fn frozen_payload(intent: &Intent, url: &str) -> Result<Vec<u8>, Error> {
     let mut notification = intent.notification(url, Mode::Proxy)?;
@@ -127,7 +148,7 @@ fn frozen_payload(intent: &Intent, url: &str) -> Result<Vec<u8>, Error> {
 impl Queue<'_> {
     pub fn proxy_recovery_items(&self, endpoint: &str) -> Result<(Vec<RecoveryItem>, bool), Error> {
         self.proxy_delivery_status(endpoint)?; // validates scope and private storage
-        let mut stmt = self.store.db.prepare("SELECT d.id,d.generation,d.state, i.state=0 AND i.mode IS NULL AND d.state='prepared' AND d.generation=e.generation FROM email_dispatch d JOIN email_intents i ON i.id=d.id AND i.endpoint=d.endpoint AND i.generation=d.generation JOIN endpoints e ON e.id=d.endpoint WHERE d.endpoint=?1 AND d.state IN ('prepared','dispatching','uncertain') AND i.mode IS NOT 'proxy_abandoned' ORDER BY d.id LIMIT 21")?;
+        let mut stmt = self.store.db.prepare("SELECT d.id,d.generation,CASE WHEN i.mode='proxy_owner_observed' THEN 'owner_observed_receipt' ELSE d.state END, i.state=0 AND i.mode IS NULL AND d.state='prepared' AND d.generation=e.generation,d.payload,i.state<>0 FROM email_dispatch d JOIN email_intents i ON i.id=d.id AND i.endpoint=d.endpoint AND i.generation=d.generation JOIN endpoints e ON e.id=d.endpoint WHERE d.endpoint=?1 AND (i.thread NOT IN (SELECT thread FROM email_purged_threads) OR i.id NOT IN (SELECT id FROM email_retired_intents) OR EXISTS(SELECT 1 FROM email_messages m WHERE m.thread=i.thread AND m.body<>'') OR EXISTS(SELECT 1 FROM email_replies r WHERE r.thread=i.thread AND r.body<>'')) UNION ALL SELECT i.id,i.generation,'outbox',0,x'',1 FROM email_intents i WHERE i.endpoint=?1 AND i.mode='outbox' AND i.state=1 AND NOT EXISTS(SELECT 1 FROM email_dispatch d WHERE d.id=i.id) AND (i.thread NOT IN (SELECT thread FROM email_purged_threads) OR i.id NOT IN (SELECT id FROM email_retired_intents) OR EXISTS(SELECT 1 FROM email_messages m WHERE m.thread=i.thread AND m.body<>'') OR EXISTS(SELECT 1 FROM email_replies r WHERE r.thread=i.thread AND r.body<>'')) ORDER BY 1 LIMIT 21")?;
         let mut items = stmt
             .query_map([endpoint], |r| {
                 Ok(RecoveryItem {
@@ -135,6 +156,8 @@ impl Queue<'_> {
                     generation: r.get(1)?,
                     state: r.get(2)?,
                     abandonable: r.get(3)?,
+                    reference: reference(&r.get::<_, Vec<u8>>(4)?).ok(),
+                    terminal: r.get(5)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -183,7 +206,13 @@ impl Queue<'_> {
         if !valid_time(now) {
             return Err(Error::Invalid);
         }
-        let valid = match current(&tx, intent, now) {
+        let remaining: i64 = tx.query_row(
+            "SELECT coalesce(lease_until,0)-?2 FROM email_intents WHERE id=?1",
+            params![intent.id, now],
+            |r| r.get(0),
+        )?;
+        let post_budget = super::proxy::REQUEST_TIMEOUT.as_secs() as i64 + 10;
+        let valid = remaining >= post_budget && match current(&tx, intent, now) {
             Ok(()) => tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM email_dispatch WHERE id=?1 AND endpoint=?2 AND generation=?3 AND state='dispatching' AND payload=?4)",
                 params![intent.id,intent.endpoint,intent.generation,expected], |r| r.get(0))?,
@@ -216,9 +245,9 @@ impl Queue<'_> {
             return Err(Error::Denied);
         }
         let (prepared,abandoned,dispatching,uncertain,provider_accepted): (i64,i64,i64,i64,i64) = tx.query_row(
-            "SELECT coalesce(sum(d.state='prepared' AND i.mode IS NULL),0),coalesce(sum(i.state=2 AND i.mode='proxy_abandoned'),0),coalesce(sum(d.state='dispatching'),0),coalesce(sum(d.state='uncertain'),0),coalesce(sum(d.state='provider_accepted'),0) FROM email_dispatch d JOIN email_intents i ON i.id=d.id WHERE d.endpoint=?1", [endpoint], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+            "SELECT coalesce(sum(d.state='prepared' AND i.mode IS NULL),0),coalesce(sum(i.state=2 AND i.mode='proxy_abandoned'),0),coalesce(sum(d.state='dispatching'),0),coalesce(sum(d.state='uncertain' AND d.id NOT IN (SELECT id FROM email_owner_resolutions)),0),coalesce(sum(d.state='provider_accepted'),0) FROM email_dispatch d JOIN email_intents i ON i.id=d.id WHERE d.endpoint=?1", [endpoint], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
         let global: i64 = tx.query_row(
-            "SELECT count(*) FROM email_dispatch WHERE state IN ('dispatching','uncertain')",
+            "SELECT count(*) FROM email_dispatch WHERE state IN ('dispatching','uncertain') AND id NOT IN (SELECT id FROM email_owner_resolutions)",
             [],
             |r| r.get(0),
         )?;
@@ -326,7 +355,7 @@ impl Queue<'_> {
         if payload != expected {
             return Err(Error::Conflict);
         }
-        let (local, global): (i64,i64) = tx.query_row("SELECT coalesce(sum(endpoint=?1),0),count(*) FROM email_dispatch WHERE state IN ('dispatching','uncertain')", [&intent.endpoint], |r|Ok((r.get(0)?,r.get(1)?)))?;
+        let (local, global): (i64,i64) = tx.query_row("SELECT coalesce(sum(endpoint=?1),0),count(*) FROM email_dispatch WHERE state IN ('dispatching','uncertain') AND id NOT IN (SELECT id FROM email_owner_resolutions)", [&intent.endpoint], |r|Ok((r.get(0)?,r.get(1)?)))?;
         if local >= PER_BINDING || global >= GLOBAL {
             return Err(Error::Full);
         }

@@ -161,6 +161,18 @@ def fixture(binary, editable=False, activation=False, tokens=False, email=False,
 if __name__=='__main__':
     signal.signal(signal.SIGTERM,lambda *_:sys.exit(0))
     with fixture(Path(sys.argv[1]).resolve(),editable='--editable' in sys.argv[2:],tokens='--token-slots' in sys.argv[2:],email='--email' in sys.argv[2:]) as f:
+        if '--seed-email-recovery' in sys.argv[2:]:
+            # New synthetic state only; workers disabled, never a live mail store.
+            db=sqlite3.connect(f['state']/'hub.sqlite3')
+            b={'endpoint_id':'ag_recovery','generation':1,'recipient':'ag_recipient','expected_path':'/team/ag_recovery','expected_cwd':'/private/fixture','expected_server_id':'machine_fixture'}
+            db.execute("INSERT INTO endpoints(id,generation,recipient,paused) VALUES('ag_recovery',1,'ag_recipient',1)")
+            db.execute("INSERT INTO hub_bindings(endpoint,definition) VALUES('ag_recovery',?)",(json.dumps(b),))
+            db.execute("INSERT INTO email_targets(endpoint,generation,address,member) VALUES('ag_recovery',1,'person@example.test','user_member')")
+            db.execute("INSERT INTO email_threads VALUES(?,'ag_recovery',1,'ag_recipient','person@example.test','user_member')",('c'*64,))
+            db.execute("INSERT INTO email_messages VALUES(?,'msg_old','synthetic retained mail','digest_old',61)",('c'*64,))
+            db.execute("INSERT INTO email_intents(id,thread,endpoint,generation) VALUES(?,?,'ag_recovery',1)",('a'*64,'c'*64))
+            db.execute("INSERT INTO email_dispatch VALUES(?,'ag_recovery',1,?,'uncertain')",('a'*64,json.dumps({'text':'Private notification\n\nReference: 0123456789abcdef','idempotency_key':'synthetic-key'}).encode()))
+            db.commit();db.close()
         if '--seed-recovery' in sys.argv[2:]:
             db=sqlite3.connect(f['state']/'hub.sqlite3')
             db.execute("INSERT INTO hub_activity(endpoint,generation,activated_at,stale_updates) VALUES('ag_demo',1,?,1)",(int(time.time()),))

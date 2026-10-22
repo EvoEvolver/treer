@@ -35,6 +35,7 @@ impl Config {
 #[derive(Default)]
 struct State {
     stop: AtomicBool,
+    stop_timed_out: AtomicBool,
     published: AtomicU64,
     replied: AtomicU64,
     failures: AtomicU64,
@@ -46,6 +47,7 @@ pub struct Status {
     pub core_replies: u64,
     pub failures: u64,
     pub stopped: bool,
+    pub stop_timed_out: bool,
 }
 #[derive(Serialize)]
 pub struct Snapshot {
@@ -187,6 +189,14 @@ impl Workers {
                         shared.stop.store(true, Ordering::Release);
                         break;
                     }
+                    if hub.lock().ok().and_then(|mut h| {
+                        email::Queue::new(&mut h.store)
+                            .ok()
+                            .map(|mut q| q.purge_retired_outbox(&config.outbox_directory).is_ok())
+                    }) != Some(true)
+                    {
+                        increment(&shared.failures);
+                    }
                     let ids = hub
                         .lock()
                         .ok()
@@ -251,16 +261,28 @@ impl Workers {
             core_replies: self.state.replied.load(Ordering::Relaxed),
             failures: self.state.failures.load(Ordering::Relaxed),
             stopped: self.state.stop.load(Ordering::Acquire),
+            stop_timed_out: self.state.stop_timed_out.load(Ordering::Acquire),
         }
     }
     pub fn request_stop(&self) {
         self.state.stop.store(true, Ordering::Release);
     }
     pub fn stop(&mut self) {
+        self.stop_with_deadline(Duration::from_secs(60));
+    }
+    fn stop_with_deadline(&mut self, budget: Duration) {
         self.request_stop();
         let mut joined = true;
         if let Some(j) = self.join.take() {
-            if j.join().is_err() {
+            let deadline = std::time::Instant::now() + budget;
+            while !j.is_finished() && std::time::Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if !j.is_finished() {
+                self.state.stop_timed_out.store(true, Ordering::Release);
+                increment(&self.state.failures);
+                joined = false; // Keep startup latched: detached jobs may still commit.
+            } else if j.join().is_err() {
                 increment(&self.state.failures);
                 joined = false;
             }
@@ -501,6 +523,19 @@ fn step(
                     }
                 };
                 let completion = directory.send_committed(core, attempt, || {
+                    // Token mint may have blocked while membership or Core pins
+                    // changed. Revalidate remotely outside the Hub mutex first.
+                    // A consumed reservation stays uncertain on any refusal.
+                    if state.stop.load(Ordering::Acquire)
+                        || !directory
+                            .current_member(core, &contact.member_id)
+                            .unwrap_or(false)
+                        || refresh(hub, core, id).is_err()
+                    {
+                        return false;
+                    }
+                    // Remote checks may themselves have blocked. Only now take
+                    // the current local pause/contact/generation/lease/stop fence.
                     if state.stop.load(Ordering::Acquire) {
                         return false;
                     }
@@ -510,7 +545,8 @@ fn step(
                     let Ok(now) = clock() else {
                         return false;
                     };
-                    if h.active(id, now).is_err()
+                    if state.stop.load(Ordering::Acquire)
+                        || h.active(id, now).is_err()
                         || h.blocked().unwrap_or(true)
                         || email::contact(&h.store, id).ok().flatten().as_ref() != Some(&contact)
                     {
@@ -805,5 +841,41 @@ pub(crate) mod tests {
         drop(lease);
         assert!(hub.lock().unwrap().email_workers_active);
         assert!(StartupLease::acquire(&hub).is_err());
+    }
+    #[test]
+    fn bounded_stop_returns_without_releasing_unjoined_startup_ownership() {
+        let h = Arc::new(Mutex::new(
+            Hub::new(
+                Store::memory(Limits::default()).unwrap(),
+                Core::new(std::path::Path::new("/usr/bin/false"), "ag_hub").unwrap(),
+                "ag_hub",
+                "ws_test",
+            )
+            .unwrap(),
+        ));
+        let lease = StartupLease::acquire(&h).unwrap();
+        let (send, recv) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let held = h.clone();
+        let j = std::thread::spawn(move || {
+            recv.recv_timeout(Duration::from_secs(5)).unwrap();
+            drop(held);
+            done.send(()).unwrap();
+        });
+        let mut worker = Workers {
+            state: Arc::new(State::default()),
+            join: Some(j),
+            startup: Some(lease),
+            mode: email::Mode::Proxy,
+        };
+        let before = std::time::Instant::now();
+        worker.stop_with_deadline(Duration::ZERO);
+        assert!(before.elapsed() < Duration::from_secs(1));
+        assert!(worker.status().stop_timed_out);
+        assert!(StartupLease::acquire(&h).is_err());
+        send.send(()).unwrap();
+        finished.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(worker); // does not wait a second deadline or clear the latch
+        assert!(h.lock().unwrap().email_workers_active);
     }
 }

@@ -12,15 +12,41 @@ const [binary,modulePath,browserPath,screenshots]=process.argv.slice(2);
 if(!screenshots)throw new Error('usage: email-browser.mjs BINARY PLAYWRIGHT_MODULE BROWSER_CACHE SCREENSHOTS');
 process.env.PLAYWRIGHT_BROWSERS_PATH=resolve(browserPath);
 const {chromium}=createRequire(import.meta.url)(resolve(modulePath));
+const recoveryOnly=process.argv.includes('--recovery-only');
 const home=mkdtempSync(join(tmpdir(),'endpoint-email-browser-'));chmodSync(home,0o700);
 const env={HOME:home,TMPDIR:home,PATH:'/usr/bin:/bin:/usr/sbin:/sbin',PLAYWRIGHT_BROWSERS_PATH:resolve(browserPath)};
 mkdirSync(screenshots,{recursive:true,mode:0o700});
-const child=spawn('/usr/bin/python3',[fileURLToPath(new URL('./http_fixture.py',import.meta.url)),resolve(binary),'--editable','--email'],{env,stdio:['ignore','pipe','pipe']});
+const child=spawn('/usr/bin/python3',[fileURLToPath(new URL('./http_fixture.py',import.meta.url)),resolve(binary),'--editable','--email',...(recoveryOnly?['--seed-email-recovery']:[])],{env,stdio:['ignore','pipe','pipe']});
 const lines=createInterface({input:child.stdout});let stderr='';child.stderr.on('data',c=>stderr+=c.toString().slice(0,1000));
 let browser;const timer=setTimeout(()=>child.kill('SIGTERM'),10000);
 try {
  const [line]=await once(lines,'line');clearTimeout(timer);const config=JSON.parse(line);
  browser=await chromium.launch({headless:true,env});
+ if(recoveryOnly) {
+  const page=await browser.newPage({viewport:{width:390,height:900},colorScheme:'dark',locale:'en-US',extraHTTPHeaders:{'X-Treer-Identity-Token':'fixture.owner.token'}});
+  page.setDefaultTimeout(8000);await page.goto(config.url);
+  const card=page.locator('section').filter({has:page.getByRole('heading',{name:'/team/ag_recovery',exact:true})});
+  await card.getByText('Email delivery recovery',{exact:true}).click();
+  await card.getByRole('button',{name:'Inspect email delivery',exact:true}).click();
+  await card.getByText('Uncertain: 1',{exact:false}).waitFor();
+  const resolveButton=card.getByRole('button',{name:'Record owner-observed receipt',exact:true});
+  if(!await resolveButton.isDisabled())throw new Error('resolution missing confirmation');
+  await card.getByLabel('Confirm an action on this item; sending stays paused.',{exact:true}).check();
+  const reference=card.getByLabel('Enter the 16-character reference observed in the mailbox',{exact:true});
+  if(await reference.inputValue()!=='')throw new Error('reference must come from owner observation');
+  await reference.fill('0123456789abcdef');await resolveButton.click();
+  await card.getByText('owner_observed_receipt',{exact:false}).waitFor();
+  if(!await page.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('owner item recovery overflow');
+  await page.screenshot({path:join(screenshots,'email-owner-observed-390-dark.png'),fullPage:true});
+  await card.getByLabel('Confirm an action on this item; sending stays paused.',{exact:true}).check();
+  const response=page.waitForResponse(r=>r.request().postData()?.includes('purge_email_payload')??false);
+  await card.getByRole('button',{name:'Retire terminal conversation payloads',exact:true}).click();
+  const rejected=await response;if(rejected.status()!==409)throw new Error('freshly terminal mail bypassed seven-day retention');
+  await card.getByRole('alert').waitFor();
+  if(!await page.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('owner recovery overflow');
+  await page.screenshot({path:join(screenshots,'email-owner-resolved-purged-390-dark.png'),fullPage:true});
+  await page.close();console.log('email recovery browser PASS: actual native owner API, observed receipt + fresh-terminal retention refusal, explicit confirmation/reference, no resend, mobile dark');
+ } else {
  for(const mode of ['wildcard','embedded','dedicated']) for(const width of [1280,390]) for(const color of ['light','dark']) {
   const page=await browser.newPage({viewport:{width,height:900},colorScheme:color,locale:'en-US',...(mode==='dedicated'?{extraHTTPHeaders:{'X-Treer-Identity-Token':'fixture.member.token'}}:{})});
   page.setDefaultTimeout(8000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
@@ -72,6 +98,7 @@ try {
  const link=login.getByRole('link',{name:'Continue with Treer',exact:true});await link.waitFor();
  if(await link.getAttribute('href')!==config.url+'api/email/auth/start?thread='+config.thread)throw new Error('member OAuth return not scoped');await login.close();
  console.log('email browser PASS: dedicated/wildcard/embedded, 1280/390, light/dark, member scope + text + reply + OAuth fallback');
+ }
 }finally {
  clearTimeout(timer);if(browser)await browser.close();lines.close();child.kill('SIGTERM');await once(child,'exit').catch(()=>{});rmSync(home,{recursive:true,force:true});
  if(stderr)console.error(stderr);
