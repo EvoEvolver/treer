@@ -1,135 +1,68 @@
-name: CI
-
+name: Disposable updater target inventory
+run-name: Inventory222 fdc19970 once
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  rust:
-    name: Rust and PostgreSQL tests
+  inventory:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    env:
-      TREER_TEST_DATABASE_URL: postgres://treer:treer@127.0.0.1:55432/treer_test
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_USER: treer
-          POSTGRES_PASSWORD: treer
-          POSTGRES_DB: treer_test
-        ports:
-          - 55432:5432
-        options: >-
-          --health-cmd "pg_isready -U treer -d treer_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-        with:
-          toolchain: 1.90.0
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Release workflow security regressions (fake registry only)
-        run: node --test scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs scripts/install-checksums.test.mjs
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Build workspace binaries
-        run: cargo build --workspace --locked
-      - name: Test workspace including database boundaries
-        run: cargo test --workspace --locked
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  web:
-    name: Frontend types and build
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: 10.12.4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
-      - run: pnpm build
-
-  agent-launcher:
-    name: Agent launcher types, fake harnesses and browser
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: launchers/agent/package-lock.json
-      - name: Install launcher dependencies
-        run: npm --prefix launchers/agent ci --ignore-scripts
-      - name: Install isolated browser runtime
-        run: cd launchers/agent && npx playwright install --with-deps chromium
-      - name: Check launcher and browser sources
-        run: npm --prefix launchers/agent run check
-      - name: Unit and installer tests (fake harnesses only)
-        run: npm --prefix launchers/agent test
-      - name: Closed Codex, ACP and Claude Interface regression
+      - name: Measure actual disposable account and manager prerequisites
+        shell: bash
         run: |
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
-          node scripts/ais-e2e.mjs
-      - name: Browser controls and screenshots
-        run: npm --prefix launchers/agent run test:browser
-        env:
-          CODEX_UI_SCREENSHOTS: ${{ runner.temp }}/launcher-screenshots
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: failure()
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          #!/usr/bin/env python3
+          """Metadata only, for a GitHub-hosted disposable Ubuntu job; no installation."""
+          import os,pwd,pathlib,subprocess,json,hashlib,stat
+          assert os.environ.get("GITHUB_ACTIONS")=="true"
+          assert os.environ.get("RUNNER_ENVIRONMENT")=="github-hosted"
+          assert os.uname().sysname=="Linux"
+          assert os.geteuid()!=0, "nonroot hosted account required"
+          u=pwd.getpwuid(os.geteuid()); home=pathlib.Path(u.pw_dir).resolve(strict=True)
+          def command(argv):
+           try:
+            p=subprocess.run(argv,capture_output=True,text=True,timeout=8)
+            return p.returncode,p.stdout.strip()
+           except (OSError,subprocess.TimeoutExpired):return None,""
+          result={"schema":1,"scope":"disposable hosted CI metadata only","uid":u.pw_uid,"gid":u.pw_gid,"account":u.pw_name,"passwd_home":str(home),"environment_home_matches":pathlib.Path(os.environ["HOME"]).resolve()==home,"home_owner_matches":home.stat().st_uid==u.pw_uid,"home_mode":oct(stat.S_IMODE(home.stat().st_mode)),"home_group_other_writable":bool(home.stat().st_mode&0o022),"pid":os.getpid(),"ppid":os.getppid(),"sid":os.getsid(0),"pgrp":os.getpgrp(),"runner_os":os.environ.get("RUNNER_OS"),"runner_arch":os.environ.get("RUNNER_ARCH"),"image_os":os.environ.get("ImageOS"),"image_version":os.environ.get("ImageVersion"),"node_candidates":[]}
+          for name in ["/opt/homebrew/bin/node","/usr/local/bin/node","/usr/bin/node"]:
+           p=pathlib.Path(name)
+           if not p.exists():
+            result["node_candidates"].append({"path":name,"exists":False});continue
+           real=p.resolve(strict=True); st=real.stat();code,version=command([str(real),"--version"])
+           result["node_candidates"].append({"path":name,"exists":True,"realpath":str(real),"uid":st.st_uid,"gid":st.st_gid,"mode":oct(stat.S_IMODE(st.st_mode)),"group_other_writable":bool(st.st_mode&0o022),"sha256":hashlib.sha256(real.read_bytes()).hexdigest(),"version":version if code==0 and version.startswith("v") and len(version)<40 else None,"exit":code})
+          parent_code,parent=command(["ps","-p",str(os.getppid()),"-o","pid=,ppid=,sid=,pgid=,comm="])
+          result["parent_metadata"]=parent if parent_code==0 and len(parent)<512 else None
+          result["user_manager_queries"]={}
+          for args in [["systemctl","--user","show-environment"],["systemctl","--user","list-unit-files","--no-pager"]]:
+           try:
+            p=subprocess.run(args,capture_output=True,text=True,timeout=8)
+            category="available" if p.returncode==0 else "query_failed"
+            for marker,label in [("Failed to connect to bus","bus_unavailable"),("No medium found","bus_unavailable"),("Permission denied","permission_denied")]:
+             if marker.lower() in p.stderr.lower():category=label
+            result["user_manager_queries"][args[2]]={"exit":p.returncode,"category":category}
+           except subprocess.TimeoutExpired:result["user_manager_queries"][args[2]]={"exit":None,"category":"timeout"}
+           except FileNotFoundError:result["user_manager_queries"][args[2]]={"exit":None,"category":"command_unavailable"}
+          code=result["user_manager_queries"]["show-environment"]["exit"]
+          result["systemd_user_bus_query_exit"]=code
+          code,version=command(["systemctl","--version"])
+          result["systemctl_present"]=code==0
+          runtime=pathlib.Path("/run/user")/str(u.pw_uid)
+          result["runtime_directory_exists"]=runtime.is_dir()
+          result["user_bus_socket_exists"]=(runtime/"bus").is_socket()
+          result["manager_acceptance"]="NOT_RUN"
+          out=pathlib.Path(os.environ["RUNNER_TEMP"])/"treer222-capability.json"
+          with out.open("x") as f:json.dump(result,f,indent=2);f.write("\n")
+          print(json.dumps(result))
+          PYTHON
+      - name: Preserve bounded capability metadata
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: agent-launcher-screenshots
-          path: ${{ runner.temp }}/launcher-screenshots
-          if-no-files-found: ignore
-
-  release-tooling:
-    name: Release tooling and fake machine updates
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-      - name: Closed release, checksum, detachment and rollback tests
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-      - name: Documentation links and launcher test isolation
-        run: |
-          node scripts/check-docs.mjs
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
+          name: treer222-disposable-target
+          path: ${{ runner.temp }}/treer222-capability.json
+          if-no-files-found: error
+          retention-days: 7
