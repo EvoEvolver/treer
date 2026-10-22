@@ -1151,6 +1151,60 @@ test('Rust explicit prompt limit uses raw UTF8 bytes while retained oversized op
 });
 const messageJournal=s=>readFile(join(s.state,'rust-spike.json'),'utf8').then(JSON.parse);
 const messageAcks=async s=>(await readFile(join(s.root,'registration.json'),'utf8')).trim().split('\n').map(JSON.parse).filter(x=>x.ack);
+const messageAttempts=async s=>(await readFile(join(s.root,'registration.json'),'utf8')).trim().split('\n').map(JSON.parse).filter(x=>x.messageAttempt);
+test('Rust message retry auth receive stops without content disclosure or periodic retries',{skip:useNode,timeout:15000},async t=>{
+  const s=await fixture(t,{...messageFixtureEnv,RUST_SPIKE_MESSAGE_FAILURE:'failure.json'});
+  await writeFile(join(s.root,'cwd/failure.json'),JSON.stringify({operation:'receive',kind:'auth',remaining:3,stdout:true}));
+  await until(async()=>s.logs(),log=>log.includes('Rust message watcher stopped: message_auth'));
+  assert.equal((await messageAttempts(s)).length,1);
+  await new Promise(r=>setTimeout(r,1400));
+  assert.equal((await messageAttempts(s)).length,1);
+  assert.equal((await messageJournal(s)).records.length,0);
+  assert.ok(!s.logs().includes('private-diagnostic-canary'));
+  assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).ready,true,'only watcher stops');
+});
+test('Rust message retry auth ACK preserves durable pending IDs until restart without turn replay',{skip:useNode,timeout:20000},async t=>{
+  const s=await fixture(t,{...messageFixtureEnv,RUST_SPIKE_MESSAGE_FAILURE:'failure.json'});
+  await writeFile(join(s.root,'cwd/failure.json'),JSON.stringify({operation:'ack',kind:'auth',remaining:3,flood:true}));
+  await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(301),incomingNotice(302)]));
+  await until(async()=>s.logs(),log=>log.includes('Rust message watcher stopped: message_auth'));
+  const before=await messageJournal(s),id=before.records[0].submission.id;
+  assert.equal(before.records[0].source_messages.filter(m=>m.ackPending).length,2);
+  assert.ok(!s.logs().includes('private-diagnostic-canary'));
+  await until(()=>messageJournal(s),j=>j.records[0].submission.state==='done');
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  await unlink(join(s.root,'cwd/failure.json'));await writeFile(join(s.root,'cwd/incoming.json'),'[]');
+  await s.launch({});
+  const after=await until(()=>messageJournal(s),j=>j.records[0].source_messages.every(m=>!m.ackPending));
+  assert.equal(after.records[0].submission.id,id);
+  assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
+  assert.equal((await messageAcks(s)).length,2);
+});
+test('Rust message retry network backoff grows and resets after a successful poll',{skip:useNode,timeout:15000},async t=>{
+  const s=await fixture(t,{...messageFixtureEnv,RUST_SPIKE_MESSAGE_FAILURE:'failure.json'});
+  const path=join(s.root,'cwd/failure.json');
+  await writeFile(path,JSON.stringify({operation:'receive',kind:'network',remaining:2,flood:true}));
+  await until(async()=>s.logs(),log=>log.includes('failures=1; delay_ms='));
+  let matches=[...s.logs().matchAll(/message_network.*failures=(\d+); delay_ms=(\d+)/g)];
+  assert.deepEqual(matches.map(m=>Number(m[1])),[0,1]);
+  assert.ok(Number(matches[0][2])>=1000&&Number(matches[0][2])<=1200);
+  assert.ok(Number(matches[1][2])>=2000&&Number(matches[1][2])<=2400);
+  await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(303)]));
+  await until(()=>messageAcks(s),a=>a.some(m=>m.ack==='dlv_303'));
+  await writeFile(path,JSON.stringify({operation:'receive',kind:'network',remaining:1}));
+  await until(async()=>s.logs(),log=>[...log.matchAll(/message_network.*failures=(\d+); delay_ms=(\d+)/g)].length>=3);
+  matches=[...s.logs().matchAll(/message_network.*failures=(\d+); delay_ms=(\d+)/g)];
+  assert.equal(matches[2][1],'0');
+  assert.ok(!s.logs().includes('private-diagnostic-canary'));
+});
+test('Rust message retry oversized stdout kills the owned command without waiting for stderr EOF',{skip:useNode,timeout:15000},async t=>{
+  const s=await fixture(t,{...messageFixtureEnv,RUST_SPIKE_MESSAGE_FAILURE:'failure.json'});
+  await writeFile(join(s.root,'cwd/failure.json'),JSON.stringify({operation:'receive',kind:'other',remaining:1,stdout:true,oversized:true}));
+  await until(async()=>s.logs(),log=>log.includes('message_other: operation failed; failures=0'));
+  assert.equal((await messageJournal(s)).records.length,0);
+  await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(304)]));
+  await until(()=>messageAcks(s),a=>a.some(m=>m.ack==='dlv_304'));
+});
 test('Rust message batching same poll is one real turn, durable before ack and redelivery deduplicated',{skip:useNode,timeout:20000},async t=>{
   const s=await fixture(t,messageFixtureEnv);
   const notices=[incomingNotice(1),incomingNotice(2),incomingNotice(3)];

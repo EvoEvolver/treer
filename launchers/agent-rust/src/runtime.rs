@@ -18,6 +18,7 @@ use tokio::{
 };
 mod messages;
 mod receipts;
+mod message_retry;
 
 pub struct Request {
     pub method: String,
@@ -1692,9 +1693,9 @@ pub async fn message_command(args: &[String], input: Option<&str>) -> Result<Val
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .spawn()?;
+        .spawn().map_err(|e| if matches!(e.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::TimedOut) {message_retry::Failure::Network} else {message_retry::Failure::Other})?;
     if let Some(input) = input {
         child
             .stdin
@@ -1708,38 +1709,51 @@ pub async fn message_command(args: &[String], input: Option<&str>) -> Result<Val
     // Ten Core deliveries may each carry a 1 MiB body. Keep a fixed response
     // ceiling large enough for that one bounded poll, never an unbounded read.
     let mut stdout = child.stdout.take().unwrap().take(16 * 1024 * 1024 + 1);
+    let stderr = child.stderr.take().unwrap();
     let mut bytes = vec![];
     let result = timeout(Duration::from_secs(40), async {
-        stdout.read_to_end(&mut bytes).await?;
-        if bytes.len() > 16 * 1024 * 1024 {
-            bail!("Treer output limit")
+        let output = async {
+            stdout.read_to_end(&mut bytes).await?;
+            if bytes.len() > 16 * 1024 * 1024 {
+                return Err(std::io::Error::other("message_output_limit"));
+            }
+            Ok(())
         };
+        let (_, diagnostic) = tokio::try_join!(output, message_retry::diagnostic_prefix(stderr))?;
         let status = child.wait().await?;
         if !status.success() {
-            bail!("Treer message operation failed")
+            let mut diagnostic = diagnostic;
+            diagnostic.push(b'\n');
+            diagnostic.extend_from_slice(&bytes[..bytes.len().min(16_384)]);
+            return Err(message_retry::classify(&diagnostic).into());
         };
         Ok::<_, anyhow::Error>(())
     })
     .await;
-    if !matches!(result, Ok(Ok(()))) {
-        let _ = child.kill().await;
-        bail!("Treer message operation failed")
+    match result {
+        Ok(Ok(())) => {},
+        Ok(Err(error)) => {
+            let _ = child.kill().await;
+            return Err(error.downcast::<message_retry::Failure>().unwrap_or(message_retry::Failure::Other).into());
+        },
+        Err(_) => {
+            let _ = child.kill().await;
+            return Err(message_retry::Failure::Network.into());
+        }
     }
     if bytes.is_empty() {
         Ok(Value::Null)
     } else {
-        Ok(serde_json::from_slice(&bytes)?)
+        serde_json::from_slice(&bytes).map_err(|_| message_retry::Failure::Other.into())
     }
 }
 pub async fn watch_messages(handle: Handle, agent: String) {
+    let mut failures = 0u32;
     loop {
-        let pending = handle.call("message_pending_acks", Value::Null).await;
-        if pending.is_err() || acknowledge_messages(&handle, pending.as_ref().unwrap()).await.is_err() {
-            eprintln!("Rust message watcher: pending_ack_retry");
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            continue;
-        }
-        let received = message_command(
+        let received = async {
+            let pending = handle.call("message_pending_acks", Value::Null).await?;
+            acknowledge_messages(&handle, &pending).await?;
+            let result = message_command(
             &[
                 "receive".into(),
                 "--wait".into(),
@@ -1749,18 +1763,32 @@ pub async fn watch_messages(handle: Handle, agent: String) {
             ],
             None,
         )
-        .await;
-        if let Ok(result) = received {
+        .await?;
             // One actor admission for the WHOLE poll, before any idle drain.
             // Only the persisted result grants permission to ack its IDs.
-            match handle.call("message_receive",json!({"agent":agent,"deliveries":result["deliveries"]})).await {
-                Ok(ids) => if acknowledge_messages(&handle, &ids).await.is_err() {
-                    eprintln!("Rust message watcher: admitted_ack_retry");
-                },
-                Err(_) => eprintln!("Rust message watcher: batch_admission_refused"),
+            let ids = handle.call("message_receive",json!({"agent":agent,"deliveries":result["deliveries"]})).await?;
+            acknowledge_messages(&handle, &ids).await?;
+            Ok::<_, anyhow::Error>(result["deliveries"].as_array().is_some_and(Vec::is_empty))
+        }.await;
+        match received {
+            Ok(empty) => {
+                failures = 0;
+                if empty { tokio::time::sleep(Duration::from_millis(250)).await; }
+            },
+            Err(error) => {
+                let failure = error.downcast_ref::<message_retry::Failure>().unwrap_or(&message_retry::Failure::Other);
+                if *failure == message_retry::Failure::Auth {
+                    eprintln!("Rust message watcher stopped: {failure}");
+                    break;
+                }
+                let id = uuid::Uuid::new_v4();
+                let jitter = u16::from_le_bytes([id.as_bytes()[0], id.as_bytes()[1]]);
+                let delay = message_retry::retry_delay(failures, jitter);
+                eprintln!("Rust message watcher retry: {failure}; failures={failures}; delay_ms={}", delay.as_millis());
+                tokio::time::sleep(delay).await;
+                failures = failures.saturating_add(1);
             }
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
 async fn acknowledge_messages(handle: &Handle, ids: &Value) -> Result<()> {

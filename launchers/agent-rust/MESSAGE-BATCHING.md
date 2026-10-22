@@ -43,7 +43,7 @@ of dispatching another turn. Completed tool retention, history normalization,
 | Untrusted framing and 64 KiB message prompt bound | Implemented using Node's framing and preview limits |
 | Normal explicit prompt byte limit | Batching-only `74806250` kept 100,000. Separate [receipt successor](RECEIPT-RETENTION.md) aligns new admission to Node's 65,536 raw bytes while preserving retained legacy retries |
 | Queue/receipt pressure | Separate receipt successor prunes safe terminals to 1,024 and counts queued/running/ACK/notification obligations toward 256; protects uncertainty and keeps the 4,096 recovery ceiling |
-| Retry diagnostics/backoff | `INGRESS-AUTH-RETRY` remains: pending ACK blocks further receive; fixed-category logs and two-second retry still differ from Node's categorized auth stop / exponential jitter |
+| Retry diagnostics/backoff | Separate [retry successor](MESSAGE-RETRY.md) implements `INGRESS-AUTH-RETRY`: fixed categories, authentication stop, bounded exponential jitter and reset after successful poll/admission/ACK; not yet a deployed parity claim |
 
 ## Operational rollout delta
 

@@ -5,6 +5,21 @@ import { localFetch } from '../../../agent/tests/hermetic.mjs';
 const args = process.argv.slice(2);
 if (args[0] === 'message' && ['receive','ack'].includes(args[1])) {
   if (!process.env.RUST_SPIKE_MESSAGE_INPUT) throw Error('message fixture not configured');
+  if (process.env.RUST_SPIKE_MESSAGE_FAILURE) {
+    let failure;
+    try {failure=JSON.parse(await readFile(process.env.RUST_SPIKE_MESSAGE_FAILURE,'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
+    if(failure?.operation===args[1] && failure.remaining>0) {
+      failure.remaining--;
+      await writeFile(process.env.RUST_SPIKE_MESSAGE_FAILURE,JSON.stringify(failure));
+      await appendFile(process.env.RUST_SPIKE_CLI_LOG,JSON.stringify({messageAttempt:args[1],failure:failure.kind,at:Date.now()})+'\n',{mode:0o600});
+      const diagnostic=failure.kind==='auth'?'treer: invalid_credentials: private-diagnostic-canary':failure.kind==='network'?'ECONNREFUSED private-diagnostic-canary':'unknown private-diagnostic-canary';
+      const output=failure.stdout?process.stdout:process.stderr;
+      const bytes=failure.oversized?'x'.repeat(17*1024*1024):failure.stdout?JSON.stringify({error:{code:'forbidden',detail:'private-diagnostic-canary'}}):diagnostic+'\n'+'x'.repeat(failure.flood?256*1024:0);
+      await new Promise((resolve,reject)=>output.write(bytes,error=>error?reject(error):resolve()));
+      if(failure.oversized)await new Promise(r=>setTimeout(r,30000));
+      process.exit(1);
+    }
+  }
   if (args[1] === 'receive') {
     let deliveries=[];
     try {deliveries=JSON.parse(await readFile(process.env.RUST_SPIKE_MESSAGE_INPUT,'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}

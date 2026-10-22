@@ -63,9 +63,10 @@ failed completion publication, and exercise multibyte/raw whitespace prompt
 boundaries plus a retained legacy oversized retry. The five accepted batching
 entry tests are also retained.
 
-`INGRESS-AUTH-RETRY` remains a named follow-up: classify authentication failure
-separately from transient failure and implement bounded exponential jitter /
-auth stop semantics. The watcher still uses its existing fixed retry interval.
+Receipt-only `87ae84cc` leaves `INGRESS-AUTH-RETRY` as a named follow-up.
+The separate [retry successor](MESSAGE-RETRY.md) implements categorized
+authentication stop and bounded exponential jitter; it is not part of the
+accepted receipt-only or batching-only frozen result.
 This increment does not claim full Node parity or live acceptance. Rollout
 expansion stays paused; only the leader may select/activate a separately pinned
 artifact. The accepted batching-only one-target package remains independent.
