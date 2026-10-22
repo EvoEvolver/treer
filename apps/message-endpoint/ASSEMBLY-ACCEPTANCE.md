@@ -190,3 +190,51 @@ also cover global capacity, aggregate write rollback, 128-slot overflow, existin
 hold/global-block preservation, and genuine storage/ACK recovery. All account,
 Core and Bot identities are local synthetic fixtures; no real send or service
 operation is involved.
+
+
+## Real Core outbox/member-reply fixture (2026-10-22 successor)
+
+`tests/actual-core-acceptance.py` adds a separate, actual Core integration entry.
+It stages explicit native binaries, creates a NEW scram-authenticated PostgreSQL,
+standalone message-enabled Proxy, owner/workspace and foreground Host/Controller,
+then creates only task-owned managed Hub, relay, recipient and Policy workloads.
+Policy uses exact supplied Core-source assets and an enforce message-send rule for
+these three workload IDs. It does not use an installed enrollment or existing
+credentials. The recipient uses its Host-injected identity and the real CLI.
+
+The exercised chain is Core send (same-key retry) -> production Rust relay/Hub ->
+one private email outbox notification -> fresh Proxy-asserted member thread read
+and same-key HTTP reply -> relay -> actual Core recipient with original context
+and confirmed delivery ACK. Anonymous settings access must fail. No mail transport
+or Telegram bot is configured. A synthetic newly registered human is both the
+owner and the current member; non-owner role separation remains covered by the
+existing focused source tests, not this fixture. The private Proxy Console origin
+is explicitly the dedicated loopback Hub origin so both Proxy and Hub CSRF checks
+remain active. This is HTTP integration, not deployed browser/OAuth acceptance.
+
+The actual App tunnel uses the registered `svc-....internal` Host. The successor
+allows that explicitly configured hostname alongside the existing `.treer`
+configuration; matching remains exact. Unconfigured internal hosts and suffix
+spoofs are rejected. Earlier startup/Host/CSRF fixture failures are retained
+separately, never counted as passes.
+
+Build only the App binaries and run with already pinned source-compatible native
+inputs (replace absolute paths and Core SHA with the intended build inventory):
+
+```sh
+cargo build --locked --manifest-path apps/message-endpoint/Cargo.toml --features hub --bin treer-message-hub --bin treer-endpoint --target-dir target
+python3 -B apps/message-endpoint/tests/actual-core-acceptance.py \
+  --source "$PWD" --native-dir /absolute/native-directory \
+  --proxy /absolute/treer-proxy --core-sha EXACT_NATIVE_CORE_SHA \
+  --hub-bin "$PWD/target/debug/treer-message-hub" \
+  --relay-bin "$PWD/target/debug/treer-endpoint" \
+  --pg-bin /absolute/postgres-bin
+```
+
+The driver is currently macOS-local (`/private/tmp`, `ps` PID/birth checks and an
+explicit Python executable). It requires PostgreSQL tools and cached native/App
+build inputs. It prints only a safe receipt path/status; the private directory
+contains new fixture credentials and must not be shared. The receipt binds source,
+driver/probe/binary hashes, Policy revision and cleanup. Success requires all
+captured identities gone and all five listener ports absent. No existing runtime,
+production rotation/cutover, real email/Telegram send or shared deployment occurs.

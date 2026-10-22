@@ -207,7 +207,7 @@ impl Settings {
     /// ingress/tunnel Host with the App's registered virtual hostname.
     pub fn with_virtual_host(mut self, host: &str) -> Result<Self, Error> {
         if host.len() > 253
-            || !host.ends_with(".treer")
+            || !(host.ends_with(".treer") || host.ends_with(".internal"))
             || !host.split('.').all(|label| {
                 !label.is_empty()
                     && label.len() <= 63
@@ -1341,12 +1341,15 @@ mod tests {
         let app = app("https://proxy.example/")
             .with_virtual_host("message-hub.treer")
             .unwrap()
+            .with_virtual_host("svc-0123456789abcdef0123456789abcdef.internal")
+            .unwrap()
             .with_loopback_listener("127.0.0.1:8786".parse().unwrap())
             .unwrap();
         for host in [
             "hub.example",
             "hub.example:443",
             "message-hub.treer",
+            "svc-0123456789abcdef0123456789abcdef.internal",
             "127.0.0.1:8786",
         ] {
             assert_eq!(
@@ -1363,6 +1366,8 @@ mod tests {
         }
         for host in [
             "evil.example",
+            "svc-unconfigured.internal",
+            "svc-0123456789abcdef0123456789abcdef.internal.evil",
             "127.0.0.1:9999",
             "hub.example.evil",
             "hub.example:8443",
