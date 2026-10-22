@@ -3,9 +3,9 @@
   "profiles": [
     { "id": "codex", "name": "Codex + UI", "description": "Native Codex with the shared Agent UI.", "args": ["--harness", "codex"] },
     { "id": "claude", "name": "Claude + UI", "description": "Native Claude Code with the shared Agent UI.", "args": ["--harness", "claude"] },
-    { "id": "gemini", "name": "Gemini + UI", "description": "Gemini ACP with the shared Agent UI.", "args": ["--harness", "acp", "--acp-command", "gemini", "--acp-arg", "--experimental-acp", "--acp-arg", "--yolo", "--name", "Gemini"] },
-    { "id": "grok", "name": "Grok + UI", "description": "Grok Build ACP with the shared Agent UI.", "args": ["--harness", "acp", "--acp-command", "grok", "--acp-arg", "agent", "--acp-arg", "stdio", "--name", "Grok"] },
-    { "id": "cursor", "name": "Cursor + UI", "description": "Cursor ACP with the shared Agent UI.", "args": ["--harness", "acp", "--acp-command", "cursor-agent", "--acp-arg", "acp", "--name", "Cursor"] },
-    { "id": "opencode", "name": "OpenCode + UI", "description": "OpenCode ACP with the shared Agent UI.", "args": ["--harness", "acp", "--acp-command", "opencode", "--acp-arg", "acp", "--name", "OpenCode"] }
+    { "id": "gemini", "name": "Gemini + UI", "description": "Gemini ACP with explicit Node runtime.", "args": ["--harness", "acp", "--acp-command", "gemini", "--acp-arg", "--experimental-acp", "--acp-arg", "--yolo", "--name", "Gemini"] },
+    { "id": "grok", "name": "Grok + UI", "description": "Grok Build ACP with explicit Node runtime.", "args": ["--harness", "acp", "--acp-command", "grok", "--acp-arg", "agent", "--acp-arg", "stdio", "--name", "Grok"] },
+    { "id": "cursor", "name": "Cursor + UI", "description": "Cursor ACP with explicit Node runtime.", "args": ["--harness", "acp", "--acp-command", "cursor-agent", "--acp-arg", "acp", "--name", "Cursor"] },
+    { "id": "opencode", "name": "OpenCode + UI", "description": "OpenCode ACP with explicit Node runtime.", "args": ["--harness", "acp", "--acp-command", "opencode", "--acp-arg", "acp", "--name", "OpenCode"] }
   ]
 }

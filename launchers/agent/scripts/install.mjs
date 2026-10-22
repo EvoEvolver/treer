@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { profileTransaction } from "./profile-transaction.mjs";
 import { installShim } from "./path-shim.mjs";
 import { managedProfile, portableCommand } from "./portable-profile.mjs";
+import { digest, regular } from "./bundle-contract.mjs";
+import { runtimeStatus } from "./native-runtime.mjs";
 const { show, saveProfile, restoreProfile } = profileTransaction("treer");
 
 function run(command, args, options = {}) {
@@ -24,7 +26,7 @@ function main() {
       console.log("Usage: install.sh [--agent codex|claude|gemini|grok|cursor|opencode]... [--source CHECKOUT] [--repository URL] [--ref COMMIT_OR_REF] [--cwd MACHINE_RELATIVE_DIRECTORY]");
       return;
     }
-    if (!["--agent", "--harness", "--source", "--ref", "--repository", "--cwd"].includes(key) || !argv[i + 1] || argv[i + 1].startsWith("--")) throw new Error(`Unknown or incomplete option: ${key}`);
+    if (!["--agent", "--harness", "--source", "--ref", "--repository", "--cwd", "--native-manifest", "--native-sha256"].includes(key) || !argv[i + 1] || argv[i + 1].startsWith("--")) throw new Error(`Unknown or incomplete option: ${key}`);
     const value = argv[++i];
     if (key === "--agent" || key === "--harness") options.agents.push(value);
     else options[key.slice(2)] = value;
@@ -72,11 +74,22 @@ function main() {
     const profiles = selected.map((id) => candidateManifest.profiles.find((p) => p.id === id));
     if (candidateManifest.schema !== manifest.schema || profiles.some((p) => !p)) throw new Error("Selected providers absent from candidate manifest");
     const version = join(root, commit);
+    let native;
+    if (options["native-manifest"] || options["native-sha256"]) {
+      if (!isAbsolute(options["native-manifest"] || "") || !/^[a-f0-9]{64}$/.test(options["native-sha256"] || "")) throw new Error("Explicit native manifest and SHA256 required");
+      native = regular(options["native-manifest"], 65536);
+      if (digest(native) !== options["native-sha256"]) throw new Error("Native manifest integrity mismatch");
+    }
     if (!existsSync(version)) {
+      if (native) writeFileSync(join(candidate, "native-runtime.json"), native, { mode: 0o600, flag: "wx" });
+      if (runtimeStatus(candidate).default !== "rust" && selected.some(id => ["codex", "claude"].includes(id))) throw new Error("Native default manifest required; no Node fallback");
       run("npm", ["ci", "--omit=dev", "--no-audit", "--no-fund"], { cwd: candidate, stdio: ["ignore", "inherit", "inherit"] });
       if (!existsSync(join(candidate, "node_modules/.bin/tsx")) || !existsSync(join(candidate, "node_modules/ws/package.json"))) throw new Error("Runtime dependencies missing after npm ci");
       renameSync(checkout, version);
     }
+    const installed = join(version, "launchers/agent");
+    if (native && !regular(join(installed, "native-runtime.json"), 65536).equals(native)) throw new Error("Immutable installed native binding differs");
+    if (runtimeStatus(installed).default !== "rust" && selected.some(id => ["codex", "claude"].includes(id))) throw new Error("Native default manifest required; no Node fallback");
     // Read every original profile before activation or mutation. A later
     // verification/write error must not leave profiles on a missing entry point.
     const originals = new Map(profiles.map((profile) => [profile.name, show(profile.name)]));

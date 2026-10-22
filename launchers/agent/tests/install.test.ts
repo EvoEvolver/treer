@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { hermeticEnv } from "./hermetic.mjs";
+import { nativeBindingFixture } from "./native-binding-fixture.mjs";
 
 const launcher = resolve(import.meta.dirname, "..");
 const mockTreer = `#!/usr/bin/env node
@@ -49,8 +50,9 @@ function fixture() {
   git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "test@example.invalid");
   const commit = () => { git("add", "."); git("commit", "-qm", "fixture"); return git("rev-parse", "HEAD"); };
   const first = commit();
+  const native = nativeBindingFixture(root, join(launcher, "public"));
   const install = (args = ["--source", source], extra = {}) => execFileSync(process.execPath,
-    [join(launcher, "scripts/install.mjs"), ...args, "--agent", "codex"], { env: { ...env, ...extra }, encoding: "utf8", stdio: "pipe" });
+    [join(launcher, "scripts/install.mjs"), ...args, "--agent", "codex", "--native-manifest", native.path, "--native-sha256", native.sha256], { env: { ...env, ...extra }, encoding: "utf8", stdio: "pipe" });
   return { root, source, machine, first, commit, install, base: join(machine, ".treer/launchers/agent") };
 }
 

@@ -1,72 +1,40 @@
 #!/usr/bin/env node
-// Cross-platform entry point; resolve physical assets exactly once per process.
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { get } from "node:http";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+// The shim remains cross-platform; Codex/Claude execute the pinned native image.
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { compatibility } from "./bundle-contract.mjs";
-import { runProviderSync, spawnProvider, stopProcessTree } from "./process.mjs";
+import { nativeRuntime } from "./native-runtime.mjs";
+import { spawnProvider, stopProcessTree } from "./process.mjs";
 
-const root = realpathSync.native(join(dirname(fileURLToPath(import.meta.url)), ".."));
-const env = { ...process.env, AGENT_UI_APP_ROOT: root };
-let harness = env.AGENT_UI_HARNESS || "codex", acpArgs = [];
-const mapping = { "--session-id": "AGENT_UI_SESSION_ID", "--thread-id": "AGENT_UI_SESSION_ID", "--cwd": "AGENT_UI_CWD", "--acp-command": "AGENT_UI_ACP_COMMAND", "--name": "AGENT_UI_NAME" };
-for (let i = 2; i < process.argv.length; i += 2) {
-  const key = process.argv[i], value = process.argv[i + 1];
-  if (value === undefined || key !== "--acp-arg" && !value) throw new Error("Incomplete launcher argument");
-  if (key === "--harness") harness = value;
-  else if (key === "--acp-arg") acpArgs.push(value);
-  else if (mapping[key]) env[mapping[key]] = value;
-  else throw new Error(`Unknown launcher argument: ${key}`);
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const args = process.argv.slice(2), env = { ...process.env };
+const mapping = { "--session-id": "AGENT_UI_SESSION_ID", "--thread-id": "AGENT_UI_SESSION_ID", "--cwd": "AGENT_UI_CWD", "--name": "AGENT_UI_NAME" };
+let runtime, harness = env.AGENT_UI_HARNESS || "codex", nodeArgs = [];
+for (let i = 0; i < args.length; i += 2) {
+  const [key, value] = args.slice(i, i + 2);
+  if (typeof value !== "string" || !value && key !== "--acp-arg") throw new Error("Incomplete launcher argument");
+  if (key === "--runtime") runtime = value;
+  else { nodeArgs.push(key, value); if (key === "--harness") harness = value; }
 }
-if (!["codex", "claude", "acp"].includes(harness) || harness === "acp" && !env.AGENT_UI_ACP_COMMAND) throw new Error("Select codex, claude, or acp with --acp-command");
-if (Number(process.versions.node.split(".")[0]) < 22) throw new Error("Node.js 22+ is required");
-env.AGENT_UI_HARNESS = harness; env.AGENT_UI_ACP_ARGS = JSON.stringify(acpArgs);
-env.AGENT_UI_CWD ||= env.CODEX_UI_CWD || process.cwd();
-env.AGENT_UI_INSTANCE_ID ||= `agent-ui-${harness}-${env.TREER_AGENT_ID || "local"}-${process.pid}`;
-env.AGENT_UI_PUBLIC_DIR ||= join(root, "public");
-const temporary = mkdtempSync(join(tmpdir(), "treer-agent-port-"));
-env.AGENT_UI_PORT_FILE = join(temporary, "port");
-const cli = env.AGENT_UI_TREER_BIN || "treer";
-const contract = JSON.parse(readFileSync(join(root, "interface-contract.json"), "utf8"));
-try {
-  const response = runProviderSync(cli, ["interface", "contract"], { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 15000 });
-  if (response.status !== 0) throw new Error("Controller does not expose the launcher compatibility handshake; update Controller");
-  const aligned = compatibility(contract, JSON.parse(response.stdout));
-  if (aligned.status !== "compatible") throw new Error(aligned.reason);
-} catch (error) { rmSync(temporary, { recursive: true, force: true }); throw new Error(error.message); }
-const portable = join(root, "runtime.mjs");
-const args = existsSync(portable) ? [portable] : ["--import", join(root, "node_modules/tsx/dist/loader.mjs"), join(root, "src/index.ts")];
-const child = spawnProvider(process.execPath, args, { env, stdio: "inherit" });
-let ended = false, registered = false, cleaned = false;
-function cleanup() {
-  if (cleaned) return; cleaned = true;
-  if (registered) runProviderSync(cli, ["interface", "clear"], { env, stdio: "ignore", timeout: 5000 });
-  stopProcessTree(child); rmSync(temporary, { recursive: true, force: true });
-}
-child.on("error", () => { ended = true; process.exitCode = 1; cleanup(); });
-child.on("exit", (code, signal) => { ended = true; process.exitCode = code ?? (signal ? 1 : 0); cleanup(); });
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => { cleanup(); });
-try {
-  let port;
-  const deadline = Date.now() + 90000;
-  while (!ended && Date.now() < deadline) {
-    if (existsSync(env.AGENT_UI_PORT_FILE)) {
-      port = Number(readFileSync(env.AGENT_UI_PORT_FILE, "utf8"));
-      if (Number.isInteger(port) && port > 0 && port <= 65535) {
-        const healthy = await new Promise((done) => {
-          const request = get(`http://127.0.0.1:${port}/api/health`, (response) => { response.resume(); done(response.statusCode === 200); });
-          request.on("error", () => done(false)); request.setTimeout(2000, () => { request.destroy(); done(false); });
-        });
-        if (healthy) break;
-      }
-    }
-    await new Promise((done) => setTimeout(done, 100));
+// Selecting the ACP harness is an explicit selection of its Node adapter,
+// not fallback from a failed native attempt. Existing workspace-global ACP
+// profile argv remain usable on machines with older installed entries.
+runtime ||= harness === "acp" ? "node" : "rust";
+if (!["node", "rust"].includes(runtime)) throw new Error("Select --runtime rust or explicit --runtime node");
+if (runtime === "node") {
+  process.argv = [process.argv[0], process.argv[1], ...nodeArgs];
+  await import("./treer-agent-node.mjs");
+} else {
+  if (!["codex", "claude"].includes(harness)) throw new Error("ACP is not Rust-adapted; select its explicit --runtime node profile");
+  for (let i = 0; i < nodeArgs.length; i += 2) {
+    const [key, value] = nodeArgs.slice(i, i + 2);
+    if (key !== "--harness" && !mapping[key]) throw new Error("Unsupported native launcher argument");
+    if (mapping[key]) env[mapping[key]] = value;
   }
-  if (ended || !port || Date.now() >= deadline) throw new Error("Agent runtime did not become ready");
-  const registration = spawnSync(process.execPath, [join(root, "scripts/register-interface.mjs"), String(port)], { env, stdio: "inherit" });
-  if (registration.status !== 0) throw new Error("Agent interface registration failed");
-  registered = true;
-} catch (error) { console.error(error.message); process.exitCode = 1; cleanup(); }
+  const binding = nativeRuntime(root, [harness]);
+  env.AGENT_UI_HARNESS = harness; env.AGENT_UI_CWD ||= process.cwd();
+  env.AGENT_UI_PUBLIC_DIR = binding.public_dir; env.RUST_SPIKE_REGISTER = "1";
+  const child = spawnProvider(binding.executable.path, [], { env, stdio: "inherit" });
+  child.on("error", () => { process.exitCode = 1; });
+  child.on("exit", (code, signal) => { process.exitCode = code ?? (signal ? 1 : 0); });
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => stopProcessTree(child));
+}

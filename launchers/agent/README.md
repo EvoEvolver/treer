@@ -71,6 +71,13 @@ do not limit concurrent requests, accumulated transcripts or model tool output.
 
 ## Installation and updates
 
+New Codex/Claude defaults use a machine-bound native Rust image. ACP remains an
+explicit Node adapter selected by `--harness acp`; existing profile argv stay
+compatible. See [native defaults](RUST-DEFAULT.md) for the pinned manifest,
+installer/status behavior, capabilities and rollback. Older installed payloads
+remain Node until their default is actually updated; this does not restart any
+running Agent. Node 22+ still runs the installation and dispatch shim.
+
 ### Create an Agent
 
 Install the matching launcher on each machine with `treer-agent-server launcher --node /absolute/node install` (Node.js 22+).
