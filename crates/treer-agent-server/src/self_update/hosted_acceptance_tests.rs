@@ -327,7 +327,11 @@ async fn hosted_complete_native_fixture() {
         if result["native_update_acceptance"] != "passed" || result["capability_enabled"] != false {
             bail!("hosted_native_fixture_incomplete");
         }
-        if super::super::images::digest_file(&bin.read_file("treer-agent-server")?)?
+        // Publication intentionally installs0755. Read that installed image
+        // through the installation boundary, not the private staging reader.
+        let installed =
+            treer_platform::installation_directory::InstallationDirectory::open(&root.join("bin"))?;
+        if super::super::images::digest_file(&installed.read_file("treer-agent-server")?)?
             != input.target.identity.controller_sha256
         {
             bail!("hosted_native_fixture_wrong_image");

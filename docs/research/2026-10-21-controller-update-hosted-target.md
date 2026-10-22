@@ -107,6 +107,9 @@ use0600 for JSON and SHA256SUMS. The fixture reads executable pins through
 `PrivateDirectory`, which rejects all group/other permission bits, including
 0755. Mode0700 also retains the owner-execute bit required by the real image
 reader and probes. Changing staged modes does not change image bytes or pins.
+Publication intentionally installs0755; the final fixture hash check uses the
+checked installation-directory reader for that image, preserving both mode
+contracts without chmod after the update.
 
 - `bin/treer-agent-server`: OLD dedicated feature build, executable and pinned.
 - `bin/treer`: matching OLD CLI, executable and pinned.
