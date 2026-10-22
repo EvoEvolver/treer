@@ -14,8 +14,16 @@ newer ticket comment disagree, the ticket wins and this file should be updated.
    someone up; they never carry state.
 2. **Reviews are written on the ticket**, not forwarded through the leader:
    `[review] <SHA> pass|changes needed — key points`. Authors and the releaser
-   read the ticket. Request a review by `@`-mentioning the reviewer, otherwise
-   the notification has no recipient. A bare `@name` fails to resolve when the
+   read the ticket. Mention a reviewer only for an actual required pending
+   review that blocks your concrete next step; never copy review results to the
+   leader. An @mention always names a current blocking dependency: state the
+   dependency, the exact recipient's required action and what resumes afterward.
+   The recipient need not be personally blocked, nor the whole issue blocked.
+   No mentions for progress, PASS results, thanks, repeated evidence or CC; use
+   plain names/roles. Multiple mentions each require a distinct necessary action,
+   never group CC. Set `waiting_on` only if the whole issue truly cannot proceed;
+   otherwise continue independent work. Never fake status or `waiting_on` to
+   permit mentions. A bare `@name` fails to resolve when the
    directory holds more than one agent with that name (for example two
    `leader`s); use the path `@/treer-dev-team/<name>` or the stable agent ID.
 3. **Releasers comment every step:** `[release] <step> <SHA> <result>`. Order is

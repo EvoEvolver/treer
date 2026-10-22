@@ -213,6 +213,18 @@ Core evaluates that caller's Message Policy:
 | Any other edit (priority, labels, text…) | assignee |
 | `@name` in a comment, or newly added to a title/description | the mentioned Agent, in addition to the above |
 
+**Agent mention rule.** Mention only a current blocking dependency: your concrete
+next step cannot proceed until that exact recipient performs a named action.
+State the dependency, requested action and what resumes afterward. The recipient
+need not be personally blocked, and the whole issue need not be blocked. Mention
+a reviewer only for an actual required pending review. No mentions for progress,
+PASS results, thanks, repeated evidence or CC; use plain names/roles, and never
+copy a result to the leader by mentioning them. Multiple mentions each require a
+distinct necessary action, never group CC. Set `waiting_on` only if the whole
+issue truly cannot proceed; otherwise continue independent work. Do not fake
+status or `waiting_on` to permit mentions. This is an Agent instruction, not an
+automatic semantic rejection, classifier or change to notification routing.
+
 Agent paths shown in the UI come only from Core's directory (`path` is the
 canonical path for display and location; `null` when hidden or unplaced, in which
 case the stable ID is shown; authorization always uses the ID). `GET /v1/directory`
@@ -230,8 +242,9 @@ notifications are off. An ambiguous or unknown mention is ignored and reported:
 path only when Core put it in the author's own directory (Core applies
 `agent.tree.read`); no other path source is used, so the App identity never
 discloses tree paths. The UI toast shows
-them. Only Agents can be mentioned; the creator therefore hears plain comments
-only when mentioned (`@author`).
+them. Only Agents can be mentioned. A creator who is not also the assignee is
+not automatically notified of plain comments; that is not a reason to mention
+them unless their action is a current blocking dependency as described above.
 
 A Message is one short fixed sentence plus a reference, for example
 `Issue #22 · Status open→done · by security-claude`. The only author text it can
