@@ -327,15 +327,7 @@ async fn hosted_complete_native_fixture() {
         if result["native_update_acceptance"] != "passed" || result["capability_enabled"] != false {
             bail!("hosted_native_fixture_incomplete");
         }
-        // Publication intentionally installs0755. Read that installed image
-        // through the installation boundary, not the private staging reader.
-        let installed =
-            treer_platform::installation_directory::InstallationDirectory::open(&root.join("bin"))?;
-        if super::super::images::digest_file(&installed.read_file("treer-agent-server")?)?
-            != input.target.identity.controller_sha256
-        {
-            bail!("hosted_native_fixture_wrong_image");
-        }
+        verify_installed_target(&root.join("bin"), &input.target.identity)?;
         host_image.verify_current()?;
         Ok(())
     }
@@ -370,6 +362,63 @@ async fn hosted_complete_native_fixture() {
         "owned Host cleanup unconfirmed; preserve fixture for job teardown"
     );
     outcome.expect("actual native fixture did not complete; no automatic retry");
+}
+
+// Publication intentionally uses installation permissions (0755), not private
+// input permissions. Authenticate the new images through retained install handles.
+fn verify_installed_target(bin: &std::path::Path, target: &wire::Identity) -> Result<()> {
+    let installation = treer_platform::installation_directory::InstallationDirectory::open(bin)?;
+    for (name, digest) in [
+        ("treer-agent-server", &target.controller_sha256),
+        ("treer", &target.cli_sha256),
+    ] {
+        let path = bin.join(name);
+        let image =
+            super::super::verified_image::VerifiedImage::open(&installation, &path, digest)?;
+        image.verify()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn installed_target_reader_accepts_publication_modes_and_rejects_unsafe_images() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir()
+        .canonicalize()
+        .unwrap()
+        .join(format!("treer-installed-reader-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let directory = PrivateDirectory::open(&root).unwrap();
+    let mut target = wire::Identity {
+        release_sha: "a".repeat(40),
+        artifact_source_sha: "a".repeat(40),
+        controller_sha256: String::new(),
+        cli_sha256: String::new(),
+    };
+    for name in ["treer-agent-server", "treer"] {
+        let mut file = directory.create_file(name).unwrap();
+        file.write_all(name.as_bytes()).unwrap();
+        let digest = super::super::images::digest_file(&file).unwrap();
+        if name == "treer" {
+            target.cli_sha256 = digest;
+        } else {
+            target.controller_sha256 = digest;
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        assert!(directory.read_file(name).is_err());
+    }
+    assert!(verify_installed_target(&root, &target).is_ok());
+    let mut wrong = target.clone();
+    wrong.controller_sha256 = "0".repeat(64);
+    assert!(verify_installed_target(&root, &wrong).is_err());
+    for mode in [0o777, 0o600] {
+        std::fs::set_permissions(root.join("treer"), std::fs::Permissions::from_mode(mode))
+            .unwrap();
+        assert!(verify_installed_target(&root, &target).is_err());
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[tokio::test]

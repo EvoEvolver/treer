@@ -171,3 +171,8 @@ cleanup; native failure or timeouts do not prove quiescence. Do not rerun the
 same root or silently clear its intent. On success, native-result cleanup is
 still separate from process/manager acceptance. Actual hosted execution of this
 source is pending Release; local compilation and guard tests are not acceptance.
+
+The fixture final image check uses retained `InstallationDirectory` /
+`VerifiedImage` authentication for both installed target Controller and CLI.
+Production publication intentionally uses mode0755; that final check must not
+reuse the mode0700 private-input reader or chmod the published images.
