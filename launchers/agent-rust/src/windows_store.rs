@@ -42,15 +42,20 @@ impl Lease {
             Err(error) if is_not_found(&error) => {
                 // Stage gives the new lease an explicit private DACL before
                 // any use. Never repair/adopt an existing permissive file.
-                let staged = store.handle.stage(LEASE, &temporary("lease"), 0o600)?;
-                staged.commit(false)?;
+                let staged = store
+                    .handle
+                    .stage(LEASE, &temporary("lease"), 0o600)
+                    .map_err(|error| lease_error(&error.into()))?;
+                staged
+                    .commit(false)
+                    .map_err(|error| lease_error(&error.into()))?;
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(lease_error(&error)),
         }
         let file = store
             .handle
             .exclusive_lease()
-            .map_err(|_| anyhow::anyhow!("private_state_in_use"))?;
+            .map_err(|error| lease_error(&error.into()))?;
         check_file(&file, &store.root.join(LEASE), 0)
             .map_err(|_| anyhow::anyhow!("private_state_lease_unavailable"))?;
         Ok(Self {
@@ -58,6 +63,20 @@ impl Lease {
             _store: store,
         })
     }
+}
+
+// ERROR_SHARING_VIOLATION and ERROR_LOCK_VIOLATION are evidence of an
+// occupied file lease. Permission denial alone is not; unsafe ACL/storage
+// refusals must not be advertised as another legitimate writer.
+fn lease_error(error: &anyhow::Error) -> anyhow::Error {
+    let occupied = error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| matches!(error.raw_os_error(), Some(32 | 33)));
+    anyhow::anyhow!(if occupied {
+        "private_state_in_use"
+    } else {
+        "private_state_lease_unavailable"
+    })
 }
 
 pub(crate) fn is_not_found(error: &anyhow::Error) -> bool {
@@ -363,6 +382,39 @@ pub(crate) mod tests {
         assert_eq!(fs::read(&path).unwrap(), original);
     }
     #[test]
+    fn only_actual_sharing_or_lock_violation_is_classified_in_use() {
+        for code in [32, 33] {
+            let error: anyhow::Error = std::io::Error::from_raw_os_error(code).into();
+            assert_eq!(lease_error(&error).to_string(), "private_state_in_use");
+        }
+        for code in [5, 2, 87] {
+            let error: anyhow::Error = std::io::Error::from_raw_os_error(code).into();
+            assert_eq!(
+                lease_error(&error).to_string(),
+                "private_state_lease_unavailable"
+            );
+        }
+        assert_eq!(
+            lease_error(&anyhow::anyhow!("private_state_file_unavailable")).to_string(),
+            "private_state_lease_unavailable"
+        );
+    }
+    #[test]
+    fn permissive_existing_lease_is_not_repaired_or_classified_in_use() {
+        let f = Fixture::new();
+        let path = f.root.join(LEASE);
+        fs::write(&path, b"").unwrap();
+        treer_platform::apply_sddl_dacl(&path, "D:P(A;;GA;;;WD)").unwrap();
+        let error = match Lease::acquire(&f.root, &f.cwd, "synthetic") {
+            Err(error) => error,
+            Ok(_) => panic!("unsafe lease adopted"),
+        };
+        assert_eq!(error.to_string(), "private_state_lease_unavailable");
+        assert!(!treer_platform::private_path_is_secure(&path).unwrap());
+        assert_eq!(fs::metadata(path).unwrap().len(), 0);
+    }
+
+    #[test]
     fn lease_is_exclusive_and_survives_in_place_after_holder_death() {
         let f = Fixture::new();
         let ready = f.base.join("ready");
@@ -380,7 +432,11 @@ pub(crate) mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         let observed = ready.exists();
-        let refused = observed && Lease::acquire(&f.root, &f.cwd, "other").is_err();
+        let refused = observed
+            && match Lease::acquire(&f.root, &f.cwd, "other") {
+                Err(error) => error.to_string() == "private_state_in_use",
+                Ok(_) => false,
+            };
         let _ = child.kill();
         child.wait().unwrap();
         assert!(
