@@ -5,6 +5,7 @@ import { compatibility, digest, regular, verifyBundle } from "./bundle-contract.
 import { profileTransaction } from "./profile-transaction.mjs";
 import { installShim } from "./path-shim.mjs";
 import { managedProfile, portableCommand } from "./portable-profile.mjs";
+import { runtimeStatus } from "./native-runtime.mjs";
 
 function present(path) { try { lstatSync(path); return true; } catch (error) { if (error.code === "ENOENT") return false; throw error; } }
 function directory(path) {
@@ -33,6 +34,7 @@ function privateCopy(source, target) {
 }
 export function controllerInstall(request) {
   if (request.schema !== "treer.launcher-install/v1" || !["install", "update", "status", "rollback"].includes(request.operation)) throw new Error("Unsupported Controller install request");
+  if (request.require_runtime != null && request.require_runtime !== "rust") throw new Error("Unsupported required launcher runtime");
   if (!isAbsolute(request.root || "") || !isAbsolute(request.node || "") || !isAbsolute(request.treer || "") || !Array.isArray(request.agents || [])) throw new Error("Explicit absolute root/Node/Treer paths are required");
   // Rust canonical paths on Windows use the verbatim prefix. Node's JS
   // realpath walker rejects those (EISDIR at C:); the native API handles them.
@@ -51,7 +53,7 @@ export function controllerInstall(request) {
     const versionName = (value) => { if (!/^sha256-[a-f0-9]{64}$/.test(value || "")) throw new Error("Invalid launcher content version"); return value; };
     const inspect = (version) => {
       const verified = verifyBundle(join(root, versionName(version)), version, undefined, true);
-      return { version, source_commit: verified.manifest.source_commit, compatibility: compatibility(verified.contract, request.controller), portable: verified.portable };
+      return { version, source_commit: verified.manifest.source_commit, compatibility: compatibility(verified.contract, request.controller), portable: verified.portable, runtime: runtimeStatus(join(root, version)) };
     };
     if (request.operation === "status") {
       const versions = readdirSync(root).filter((name) => /^sha256-[a-f0-9]{64}$/.test(name)).map((version) => {
@@ -62,7 +64,7 @@ export function controllerInstall(request) {
         try { entryIntegrity = digest(regular(join(root, "run.mjs"))) === digest(regular(join(root, versionName(pointer.version), "scripts/installed-runner.mjs"))) ? "valid" : "mismatch"; }
         catch { entryIntegrity = "invalid"; }
       }
-      return { schema: "treer.launcher-install-result/v1", operation: "status", current: pointer?.version ?? null, previous: pointer?.previous ?? null, versions, entry_integrity: entryIntegrity,
+      return { schema: "treer.launcher-install-result/v1", operation: "status", current: pointer?.version ?? null, previous: pointer?.previous ?? null, versions, entry_integrity: entryIntegrity, current_runtime: versions.find(v => v.version === pointer?.version)?.runtime ?? { default: pointer ? "invalid" : "not-installed" },
         legacy_current: !pointer && present(join(root, "current")) ? "legacy pointer present; not migrated" : null };
     }
     const version = versionName(request.operation === "rollback" ? request.rollback_version || pointer?.previous : request.version);
@@ -73,6 +75,11 @@ export function controllerInstall(request) {
       verified = verifyBundle(request.bundle_dir, version, request.source_commit);
       const aligned = compatibility(verified.contract, request.controller);
       if (aligned.status !== "compatible") throw new Error(aligned.reason);
+      const preserveRust = request.require_runtime === "rust" || request.operation === "update" && pointer?.version && present(join(root, versionName(pointer.version), "native-runtime.json"));
+      if (preserveRust) {
+        const candidateRuntime = runtimeStatus(request.bundle_dir);
+        if (candidateRuntime.default !== "rust" || ![candidateRuntime.codex, candidateRuntime.claude].includes("rust")) throw new Error("Update requires a verified native Rust default with an available provider; refusing Node/unconfigured candidate");
+      }
       if (!verified.portable && !request.allow_network) throw new Error("Development payload is not runtime-ready; rebuild official payload or explicitly allow network installation");
       if (!present(versionRoot)) {
         stage = mkdtempSync(join(root, ".install-"));
@@ -97,6 +104,8 @@ export function controllerInstall(request) {
     const selected = request.skip_profiles === true ? [] : request.agents?.length ? [...new Set(request.agents)] : profilesManifest.profiles.map((profile) => profile.id);
     let profiles = selected.map((id) => profilesManifest.profiles.find((profile) => profile.id === id));
     if (profiles.some((profile) => !profile || typeof profile.name !== "string" || !Array.isArray(profile.args))) throw new Error("Unknown launcher provider");
+    const runtime = runtimeStatus(versionRoot);
+    if (runtime.default === "unconfigured" && (selected.length === 0 || selected.some(id => ["codex", "claude"].includes(id)))) throw new Error("Native Codex/Claude default requires a verified machine-specific native-runtime.json; no Node fallback");
     const transaction = profileTransaction(request.treer, (message) => console.error(message));
     const receiptPath = join(root, "profiles-receipt.json");
     const originalReceipt = present(receiptPath) ? regular(receiptPath) : null;
@@ -140,6 +149,6 @@ export function controllerInstall(request) {
       throw error;
     }
     return { schema: "treer.launcher-install-result/v1", operation: request.operation, version, source_commit: verified.manifest.source_commit, previous: next.previous,
-      compatibility: aligned, profiles: profiles.map((profile) => profile.name), command: portableCommand, entry: runner, shim: shim?.path ?? null, portable: verified.portable };
+      compatibility: aligned, profiles: profiles.map((profile) => profile.name), command: portableCommand, entry: runner, shim: shim?.path ?? null, portable: verified.portable, runtime };
   } finally { if (stage) rmSync(stage, { recursive: true, force: true }); rmdirSync(lock); }
 }

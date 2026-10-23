@@ -55,7 +55,12 @@ export function reducer(state: State, action: Action): State {
     case "snapshot": {
       // A late HTTP response must not shrink a history window the user already widened.
       const current = state.snapshot?.history.limit ?? 0;
-      if (action.source === "http" && action.snapshot.history.limit < current) return state;
+      if (action.source === "http" && !state.snapshot?.history.page && !action.snapshot.history.page && action.snapshot.history.limit < current) return state;
+      // A streamed older page is a bounded view, not a growing cache. Keep its
+      // content while live status/queue/goal updates continue over the socket.
+      if (action.source !== "http" && state.snapshot?.history.page && action.snapshot.thread && state.snapshot.thread) {
+        action = { ...action, snapshot: { ...action.snapshot, history: state.snapshot.history, thread: { ...action.snapshot.thread, turns: state.snapshot.thread.turns, hasOlderItems: state.snapshot.thread.hasOlderItems } } };
+      }
       const goal = action.snapshot.goal, before = state.snapshot?.goal;
       const finished = (status?: string) => status === "complete" || status === "done";
       const notices = goal && finished(goal.status) && (!finished(before?.status) || before?.objective !== goal.objective)
@@ -79,6 +84,7 @@ export interface Actions {
   interrupt(): Promise<void>;
   /** Resolves true when a wider history window arrived. */
   loadOlder(): Promise<boolean>;
+  loadLatest(): Promise<void>;
   settings(input: { model?: string; reasoningEffort?: string | null }): Promise<void>;
   cancelQueued(id: string): Promise<void>;
   /** Goal mutations resolve to an error message, or null on success; callers decide where to show it. */
@@ -172,13 +178,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       dispatch({ type: "loadingOlder", value: true });
       dispatch({ type: "error", message: null });
       try {
-        const next = await request<Snapshot>("api/history/older", { method: "POST", body: JSON.stringify({ limit: historyLimit(current) }) });
+        const next = await request<Snapshot>("api/history/older", { method: "POST", body: JSON.stringify({ limit: historyLimit(current), ...(current.snapshot?.history.cursor ? { cursor: current.snapshot.history.cursor } : {}) }) });
         dispatch({ type: "snapshot", snapshot: next, source: "http" });
         const socket = socketRef.current;
-        if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "history-limit", limit: next.history.limit, respond: false }));
+        if (!next.history.page && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "history-limit", limit: next.history.limit, respond: false }));
         return true;
       } catch (error) { dispatch({ type: "error", message: (error as Error).message }); return false; }
       finally { dispatch({ type: "loadingOlder", value: false }); }
+    },
+    async loadLatest() {
+      try { dispatch({ type: "snapshot", snapshot: await request<Snapshot>("api/state"), source: "http" }); }
+      catch (error) { dispatch({ type: "error", message: (error as Error).message }); }
     },
     async settings(input) {
       dispatch({ type: "settingsBusy", value: true });

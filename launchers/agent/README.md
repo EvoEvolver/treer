@@ -71,6 +71,59 @@ do not limit concurrent requests, accumulated transcripts or model tool output.
 
 ## Installation and updates
 
+New Codex/Claude defaults use a machine-bound native Rust image. ACP remains an
+explicit Node adapter selected by `--harness acp`; existing profile argv stay
+compatible. See [native defaults](RUST-DEFAULT.md) for the pinned manifest,
+installer/status behavior, capabilities and rollback. Older installed payloads
+remain Node until their default is actually updated; this does not restart any
+running Agent. Node 22+ still runs the installation and dispatch shim.
+
+### Update the default entry
+
+`treer-agent --help` lists launch arguments and the separate update command.
+From an installed entry, run:
+
+```sh
+treer-agent update
+treer-agent update --help
+# Launcher-only delivery, independently of the Controller's embedded version:
+treer-agent update --bundle /absolute/prepared --sha256 MANIFEST_SHA256
+```
+
+Without a bundle, the command uses the local Controller's existing launcher
+installer with `update --require-runtime rust`. It discovers the Controller
+beside the pinned Treer CLI or in its sibling `libexec` directory; select a
+trusted absolute `--controller` if installed elsewhere. This requires the new
+guarded Controller bridge and an embedded, verified native Rust payload. Older
+Controllers or Node-only embedded payloads refuse; the command never retries
+without the Rust requirement. This selects the local Controller release, not
+an Internet “latest” channel, and does not upgrade the Controller itself.
+
+Explicit `--bundle` delivery reuses the same prepared-bundle installer described
+below. Supply the independently checked SHA256 of `bundle-manifest.json`, not
+the native binary hash. The bundle must include a valid machine-specific native
+binding and at least one available Codex/Claude provider. Node, unconfigured,
+wrong-platform, altered or incompatible candidates refuse before activation;
+missing individual providers remain unavailable rather than falling back.
+
+Installed entries use their pinned Treer CLI and installation root, regardless
+of shell cwd. A source invocation requires `--treer /absolute/treer` (Node22+);
+explicit bundle delivery also accepts `--root ABS` inside the enrolled machine
+root. An installed entry refuses a different root. Existing authentication and
+Controller selection remain in force; ambiguous enrollment fails explicitly.
+No download, Git, npm or provider installation occurs in this command.
+
+The result is JSON with current and target content versions, source commit,
+runtime/provider status, whether the version changed, and success/failure exit
+status. Candidate/current progress goes to stderr. Installer locks, verified
+immutable versions, profile ownership and publication use the existing
+transaction. Running sessions retain their startup version: updating the
+default does not restart, migrate, clear or replay Agents, Host or Controller.
+An explicit session restart is a separate operation. A failed/ambiguous command
+is not automatically retried; inspect launcher status first. Windows uses the
+same frontend under its maintained native command shim; actual Windows smoke
+verification is reported separately from POSIX checks.
+
 ### Create an Agent
 
 Install the matching launcher on each machine with `treer-agent-server launcher --node /absolute/node install` (Node.js 22+).
@@ -394,6 +447,26 @@ Agent. `--source CHECKOUT` archives committed files, ignoring dirty changes;
 `--repository URL` supports self-hosted/local Git mirrors. Run the script from
 its checkout, rather than piping it into a shell.
 
+### Browser suite against both launchers (#158 M1)
+
+`tests/browser-ui.mjs` (and the helpers it calls) runs against either launcher implementation:
+
+```bash
+# Node launcher (default, unchanged; fails at the first failing step)
+node tests/browser-ui.mjs
+# Rust launcher: a fixture-harness build, so CODEX_BIN can point at the fake Codex
+cargo build --locked --features fixture-harness --manifest-path launchers/agent-rust/Cargo.toml   # private CARGO_TARGET_DIR
+LAUNCHER_BACKEND=rust RUST_LAUNCHER_BIN=/abs/private-target/debug/treer-agent-rust-spike node tests/browser-ui.mjs
+# Run every step instead of stopping at the first failure, and print/write the failure list
+SUITE_REPORT=1 SUITE_REPORT_FILE=/abs/report.json LAUNCHER_BACKEND=rust RUST_LAUNCHER_BIN=... node tests/browser-ui.mjs
+```
+
+`tests/launcher-backend.mjs` owns the switch: it spawns the selected launcher with the same hermetic environment (the Rust
+launcher gets the `AGENT_UI_*` names for the `CODEX_UI_*` ones), and a harness the backend lacks (Claude on Rust) is reported
+as `unsupported` rather than failing. The suite is split into named steps; in report mode a failed step is recorded with its
+first assertion and the next step starts from a reset page. The exit criterion for the Rust launcher is the default (fail-fast)
+run being green on both backends.
+
 For local development outside a managed Agent:
 
 ```bash
@@ -628,17 +701,46 @@ and same-account filesystem permissions, **not isolation between processes of
 the same OS user**. Core implementation and end-to-end lifecycle validation are
 still required before releasing this candidate.
 
-**Files and policy.** Four flat files: `index.html`, `boot.js` (runs in `<head>`, no flash
-of the wrong look or theme), `ui.js` (React, marked and DOMPurify, bundled) and `ui.css`
-(all looks). They are committed because the bootstrap installer checks out git without
-esbuild, and they are listed in the payload hash manifest like every other file; nothing
-needs `node_modules` at runtime. Budget: at most 5 files and 600 KB. The page is served
+**Files and policy.** `index.html`, `boot.js` (runs in `<head>`, no flash of the
+wrong look or theme), ESM `ui.js`, shared core chunks and `ui.css` (all looks)
+start the page. Markdown, image and PDF file viewers are separate literal local
+dynamic imports; no rich viewer is preloaded by chat, directory listing or text
+preview. Chat still uses its existing sanitized Markdown renderer. PDF.js and
+its content-addressed local module worker load only for a PDF. No CDN, global
+script injection or development server is needed. `ui-assets.json` inventories
+all generated bytes; prepared bundles reject stale/extra assets, and native
+runtime manifests must include the whole inventory, not just the former four
+files. The files are committed because bootstrap installs without esbuild;
+runtime needs no `node_modules`. Budget: 20 assets / 3.5 MB total, core ui.js
+520 KB / CSS 80 KB. Hashed JavaScript assets can be privately cached as immutable;
+mutable entry files remain no-store. Asset URLs resolve under the AIS/Proxy prefix.
+The page is served
 with `style-src 'self'` (no inline styles or scripts, no eval), `object-src 'none'`,
 `base-uri 'self'` and `form-action 'none'`. HTML reaches the DOM through one component
 only (markdown, sanitized with DOMPurify); everything else is rendered as text, and
 file names, paths, diffs, task output and errors are never interpreted as markup.
 Assets and requests are relative (`<base href="./">`), so the page works behind Treer's
 iframe tunnel.
+
+**File previews.** Markdown renders by default with the existing DOMPurify sink;
+Rendered/Source buttons retain a plain-text/code view (server preview limit
+64 KiB, with a truncation notice). PNG/JPEG/GIF/WebP/AVIF/BMP display with fit
+and actual-size controls. SVG/HTML remain text. PDF displays one canvas page at
+a time with previous/next and zoom controls; the canvas is limited to 4 million
+pixels and 4096 px per dimension. It is a basic visual preview, not a full PDF
+editor, form runner, annotation viewer or searchable/selectable text reader.
+Encrypted, malformed or unsupported PDFs show an error and a download action;
+optional PDF CMaps/standard-font/codec packs are not fetched from a network.
+Image/PDF downloads reuse the existing cwd-confined download endpoint, with a
+20 MiB client streaming cap (also enforced against stale/missing size headers).
+Larger files require explicit download. Closing or changing selection aborts
+old reads, ignores stale async imports, revokes image object URLs and destroys
+the PDF loading task/worker; no file is executed. Build/network verification:
+`npm run build:ui && npm run check:ui`, then
+`node tests/browser-file-previews.mjs`; use `LAUNCHER_BACKEND=rust` with an
+explicit fixture-feature `RUST_LAUNCHER_BIN` for native served-path verification.
+These checks create only disposable synthetic workspaces/providers, not managed
+Agent processes or real provider sessions.
 It also works as a standalone top-level page: prompting, transcript pagination,
 WebSocket updates and user-initiated image paste use the same relative APIs.
 Top-level pages do not have the Console iframe's sandbox; they rely on these
@@ -1195,8 +1297,8 @@ npm --prefix launchers/agent run test:windows -- --controller C:\Treer\treer-age
 # No inference, managed Agent mutation, or restart. Chromium is needed once:
 npm --prefix launchers/agent exec -- playwright install chromium
 UI_SCREENSHOTS=/tmp/agent-ui-screenshots npm --prefix launchers/agent run test:browser
-# UI sources live in launchers/agent/ui. After editing them rebuild the four committed
-# files in public/; check:ui (part of `run check`) fails on any byte difference with a
+# UI sources live in launchers/agent/ui. After editing them rebuild the committed
+# inventory and assets in public/; check:ui (part of `run check`) fails on any byte difference with a
 # fresh build, on budget overruns and on forbidden code patterns (HTML sinks outside the
 # markdown component, eval, unsafe URLs, absolute network paths).
 npm --prefix launchers/agent run build:ui

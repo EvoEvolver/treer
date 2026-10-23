@@ -23,7 +23,7 @@ export function parseOptions(argv) {
     if (flag === "--apply") options.apply = true;
     else if (flag === "--skip-profiles") options.skipProfiles = true;
     else {
-      if (!["--treer", "--root", "--bundle", "--sha256", "--agent", "--cwd", "--version", "--targets", "--preview", "--rollout-id", "--batch-size", "--timeout"].includes(flag) || !argv[i + 1]) throw new Error(usage);
+      if (!["--treer", "--root", "--bundle", "--sha256", "--agent", "--cwd", "--version", "--targets", "--preview", "--rollout-id", "--batch-size", "--timeout", "--require-runtime"].includes(flag) || !argv[i + 1]) throw new Error(usage);
       const value = argv[++i];
       if (flag === "--agent") options.agents.push(value);
       else options[flag.slice(2).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = value;
@@ -94,7 +94,7 @@ function bundle(options, controller) {
 function install(options, ctx, selected, operation = options.operation, version) {
   return controllerInstall({ schema: "treer.launcher-install/v1", operation, root: ctx.root, cwd: options.cwd ?? ".", agents: options.agents,
     skip_profiles: options.skipProfiles, node: realpathSync.native(process.execPath), treer: options.treer, controller: ctx.controller,
-    bundle_dir: options.bundle, version: selected?.version, source_commit: selected?.source, allow_network: false, rollback_version: version });
+    bundle_dir: options.bundle, version: selected?.version, source_commit: selected?.source, allow_network: false, rollback_version: version, require_runtime: options.requireRuntime });
 }
 function localGet(port, path) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) return Promise.reject(new Error("Agent has no valid local interface port"));

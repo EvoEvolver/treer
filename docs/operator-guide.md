@@ -1335,6 +1335,23 @@ treer-agent-server launcher update
 treer-agent-server launcher rollback
 ```
 
+To require a Rust default when installing or updating, pass
+`treer-agent-server launcher update --require-runtime rust` (also supported by
+`install`). This checks the candidate embedded payload's native manifest,
+platform, provider images and asset hashes through its verified runtime checker
+before invoking the installer. At least one of Codex or Claude must have an
+available Rust binding; Claude-only candidates are supported. A Node-only or
+unconfigured payload is refused before activation or profile changes; a missing
+provider remains explicitly unavailable, without a Node fallback. An older Controller
+rejects the new flag: do not retry without it to bypass this requirement.
+On success, the JSON result includes `runtime` with the candidate's verified
+`default`, `codex` and `claude` statuses, including when the bundled installer
+itself predates that result field.
+This command selects the payload embedded in the local Controller binary; it
+does not download the latest Launcher or adopt another installation's native
+manifest. Install a Controller carrying a suitable payload or use an explicitly
+verified Launcher bundle when the embedded candidate is unsuitable.
+
 On a machine with several local Controller enrollments, launcher commands fail
 with `launcher_controller_ambiguous` rather than selecting one. Pass
 `treer-agent-server launcher --workspace WORKSPACE_ID --url http://127.0.0.1:PORT status`

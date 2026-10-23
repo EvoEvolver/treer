@@ -7,6 +7,7 @@ import test from "node:test";
 import { hermeticEnv } from "./hermetic.mjs";
 import { digest } from "../scripts/bundle-contract.mjs";
 import { nodeEntry } from "../scripts/bundle-launcher.mjs";
+import { nativeBindingFixture } from "./native-binding-fixture.mjs";
 
 const launcher = resolve(import.meta.dirname, ".."), entry = join(launcher, "scripts/bundle-launcher.mjs");
 const temp = () => realpathSync.native(mkdtempSync(join(tmpdir(), "bundle-delivery-")));
@@ -16,7 +17,9 @@ test("Node entry normalization only removes a Windows drive verbatim prefix", ()
   assert.equal(nodeEntry("\\\\?\\UNC\\server\\share\\run.mjs"), "\\\\?\\UNC\\server\\share\\run.mjs");
   assert.equal(nodeEntry("/private/run.mjs"), "/private/run.mjs");
 });
-execFileSync(process.execPath, [join(launcher, "scripts/prepare-bundle.mjs"), "--output", prepared, "--source-commit", "a".repeat(40)], { env: hermeticEnv(), stdio: "pipe" });
+const bindingDirectory = temp(), native = nativeBindingFixture(bindingDirectory, join(launcher, "public"));
+test.after(() => rmSync(bindingDirectory, { recursive: true, force: true }));
+execFileSync(process.execPath, [join(launcher, "scripts/prepare-bundle.mjs"), "--output", prepared, "--source-commit", "a".repeat(40), "--native-manifest", native.path, "--native-sha256", native.sha256], { env: hermeticEnv(), stdio: "pipe" });
 test.after(() => rmSync(prepared, { recursive: true, force: true }));
 
 const fakeTreer = `import fs from 'node:fs';

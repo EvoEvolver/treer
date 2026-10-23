@@ -5,6 +5,8 @@ import { safeUrl } from "../lib/url";
 import type { FileEntry, FilePreview } from "../types";
 import { useDialogs } from "./Dialogs";
 import { Icon } from "./Icon";
+import { FileContent } from "./FileContent";
+import { previewKind } from "./previews/kind";
 
 // The server refuses larger files with 413 before sending a byte; the UI says so up front instead of starting a failed download.
 const DOWNLOAD_LIMIT_BYTES = 1024 ** 3;
@@ -26,6 +28,7 @@ export function FilesPanel({ open, requestedFile, onClose }: { open: boolean; re
   const cacheRef = useRef(cache);
   const pendingRef = useRef(pending);
   const version = useRef(0);
+  const previewRequest = useRef<AbortController | null>(null);
   const list = useRef<HTMLUListElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
   const { openText } = useDialogs();
@@ -47,22 +50,29 @@ export function FilesPanel({ open, requestedFile, onClose }: { open: boolean; re
     }
   }, []);
   // Opening the panel starts on the tree (on a phone the preview is a separate tab); the folder cache and selection are kept.
-  useEffect(() => { if (open) { void load(""); setTab("browse"); } }, [open, load]);
+  useEffect(() => {
+    if (open) { void load(""); setTab("browse"); }
+    else { ++version.current; previewRequest.current?.abort(); setPreview({ state: "idle" }); }
+    return () => { ++version.current; previewRequest.current?.abort(); };
+  }, [open, load]);
 
   const select = useCallback(async (path: string) => {
     setSelected(path);
     setTab("preview");
     const mine = ++version.current;
+    previewRequest.current?.abort();
+    const controller = new AbortController();
+    previewRequest.current = controller;
     setPreview({ state: "loading" });
     try {
-      const file = await request<FilePreview>(`v1/files?path=${encodeURIComponent(path)}`);
+      const file = await request<FilePreview>(`v1/files?path=${encodeURIComponent(path)}`, { signal: controller.signal });
       if (mine === version.current) setPreview({ state: "ready", file });
     } catch (error) {
       if (mine === version.current) setPreview({ state: "error", message: (error as Error).message });
     }
   }, []);
   useEffect(() => {
-    if (!requestedFile) return;
+    if (!open || !requestedFile) return;
     closeButton.current?.focus();
     const path = requestedFile.path;
     setFilter(""); setFocusPath(path);
@@ -73,7 +83,7 @@ export function FilesPanel({ open, requestedFile, onClose }: { open: boolean; re
       for (const parent of parents) void load(parent);
     }
     void select(path);
-  }, [requestedFile, load, select]);
+  }, [open, requestedFile, load, select]);
   function toggleDirectory(path: string) {
     setExpanded((current) => {
       const next = new Set(current);
@@ -169,14 +179,14 @@ export function FilesPanel({ open, requestedFile, onClose }: { open: boolean; re
           </li>
         ))}
       </ul>
-      <section className="preview" aria-label={t("files.preview")}>
+      <section className={`preview${file && previewKind(file.path) !== "text" ? " rich-preview" : ""}`} aria-label={t("files.preview")}>
         <div className="pmeta"><b>{selected ?? t("files.select")}</b><span className={file?.truncated ? "truncated" : undefined}>{meta}</span>
-          {file && <button type="button" className="btn" onClick={() => openText(file.path, file.content)}>{t("files.open")}</button>}
+          {file && ["text", "markdown"].includes(previewKind(file.path)) && <button type="button" className="btn" onClick={() => openText(file.path, file.content)}>{t("files.open")}</button>}
           {selected && preview.state !== "idle" && (file && file.size > DOWNLOAD_LIMIT_BYTES
             ? <><button type="button" className="btn dl" disabled title={t("files.downloadTooLarge")}><Icon name="download" /> {t("files.download")}</button><span className="dl-note" role="status">{t("files.downloadTooLarge")}</span></>
             : <a className="btn dl" href={safeUrl(fileDownloadUrl(selected))} download={selected.split("/").pop()} title={t("files.downloadFile", { name: selected })}><Icon name="download" /> {t("files.download")}</a>)}</div>
         {preview.state === "error" && <p className="field-error" role="status">{preview.message}</p>}
-        <pre tabIndex={0}>{file ? file.content : preview.state === "idle" ? t("files.hint") : ""}</pre>
+        {open && file ? <FileContent key={`${file.path}:${version.current}`} file={file} /> : <pre tabIndex={0}>{preview.state === "idle" ? t("files.hint") : ""}</pre>}
       </section>
     </aside>
   );

@@ -19,6 +19,7 @@ if (process.env.FAKE_CODEX_IMAGES) {
 }
 let threadId = `new-${process.pid}`;
 let relayTurn = 0;
+let completedTurns = 0, pendingCompletion;
 let recoveryRead = false;
 if (process.env.FAKE_CODEX_OLD_ERROR) {
   turns[0].status = "failed";
@@ -94,6 +95,19 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
         else turn.items.push({ id: `answer-${turn.id}`, type: "agentMessage", text: "Relay recovered" });
         console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn } }));
       }, 40);
+    } else if (process.env.FAKE_CODEX_IMAGES) {
+      const count = turns.filter(turn => turn.id === "turn-new" || turn.id.startsWith("turn-new-")).length;
+      const id = count ? `turn-new-${count}` : "turn-new";
+      const turn = { id, status: "completed", items: [{ id: `image-user-${count}`, type: "userMessage", content: request.params.input }] };
+      turns.push(turn); pendingCompletion = turn;
+      writeFileSync(join(process.cwd(), ".fake-image-turns.json"), JSON.stringify(turns.filter(turn => turn.id === "turn-new" || turn.id.startsWith("turn-new-"))));
+      result = { turn: { id } };
+    } else if (process.env.FAKE_CODEX_COMPLETE_TURNS) {
+      // Records the started turn and completes it for real (thread/read shows it, turn/completed is emitted), so no
+      // launcher has to settle an accepted turn by guessing.
+      const turn = { id: completedTurns ? `turn-new-${completedTurns}` : "turn-new", status: "completed", items: [{ id: `u-new-${completedTurns}`, type: "userMessage", content: request.params.input }, { id: `a-new-${completedTurns}`, type: "agentMessage", text: "Done." }] };
+      completedTurns++; turns.push(turn); pendingCompletion = turn;
+      result = { turn: { id: turn.id } };
     } else result = { turn: { id: "turn-new" } };
   }
   if (request.method === "thread/resume") {
@@ -122,19 +136,18 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     }
     const recoveryState = failed ? process.env.FAKE_CODEX_RECOVERY_STATE_FILE ? readFileSync(process.env.FAKE_CODEX_RECOVERY_STATE_FILE, "utf8") : process.env.FAKE_CODEX_RECOVERY_STATE : undefined;
     const status = recoveryState?.startsWith("systemError") ? { type: "systemError" } : recoveryState === "unknown" ? { type: "unknown" } : recoveryState === "idle" ? { type: turns.some(turn => turn.status === "inProgress") ? "active" : "idle" } : process.env.FAKE_CODEX_STATUS ? { type: process.env.FAKE_CODEX_STATUS } : undefined;
-    result = { thread: { id: threadId, cwd: process.cwd(), turns: recoveryState === "missing-turns" ? undefined : recoveryState === "systemError-empty" ? [] : turns, ...(status ? { status } : {}) }, model: "test" };
+    // Rust contract fixtures model explicit producer status on resume. Leave
+    // the Node fixture's deliberate missing-status scenarios unchanged.
+    const contractStatus = status ?? (process.env.RUST_SPIKE_PROVIDER_LOG ? { type: turns.some(turn => turn.status === "inProgress") ? "active" : "idle" } : undefined);
+    result = { thread: { id: threadId, cwd: process.cwd(), turns: recoveryState === "missing-turns" ? undefined : recoveryState === "systemError-empty" ? [] : turns, ...(contractStatus ? { status: contractStatus } : {}) }, model: "test" };
   }
   if (request.method === "turn/steer" && request.params.expectedTurnId !== "turn-live") {
     console.log(JSON.stringify({ id: request.id, error: { message: `expected active turn id \`${request.params.expectedTurnId}\` but found \`turn-live\`` } }));
     continue;
   }
   console.log(JSON.stringify({ id: request.id, result }));
-  if (request.method === "turn/start" && process.env.FAKE_CODEX_IMAGES) {
-    const turn = { id: "turn-new", status: "completed", items: [{ id: "image-user", type: "userMessage", content: request.params.input }] };
-    writeFileSync(join(process.cwd(), ".fake-image-turns.json"), JSON.stringify([turn]));
-    console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn } }));
-  }
   if (request.method === "thread/goal/set" || request.method === "thread/goal/clear") console.log(JSON.stringify({ method: goal ? "thread/goal/updated" : "thread/goal/cleared", params: { threadId, goal } }));
+  if (pendingCompletion) { console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn: pendingCompletion } })); pendingCompletion = undefined; }
   if (request.method === "turn/start" && goal && !process.env.FAKE_CODEX_GOAL_ACTIVE) {
     goal = { ...goal, status: "complete", tokensUsed: 42, timeUsedSeconds: 2 };
     writeFileSync(goalFile, JSON.stringify(goal));

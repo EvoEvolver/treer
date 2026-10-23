@@ -12,6 +12,7 @@ async function phoneNav(page, item) {
 }
 
 export async function testRuntimeControlsUi(browser, screenshots, pageName = "index.html") {
+  const publicFiles = new Set(JSON.parse(await readFile(join(import.meta.dirname, "../public/ui-assets.json"), "utf8")).files.map((file) => file.path));
   let state = {
     type: "state", ready: true, runtime: { state: "idle" }, modelOptions: [],
     harness: { name: "Mock Agent", capabilities: { steer: true, backgroundTasks: true, goal: { pause: true, budget: true } } },
@@ -101,7 +102,7 @@ export async function testRuntimeControlsUi(browser, screenshots, pageName = "in
       }
       if (path === "v1/files/tree") return json({ entries: [] });
       const file = path === "" ? pageName : path;
-      if (!/^[a-z-]+\.(?:html|css|js)$/.test(file)) return json({ error: "not found" }, 404);
+      if (!publicFiles.has(file)) return json({ error: "not found" }, 404);
       const content = await readFile(join(import.meta.dirname, "../public", file));
       res.writeHead(200, { "content-type": file.endsWith("js") ? "application/javascript" : file.endsWith("css") ? "text/css" : "text/html" });
       res.end(content);

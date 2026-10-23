@@ -11,21 +11,29 @@ const source = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 providerRecipes(readFileSync(join(source, "provider-recipes.json")));
 const options = {};
 for (let i = 2; i < process.argv.length; i += 2) {
-  if (!["--output", "--source-commit"].includes(process.argv[i]) || !process.argv[i + 1]) throw new Error("Usage: prepare-bundle.mjs --output ABSOLUTE_DIR --source-commit FULL_SHA");
+  if (!["--output", "--source-commit", "--native-manifest", "--native-sha256"].includes(process.argv[i]) || !process.argv[i + 1]) throw new Error("Usage: prepare-bundle.mjs --output ABSOLUTE_DIR --source-commit FULL_SHA [--native-manifest ABS --native-sha256 SHA256]");
   options[process.argv[i].slice(2)] = process.argv[i + 1];
 }
 if (!isAbsolute(options.output || "") || !/^[a-f0-9]{40}$/.test(options["source-commit"] || "")) throw new Error("An absolute output and full source commit are required");
 const output = options.output;
 if (existsSync(output) && (lstatSync(output).isSymbolicLink() || !lstatSync(output).isDirectory() || readdirSync(output).length)) throw new Error("Output must be a new or empty physical directory");
 mkdirSync(output, { recursive: true, mode: 0o700 });
-// The React UI is committed as public/{ui.html,boot.js,ui.js,ui.css} (bootstrap installs from git without esbuild).
+// Core UI and lazy chunks/worker are committed (bootstrap installs without esbuild).
 // A payload must carry exactly what the sources build to, so a stale commit fails here instead of shipping.
-for (const [name, bytes] of await buildUi(source)) {
+const ui = await buildUi(source);
+for (const name of readdirSync(join(source, "public"))) if (!ui.has(name)) throw new Error(`Unexpected public asset: ${name}`);
+for (const [name, bytes] of ui) {
   if (!readFileSync(join(source, "public", name)).equals(bytes)) throw new Error(`public/${name} is stale; run npm run build:ui and commit it`);
 }
 // UI build tooling needs esbuild/typescript and never runs inside an installation.
 const uiTooling = /[\\/]scripts[\\/](?:ui-build|build-ui|check-ui|check-ui-source)(?:\.d)?\.m?[jt]s$/;
 for (const name of ["public", "scripts", "profiles.json", "interface-contract.json", "provider-recipes.json", "provider-review.json"]) cpSync(join(source, name), join(output, name), { recursive: true, dereference: false, filter: (path) => !uiTooling.test(path) });
+if (options["native-manifest"] || options["native-sha256"]) {
+  if (!isAbsolute(options["native-manifest"] || "") || !/^[a-f0-9]{64}$/.test(options["native-sha256"] || "")) throw new Error("Explicit native manifest path and independently checked SHA256 required");
+  const bytes = readFileSync(options["native-manifest"]);
+  if (bytes.length > 65536 || createHash("sha256").update(bytes).digest("hex") !== options["native-sha256"]) throw new Error("Native manifest integrity mismatch");
+  writeFileSync(join(output, "native-runtime.json"), bytes, { mode: 0o600, flag: "wx" });
+}
 await build({ entryPoints: [join(source, "src/index.ts")], outfile: join(output, "runtime.mjs"), bundle: true,
   platform: "node", format: "esm", target: "node22", minify: false,
   external: ["bufferutil", "utf-8-validate"], define: { "process.env.WS_NO_BUFFER_UTIL": '"1"', "process.env.WS_NO_UTF_8_VALIDATE": '"1"' },

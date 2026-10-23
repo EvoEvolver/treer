@@ -8,10 +8,13 @@ import { tmpdir } from "node:os";
 import { compatibility, digest } from "../scripts/bundle-contract.mjs";
 import { hermeticEnv } from "./hermetic.mjs";
 import { controllerContractFixture } from "./controller-contract.mjs";
+import { nativeBindingFixture } from "./native-binding-fixture.mjs";
 const launcher = resolve(import.meta.dirname, "..");
 const temp = () => realpathSync(mkdtempSync(join(tmpdir(), "controller-launcher-")));
 const prepared = temp();
-execFileSync(process.execPath, [join(launcher, "scripts/prepare-bundle.mjs"), "--output", prepared, "--source-commit", "a".repeat(40)], { env: hermeticEnv(), stdio: "pipe" });
+const bindingDirectory = temp(), native = nativeBindingFixture(bindingDirectory, join(launcher, "public"));
+after(() => rmSync(bindingDirectory, { recursive: true, force: true }));
+execFileSync(process.execPath, [join(launcher, "scripts/prepare-bundle.mjs"), "--output", prepared, "--source-commit", "a".repeat(40), "--native-manifest", native.path, "--native-sha256", native.sha256], { env: hermeticEnv(), stdio: "pipe" });
 after(() => rmSync(prepared, { recursive: true, force: true }));
 const mock = `#!/usr/bin/env node
 const fs=require('node:fs'),path=require('node:path'),root=process.env.FIXTURE_ROOT,args=process.argv.slice(2);
@@ -55,7 +58,10 @@ test("installer and native-smoke Controller fixtures advertise optional private-
 });
 test("portable install is offline, saves all six profiles, idempotently retains assets and rolls back", (t) => {
   const f = fixture(t), result = f.call();
+  assert.equal(f.call({ require_runtime: null }).operation, "install"); // Core's absent optional field serializes as null.
   assert.equal(result.portable, true); assert.equal(result.profiles.length, 6);
+  assert.equal(f.call({ operation: "status" }).current_runtime.default, "rust");
+  assert.equal(f.call({ operation: "status" }).current_runtime.acp, "explicit-node");
   const installed = join(f.base, f.request.version); assert.equal(existsSync(join(installed, "node_modules")), false);
   assert.deepEqual(readFileSync(join(installed, "provider-recipes.json")), readFileSync(join(launcher, "provider-recipes.json")));
   const manifest = JSON.parse(readFileSync(join(installed, "bundle-manifest.json"), "utf8"));
@@ -80,6 +86,17 @@ test("isolated skip-profiles installation does not create or redirect a per-user
   assert.equal(existsSync(join(f.root, ".local/bin/treer-agent")), false);
   assert.equal(existsSync(join(f.root, "Treer/bin/treer-agent.exe")), false);
   assert.equal(existsSync(join(f.base, "profiles-receipt.json")), false);
+});
+test("a native-default payload without its binding refuses before pointer/profile/default changes", t => {
+  const f = fixture(t), path = join(f.bundle, "bundle-manifest.json");
+  const manifest = JSON.parse(readFileSync(path, "utf8"));
+  manifest.files = manifest.files.filter((file: any) => file.path !== "native-runtime.json");
+  rmSync(join(f.bundle, "native-runtime.json")); writeFileSync(path, JSON.stringify(manifest));
+  f.request.version = `sha256-${digest(readFileSync(path))}`;
+  assert.throws(() => f.call(), /requires a verified machine-specific native-runtime/);
+  assert.equal(existsSync(join(f.base, "current.json")), false);
+  assert.equal(existsSync(join(f.root, "Codex + UI.json")), false);
+  assert.equal(existsSync(join(f.root, ".local/bin/treer-agent")), false);
 });
 test("recognized profiles from another machine converge to one portable profile through update and rollback", (t) => {
   const f = fixture(t), profiles = JSON.parse(readFileSync(join(f.bundle, "profiles.json"), "utf8")).profiles;
@@ -199,7 +216,7 @@ test("bundle integrity, path traversal, symlink escape and concurrent locks fail
 });
 test("portable runtime and Node entry register the same interface contract without shell or node_modules", async (t) => {
   const f = fixture(t); f.call();
-  const child = spawn(process.execPath, [join(f.base, "run.mjs"), "--harness", "codex"], { cwd: f.machine, env: hermeticEnv({ FIXTURE_ROOT: f.root, PATH: dirname(process.execPath), CODEX_BIN: join(launcher, "tests/fake-codex.mjs"), AGENT_UI_MESSAGE_WATCH: "0" }), stdio: "pipe" });
+  const child = spawn(process.execPath, [join(f.base, "run.mjs"), "--runtime", "node", "--harness", "codex"], { cwd: f.machine, env: hermeticEnv({ FIXTURE_ROOT: f.root, PATH: dirname(process.execPath), CODEX_BIN: join(launcher, "tests/fake-codex.mjs"), AGENT_UI_MESSAGE_WATCH: "0" }), stdio: "pipe" });
   let error = ""; child.stderr.on("data", (chunk) => error += chunk);
   t.after(() => child.kill());
   const deadline = Date.now() + 10000;
