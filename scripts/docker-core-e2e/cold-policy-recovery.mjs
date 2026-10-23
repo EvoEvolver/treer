@@ -78,12 +78,17 @@ export async function runColdPolicyRecovery(h) {
     for (const side of ['a', 'b']) await docker('restart', names(`proxy-${side}`));
     await h.proxyReady();
     await check('226 cold Host loss and one refused operator restore', async () => {
-      await docker('stop', '-t', '2', machine);
-      await docker('start', machine);
-      const cold = await fingerprint();
-      sameRegistration(before, cold);
-      assert.equal(cold.host_reachable, false);
-      assert.equal(cold.host_record_matches_process, false);
+      await check('226 stop and cold-start owned machine', async () => {
+        await docker('stop', '-t', '2', machine);
+        await docker('start', machine);
+      });
+      await check('226 cold registration retained and Host absent', async () => {
+        const cold = await fingerprint();
+        sameRegistration(before, cold);
+        assert.equal(cold.host_reachable, false);
+        assert.equal(cold.host_record_matches_process, false);
+      });
+      await check('226 missing Host restart guidance', async () => {
       let restartFailed = false;
       try { await docker('exec', machine, 'treer-agent-server', 'service', '--workspace', workspace, 'restart-controller'); }
       catch (e) {
@@ -92,6 +97,8 @@ export async function runColdPolicyRecovery(h) {
         restartFailed = true;
       }
       assert(restartFailed, 'missing Host restart must not silently succeed');
+      });
+      await check('226 first explicit restore denied by unavailable Policy', async () => {
       let refused = false;
       receipt.actual_restore_cli_invocations++;
       try { await docker('exec', machine, 'treer-agent-server', 'restore', '--workspace', workspace); }
@@ -102,35 +109,45 @@ export async function runColdPolicyRecovery(h) {
         refused = true;
       }
       assert(refused, 'provider outage must not restore through a fallback');
+      });
+      await check('226 refused restore retains registration and new Host', async () => {
       const denied = await fingerprint();
       sameRegistration(before, denied);
       assert.equal(denied.host_reachable, true);
       assert.equal(denied.host_record_matches_process, true);
       assert.equal(denied.proxy_connected, true);
       receipt.denied_host_identity = denied.host_identity;
+      });
+      await check('226 unavailable provider has no cached revision', async () => {
       const status = (await api(`/api/workspaces/${workspace}/policy-provider`)).data;
       assert.equal(status.provider.failure_mode, 'fail_closed');
       assert.equal(status.cache.revision, null, 'no stale compiled Policy allowance');
       receipt.first_restore = 'policy_provider_unavailable';
+      });
     });
     await docker('unpause', providerMachine); paused = false;
     receipt.provider_pause_released = true;
-    await wait('226 actual Policy HTTP readiness', async () => {
+    await check('226 provider resumes real HTTP health', () => wait('226 actual Policy HTTP readiness', async () => {
       const text = await docker('exec', providerMachine, 'curl', '-fsS', '--max-time', '3', `http://127.0.0.1:${receipt.provider_port}/health`);
       return JSON.parse(text).service === 'treer-policy';
-    });
+    }));
     // Production caches provider failure for five seconds. This is a bounded
     // wait, not a restore retry; the next mutation is a second explicit call.
     await sleep(6000);
     await check('226 explicit Policy-ready restore retains enrollment and Host', async () => {
       receipt.actual_restore_cli_invocations++;
-      const output = await docker('exec', machine, 'treer-agent-server', 'restore', '--workspace', workspace);
-      receipt.report = restoreReport(output, workspace, a, receipt.workload_id);
+      const output = await check('226 second explicit restore succeeds', () => docker('exec', machine, 'treer-agent-server', 'restore', '--workspace', workspace));
+      await check('226 restored workload report identity', async () => {
+        receipt.report = restoreReport(output, workspace, a, receipt.workload_id);
+      });
+      await check('226 successful restore reuses Host and registration', async () => {
       const after = await fingerprint();
       sameRegistration(before, after);
       assert.equal(after.host_record_matches_process, true);
       assert.deepEqual(after.host_identity, receipt.denied_host_identity);
       assert.equal(after.proxy_connected, true);
+      });
+      await check('226 recovered Policy revision and machine identities', async () => {
       const status = (await api(`/api/workspaces/${workspace}/policy-provider`)).data;
       assert.equal(status.provider.app_id, receipt.provider_app_id);
       assert.equal(status.provider.failure_mode, 'fail_closed');
@@ -138,6 +155,7 @@ export async function runColdPolicyRecovery(h) {
       assert.equal(status.cache.last_error, null);
       assert.deepEqual((await snapshot()).servers.map(s => s.server_id).sort(), ids);
       receipt.policy_revision = status.cache.revision;
+      });
       receipt.real_policy_acceptance = 'passed';
       receipt.registration_unchanged = true;
       receipt.host_reused_after_explicit_retry = true;

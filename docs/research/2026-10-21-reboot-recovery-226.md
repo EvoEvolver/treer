@@ -102,7 +102,9 @@ are separate fixed checks in `results.json`. The synthetic Python PTY worker
 has no AIS queue: fixture command input explicitly uses `delivery: "steer"`,
 without notifications or required receipts; the default queued prompt contract
 is not relaxed. Thus preparation failures remain
-distinct from cold Host loss and restore. A failed run is not a
+distinct from cold Host loss and restore. Cold stop/start, absent-Host identity,
+restart guidance, first refusal, post-refusal Host identity/cache, provider health,
+second restore/report and final identity/revision each have a fixed check label. A failed run is not a
 successful recovery or proof of historical incident cause.
 
 Focused entry controls (no Docker or managed configuration needed):
