@@ -99,7 +99,7 @@ async function cli(side, ...argv) {
   try { return JSON.parse(out); } catch { return out; }
 }
 async function command(agent, label, argv, extra={}) {
-  await api(`/api/workspaces/${ws}/agents/${agent}/prompt`,{text:JSON.stringify({label,argv,...extra})});
+  await api(`/api/workspaces/${ws}/agents/${agent}/prompt`,{text:JSON.stringify({label,argv,...extra}),delivery:'steer'});
   const result = await wait(label,async()=>{
     const text = (await api(`/api/workspaces/${ws}/agents/${agent}/output?lines=300`)).data.text;
     const line = text.split(/\r?\n/).find(line=>line.startsWith('RESULT ') && line.includes(`"label": "${label}"`));
