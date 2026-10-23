@@ -9,3 +9,5 @@ form{display:grid;gap:14px;margin-top:14px;min-width:0}input{font:inherit;min-he
 .email-message{border-top:1px solid hsl(var(--border));padding:1rem 0}.email-message pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}textarea{width:100%;min-height:120px;font:inherit;box-sizing:border-box;padding:.75rem;background:inherit;color:inherit;border:1px solid currentColor;border-radius:6px}
 
 .email-target{overflow-wrap:anywhere}
+
+.human-conversations article{padding:16px 0;border-bottom:1px solid hsl(var(--border))}.conversation-link{max-width:100%;flex-wrap:wrap;overflow-wrap:anywhere;gap:6px}

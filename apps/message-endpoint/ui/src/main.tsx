@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {EmailRecovery} from './EmailRecovery';
+import {HumanInbox} from './HumanInbox';
 import {EmailThread} from './EmailThread';
 import { readSettings, readLoginUrl, endSession, readEditUrl, saveConfiguration, saveTelegramToken } from './api';
 type Lang = 'en' | 'zh';
@@ -48,6 +49,7 @@ function App() {
   finally {setSaving(false);}
  }
  return <main><header><div><p className="eyebrow">Treer</p><h1>{t.title}</h1><p>{t.subtitle}</p></div><div className="controls"><label>{t.language}<select value={lang} onChange={e=>setLang(e.target.value as Lang)}><option value="en">English</option><option value="zh">中文</option></select></label><button type="button" onClick={()=>setDark(!dark)}>{dark?t.light:t.dark}</button><button type="button" disabled={busy} onClick={()=>void load()}>{t.refresh}</button></div></header>
+ <nav><a className="button" href="#inbox">{lang==='zh'?'我的会话':'My conversations'}</a></nav>
  <p className="preview">{t.preview}</p>{data&&<p>{lang==='zh'?'Operator 启用开关':'Operator activation gate'}: <strong>{data.settings.activation_enabled?(lang==='zh'?'已开启':'Enabled'):(lang==='zh'?'关闭':'Disabled')}</strong> · {lang==='zh'?'此开关不代表 Policy 或启动配置已验证。':'This gate is not verification of Policy or the launch profile.'}</p>}
  <div role="status" aria-live="polite">{busy?t.loading:saved?(lang==='zh'?'已保存。':'Saved.'):''}</div>
  {failure&&<section role="alert" className="error"><h2>{t.error}</h2><code>{failure}</code><button disabled={busy} onClick={()=>void load()}>{t.retry}</button></section>}
@@ -98,7 +100,7 @@ function Root() {
  const [hash,setHash]=useState(location.hash);
  useEffect(()=>{const changed=()=>setHash(location.hash);addEventListener('hashchange',changed);return()=>removeEventListener('hashchange',changed);},[]);
  const match=/^#email-thread=([a-f0-9]{64})$/.exec(hash);
- return match?<EmailThread key={match[1]!} id={match[1]!}/>:<App/>;
+ return hash==='#inbox'?<HumanInbox/>:match?<EmailThread key={match[1]!} id={match[1]!}/>:<App/>;
 }
 createRoot(document.getElementById('root')!).render(<Root/>);
 

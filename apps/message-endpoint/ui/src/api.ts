@@ -51,3 +51,10 @@ export async function endMemberSession() {
  const r=await fetch('api/email/auth/logout',{method:'POST',credentials:'same-origin',headers:{'X-Endpoint-Request':'1'}});
  if(!r.ok)throw new Error('logout_rejected');
 }
+
+export async function readHumanInbox(){
+ const r=await fetch('api/email/inbox',{credentials:'same-origin',cache:'no-store',redirect:'error',signal:AbortSignal.timeout(10000),headers:{Accept:'application/json'}});
+ if(!r.ok)return {ok:false,status:r.status,value:null};
+ const reader=r.body!.getReader();let size=0;const chunks:Uint8Array[]=[];
+ try{while(true){const part=await reader.read();if(part.done)break;size+=part.value.byteLength;if(size>65536)throw Error('inbox_unavailable');chunks.push(part.value);}const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.length;}return {ok:true,status:r.status,value:JSON.parse(new TextDecoder().decode(bytes))};}finally{await reader.cancel().catch(()=>{});}
+}
