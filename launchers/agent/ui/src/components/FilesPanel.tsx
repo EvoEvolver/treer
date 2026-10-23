@@ -179,7 +179,7 @@ export function FilesPanel({ open, requestedFile, onClose }: { open: boolean; re
           </li>
         ))}
       </ul>
-      <section className="preview" aria-label={t("files.preview")}>
+      <section className={`preview${file && previewKind(file.path) !== "text" ? " rich-preview" : ""}`} aria-label={t("files.preview")}>
         <div className="pmeta"><b>{selected ?? t("files.select")}</b><span className={file?.truncated ? "truncated" : undefined}>{meta}</span>
           {file && ["text", "markdown"].includes(previewKind(file.path)) && <button type="button" className="btn" onClick={() => openText(file.path, file.content)}>{t("files.open")}</button>}
           {selected && preview.state !== "idle" && (file && file.size > DOWNLOAD_LIMIT_BYTES

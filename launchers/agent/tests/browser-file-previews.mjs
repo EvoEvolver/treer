@@ -78,7 +78,13 @@ try {
   const page = await context.newPage();
   const errors = [], violations = [];
   page.on("pageerror", e => errors.push(e.message));
-  await page.addInitScript(() => { window.__previewViolations = []; document.addEventListener("securitypolicyviolation", e => window.__previewViolations.push(e.violatedDirective)); });
+  await page.addInitScript(() => {
+    window.__previewViolations = []; window.__previewURLs = new Set();
+    document.addEventListener("securitypolicyviolation", e => window.__previewViolations.push(e.violatedDirective));
+    const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
+    URL.createObjectURL = blob => { const url = create(blob); window.__previewURLs.add(url); return url; };
+    URL.revokeObjectURL = url => { window.__previewURLs.delete(url); revoke(url); };
+  });
   const resources = () => served.filter(path => /\.js(?:\?|$)/.test(path));
   const rich = () => resources().filter(path => /(?:MarkdownPreview|ImagePreview|PdfPreview|pdf-worker)-/.test(path));
   await page.goto(`http://127.0.0.1:${relay.address().port}${prefix}?lang=en`);
@@ -105,6 +111,7 @@ try {
   await expect.poll(() => served.some(p => p.includes("download?") && p.includes("slow.png"))).toBe(true);
   await choose("plain.txt"); await expect(page.locator(".preview pre")).toHaveText("plain source only");
   await expect.poll(() => cancelledRead).toBe(true);
+  assert.equal(await page.evaluate(() => window.__previewURLs.size), 0, "image object URLs must be revoked on selection change");
   await choose("two.pdf"); await expect(page.locator(".file-pdf canvas")).toBeVisible();
   await expect(page.locator(".file-pdf [role=status]")).toHaveCount(0);
   await expect(page.locator(".file-pdf")).toContainText("Page 1 / 2");
@@ -137,6 +144,8 @@ try {
   await page.getByRole("button", { name: "菜单", exact: true }).click();
   await page.getByRole("menuitem", { name: "文件", exact: true }).click();
   await choose("two.pdf"); await expect(page.locator(".file-pdf")).toContainText("第 1 / 2 页");
+  await expect(page.locator(".file-pdf [role=status]")).toHaveCount(0);
+  assert.ok((await page.locator(".pdf-scroll").boundingBox()).height > 300, "mobile viewer must use remaining screen height");
   for (const button of await page.locator(".preview-tools button:visible").all()) {
     const rect = await button.boundingBox(); assert.ok(rect.width >= 44 && rect.height >= 44);
   }
