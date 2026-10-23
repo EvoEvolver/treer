@@ -51,6 +51,7 @@ try {
   assert.ok(base, logs);
   const prefix = "/proxy/agent/interface/";
   const served = [];
+  const assetHeaders = {};
   let cancelledRead = false;
   relay = createServer((req, res) => {
     assert.ok(req.url.startsWith(prefix));
@@ -61,7 +62,10 @@ try {
       res.once("close", () => { cancelledRead = true; clearTimeout(timer); });
       return;
     }
-    const upstream = httpRequest(base + "/" + path, { method: req.method, headers: { ...req.headers, host: new URL(base).host } }, response => { res.writeHead(response.statusCode, response.headers); response.pipe(res); });
+    const upstream = httpRequest(base + "/" + path, { method: req.method, headers: { ...req.headers, host: new URL(base).host } }, response => {
+      if (path.endsWith(".js")) assetHeaders[path] = { status: response.statusCode, type: response.headers["content-type"], cache: response.headers["cache-control"] };
+      res.writeHead(response.statusCode, response.headers); response.pipe(res);
+    });
     upstream.on("error", () => res.destroy()); req.pipe(upstream); res.on("close", () => upstream.destroy());
   });
   relay.on("upgrade", (req, socket, head) => {
@@ -131,7 +135,12 @@ try {
   // Modules use the module map even under no-store. Hashed-worker HTTP cache
   // is asserted by the current backend only when its header supports it.
   assert.equal(pdfAfter.filter(p => p.startsWith("PdfPreview-")).length, 1);
-  if (process.env.EXPECT_WORKER_CACHE === "1") assert.deepEqual(pdfAfter, pdfBefore, "reopened worker must use HTTP cache");
+  if (process.env.EXPECT_WORKER_CACHE === "1") {
+    assert.deepEqual(pdfAfter, pdfBefore, "reopened worker must use HTTP cache");
+    const worker = Object.entries(assetHeaders).find(([name]) => name.startsWith("pdf-worker-"))[1];
+    assert.equal(worker.status, 200); assert.match(worker.type, /javascript/); assert.match(worker.cache, /private.*immutable/);
+    assert.equal(assetHeaders["ui.js"].cache, "no-store");
+  }
   await choose("oversized.pdf"); await expect(page.locator(".preview [role=alert]")).toContainText("20 MiB");
   assert.ok(!served.some(p => p.startsWith("v1/files/download?") && p.includes("oversized.pdf")));
   await choose("broken.pdf"); await expect(page.locator(".file-pdf [role=alert]")).toContainText("Unable to preview");
@@ -155,7 +164,7 @@ try {
   await page.keyboard.press("Enter"); await expect(page.locator(".file-pdf")).toContainText("第 2 / 2 页");
   violations.push(...await page.evaluate(() => window.__previewViolations));
   assert.deepEqual(errors, []); assert.deepEqual(violations, []);
-  console.log(JSON.stringify({ backend, resources: resources(), pdfBefore, pdfAfter, cancelledRead, assertions: "cold/list/text0 rich; md-only; image-noPDF; PDF worker/pages/zoom/reopen/error/bound/disposal; mobile390 dark zh; prefix actual AIS", errors, violations }, null, 2));
+  console.log(JSON.stringify({ backend, resources: resources(), assetHeaders, pdfBefore, pdfAfter, cancelledRead, assertions: "cold/list/text0 rich; md-only; image-noPDF; PDF worker/pages/zoom/reopen/error/bound/disposal; mobile390 dark zh; prefix actual AIS", errors, violations }, null, 2));
   await browser.close(); browser = null;
 } finally {
   if (browser) await browser.close();

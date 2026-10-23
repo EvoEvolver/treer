@@ -768,6 +768,19 @@ async fn history_page(app: &App, body: Value, ais: bool) -> Response {
         Err(error)=>{let (status,code)=match error.to_string().as_str() {"history_cursor_invalid"=>(StatusCode::BAD_REQUEST,"history_cursor_invalid"),"history_page_busy"=>(StatusCode::TOO_MANY_REQUESTS,"history_page_busy"),_=>(StatusCode::SERVICE_UNAVAILABLE,"history_page_unavailable")};failure(status,code)}
     }
 }
+fn static_cache_control(path: &str) -> &'static str {
+    let name = path.rsplit('/').next().unwrap_or("");
+    let hashed = name.strip_suffix(".js").is_some_and(|stem| {
+        if let Some(hash) = stem.strip_prefix("pdf-worker-") {
+            hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        } else if let Some((prefix, hash)) = stem.rsplit_once('-') {
+            !prefix.is_empty() && prefix.bytes().all(|b| b.is_ascii_alphabetic())
+                && hash.len() == 8 && hash.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        } else { false }
+    });
+    if hashed { "private, max-age=31536000, immutable" } else { "no-store" }
+}
+
 async fn static_file(app: &App, path: &str) -> Response {
     if path.split('/').any(|p| p == "..") || path.contains('%') || path.contains('\\') {
         return failure(StatusCode::FORBIDDEN, "invalid_asset_path");
@@ -815,7 +828,7 @@ async fn static_file(app: &App, path: &str) -> Response {
         StatusCode::OK,
         [
             ("content-type", mime),
-            ("cache-control", "no-store"),
+            ("cache-control", static_cache_control(path)),
             ("x-content-type-options", "nosniff"),
             ("referrer-policy", "no-referrer"),
         ],
