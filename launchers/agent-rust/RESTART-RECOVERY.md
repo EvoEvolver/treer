@@ -31,4 +31,6 @@ and `tests/contract.mjs` selected with `restart recovery reconciles`. The latter
 uses the actual Rust HTTP entry, a synthetic provider, a private Controller
 fixture, real journal persistence and two launcher processes; it checks that the
 accepted input is sent once, the queued input follows it, and deduplicated retries
-retain their submission ID.
+retain their submission ID. The scenarios include journals from the older
+launcher that had already marked an accepted receipt uncertain, including an
+explicitly interrupted provider turn followed by queued work.

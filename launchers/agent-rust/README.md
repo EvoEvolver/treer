@@ -674,15 +674,15 @@ instead of dropping accepted active content. These are experiment limits, not
 an OS memory quota or production parity claim.
 
 Operation IDs are durable before 202. A conflicting retry is refused. Running
-submissions after restart become explicit uncertain failures and are not
-automatically re-dispatched. Persisted dispatch intent blocks **all** further
-dispatch if the start/steer result is missing, times out, disconnects, omits a
-turn identity, or cannot be durably checkpointed. Restart and late provider
-events do not clear this lock. Read/observe/abort/cancel remain available; new
-queue admissions remain queued. Automated reconciliation/unblocking is not
-implemented: stop this disposable run and inspect its transcript; do not use a
-restart to continue the comparison after uncertainty. Admission receipts are
-immutable; submission state and queue positions are computed separately.
+submissions are never automatically re-dispatched. On restart, an acknowledged
+receipt with an exact provider turn identity is reconciled against validated
+same-thread history; a terminal turn settles that receipt and allows queued work
+to continue without replay. A missing turn identity, missing provider turn, or
+unknown status remains uncertain and blocks **all** further dispatch. Idle alone,
+matching text, restart, and late provider events do not clear that lock.
+Read/observe/abort/cancel remain available and new queue admissions remain queued.
+Admission receipts are immutable; submission state and queue positions are
+computed separately. See [restart recovery](RESTART-RECOVERY.md).
 Completion sends retry with a stable key through one bounded worker (one pending
 job and one result); a slow CLI does not occupy the state/abort/event actor. The
 watcher acknowledges only after a persisted submission. It does not yet coalesce
