@@ -93,6 +93,9 @@ stops only its exact new containers and retains stopped containers/network/logs.
 and `resources.json` identifies retained resources. `prerequisites226.json` records
 fixed install/bootstrap/preflight/connect/status/help substage labels and bounded
 error categories; it never copies command arguments, stderr, keys or error text.
+The source image must contain the three native binaries plus their generated
+`SHA256SUMS`; the runner verifies that exact set before creating services, avoiding
+installer fallback to unrelated remote release checksums.
 Collect this leaf explicitly when diagnosing a pre-cold failure; an aggregate
 prerequisite FAIL alone does not identify the failed substage. A failed run is not a
 successful recovery or proof of historical incident cause.

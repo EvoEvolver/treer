@@ -123,6 +123,10 @@ try {
     image = inspected.Id; // All new Proxy containers use the inspected immutable image.
     fs.writeFileSync(path.join(dir, 'source-image.json'), JSON.stringify({source, image, scenario: selectedScenario}));
   }
+  await check('source image includes verified installer checksum set', async () => {
+    await docker('run','--rm','--entrypoint','sh',image,'-ec',
+      'case "$(uname -m)" in x86_64|amd64) p=linux-x86_64;; aarch64|arm64) p=linux-aarch64;; *) exit 1;; esac; cd "/app/dist/$p"; test "$(wc -l < SHA256SUMS)" -eq 3; sha256sum -c SHA256SUMS');
+  });
   await docker('build','-t',names('fixture'),fixtures);
   await docker('network','create',names('net')); networkCreated = true;
   await run('pg','--network-alias','pg','-e','POSTGRES_PASSWORD=e2e-only','-e','POSTGRES_USER=treer','-e','POSTGRES_DB=treer','postgres:17-alpine');

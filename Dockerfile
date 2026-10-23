@@ -33,7 +33,8 @@ RUN set -eu; \
     cp target/release/treer-proxy /out/bin/treer-proxy; \
     cp target/release/treer "/out/dist/$platform/treer"; \
     cp target/release/treer-agent-host "/out/dist/$platform/treer-agent-host"; \
-    cp target/release/treer-agent-server "/out/dist/$platform/treer-agent-server"
+    cp target/release/treer-agent-server "/out/dist/$platform/treer-agent-server"; \
+    (cd "/out/dist/$platform" && sha256sum treer treer-agent-host treer-agent-server > SHA256SUMS)
 
 FROM debian:bookworm-slim
 ARG TREER_VERSION=0.0.0
