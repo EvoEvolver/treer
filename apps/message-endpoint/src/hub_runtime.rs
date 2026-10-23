@@ -44,9 +44,6 @@ pub struct Config {
     activation_enabled: bool,
     #[serde(default)]
     virtual_hostname: Option<String>,
-    /// Exact trusted HTTPS Console origin permitted to frame this owner UI.
-    #[serde(default)]
-    console_origin: Option<String>,
     cli: PathBuf,
     cli_sha256: String,
     state_directory: PathBuf,
@@ -327,12 +324,6 @@ fn run_assembled(
             );
         let settings = match email_http {
             Some(email) => settings.with_email(Arc::new(email)),
-            None => settings,
-        };
-        let settings = match &config.console_origin {
-            Some(origin) => settings
-                .with_console_origin(origin)
-                .map_err(|_| Error::Configuration)?,
             None => settings,
         };
         let settings = match &config.virtual_hostname {

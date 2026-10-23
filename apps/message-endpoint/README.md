@@ -1718,10 +1718,9 @@ documents the offline paused-binding offset journal and pre-traffic reversal;
 it does not grant cutover authority or historical native reply continuity.
 No real send, deploy or existing poller switch is implied by these source tools.
 
-For Console iframe delivery set trusted `console_origin` to the exact HTTPS
-Console root origin. Without it, CSP continues to forbid framing. With it,
-`frame-ancestors` permits only that origin and self; this does not add a CSRF
-origin or grant owner access. GET `/` accepts bounded, nonduplicate Console
-appearance hints (`theme`, `look`, `lang`, `embed_origin`), but ignores them for
-all authority decisions. API queries remain refused. App-relative assets retain
-the authenticated embedded `/ui/` prefix.
+The Console iframe root may carry bounded `theme` (light/dark), `look` (a/b/c),
+`lang` (en/zh) and `embed_origin` appearance hints. Only GET `/` accepts these
+known, nonduplicate keys; API and asset queries remain refused. Hints never grant
+owner access or change Host/CSRF/CSP trust. Relative assets retain the `/ui/`
+prefix. The authenticated Proxy UI tunnel normalizes framing policy to the
+configured Console origin; the Hub's upstream CSP remains unchanged.
