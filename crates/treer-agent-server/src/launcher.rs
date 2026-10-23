@@ -652,8 +652,9 @@ fn validate_controller(value: &Value) -> Result<()> {
 
 fn validate_required_runtime(status: &Value) -> Result<()> {
     anyhow::ensure!(
-        status["default"] == "rust" && status["codex"] == "rust",
-        "launcher_runtime_required: candidate must have a verified Rust default and Codex provider; no activation performed"
+        status["default"] == "rust"
+            && (status["codex"] == "rust" || status["claude"] == "rust"),
+        "launcher_runtime_required: candidate must have a verified Rust default and at least one available Rust provider; no activation performed"
     );
     Ok(())
 }
@@ -676,7 +677,7 @@ try {
   const root = process.argv[1];
   const { runtimeStatus } = await import(pathToFileURL(join(root, 'scripts/native-runtime.mjs')).href);
   const status = runtimeStatus(root);
-  process.stdout.write(JSON.stringify({default:status.default,codex:status.codex}));
+  process.stdout.write(JSON.stringify({default:status.default,codex:status.codex,claude:status.claude}));
 } catch { process.exitCode = 1; }
 "#]);
     probe.arg(node_entry_path(stage.to_path_buf()));
@@ -1300,6 +1301,14 @@ mod tests {
             &json!({"default":"rust","codex":"rust","claude":"unavailable-provider"}),
         )
         .unwrap();
+        validate_required_runtime(
+            &json!({"default":"rust","codex":"unavailable-provider","claude":"rust"}),
+        )
+        .unwrap();
+        assert!(validate_required_runtime(
+            &json!({"default":"rust","codex":"unavailable-provider","claude":"unavailable-provider"}),
+        )
+        .is_err());
     }
 
     #[tokio::test]
@@ -1324,6 +1333,7 @@ mod tests {
             "export function runtimeStatus() { throw new Error('fixture invalid hash'); }",
             "export function runtimeStatus() { return {default:'node',codex:'node'}; }",
             "export function runtimeStatus() { return {default:'unconfigured'}; }",
+            "export function runtimeStatus() { return {default:'rust',codex:'unavailable-provider',claude:'unavailable-provider'}; }",
         ] {
             fs::write(&module, code).unwrap();
             assert!(require_rust_runtime(&node, &root)
@@ -1333,6 +1343,8 @@ mod tests {
                 .starts_with("launcher_runtime_required"));
         }
         fs::write(&module, "export function runtimeStatus() { return {default:'rust',codex:'rust',claude:'unavailable-provider'}; }").unwrap();
+        require_rust_runtime(&node, &root).await.unwrap();
+        fs::write(&module, "export function runtimeStatus() { return {default:'rust',codex:'unavailable-provider',claude:'rust'}; }").unwrap();
         require_rust_runtime(&node, &root).await.unwrap();
         assert!(!root.join("current.json").exists());
         fs::remove_dir_all(root).unwrap();

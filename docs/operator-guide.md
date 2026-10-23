@@ -1207,9 +1207,10 @@ To require a Rust default when installing or updating, pass
 `treer-agent-server launcher update --require-runtime rust` (also supported by
 `install`). This checks the candidate embedded payload's native manifest,
 platform, provider images and asset hashes through its verified runtime checker
-before invoking the installer. A Node-only or unconfigured payload is refused
-before activation or profile changes; an unavailable Claude provider remains an
-explicit unsupported provider, without a Node fallback. An older Controller
+before invoking the installer. At least one of Codex or Claude must have an
+available Rust binding; Claude-only candidates are supported. A Node-only or
+unconfigured payload is refused before activation or profile changes; a missing
+provider remains explicitly unavailable, without a Node fallback. An older Controller
 rejects the new flag: do not retry without it to bypass this requirement.
 This command selects the payload embedded in the local Controller binary; it
 does not download the latest Launcher or adopt another installation's native
