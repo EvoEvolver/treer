@@ -1212,6 +1212,9 @@ available Rust binding; Claude-only candidates are supported. A Node-only or
 unconfigured payload is refused before activation or profile changes; a missing
 provider remains explicitly unavailable, without a Node fallback. An older Controller
 rejects the new flag: do not retry without it to bypass this requirement.
+On success, the JSON result includes `runtime` with the candidate's verified
+`default`, `codex` and `claude` statuses, including when the bundled installer
+itself predates that result field.
 This command selects the payload embedded in the local Controller binary; it
 does not download the latest Launcher or adopt another installation's native
 manifest. Install a Controller carrying a suitable payload or use an explicitly

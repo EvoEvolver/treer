@@ -659,7 +659,7 @@ fn validate_required_runtime(status: &Value) -> Result<()> {
     Ok(())
 }
 
-async fn require_rust_runtime(node: &Path, stage: &Path) -> Result<()> {
+async fn require_rust_runtime(node: &Path, stage: &Path) -> Result<Value> {
     // This module and the binding are from the verified, extracted candidate,
     // never from current.json or the previously installed runtime. Do not run
     // install.mjs until this read-only check has completed successfully.
@@ -688,7 +688,8 @@ try {
     let status = serde_json::from_slice(&output.stdout).context(
         "launcher_runtime_required: invalid candidate runtime status; no activation performed",
     )?;
-    validate_required_runtime(&status)
+    validate_required_runtime(&status)?;
+    Ok(status)
 }
 
 fn validate_controller_with_floor(value: &Value, minimum_epoch: u32) -> Result<()> {
@@ -783,9 +784,11 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
         .transpose()?;
     let stage = extract(&root)?;
     let required_runtime = install.and_then(|options| options.require_runtime.as_deref());
-    if required_runtime == Some("rust") {
-        require_rust_runtime(&node, &stage.0).await?;
-    }
+    let verified_runtime = if required_runtime == Some("rust") {
+        Some(require_rust_runtime(&node, &stage.0).await?)
+    } else {
+        None
+    };
     let manifest: Value = serde_json::from_str(MANIFEST_JSON)?;
     let request = json!({"schema":"treer.launcher-install/v1", "operation":operation,
         "bundle_dir":stage.0, "version":format!("sha256-{PAYLOAD_DIGEST}"), "source_commit":SOURCE_COMMIT,
@@ -842,6 +845,11 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
     }
     let mut result: Value =
         serde_json::from_slice(&output.stdout).context("installer returned invalid status JSON")?;
+    if let Some(runtime) = verified_runtime {
+        // Older verified Rust installers did not return a runtime field. Report
+        // the candidate status checked by Core, not an unverified installer claim.
+        result["runtime"] = runtime;
+    }
     if operation == "status" {
         result["agent_startups"] =
             startup_references(&treer, &selection, &context.server_id, &root).await;
@@ -1343,9 +1351,15 @@ mod tests {
                 .starts_with("launcher_runtime_required"));
         }
         fs::write(&module, "export function runtimeStatus() { return {default:'rust',codex:'rust',claude:'unavailable-provider'}; }").unwrap();
-        require_rust_runtime(&node, &root).await.unwrap();
+        let runtime = require_rust_runtime(&node, &root).await.unwrap();
+        assert_eq!(runtime["default"], "rust");
+        assert_eq!(runtime["codex"], "rust");
+        assert_eq!(runtime["claude"], "unavailable-provider");
         fs::write(&module, "export function runtimeStatus() { return {default:'rust',codex:'unavailable-provider',claude:'rust'}; }").unwrap();
-        require_rust_runtime(&node, &root).await.unwrap();
+        let runtime = require_rust_runtime(&node, &root).await.unwrap();
+        assert_eq!(runtime["default"], "rust");
+        assert_eq!(runtime["codex"], "unavailable-provider");
+        assert_eq!(runtime["claude"], "rust");
         assert!(!root.join("current.json").exists());
         fs::remove_dir_all(root).unwrap();
     }
