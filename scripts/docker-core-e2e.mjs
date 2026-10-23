@@ -45,6 +45,23 @@ async function check(label, fn) {
     throw error;
   } finally { fs.writeFileSync(path.join(dir,'results.json'), JSON.stringify(results,null,2)); }
 }
+const prerequisites = [];
+async function prerequisite(side, stage, fn) {
+  try {
+    const value = await fn();
+    prerequisites.push({side, stage, status: 'PASS'});
+    return value;
+  } catch (error) {
+    const category = error.code === 'ERR_ASSERTION' ? 'assertion_failed'
+      : error.killed ? 'subprocess_timeout'
+      : Number.isInteger(error.code) ? 'subprocess_failed' : 'unavailable';
+    prerequisites.push({side, stage, status: 'FAIL', category});
+    throw error;
+  } finally {
+    // Fixed labels/categories only: command errors may contain enrollment keys.
+    fs.writeFileSync(path.join(dir, 'prerequisites226.json'), JSON.stringify(prerequisites));
+  }
+}
 async function run(suffix, ...args) {
   const name = names(suffix);
   await docker('run','-d','--name',name,'--network',names('net'),...args);
@@ -132,21 +149,36 @@ try {
   });
   for (const side of ['a','b']) await check(`install/preflight/enroll ${side}; key survives missing ps`,async()=>{
     const machine=names('machine-'+side);
-    const installed = await docker('exec',machine,'sh','-c',`curl -fsSL http://proxy-${side}:8787/install.sh | sh`);
-    assert(!installed.includes('unshare'));
-    const key = (await api(`/api/workspaces/${ws}/bootstrap`,{})).data.enrollment_key;
+    await prerequisite(side, 'install', async () => {
+      const installed = await docker('exec',machine,'sh','-c',`curl -fsSL http://proxy-${side}:8787/install.sh | sh`);
+      assert(!installed.includes('unshare'));
+    });
+    const key = await prerequisite(side, 'bootstrap', async () =>
+      (await api(`/api/workspaces/${ws}/bootstrap`,{})).data.enrollment_key);
     const connect = ['exec',machine,'treer-agent-server','connect','--key',key,'--proxy',`http://proxy-${side}:8787/`,'--non-interactive','--accept-risk','--name','docker-'+side];
-    await assert.rejects(docker(...connect),error=>error.message.includes('procps'));
-    assert.equal((await snapshot()).servers.length,side==='a'?0:1);
-    await docker('exec',machine,'sh','-c','test ! -d "$HOME/.config/treer/agent-servers"');
-    await docker('exec','-u','root',machine,'sh','-c','apt-get update -qq && apt-get install -y -qq --no-install-recommends procps');
-    await docker(...connect); // The exact same one-time key must still work.
-    assert((await cli(side,'status')).servers.some(s=>s.name==='docker-'+side&&s.status==='online'));
-    const automatic = JSON.parse(await docker('exec',machine,'treer','status'));
-    assert(automatic.servers.some(s=>s.name==='docker-'+side));
-    assert((await cli(side,'message','--help')).includes('durable'));
-    assert(!(await cli(side,'message','send','--help')).includes('--body-file'));
-    assert((await cli(side,'--skill')).includes('Exchange durable Messages'));
+    await prerequisite(side, 'missing_ps_refusal', async () => {
+      await assert.rejects(docker(...connect),error=>error.message.includes('procps'));
+    });
+    await prerequisite(side, 'unconsumed_registration', async () => {
+      assert.equal((await snapshot()).servers.length,side==='a'?0:1);
+      await docker('exec',machine,'sh','-c','test ! -d "$HOME/.config/treer/agent-servers"');
+    });
+    await prerequisite(side, 'install_procps', () => docker('exec','-u','root',machine,'sh','-c','apt-get update -qq && apt-get install -y -qq --no-install-recommends procps'));
+    await prerequisite(side, 'connect_same_key', () => docker(...connect));
+    await prerequisite(side, 'workspace_status', async () => {
+      assert((await cli(side,'status')).servers.some(s=>s.name==='docker-'+side&&s.status==='online'));
+    });
+    await prerequisite(side, 'automatic_status', async () => {
+      const automatic = JSON.parse(await docker('exec',machine,'treer','status'));
+      assert(automatic.servers.some(s=>s.name==='docker-'+side));
+    });
+    await prerequisite(side, 'message_help', async () => {
+      assert((await cli(side,'message','--help')).includes('durable'));
+      assert(!(await cli(side,'message','send','--help')).includes('--body-file'));
+    });
+    await prerequisite(side, 'skill', async () => {
+      assert((await cli(side,'--skill')).includes('Exchange durable Messages'));
+    });
   });
   if (selectedScenario === 'cold-policy-recovery-226') {
     const server = (await snapshot()).servers.find(s => s.name === 'docker-a').server_id;
