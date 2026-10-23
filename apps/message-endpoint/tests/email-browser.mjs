@@ -12,6 +12,7 @@ const [binary,modulePath,browserPath,screenshots]=process.argv.slice(2);
 if(!screenshots)throw new Error('usage: email-browser.mjs BINARY PLAYWRIGHT_MODULE BROWSER_CACHE SCREENSHOTS');
 process.env.PLAYWRIGHT_BROWSERS_PATH=resolve(browserPath);
 const {chromium}=createRequire(import.meta.url)(resolve(modulePath));
+const inboxOnly=process.argv.includes('--inbox-only');
 const recoveryOnly=process.argv.includes('--recovery-only');
 const home=mkdtempSync(join(tmpdir(),'endpoint-email-browser-'));chmodSync(home,0o700);
 const env={HOME:home,TMPDIR:home,PATH:'/usr/bin:/bin:/usr/sbin:/sbin',PLAYWRIGHT_BROWSERS_PATH:resolve(browserPath)};
@@ -22,7 +23,24 @@ let browser;const timer=setTimeout(()=>child.kill('SIGTERM'),10000);
 try {
  const [line]=await once(lines,'line');clearTimeout(timer);const config=JSON.parse(line);
  browser=await chromium.launch({headless:true,env});
- if(recoveryOnly) {
+ if(inboxOnly) {
+  for(const width of [1280,390]) {
+   const page=await browser.newPage({viewport:{width,height:900},colorScheme:width===390?'dark':'light',locale:'en-US',extraHTTPHeaders:{'X-Treer-Identity-Token':'fixture.member.token'}});
+   page.setDefaultTimeout(8000);await page.goto(config.url+'#inbox');
+   const link=page.getByRole('link',{name:'Open conversation',exact:false});await link.first().waitFor();
+   if(await link.first().getAttribute('href')!=='#email-thread='+config.thread)throw Error('inbox lost thread scope');
+   if(await page.getByText('Add a paused endpoint',{exact:true}).count())throw Error('member inbox exposed owner form');
+   await link.first().click();await page.getByText('<script>window.PWNED=1</script> & confidential text',{exact:true}).waitFor();
+   await page.getByLabel('Message',{exact:true}).fill('native inbox member reply '+width);await page.getByRole('button',{name:'Queue reply',exact:true}).click();
+   await page.getByText('Reply queued; delivery is not yet confirmed.',{exact:true}).waitFor();
+   await page.getByRole('link',{name:'All conversations',exact:true}).click();await link.first().waitFor();
+   if(!await page.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw Error('inbox overflow');
+   await page.screenshot({path:join(screenshots,'inbox-native-'+width+'.png'),fullPage:true});await page.close();
+  }
+  const denied=await browser.newPage({extraHTTPHeaders:{'X-Treer-Identity-Token':'fixture.owner.token'}});await denied.goto(config.url+'#inbox');await denied.getByText('No visible conversations yet.',{exact:false}).waitFor();await denied.close();
+  const absent=await browser.newPage();await absent.goto(config.url+'#inbox');await absent.getByRole('heading',{name:'Sign in to view conversations',exact:true}).waitFor();const login=absent.getByRole('link',{name:'Continue with Treer',exact:true});if(await login.getAttribute('href')!==config.url+'api/email/auth/start?inbox=1')throw Error('inbox login scope');await absent.close();
+  console.log('native inbox browser PASS: actual Hub+SQLite/scoped synthetic member verifier; list->thread->reply->back, owner not implicit member, login inbox destination, 1280/390. Core/external transport not exercised.');
+ } else if(recoveryOnly) {
   const page=await browser.newPage({viewport:{width:390,height:900},colorScheme:'dark',locale:'en-US',extraHTTPHeaders:{'X-Treer-Identity-Token':'fixture.owner.token'}});
   page.setDefaultTimeout(8000);await page.goto(config.url);
   const card=page.locator('section').filter({has:page.getByRole('heading',{name:'/team/ag_recovery',exact:true})});
