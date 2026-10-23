@@ -82,6 +82,10 @@ struct Record {
     source_messages: Vec<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message_batch: Option<messages::Batch>,
+    // Display-only boundary observed BEFORE a steer RPC. This is not provider
+    // turn authority and never authorizes dispatch/reconciliation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    projection_after: Option<String>,
 }
 struct Runtime {
     claude:bool,
@@ -432,7 +436,7 @@ impl Runtime {
             self.goals = Goals::load(&saved["goals"])?;
             self.checkpoint = (self.records.clone(), self.goals.clone());
         }
-        self.provider_request("initialize", json!({"clientInfo":{"name":"treer-rust-spike","title":"Treer Rust experiment","version":"0.0.1"},"capabilities":{"experimentalApi":true}})).await?;
+        self.provider_request("initialize", json!({"clientInfo":{"name":"treer-rust-spike","title":"Treer Agent","version":"0.0.1"},"capabilities":{"experimentalApi":true}})).await?;
         self.rpc.write(json!({"method":"initialized"})).await?;
         self.models = self.provider_request("model/list", json!({}))
             .await
@@ -466,7 +470,7 @@ impl Runtime {
         {
             bail!("active provider thread has no current turn");
         }
-        self.thread = json!({"id":id,"title":result["thread"]["name"].as_str().unwrap_or("Codex (Rust experiment)"),"cwd":config.cwd,"model":result["model"],"reasoningEffort":result["reasoningEffort"],"status":"idle","activeTurnId":null,"lastError":null,"createdAt":now(),"updatedAt":now(),"turns":[],"hasOlderItems":false});
+        self.thread = json!({"id":id,"title":result["thread"]["name"].as_str().filter(|name| *name != "Codex (Rust experiment)").unwrap_or(if self.claude {"Claude"} else {"Codex"}),"cwd":config.cwd,"model":result["model"],"reasoningEffort":result["reasoningEffort"],"status":"idle","activeTurnId":null,"lastError":null,"createdAt":now(),"updatedAt":now(),"turns":[],"hasOlderItems":false});
         for turn in result["thread"]["turns"].as_array().into_iter().flatten() {
             self.turns.insert(model::turn(turn))?;
         }
@@ -627,7 +631,13 @@ impl Runtime {
                 // Receipts remain durable, but evicted completed turns must not
                 // be synthesized back into every snapshot from that journal.
                 if !synthesize || number<self.records.len().saturating_sub(50) {continue;}
-                turns.push(json!({"id":id,"status":if record.submission["state"] == "running" {"inProgress"} else {"completed"},"startedAt":record.submission["created_at"],"error":null,"items":[]}));
+                // A local-only turn belongs before the next receipt-associated
+                // provider turn, not at the end of all provider history.
+                let next = self.records.iter().skip(number + 1)
+                    .filter_map(|r| r.submission["turn_id"].as_str())
+                    .find_map(|next| turns.iter().position(|t| t["id"] == next))
+                    .unwrap_or(turns.len());
+                turns.insert(next,json!({"id":id,"status":if record.submission["state"] == "running" {"inProgress"} else {"completed"},"startedAt":record.submission["created_at"],"error":null,"items":[]}));
             }
             let Some(submission_id) = record.submission["id"].as_str() else {
                 continue;
@@ -665,12 +675,27 @@ impl Runtime {
                 items[index]["submissionId"] = record.submission["id"].clone();
                 items[index]["attachments"] = json!(record.images);
             } else {
-                // Keep accepted user input before the provider's response. The
-                // stable journal-derived ID survives completion and restart.
-                let before = items
-                    .iter()
-                    .take_while(|i| i["kind"] == "userMessage")
-                    .count();
+                // Queue/start input precedes its response. Steering instead
+                // belongs after what was already observed at dispatch, even
+                // when the provider omits its user echo from final history.
+                // Never move a native occurrence: its ordered position wins.
+                let before = record.projection_after.as_ref()
+                    .and_then(|after| items.iter().position(|item| item["id"] == *after))
+                    .map(|at| at + 1)
+                    .or_else(|| {
+                        // A final summary can omit the anchor's tool while
+                        // retaining items on either side. Use those ordered
+                        // shared identities; retain_final_items will keep the
+                        // omitted activity. Never sort by text or timestamps.
+                        let after = record.projection_after.as_ref()?;
+                        let previous = self.turns.iter().find(|t| t["id"] == id)?["items"].as_array()?;
+                        let boundary = previous.iter().position(|item| item["id"] == *after)? + 1;
+                        previous[boundary..].iter()
+                            .find_map(|old| items.iter().position(|item| item["id"] == old["id"]))
+                            .or_else(|| previous[..boundary].iter().rev()
+                                .find_map(|old| items.iter().position(|item| item["id"] == old["id"]).map(|at| at + 1)))
+                    })
+                    .unwrap_or_else(|| items.iter().take_while(|i| i["kind"] == "userMessage").count());
                 items.insert(before, json!({"id":item_id,"kind":"userMessage","text":record.text,"sender":record.submission["sender"],"submissionId":record.submission["id"],"detailText":null,"sourceTurnId":id,"attachments":record.images}));
                 matched.insert((id.to_string(), json!(item_id).to_string()));
             }
@@ -1085,6 +1110,7 @@ impl Runtime {
             node_fingerprint: None,
             source_messages: vec![],
             message_batch: None,
+            projection_after: None,
         };
         if has_images {
             self.attachments
@@ -1136,6 +1162,14 @@ impl Runtime {
             {
                 input.push(json!({"type":"localImage","path":path}));
             }
+        }
+        // Capture display order before the cooperative RPC can consume newer
+        // provider activity. Persist it with intent, never as provider authority.
+        if busy {
+            self.records[index].projection_after = self.turns.iter()
+                .find(|t| t["id"] == self.thread["activeTurnId"])
+                .and_then(|t| t["items"].as_array()).and_then(|items| items.last())
+                .and_then(|item| item["id"].as_str()).map(str::to_owned);
         }
         // Persist intent BEFORE contacting the provider. No ambiguous replay.
         self.records[index].submission["state"] = json!("running");
@@ -1551,6 +1585,7 @@ fn decode_records(saved: &Value) -> Result<VecDeque<Record>> {
                 || !operations.insert(r.operation.clone())
                 || r.text.is_empty() && r.images.is_empty() && (r.node_fingerprint.is_none() || matches!(s["state"].as_str(), Some("queued" | "running")))
                 || r.text.len() > 100_000
+                || r.projection_after.as_ref().is_some_and(|id| id.is_empty() || id.len() > 1024)
                 || !["queue", "steer"].contains(&r.delivery.as_str())
                 || !s["state"].as_str().is_some_and(|s| {
                     ["queued", "running", "done", "failed", "interrupted"].contains(&s)
@@ -1686,7 +1721,7 @@ pub(crate) fn import_node_queue(thread: &Value, queue: &Value) -> Result<Value> 
             operation: operation.into(), fingerprint: String::new(), node_fingerprint: Some(hash.into()),
             text: text.into(), delivery: value["delivery"].as_str().unwrap_or("").into(),
             submission, receipt: value["receipt"].clone(), notify: value["notify"].clone(),
-            notified: value["notification"]["delivered"] == true, images: vec![], source_messages: messages, message_batch: None,
+            notified: value["notification"]["delivered"] == true, images: vec![], source_messages: messages, message_batch: None, projection_after: None,
         };
         records.push(record);
     }

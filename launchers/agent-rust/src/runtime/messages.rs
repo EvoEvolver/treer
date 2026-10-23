@@ -307,7 +307,7 @@ fn admit(records: &VecDeque<Record>, deliveries: &Value, agent: &str) -> Result<
                     submission: json!({"id":id,"sender":null,"created_at":now(),"position":null,"text_preview":preview(&text,256),"state":"queued","turn_id":null,"assistant_preview":null,"error":null}),
                     receipt: json!({"id":id,"disposition":"queued","position":null}),
                     text, delivery:"queue".into(), notify:Value::Null, notified:false, images:vec![], node_fingerprint:None,
-                    source_messages:vec![checkpoint], message_batch:Some(Batch { sections:vec![next], initial_count:1 }),
+                    source_messages:vec![checkpoint], message_batch:Some(Batch { sections:vec![next], initial_count:1 }), projection_after:None,
                 });
             }
         }

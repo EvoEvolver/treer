@@ -1288,8 +1288,8 @@ npm --prefix launchers/agent run test:windows -- --controller C:\Treer\treer-age
 # No inference, managed Agent mutation, or restart. Chromium is needed once:
 npm --prefix launchers/agent exec -- playwright install chromium
 UI_SCREENSHOTS=/tmp/agent-ui-screenshots npm --prefix launchers/agent run test:browser
-# UI sources live in launchers/agent/ui. After editing them rebuild the four committed
-# files in public/; check:ui (part of `run check`) fails on any byte difference with a
+# UI sources live in launchers/agent/ui. After editing them rebuild the committed
+# inventory and assets in public/; check:ui (part of `run check`) fails on any byte difference with a
 # fresh build, on budget overruns and on forbidden code patterns (HTML sinks outside the
 # markdown component, eval, unsafe URLs, absolute network paths).
 npm --prefix launchers/agent run build:ui

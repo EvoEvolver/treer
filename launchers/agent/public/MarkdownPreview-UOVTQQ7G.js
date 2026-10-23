@@ -1,1 +1,0 @@
-import{f as t}from"./chunk-RAFBPGO6.js";import"./chunk-R7SBWEKE.js";import{b as o,e as r}from"./chunk-UDHOQ4TQ.js";var n=o(r(),1);function d({content:e}){return(0,n.jsx)("div",{className:"file-markdown",children:(0,n.jsx)(t,{text:e})})}export{d as default};

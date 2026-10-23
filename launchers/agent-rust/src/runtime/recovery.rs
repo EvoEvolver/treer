@@ -78,6 +78,7 @@ mod tests {
             node_fingerprint: None,
             source_messages: vec![json!({"ackPending":true})],
             message_batch: None,
+            projection_after: None,
         }
     }
     fn history(status: &str) -> Transcript {

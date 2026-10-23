@@ -92,6 +92,7 @@ mod tests {
             node_fingerprint: None,
             source_messages: vec![],
             message_batch: None,
+            projection_after: None,
         }
     }
     #[test]

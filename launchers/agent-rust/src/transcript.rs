@@ -11,7 +11,7 @@ const MAX_TURNS: usize = 50;
 pub struct HistoryLimit;
 impl fmt::Display for HistoryLimit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Rust experiment history limit reached; queue paused")
+        f.write_str("Conversation history limit reached; queue paused")
     }
 }
 impl std::error::Error for HistoryLimit {}

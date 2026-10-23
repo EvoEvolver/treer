@@ -438,7 +438,7 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
             }
             "/api/health" => json!({"ok":snapshot["ready"],"ready":snapshot["ready"]}),
             "/.treer/agent" => {
-                json!({"protocol":"treer.agent.surface","version":1,"ready":snapshot["ready"],"title":"Codex (Rust experiment)","ui":true,"capabilities":CAPABILITIES})
+                json!({"protocol":"treer.agent.surface","version":1,"ready":snapshot["ready"],"title":snapshot["harness"]["name"],"ui":true,"capabilities":CAPABILITIES})
             }
             "/api/state" | "/v1/state" => limited(&snapshot, 50),
             "/v1/status" => {

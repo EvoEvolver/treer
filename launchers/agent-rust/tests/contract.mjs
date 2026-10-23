@@ -71,7 +71,7 @@ async function fixture(t, extra={}, controllerOptions={}) {
   return {base,post,headers,child,root,state,launch,controller,env,logs:()=>logs,trackChild:child=>children.push(child)};
 }
 
-for(const scenario of ['completed','failed','interrupted','inProgress','legacy','missing','older'])test('restart recovery reconciles '+scenario+' without replaying accepted input',{skip:useNode,timeout:20000},async t=>{
+for(const scenario of ['completed','failed','interrupted','inProgress','legacy','legacyInterrupted','missing','older'])test('restart recovery reconciles '+scenario+' without replaying accepted input',{skip:useNode,timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1'});
   const first=await s.post({text:'first input must never replay',operation_id:'recovery-first'}).then(r=>r.json());
   const receipt=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
@@ -80,19 +80,19 @@ for(const scenario of ['completed','failed','interrupted','inProgress','legacy',
   assert.equal((await receipt(second.submission.id)).submission.state,'queued');
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');assert.equal((await exit)[0],0);
   const journalPath=join(s.state,'rust-spike.json'),journal=JSON.parse(await readFile(journalPath,'utf8'));
-  if(scenario==='legacy') {
+  if(['legacy','legacyInterrupted'].includes(scenario)) {
     journal.records[0].submission.state='failed';
     journal.records[0].submission.error='Experiment restarted; dispatch outcome uncertain; inspect transcript before retry';
     await writeFile(journalPath,JSON.stringify(journal),{mode:0o600});
   }
-  const restarted=await s.launch({RECOVERY_HOLD:'0',RECOVERY_STATUS:['legacy','missing','older'].includes(scenario)?'completed':scenario,RECOVERY_MISSING:scenario==='missing'?'1':'0',RECOVERY_OLD:scenario==='older'?'1':'0'});
+  const restarted=await s.launch({RECOVERY_HOLD:'0',RECOVERY_STATUS:scenario==='legacyInterrupted'?'interrupted':['legacy','missing','older'].includes(scenario)?'completed':scenario,RECOVERY_MISSING:scenario==='missing'?'1':'0',RECOVERY_OLD:scenario==='older'?'1':'0'});
   const get=id=>fetch(restarted.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
   if(scenario==='missing') {
     assert.equal((await fetch(restarted.base+'/api/state').then(r=>r.json())).runtime.state,'blocked');
     assert.equal((await get(second.submission.id)).submission.state,'queued');
   } else {
     await until(()=>get(second.submission.id),r=>r.submission?.state==='done');
-    assert.equal((await get(first.submission.id)).submission.state,['completed','legacy','inProgress','older'].includes(scenario)?'done':scenario);
+    assert.equal((await get(first.submission.id)).submission.state,['completed','legacy','inProgress','older'].includes(scenario)?'done':scenario==='legacyInterrupted'?'interrupted':scenario);
     const state=await fetch(restarted.base+'/api/state').then(r=>r.json());
     assert.equal(state.thread.id,'recovery-thread');assert.equal(state.runtime.state,'idle');
     assert.equal(state.queue.length,0);assert.equal(state.thread.lastError,null);
@@ -103,6 +103,35 @@ for(const scenario of ['completed','failed','interrupted','inProgress','legacy',
   const inputs=calls.filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text);
   assert.deepEqual(inputs,scenario==='missing'?['first input must never replay']:['first input must never replay','second input must retain FIFO']);
   if(scenario==='older')assert.ok(calls.some(c=>c.method==='thread/read'),'older turn is actually fetched via provider protocol');
+});
+
+for(const mode of ['omitted','native','summary'])test('history order keeps receipt steering between observed activity and its response, including restart '+mode,{skip:useNode,timeout:20000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/history-order-provider.mjs'),ORDER_HISTORY_FILE:'order-history.json',ORDER_NATIVE_ECHO:mode==='native'?'1':'0',ORDER_SUMMARY:mode==='summary'?'1':'0'});
+  const read=()=>fetch(s.base+'/api/state').then(r=>r.json());
+  const first=await s.post({text:'first accepted input',operation_id:'order-first'}).then(r=>r.json());
+  await until(read,x=>x.thread.turns.at(-1)?.items.some(i=>i.kind==='commandExecution'));
+  const steer=await s.post({text:'later steering input',delivery:'steer',operation_id:'order-steer'}).then(r=>r.json());
+  const expected=['first accepted input','assistant before steering','synthetic read only','later steering input','assistant after steering'];
+  const check=state=>{
+    const turn=state.thread.turns.find(t=>t.id===state.thread.turns.find(t=>t.items.some(i=>i.submissionId===first.submission.id))?.id);
+    assert.deepEqual(turn.items.map(i=>i.text),expected);
+    assert.deepEqual(turn.items.filter(i=>i.kind==='userMessage').map(i=>i.submissionId),[first.submission.id,steer.submission.id]);
+    for(let n=0;n<12;n++)assert.deepEqual(state.thread.turns[n].items.map(i=>i.text),['past question '+n,'past answer '+n]);
+    assert.doesNotMatch(state.thread.title,/Rust experiment/);
+  };
+  check(await until(read,x=>x.thread.turns.at(-1)?.status==='completed'));
+  const surface=await fetch(s.base+'/.treer/agent').then(r=>r.json());assert.equal(surface.title,'Codex');
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');assert.equal((await exit)[0],0);
+  const restarted=await s.launch({AGENT_UI_SESSION_ID:'order-thread'});
+  check(await fetch(restarted.base+'/api/state').then(r=>r.json()));
+  const response=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'ordinary follow-up',operation_id:'order-followup'})});
+  assert.equal(response.status,202);
+  const final=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.thread.turns.length===14&&x.thread.turns.at(-1).status==='completed');
+  check(final);assert.equal(final.thread.turns.at(-1).items[0].text,'ordinary follow-up');
+  const duplicate=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'later steering input',delivery:'steer',operation_id:'order-steer'})}).then(r=>r.json());
+  assert.equal(duplicate.duplicate,true);assert.equal(duplicate.submission.id,steer.submission.id);
+  const calls=(await readFile(join(s.root,'provider.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(calls.filter(c=>c.method==='turn/start').length,2);assert.equal(calls.filter(c=>c.method==='turn/steer').length,1);
 });
 
 test('Rust serves its manifest while Controller registration probes it',{skip:useNode},async t=>{

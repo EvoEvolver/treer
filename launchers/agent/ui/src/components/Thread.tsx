@@ -21,6 +21,7 @@ export function Thread() {
   const stuck = useRef(true);
   const anchor = useRef<{ height: number; top: number } | null>(null);
   const seen = useRef<TurnDto[]>([]);
+  const initialHistory = useRef<string | null>(null);
   const [away, setAway] = useState(false);
   const [fresh, setFresh] = useState(false);
   const turns = snapshot?.thread?.turns ?? [];
@@ -29,7 +30,9 @@ export function Thread() {
 
   const onScroll = useCallback(() => {
     const element = ref.current;
-    if (!element) return;
+    // Loading placeholders may scroll before the first asynchronous history
+    // render. They must not opt the reader out of initial bottom placement.
+    if (!element || initialHistory.current === null) return;
     const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
     stuck.current = distance < STICK;
     setAway(!stuck.current);
@@ -44,7 +47,14 @@ export function Thread() {
       if (element && stuck.current) element.scrollTop = element.scrollHeight;
     };
     document.addEventListener("treer:dock-resize", resized);
-    return () => document.removeEventListener("treer:dock-resize", resized);
+    // Markdown, images, folded activity and dock measurements can settle after
+    // React's layout effect. Follow those resizes only while already following.
+    const observer = new ResizeObserver(resized);
+    if (ref.current) {
+      observer.observe(ref.current);
+      if (ref.current.firstElementChild) observer.observe(ref.current.firstElementChild);
+    }
+    return () => { document.removeEventListener("treer:dock-resize", resized); observer.disconnect(); };
   }, []);
 
   // After every update: keep the anchor when earlier history was prepended, follow the bottom when stuck, otherwise flag news.
@@ -53,13 +63,22 @@ export function Thread() {
     if (!element) return;
     const previous = seen.current;
     seen.current = turns;
+    const threadId = snapshot?.thread?.id;
+    if (threadId && turns.length && initialHistory.current !== threadId) {
+      initialHistory.current = threadId;
+      stuck.current = true;
+      setAway(false);
+      setFresh(false);
+      element.scrollTop = element.scrollHeight;
+      return;
+    }
     if (turns.length === previous.length && turns.every((turn, index) => turn === previous[index])) return; // nothing visible changed
     if (anchor.current) {
       element.scrollTop = anchor.current.top + element.scrollHeight - anchor.current.height;
       anchor.current = null;
     } else if (stuck.current) element.scrollTop = element.scrollHeight;
     else setFresh(true);
-  }, [turns]);
+  }, [turns, snapshot?.thread?.id, view]);
 
   async function older() {
     const element = ref.current;
