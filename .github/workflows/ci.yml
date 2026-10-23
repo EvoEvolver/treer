@@ -9,8 +9,6 @@ jobs:
     timeout-minutes: 120
     env:
       TREER_226_SOURCE: 9598889d615c51be047ddfb56ee0ce9b0cca849d
-      TREER_226_EVIDENCE_ROOT: ${{ runner.temp }}/treer226-private
-      TREER_226_SAFE_OUT: ${{ runner.temp }}/treer226-safe
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -29,7 +27,11 @@ jobs:
           test -z "$(git status --porcelain)"
           docker info --format '{{.ServerVersion}}'
           df -h .
+          TREER_226_EVIDENCE_ROOT="$RUNNER_TEMP/treer226-private"
+          TREER_226_SAFE_OUT="$RUNNER_TEMP/treer226-safe"
           mkdir -m 700 "$TREER_226_EVIDENCE_ROOT" "$TREER_226_SAFE_OUT"
+          echo "TREER_226_EVIDENCE_ROOT=$TREER_226_EVIDENCE_ROOT" >> "$GITHUB_ENV"
+          echo "TREER_226_SAFE_OUT=$TREER_226_SAFE_OUT" >> "$GITHUB_ENV"
       - name: Build only exact fixture source image with ordinary features
         shell: bash
         run: |
