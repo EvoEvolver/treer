@@ -118,10 +118,32 @@ python3 -B -m unittest discover -s scripts/docker-core-e2e -p recovery_fingerpri
 ```
 
 These controls exercise orchestration refusal, bounded projection and explicit
-retry sequencing with synthetic adapters/files. They are not real Policy or
-cold-restore acceptance. At authoring, Docker daemon access failed before any
-fixture startup, so the new real entry remains **NOT_RUN**. Previously accepted
-mock-HTTP, private Host and delivered hot-update evidence remains separate.
-Even a passing new entry would establish Linux/private nohup recovery with a
-remote fixture provider, not the historical same-machine dependency cycle,
-physical reboot, service-manager boot behavior or enrolled-machine recovery.
+retry sequencing with synthetic adapters/files. They are not themselves real
+Policy or cold-restore acceptance.
+
+### Actual isolated acceptance (2026-10-23)
+
+[Hosted run 39977902738](https://github.com/EvoEvolver/treer/actions/runs/39977902738)
+passed with exact source `0fffc102e8e9df837879ae85fe8452f22046ddf8` and
+ordinary Docker build features. All 24 fixed checks passed. The real provider
+outage returned `policy_provider_unavailable`, with unchanged registration and a
+new reachable Host. Provider status was HTTP 200, fail-closed, revision null,
+and an error present. After actual provider health returned, the second explicit
+restore attached the selected workload, with revision 1 and no cache error;
+registration hashes and the first restore's Host PID/creation ticks matched.
+The receipt records exactly two explicit restore CLI invocations. All six owned
+containers were stopped and unpaused before disposable runner teardown.
+
+Safe `summary.json`, `recovery226.json`, `policy226.json`, `checks.json`,
+`prerequisites226.json`, `source-image.json` and `resources.json` support this
+result; no credentials, configuration bodies or raw diagnostic errors were
+uploaded. Earlier failed jobs remain failures and were not relabelled. The
+fixture fixes included same-source installer checksums, explicit steer for its
+non-AIS Python PTY worker, and refreshing the external API port mapping after
+Proxy container restart.
+
+This establishes Linux/private nohup cold recovery with a remote real Policy
+provider. Historical same-machine dependency cycle, physical macOS reboot,
+service-manager boot behavior and enrolled-machine recovery remain unproven.
+Previously accepted mock-HTTP, private Host and delivered hot-update evidence
+remains separate. No live enrolled resource was restarted or re-enrolled.
