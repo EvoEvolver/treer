@@ -13,6 +13,7 @@ if(!screenshots)throw new Error('usage: email-browser.mjs BINARY PLAYWRIGHT_MODU
 process.env.PLAYWRIGHT_BROWSERS_PATH=resolve(browserPath);
 const {chromium}=createRequire(import.meta.url)(resolve(modulePath));
 const inboxOnly=process.argv.includes('--inbox-only');
+const setupOnly=process.argv.includes('--setup-only');
 const recoveryOnly=process.argv.includes('--recovery-only');
 const home=mkdtempSync(join(tmpdir(),'endpoint-email-browser-'));chmodSync(home,0o700);
 const env={HOME:home,TMPDIR:home,PATH:'/usr/bin:/bin:/usr/sbin:/sbin',PLAYWRIGHT_BROWSERS_PATH:resolve(browserPath)};
@@ -23,7 +24,19 @@ let browser;const timer=setTimeout(()=>child.kill('SIGTERM'),10000);
 try {
  const [line]=await once(lines,'line');clearTimeout(timer);const config=JSON.parse(line);
  browser=await chromium.launch({headless:true,env});
- if(inboxOnly) {
+ if(setupOnly) {
+  for(const width of [1280,390]) {
+   const page=await browser.newPage({viewport:{width,height:900},colorScheme:width===390?'dark':'light',locale:'en-US',extraHTTPHeaders:{'X-Treer-Identity-Token':'fixture.owner.token'}});
+   page.setDefaultTimeout(8000);await page.goto(config.url);
+   const create=page.locator('form').first();await create.getByLabel('Endpoint Agent ID',{exact:true}).fill('ag_setup'+width);await create.getByLabel('Recipient Agent ID',{exact:true}).fill('ag_recipient');
+   await create.getByRole('button',{name:'Preview binding from Core',exact:true}).click();await create.getByRole('heading',{name:'Confirm these current objects',exact:true}).waitFor();await create.getByRole('checkbox').check();await create.getByRole('button',{name:'Create paused binding',exact:true}).click();
+   const setup=page.locator('.email-setup');await setup.getByRole('button',{name:'Load email setup and members',exact:true}).click();await setup.getByLabel('Workspace member',{exact:true}).selectOption('user_member');await setup.getByLabel('Endpoint / recipient Agent',{exact:true}).selectOption('ag_setup'+width);await setup.getByLabel('Contact email',{exact:true}).fill('person@example.test');await setup.getByRole('checkbox').check();
+   const result=page.waitForResponse(r=>r.url().endsWith('/api/settings')&&r.request().method()==='GET');await setup.getByRole('button',{name:'Bind contact (keep paused)',exact:true}).click();const settings=(await(await result).json()).settings;
+   if(!settings.email.targets.some(t=>t.endpoint_id==='ag_setup'+width&&t.member_id==='user_member'))throw Error('setup binding not persisted');if(!settings.endpoints.find(e=>e.binding.endpoint_id==='ag_setup'+width)?.paused)throw Error('setup activated endpoint');
+   await setup.getByText('Contact bound. The endpoint remains paused; no email was sent.',{exact:true}).waitFor();if(!await page.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw Error('setup overflow');await page.screenshot({path:join(screenshots,'email-setup-native-'+width+'.png'),fullPage:true});await page.close();
+  }
+  console.log('native email setup PASS: actual Hub/SQLite + closed synthetic Proxy owner/member verifier; real directory->endpoint/member->binding persisted/paused, 1280+390. No actual Core or mail transport.');
+ } else if(inboxOnly) {
   for(const width of [1280,390]) {
    const page=await browser.newPage({viewport:{width,height:900},colorScheme:width===390?'dark':'light',locale:'en-US',extraHTTPHeaders:{'X-Treer-Identity-Token':'fixture.member.token'}});
    page.setDefaultTimeout(8000);await page.goto(config.url+'#inbox');
@@ -44,16 +57,16 @@ try {
   const page=await browser.newPage({viewport:{width:390,height:900},colorScheme:'dark',locale:'en-US',extraHTTPHeaders:{'X-Treer-Identity-Token':'fixture.owner.token'}});
   page.setDefaultTimeout(8000);await page.goto(config.url);
   const card=page.locator('section').filter({has:page.getByRole('heading',{name:'/team/ag_recovery',exact:true})});
-  await card.getByText('Email delivery recovery',{exact:true}).click();
+  await card.getByText('Email send status and recovery',{exact:true}).click();
   await card.getByRole('button',{name:'Inspect email delivery',exact:true}).click();
-  await card.getByText('Uncertain: 1',{exact:false}).waitFor();
+  await card.getByText('Uncertain (held): 1',{exact:false}).waitFor();
   const resolveButton=card.getByRole('button',{name:'Record owner-observed receipt',exact:true});
   if(!await resolveButton.isDisabled())throw new Error('resolution missing confirmation');
   await card.getByLabel('Confirm an action on this item; sending stays paused.',{exact:true}).check();
   const reference=card.getByLabel('Enter the 16-character reference observed in the mailbox',{exact:true});
   if(await reference.inputValue()!=='')throw new Error('reference must come from owner observation');
   await reference.fill('0123456789abcdef');await resolveButton.click();
-  await card.getByText('owner_observed_receipt',{exact:false}).waitFor();
+  await card.getByText('Owner-observed receipt',{exact:false}).waitFor();
   if(!await page.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('owner item recovery overflow');
   await page.screenshot({path:join(screenshots,'email-owner-observed-390-dark.png'),fullPage:true});
   await card.getByLabel('Confirm an action on this item; sending stays paused.',{exact:true}).check();
@@ -100,16 +113,15 @@ try {
  const create=owner.locator('form').first();await create.getByLabel('Endpoint Agent ID',{exact:true}).fill('ag_new');await create.getByLabel('Recipient Agent ID',{exact:true}).fill('ag_recipient');
  await create.getByRole('button',{name:'Preview binding from Core',exact:true}).click();await create.getByRole('heading',{name:'Confirm these current objects',exact:true}).waitFor();await create.getByRole('checkbox').check();await create.getByRole('button',{name:'Create paused binding',exact:true}).click();
  const card=owner.locator('section').filter({has:owner.getByRole('heading',{name:'/team/ag_new',exact:true})});
- await card.getByRole('heading',{name:'/team/ag_new',exact:true}).waitFor();await card.locator('summary').filter({hasText:'Configure endpoint'}).click();
- await card.getByLabel('Contact email',{exact:true}).fill('person@example.test');await card.getByLabel('Workspace human member stable ID',{exact:true}).fill('user_member');
- if(!await card.getByRole('button',{name:'Bind email target',exact:true}).isDisabled())throw new Error('email binding lacked confirmation');
- await card.getByLabel('Confirm this address maps to this member and replies go only to this endpoint’s fixed Agent.',{exact:true}).check();
- const saved=owner.waitForResponse(r=>r.url().endsWith('/api/settings')&&r.request().method()==='GET');await card.getByRole('button',{name:'Bind email target',exact:true}).click();
+ await card.getByRole('heading',{name:'/team/ag_new',exact:true}).waitFor();
+ const setup=owner.locator('.email-setup');await setup.getByRole('button',{name:'Load email setup and members',exact:true}).click();await setup.getByLabel('Workspace member',{exact:true}).selectOption('user_member');await setup.getByLabel('Endpoint / recipient Agent',{exact:true}).selectOption('ag_new');await setup.getByLabel('Contact email',{exact:true}).fill('person@example.test');
+ if(!await setup.getByRole('button',{name:'Bind contact (keep paused)',exact:true}).isDisabled())throw Error('email binding lacked confirmation');await setup.getByRole('checkbox').check();
+ const saved=owner.waitForResponse(r=>r.url().endsWith('/api/settings')&&r.request().method()==='GET');await setup.getByRole('button',{name:'Bind contact (keep paused)',exact:true}).click();
  const savedData=await (await saved).json();if(!savedData.settings.email.targets.some(t=>t.endpoint_id==='ag_new'&&t.member_id==='user_member'))throw new Error('owner binding did not persist');
  if(savedData.settings.endpoints.find(v=>v.binding.endpoint_id==='ag_new')?.paused!==true)throw new Error('email binding auto-activated');
- await card.getByText('Email delivery recovery',{exact:true}).click();
+ await card.getByText('Email send status and recovery',{exact:true}).click();
  await card.getByRole('button',{name:'Inspect email delivery',exact:true}).click();
- await card.getByText('Prepared: 0 · Uncertain: 0 · Dispatching: 0 · Provider accepted: 0 · Abandoned: 0',{exact:true}).waitFor();
+ await card.getByText('Prepared: 0 · Uncertain (held): 0 · Dispatching: 0 · Accepted by Treer: 0 · Abandoned: 0',{exact:true}).waitFor();
  if(await card.getByRole('button',{name:'Abandon prepared item',exact:true}).count())throw new Error('empty journal offered abandonment');
  if(!await owner.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('email owner form overflow');await owner.screenshot({path:join(screenshots,'email-owner-binding-390.png'),fullPage:true});await owner.close();
  const login=await browser.newPage({locale:'en-US'});await login.goto(config.url+'#email-thread='+config.thread);
