@@ -230,4 +230,6 @@ email targets with an explicit truncation notice; other settings remain usable.
 
 [Email activation plan](EMAIL-ACTIVATION.md) records #204 source gaps, the
 uncertain-send limitation and the separate review/activation requirements.
-Existing runtime remains outbox-only; the plan does not enable real sending.
+The runtime supports explicit Proxy mode as documented above; the plan’s older
+primitive-stage notes are historical. Current installed configuration still
+omits email, and this implementation does not initiate a real send.

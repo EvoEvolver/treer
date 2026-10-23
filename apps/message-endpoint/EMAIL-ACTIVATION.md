@@ -1,10 +1,23 @@
 # Email activation increment (#204)
 
-This is a source audit and proposed implementation sequence, not authorization
-to deploy, change configuration or send mail. Both channel increments share the same assembled hub. All initial
-checks use fresh private HOME/state, fake Core/Proxy, synthetic members and local
-outbox; never the real provider. A later real-send authorization must name the
-recipient `doomspec@outlook.com`, count, exact version and rollback boundary.
+## Current status (2026-10-23)
+
+The maintained runtime already supports the built-in Treer App email API via
+`email.mode:"proxy"`; no provider installation or SMTP secret is needed in Hub.
+Owner setup/member selection is described in [EMAIL.md](EMAIL.md). Current
+installed Hub configuration omits email and retains operator activation off.
+A contact is no longer restricted to a historical test mailbox: the normalized
+bound contact is checked again at dispatch, and the platform enforces its
+verified-member/allowlist and `email.send` Policy boundary. This is not evidence
+of a successful live send.
+
+This document also preserves earlier implementation/review notes below. Their
+old recipient cap, missing integration or unavailable-browser gate statements
+are historical, not new prerequisites for implementing or installing the
+current authorized App increment. All current isolated checks use synthetic
+Core/Proxy and make no real external send. A real send is separately coordinated
+with the exact intended recipient/content; absent live account inputs do not
+block source or closed runtime verification.
 
 ## Existing assembly and actual gaps
 
@@ -16,7 +29,7 @@ recipient `doomspec@outlook.com`, count, exact version and rollback boundary.
 | Worker | `email_workers::Config.mode` defaults to `outbox`; explicit `proxy` uses the committed journal and single-use transport | Production configuration/activation and real mail remain separately authorized; no UI or Agent command changes mode |
 | Proxy helper | Worker invokes `send_committed` with frozen bytes, fresh membership/Core readback before reservation and a post-token current binding/lease/stop fence | Real provider and deployed identity/browser acceptance remain unrun |
 | Queues | Durable intent digest/key/lease/retry/parking, rate and byte/count limits, pause/readback checks | Distinguish provider acceptance, definite refusal and uncertain result; recovery cannot claim exactly-once external mail |
-| Retention | Private SQLite and outbox, bounded retained plaintext | No TTL/purge UI/private outbox reconciliation yet; sustained production remains blocked |
+| Retention | Private SQLite and outbox, bounded retained plaintext | Audited terminal payload retirement and private-outbox deletion are implemented; no automatic TTL or unlimited capacity is claimed |
 
 The assembled development boundary merges Telegram `2eb511e1` and email
 `e9359a14`. Earlier review notes below describe the staged primitives; the
