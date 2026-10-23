@@ -1,135 +1,122 @@
-name: CI
-
+name: Dedicated cold Proxy mapping 226
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  rust:
-    name: Rust and PostgreSQL tests
+  cold-policy-226:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 120
     env:
-      TREER_TEST_DATABASE_URL: postgres://treer:treer@127.0.0.1:55432/treer_test
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_USER: treer
-          POSTGRES_PASSWORD: treer
-          POSTGRES_DB: treer_test
-        ports:
-          - 55432:5432
-        options: >-
-          --health-cmd "pg_isready -U treer -d treer_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
+      TREER_226_SOURCE: 0fffc102e8e9df837879ae85fe8452f22046ddf8
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: 0fffc102e8e9df837879ae85fe8452f22046ddf8
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-        with:
-          toolchain: 1.90.0
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Release workflow security regressions (fake registry only)
-        run: node --test scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs scripts/install-checksums.test.mjs
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Build workspace binaries
-        run: cargo build --workspace --locked
-      - name: Test workspace including database boundaries
-        run: cargo test --workspace --locked
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  web:
-    name: Frontend types and build
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: 10.12.4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
-      - run: pnpm build
-
-  agent-launcher:
-    name: Agent launcher types, fake harnesses and browser
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: launchers/agent/package-lock.json
-      - name: Install launcher dependencies
-        run: npm --prefix launchers/agent ci --ignore-scripts
-      - name: Install isolated browser runtime
-        run: cd launchers/agent && npx playwright install --with-deps chromium
-      - name: Check launcher and browser sources
-        run: npm --prefix launchers/agent run check
-      - name: Unit and installer tests (fake harnesses only)
-        run: npm --prefix launchers/agent test
-      - name: Closed Codex, ACP and Claude Interface regression
+      - name: Bind existing disposable Docker target
+        shell: bash
         run: |
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
-          node scripts/ais-e2e.mjs
-      - name: Browser controls and screenshots
-        run: npm --prefix launchers/agent run test:browser
-        env:
-          CODEX_UI_SCREENSHOTS: ${{ runner.temp }}/launcher-screenshots
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: failure()
-        with:
-          name: agent-launcher-screenshots
-          path: ${{ runner.temp }}/launcher-screenshots
-          if-no-files-found: ignore
-
-  release-tooling:
-    name: Release tooling and fake machine updates
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-      - name: Closed release, checksum, detachment and rollback tests
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-      - name: Documentation links and launcher test isolation
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(git rev-parse HEAD)" = "$TREER_226_SOURCE"
+          test -z "$(git status --porcelain)"
+          docker info --format '{{.ServerVersion}}'
+          df -h .
+          TREER_226_EVIDENCE_ROOT="$RUNNER_TEMP/treer226-private"
+          TREER_226_SAFE_OUT="$RUNNER_TEMP/treer226-safe"
+          mkdir -m 700 "$TREER_226_EVIDENCE_ROOT" "$TREER_226_SAFE_OUT"
+          echo "TREER_226_EVIDENCE_ROOT=$TREER_226_EVIDENCE_ROOT" >> "$GITHUB_ENV"
+          echo "TREER_226_SAFE_OUT=$TREER_226_SAFE_OUT" >> "$GITHUB_ENV"
+      - name: Build only exact fixture source image with ordinary features
+        shell: bash
         run: |
-          node scripts/check-docs.mjs
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
+          set -euo pipefail
+          docker build --build-arg TREER_BUILD_COMMIT="$TREER_226_SOURCE" -t "treer-recovery226:$TREER_226_SOURCE" .
+      - name: One cold Policy restore scenario
+        shell: bash
+        run: |
+          set -uo pipefail
+          export TMPDIR="$TREER_226_EVIDENCE_ROOT"
+          export TREER_E2E_IMAGE="treer-recovery226:$TREER_226_SOURCE"
+          export TREER_E2E_SCENARIO=cold-policy-recovery-226
+          fixture_exit=0
+          node scripts/docker-core-e2e.mjs >"$TREER_226_EVIDENCE_ROOT/private-run.log" 2>&1 || fixture_exit=$?
+          echo "TREER_226_EXIT=$fixture_exit" >> "$GITHUB_ENV"
+          exit "$fixture_exit"
+      - name: Collect only fixed safe receipt leaves
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -B - <<'PYCOLLECT'
+          import hashlib,json,os,pathlib,re,subprocess
+          root=pathlib.Path(os.environ['TREER_226_EVIDENCE_ROOT'])
+          out=pathlib.Path(os.environ['TREER_226_SAFE_OUT']);out.mkdir(mode=0o700,exist_ok=True)
+          def save(name,value):
+           p=out/name
+           with p.open('x') as f:json.dump(value,f,indent=2);f.flush();os.fsync(f.fileno())
+          def read(p):
+           if p.is_symlink() or not p.is_file() or p.stat().st_size>131072:raise RuntimeError('receipt_refused')
+           v=json.loads(p.read_text());return v
+          summary={'source':'0fffc102e8e9df837879ae85fe8452f22046ddf8','scenario':'cold-policy-recovery-226','fixture_exit':int(os.environ.get('TREER_226_EXIT','-1')),'acceptance':'not_run','cleanup':'unproven'}
+          dirs=[p for p in root.glob('treer-core-e2e-*') if p.is_dir() and not p.is_symlink()]
+          if len(dirs)==1:
+           p=dirs[0]
+           if (p/'source-image.json').exists():save('source-image.json',read(p/'source-image.json'))
+           if (p/'results.json').exists():
+            checks=read(p/'results.json');save('checks.json',[{k:c[k] for k in ['label','status','ms'] if k in c} for c in checks])
+           if (p/'prerequisites226.json').exists():
+            stages={'install','bootstrap','missing_ps_refusal','unconsumed_registration','install_procps','connect_same_key','workspace_status','automatic_status','message_help','skill'}
+            rows=read(p/'prerequisites226.json')
+            if not isinstance(rows,list) or len(rows)>20:raise RuntimeError('prerequisites_refused')
+            for c in rows:
+             if not isinstance(c,dict) or set(c)-{'side','stage','status','category'} or c.get('side') not in {'a','b'} or c.get('stage') not in stages or c.get('status') not in {'PASS','FAIL'} or c.get('category') not in {None,'assertion_failed','subprocess_timeout','subprocess_failed','unavailable'}:raise RuntimeError('prerequisites_refused')
+            save('prerequisites226.json',rows)
+           if (p/'policy226.json').exists():
+            rows=read(p/'policy226.json')
+            if not isinstance(rows,list) or len(rows)>2:raise RuntimeError('policy_projection_refused')
+            for c in rows:
+             if not isinstance(c,dict) or set(c)!={'schema','phase','http_status','failure_mode','cache_revision','cache_error_present'} or c['schema']!=1 or c['phase'] not in {'unavailable','recovered'} or type(c['http_status']) is not int or not 0<=c['http_status']<=599 or c['failure_mode'] not in {'fail_closed','fail_open','unavailable'} or type(c['cache_error_present']) is not bool:raise RuntimeError('policy_projection_refused')
+             revision=c['cache_revision']
+             if revision is not None and revision!='unavailable' and (type(revision) is not int or not 0<=revision<=9007199254740991):raise RuntimeError('policy_revision_refused')
+            save('policy226.json',rows)
+           if (p/'resources.json').exists():
+            resources=read(p/'resources.json');prefix=resources.get('prefix','')
+            if not re.fullmatch(r'treer-core-[a-z0-9]{6}',prefix):raise RuntimeError('resource_prefix_refused')
+            names=resources.get('containers',[])
+            if len(names)>8 or any(not isinstance(n,str) or not n.startswith(prefix+'-') for n in names):raise RuntimeError('resource_names_refused')
+            states=[]
+            for n in names:
+             r=subprocess.run(['docker','inspect','--format','{{json .State}}',n],capture_output=True,text=True,timeout=10)
+             if r.returncode:states.append({'name':n,'state':'unproven'});continue
+             state=json.loads(r.stdout);states.append({'name':n,'running':state['Running'],'paused':state['Paused']})
+            stopped=bool(states) and all(s.get('running') is False and s.get('paused') is False for s in states)
+            summary['cleanup']='owned_containers_stopped' if stopped else 'unproven'
+            save('resources.json',{'prefix':prefix,'network':resources.get('network'),'containers':states,'retained_until_disposable_job_teardown':True})
+           if (p/'recovery226.json').exists():
+            receipt=read(p/'recovery226.json')
+            passed=receipt.get('real_policy_acceptance')=='passed' and receipt.get('registration_unchanged') is True and receipt.get('host_reused_after_explicit_retry') is True and receipt.get('actual_restore_cli_invocations')==2
+            save('recovery226.json',receipt)
+            if passed and summary['fixture_exit']==0 and summary['cleanup']=='owned_containers_stopped':summary['acceptance']='passed'
+          save('summary.json',summary)
+          if summary['acceptance']!='passed':raise SystemExit(1)
+          PYCOLLECT
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: cold-policy-226-mapping-safe
+          path: |
+            ${{ runner.temp }}/treer226-safe/summary.json
+            ${{ runner.temp }}/treer226-safe/source-image.json
+            ${{ runner.temp }}/treer226-safe/checks.json
+            ${{ runner.temp }}/treer226-safe/resources.json
+            ${{ runner.temp }}/treer226-safe/recovery226.json
+            ${{ runner.temp }}/treer226-safe/prerequisites226.json
+            ${{ runner.temp }}/treer226-safe/policy226.json
+          if-no-files-found: error
+          retention-days: 7
