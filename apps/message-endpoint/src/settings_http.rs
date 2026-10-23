@@ -159,6 +159,7 @@ pub struct Settings {
     javascript: &'static str,
     stylesheet: &'static str,
     allowed_hosts: BTreeSet<String>,
+    console_origin: Option<String>,
 }
 impl Settings {
     pub fn new(
@@ -201,6 +202,7 @@ impl Settings {
             javascript: "",
             stylesheet: "",
             allowed_hosts,
+            console_origin: None,
         })
     }
     /// Explicit trusted configuration, never a forwarded header. Core replaces
@@ -236,6 +238,32 @@ impl Settings {
         }
         self.allowed_hosts.insert(listener.to_string());
         Ok(self)
+    }
+    /// Trusted deployment configuration only; never an embed_origin query hint.
+    pub fn with_console_origin(mut self, origin: &str) -> Result<Self, Error> {
+        let url = reqwest::Url::parse(origin).map_err(|_| Error::Configuration)?;
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(Error::Configuration);
+        }
+        self.console_origin = Some(url.origin().ascii_serialization());
+        Ok(self)
+    }
+    fn frame_policy(&self, mut response: Response) -> Response {
+        if let Some(origin) = &self.console_origin {
+            let policy = format!("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'self' {origin}; form-action 'self'");
+            response.headers_mut().insert(
+                "content-security-policy",
+                HeaderValue::from_str(&policy).expect("validated HTTPS origin"),
+            );
+        }
+        response
     }
     pub fn with_configuration(mut self, mutation: Arc<Mutation>) -> Self {
         self.mutation = Some(mutation);
@@ -373,6 +401,34 @@ fn wants_html(headers: &HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.contains("Mozilla/"))
 }
+// Non-authoritative Console appearance hints, valid only on the root document.
+fn appearance_query(query: &str) -> bool {
+    if query.is_empty() || query.len() > 2048 {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(&format!("https://invalid.example/?{query}")) else {
+        return false;
+    };
+    let mut seen = HashSet::new();
+    url.query_pairs().all(|(key, value)| {
+        seen.insert(key.to_string())
+            && match key.as_ref() {
+                "theme" => matches!(value.as_ref(), "light" | "dark" | "system"),
+                "look" => matches!(value.as_ref(), "a" | "b" | "c"),
+                "lang" => matches!(value.as_ref(), "en" | "zh"),
+                "embed_origin" => reqwest::Url::parse(&value).is_ok_and(|u| {
+                    matches!(u.scheme(), "http" | "https")
+                        && u.host_str().is_some()
+                        && u.username().is_empty()
+                        && u.password().is_none()
+                        && u.path() == "/"
+                        && u.query().is_none()
+                        && u.fragment().is_none()
+                }),
+                _ => false,
+            }
+    })
+}
 fn callback(query: &str) -> Result<(String, String), Error> {
     if query.len() > 4096 {
         return Err(Error::OAuthState);
@@ -395,6 +451,14 @@ fn callback(query: &str) -> Result<(String, String), Error> {
     ))
 }
 async fn handle(
+    State(app): State<Arc<Settings>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: axum::extract::Request,
+) -> Response {
+    let response = audited_handle(State(app.clone()), ConnectInfo(peer), request).await;
+    app.frame_policy(response)
+}
+async fn audited_handle(
     State(app): State<Arc<Settings>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: axum::extract::Request,
@@ -873,8 +937,10 @@ fn dispatch(
             }
         }
     }
-    if query.is_some() {
-        return fixed(StatusCode::BAD_REQUEST, "query_not_allowed");
+    if let Some(query) = query {
+        if method != Method::GET || path != "/" || !appearance_query(query) {
+            return fixed(StatusCode::BAD_REQUEST, "query_not_allowed");
+        }
     }
     if method == Method::GET && path == "/api/endpoint/auth/config" {
         return response(
@@ -1645,6 +1711,91 @@ mod tests {
             ]),
         );
         assert_eq!(result.status(), StatusCode::FORBIDDEN);
+    }
+    #[test]
+    fn console_iframe_root_queries_and_frame_policy_are_separate_from_authority() {
+        let app = app("https://proxy.example/")
+            .with_console_origin("https://console.example/")
+            .unwrap();
+        for query in [
+            "theme=dark",
+            "theme=light&look=b&lang=zh&embed_origin=https%3A%2F%2Fevil.example",
+        ] {
+            let response = app.frame_policy(invoke(
+                &app,
+                Method::GET,
+                "/",
+                Some(query),
+                &headers(&[("accept", "text/html")]),
+            ));
+            assert_eq!(response.status(), StatusCode::OK);
+            let csp = response.headers()["content-security-policy"]
+                .to_str()
+                .unwrap();
+            assert!(csp.contains("frame-ancestors 'self' https://console.example;"));
+            assert!(!csp.contains("evil.example"));
+            assert!(csp.contains("default-src 'none'"));
+        }
+        for query in [
+            "theme=dark&theme=light",
+            "unknown=x",
+            "embed_origin=javascript%3Aevil",
+        ] {
+            assert_eq!(
+                invoke(&app, Method::GET, "/", Some(query), &headers(&[])).status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            invoke(
+                &app,
+                Method::GET,
+                "/api/settings",
+                Some("theme=dark"),
+                &headers(&[])
+            )
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            invoke(&app, Method::GET, "/api/settings", None, &headers(&[])).status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            invoke(
+                &app,
+                Method::POST,
+                "/api/endpoint/auth/logout",
+                None,
+                &headers(&[
+                    ("origin", "https://console.example"),
+                    ("x-endpoint-request", "1")
+                ])
+            )
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        for origin in [
+            "https://console.example/path",
+            "https://user@console.example/",
+            "https://console.example/?x=1",
+            "http://console.example/",
+        ] {
+            assert!(Settings::new(
+                OwnerAuth::new(
+                    "https://proxy.example/",
+                    "svc_hub",
+                    "ws_test",
+                    "https://hub.example/"
+                )
+                .unwrap(),
+                Arc::new(|| Ok(SettingsSnapshot::default())),
+                "html"
+            )
+            .unwrap()
+            .with_console_origin(origin)
+            .is_err());
+        }
     }
     #[test]
     fn managed_service_host_does_not_grant_csrf_origin() {

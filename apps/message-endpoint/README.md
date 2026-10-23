@@ -1717,3 +1717,11 @@ and owner recovery UI. [MIGRATION.md](MIGRATION.md#stopped-state-cutoff-journal)
 documents the offline paused-binding offset journal and pre-traffic reversal;
 it does not grant cutover authority or historical native reply continuity.
 No real send, deploy or existing poller switch is implied by these source tools.
+
+For Console iframe delivery set trusted `console_origin` to the exact HTTPS
+Console root origin. Without it, CSP continues to forbid framing. With it,
+`frame-ancestors` permits only that origin and self; this does not add a CSRF
+origin or grant owner access. GET `/` accepts bounded, nonduplicate Console
+appearance hints (`theme`, `look`, `lang`, `embed_origin`), but ignores them for
+all authority decisions. API queries remain refused. App-relative assets retain
+the authenticated embedded `/ui/` prefix.
