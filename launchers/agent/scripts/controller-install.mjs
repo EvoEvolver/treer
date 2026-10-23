@@ -34,6 +34,7 @@ function privateCopy(source, target) {
 }
 export function controllerInstall(request) {
   if (request.schema !== "treer.launcher-install/v1" || !["install", "update", "status", "rollback"].includes(request.operation)) throw new Error("Unsupported Controller install request");
+  if (request.require_runtime != null && request.require_runtime !== "rust") throw new Error("Unsupported required launcher runtime");
   if (!isAbsolute(request.root || "") || !isAbsolute(request.node || "") || !isAbsolute(request.treer || "") || !Array.isArray(request.agents || [])) throw new Error("Explicit absolute root/Node/Treer paths are required");
   // Rust canonical paths on Windows use the verbatim prefix. Node's JS
   // realpath walker rejects those (EISDIR at C:); the native API handles them.
@@ -74,6 +75,11 @@ export function controllerInstall(request) {
       verified = verifyBundle(request.bundle_dir, version, request.source_commit);
       const aligned = compatibility(verified.contract, request.controller);
       if (aligned.status !== "compatible") throw new Error(aligned.reason);
+      const preserveRust = request.require_runtime === "rust" || request.operation === "update" && pointer?.version && present(join(root, versionName(pointer.version), "native-runtime.json"));
+      if (preserveRust) {
+        const candidateRuntime = runtimeStatus(request.bundle_dir);
+        if (candidateRuntime.default !== "rust" || ![candidateRuntime.codex, candidateRuntime.claude].includes("rust")) throw new Error("Update requires a verified native Rust default with an available provider; refusing Node/unconfigured candidate");
+      }
       if (!verified.portable && !request.allow_network) throw new Error("Development payload is not runtime-ready; rebuild official payload or explicitly allow network installation");
       if (!present(versionRoot)) {
         stage = mkdtempSync(join(root, ".install-"));
@@ -143,6 +149,6 @@ export function controllerInstall(request) {
       throw error;
     }
     return { schema: "treer.launcher-install-result/v1", operation: request.operation, version, source_commit: verified.manifest.source_commit, previous: next.previous,
-      compatibility: aligned, profiles: profiles.map((profile) => profile.name), command: portableCommand, entry: runner, shim: shim?.path ?? null, portable: verified.portable };
+      compatibility: aligned, profiles: profiles.map((profile) => profile.name), command: portableCommand, entry: runner, shim: shim?.path ?? null, portable: verified.portable, runtime };
   } finally { if (stage) rmSync(stage, { recursive: true, force: true }); rmdirSync(lock); }
 }

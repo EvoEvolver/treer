@@ -78,6 +78,52 @@ installer/status behavior, capabilities and rollback. Older installed payloads
 remain Node until their default is actually updated; this does not restart any
 running Agent. Node 22+ still runs the installation and dispatch shim.
 
+### Update the default entry
+
+`treer-agent --help` lists launch arguments and the separate update command.
+From an installed entry, run:
+
+```sh
+treer-agent update
+treer-agent update --help
+# Launcher-only delivery, independently of the Controller's embedded version:
+treer-agent update --bundle /absolute/prepared --sha256 MANIFEST_SHA256
+```
+
+Without a bundle, the command uses the local Controller's existing launcher
+installer with `update --require-runtime rust`. It discovers the Controller
+beside the pinned Treer CLI or in its sibling `libexec` directory; select a
+trusted absolute `--controller` if installed elsewhere. This requires the new
+guarded Controller bridge and an embedded, verified native Rust payload. Older
+Controllers or Node-only embedded payloads refuse; the command never retries
+without the Rust requirement. This selects the local Controller release, not
+an Internet “latest” channel, and does not upgrade the Controller itself.
+
+Explicit `--bundle` delivery reuses the same prepared-bundle installer described
+below. Supply the independently checked SHA256 of `bundle-manifest.json`, not
+the native binary hash. The bundle must include a valid machine-specific native
+binding and at least one available Codex/Claude provider. Node, unconfigured,
+wrong-platform, altered or incompatible candidates refuse before activation;
+missing individual providers remain unavailable rather than falling back.
+
+Installed entries use their pinned Treer CLI and installation root, regardless
+of shell cwd. A source invocation requires `--treer /absolute/treer` (Node22+);
+explicit bundle delivery also accepts `--root ABS` inside the enrolled machine
+root. An installed entry refuses a different root. Existing authentication and
+Controller selection remain in force; ambiguous enrollment fails explicitly.
+No download, Git, npm or provider installation occurs in this command.
+
+The result is JSON with current and target content versions, source commit,
+runtime/provider status, whether the version changed, and success/failure exit
+status. Candidate/current progress goes to stderr. Installer locks, verified
+immutable versions, profile ownership and publication use the existing
+transaction. Running sessions retain their startup version: updating the
+default does not restart, migrate, clear or replay Agents, Host or Controller.
+An explicit session restart is a separate operation. A failed/ambiguous command
+is not automatically retried; inspect launcher status first. Windows uses the
+same frontend under its maintained native command shim; actual Windows smoke
+verification is reported separately from POSIX checks.
+
 ### Create an Agent
 
 Install the matching launcher on each machine with `treer-agent-server launcher --node /absolute/node install` (Node.js 22+).

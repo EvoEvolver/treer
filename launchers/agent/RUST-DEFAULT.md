@@ -6,6 +6,16 @@ adapter; its workspace-global profile argv do not change. `--runtime node` is
 also an explicit Node entry. A failed or missing Rust binding never falls back
 to Node. Running Agents keep their copied startup and immutable assets.
 
+`treer-agent update` forwards only to the Controller's guarded
+`launcher update --require-runtime rust`; it never calls an older unguarded
+update as fallback. A Controller without that flag or without a verified
+embedded Rust payload refuses. `treer-agent update --bundle ABS --sha256 HASH`
+uses the existing local prepared-bundle installer instead. Both routes require
+a Rust default with at least one available Codex/Claude provider and leave
+running sessions untouched. The selected source is explicit/local, not a
+network latest-version feed. See the README's update section for discovery,
+version output, root binding and platform limits.
+
 Each prepared payload carries a machine-specific `native-runtime.json`:
 
 ```json

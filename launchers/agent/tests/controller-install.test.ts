@@ -58,6 +58,7 @@ test("installer and native-smoke Controller fixtures advertise optional private-
 });
 test("portable install is offline, saves all six profiles, idempotently retains assets and rolls back", (t) => {
   const f = fixture(t), result = f.call();
+  assert.equal(f.call({ require_runtime: null }).operation, "install"); // Core's absent optional field serializes as null.
   assert.equal(result.portable, true); assert.equal(result.profiles.length, 6);
   assert.equal(f.call({ operation: "status" }).current_runtime.default, "rust");
   assert.equal(f.call({ operation: "status" }).current_runtime.acp, "explicit-node");
