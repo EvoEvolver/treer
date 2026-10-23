@@ -42,19 +42,24 @@ export async function runColdPolicyRecovery(h) {
   let paused = false;
   try {
     await check('226 real startup declaration and fail-closed Policy fixture', async () => {
-      const created = await cli('a', 'agent', 'admin', 'create', '--machine', 'docker-a', '--kind', 'command', '--name', 'cold-recovery', '--', 'python3', '/fixtures/worker.py', 'cold', '8200');
+      const created = await check('226 create owned startup workload', () => cli('a', 'agent', 'admin', 'create', '--machine', 'docker-a', '--kind', 'command', '--name', 'cold-recovery', '--', 'python3', '/fixtures/worker.py', 'cold', '8200'));
       receipt.workload_id = (created.agent ?? created).agent_id;
-      await wait('226 startup declaration', async () =>
-        (await api(`/api/workspaces/${workspace}/agents/${receipt.workload_id}/output`)).data.text.includes('READY cold'));
-      assert.equal((await h.command(receipt.workload_id, '226-startup', ['agent', 'startup', 'show'])).enabled, true);
-      const installed = (await api(`/api/workspaces/${workspace}/policy-provider/default-app`, {server_id: b})).data;
-      assert(installed.provider?.app_id && Number.isInteger(installed.app?.port));
+      await check('226 owned workload readiness', () => wait('226 startup declaration', async () =>
+        (await api(`/api/workspaces/${workspace}/agents/${receipt.workload_id}/output`)).data.text.includes('READY cold')));
+      await check('226 verify real startup declaration', async () => {
+        assert.equal((await h.command(receipt.workload_id, '226-startup', ['agent', 'startup', 'show'])).enabled, true);
+      });
+      const installed = await check('226 install real default Policy App', async () =>
+        (await api(`/api/workspaces/${workspace}/policy-provider/default-app`, {server_id: b})).data);
+      await check('226 validate installed Policy identity', async () => {
+        assert(installed.provider?.app_id && Number.isInteger(installed.app?.port));
+      });
       receipt.provider_app_id = installed.provider.app_id;
       receipt.provider_port = installed.app.port;
       assert(receipt.provider_port > 0 && receipt.provider_port <= 65535);
-      const configured = (await api(`/api/workspaces/${workspace}/policy-provider`, {
+      const configured = await check('226 configure real fail-closed Policy', async () => (await api(`/api/workspaces/${workspace}/policy-provider`, {
         app_id: receipt.provider_app_id, failure_mode: 'fail_closed', max_stale_seconds: 0,
-      }, {method: 'PUT'})).data;
+      }, {method: 'PUT'})).data);
       assert.equal(configured.provider.failure_mode, 'fail_closed');
       assert.equal(configured.provider.max_stale_seconds, 0);
     });

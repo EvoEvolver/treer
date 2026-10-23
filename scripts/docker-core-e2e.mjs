@@ -37,9 +37,10 @@ async function wait(label, fn) {
 async function check(label, fn) {
   const start = Date.now();
   try {
-    await fn();
+    const value = await fn();
     results.push({label, status:'PASS', ms:Date.now()-start});
     console.log('PASS', label);
+    return value;
   } catch (error) {
     results.push({label, status:'FAIL', error:error.message});
     throw error;

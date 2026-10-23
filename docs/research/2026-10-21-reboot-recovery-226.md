@@ -97,7 +97,9 @@ The source image must contain the three native binaries plus their generated
 `SHA256SUMS`; the runner verifies that exact set before creating services, avoiding
 installer fallback to unrelated remote release checksums.
 Collect this leaf explicitly when diagnosing a pre-cold failure; an aggregate
-prerequisite FAIL alone does not identify the failed substage. A failed run is not a
+prerequisite FAIL alone does not identify the failed substage. Startup workload creation/readiness/declaration and Policy install/identity/configuration
+are separate fixed checks in `results.json`, so preparation failures remain
+distinct from cold Host loss and restore. A failed run is not a
 successful recovery or proof of historical incident cause.
 
 Focused entry controls (no Docker or managed configuration needed):
