@@ -18,9 +18,11 @@ if (!isAbsolute(options.output || "") || !/^[a-f0-9]{40}$/.test(options["source-
 const output = options.output;
 if (existsSync(output) && (lstatSync(output).isSymbolicLink() || !lstatSync(output).isDirectory() || readdirSync(output).length)) throw new Error("Output must be a new or empty physical directory");
 mkdirSync(output, { recursive: true, mode: 0o700 });
-// The React UI is committed as public/{ui.html,boot.js,ui.js,ui.css} (bootstrap installs from git without esbuild).
+// Core UI and lazy chunks/worker are committed (bootstrap installs without esbuild).
 // A payload must carry exactly what the sources build to, so a stale commit fails here instead of shipping.
-for (const [name, bytes] of await buildUi(source)) {
+const ui = await buildUi(source);
+for (const name of readdirSync(join(source, "public"))) if (!ui.has(name)) throw new Error(`Unexpected public asset: ${name}`);
+for (const [name, bytes] of ui) {
   if (!readFileSync(join(source, "public", name)).equals(bytes)) throw new Error(`public/${name} is stale; run npm run build:ui and commit it`);
 }
 // UI build tooling needs esbuild/typescript and never runs inside an installation.

@@ -64,3 +64,11 @@ test("ACP requires explicit Node selection and preserves provider argv", t => {
   const profiles = JSON.parse(readFileSync(join(launcher, "profiles.json"), "utf8")).profiles;
   for (const p of profiles.filter((p: any) => !["codex", "claude"].includes(p.id))) assert.match(p.description, /explicit Node/);
 });
+
+test("split UI native bindings refuse a missing worker even when core assets match", t => {
+  const f = fixture(t);
+  assert.ok(f.binding.assets.some((asset: { path: string }) => /pdf-worker-/.test(asset.path)));
+  assert.doesNotThrow(() => nativeRuntime(f.root));
+  f.binding.assets = f.binding.assets.filter((asset: { path: string }) => !/pdf-worker-/.test(asset.path)); f.save();
+  assert.throws(() => nativeRuntime(f.root), /no Node fallback/);
+});

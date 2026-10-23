@@ -16,6 +16,8 @@ const RAW_NETWORK = new Set(["fetch", "WebSocket", "EventSource", "XMLHttpReques
 const URL_ATTRIBUTE_NAMES = new Set(["href", "src", "srcdoc", "action", "formaction", "xlink:href", "poster", "data"]);
 const FORBIDDEN_TAGS = new Set(["iframe", "object", "embed", "script", "frame"]);
 const FORBIDDEN_ELEMENTS = new Set(["script", "iframe", "object", "embed", "frame"]);
+// The only executable lazy imports are these build-time local viewer literals.
+const PREVIEW_IMPORTS = new Set(["./previews/MarkdownPreview", "./previews/ImagePreview", "./previews/PdfPreview"]);
 
 function* files(directory) {
   for (const name of readdirSync(directory).sort()) {
@@ -54,7 +56,7 @@ export function scanSource(sourceRoot) {
         if (ts.isPropertyAccessExpression(left) && URL_ATTRIBUTE_NAMES.has(left.name.text.toLowerCase()) && !safeValue(node.right)) report(node, `.${left.name.text} assignment must use safeUrl()/safeImageUrl() or a blob URL`);
         if (ts.isPropertyAccessExpression(left) && left.name.text === "location" || (ts.isIdentifier(left) && left.text === "location") || (ts.isPropertyAccessExpression(left) && left.expression.getText().endsWith("location"))) report(node, "navigation by assigning location is forbidden");
       }
-      if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) report(node, "dynamic import() is forbidden");
+      if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && !(rel === "components/FileContent.tsx" && node.arguments.length === 1 && ts.isStringLiteral(node.arguments[0]) && PREVIEW_IMPORTS.has(node.arguments[0].text))) report(node, "dynamic import() is forbidden outside the local preview allowlist");
       if (ts.isCallExpression(node)) {
         const callee = node.expression;
         const name = ts.isPropertyAccessExpression(callee) ? callee.name.text : ts.isIdentifier(callee) ? callee.text : "";

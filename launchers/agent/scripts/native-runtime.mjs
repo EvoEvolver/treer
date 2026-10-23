@@ -50,6 +50,22 @@ export function nativeRuntime(root, harnesses = ["codex", "claude"]) {
     names.add(rel); image(asset);
   }
   for (const name of ["index.html", "boot.js", "ui.js", "ui.css"]) if (!names.has(name)) fail();
+  // New split UIs declare their entire transitive asset closure. Old four-file
+  // UIs remain compatible; new manifests cannot omit a worker/shared chunk.
+  const inventoryPath = join(value.public_dir, "ui-assets.json");
+  if (existsSync(inventoryPath)) {
+    if (!names.has("ui-assets.json") || physical(inventoryPath).size > 65536) fail();
+    const inventory = JSON.parse(readFileSync(inventoryPath, "utf8"));
+    if (inventory.schema !== "treer.ui-assets/v1" || !Array.isArray(inventory.files) || inventory.files.length > 63) fail();
+    const declared = new Set();
+    for (const entry of inventory.files) {
+      if (typeof entry.path !== "string" || !/^[A-Za-z0-9_.-]+$/.test(entry.path) || declared.has(entry.path)) fail();
+      declared.add(entry.path);
+      const asset = value.assets.find(asset => relative(value.public_dir, asset.path) === entry.path);
+      if (!asset || asset.bytes !== entry.bytes || asset.sha256 !== entry.sha256) fail();
+    }
+    if (declared.size + 1 !== names.size) fail();
+  }
   for (const tool of ["treer", ...harnesses]) {
     if (!value.tools || typeof value.tools[tool]?.version !== "string" || !value.tools[tool].version) fail();
     image(value.tools[tool], true);

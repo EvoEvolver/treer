@@ -1,0 +1,65 @@
+{
+  "schema": "treer.ui-assets/v1",
+  "files": [
+    {
+      "path": "index.html",
+      "bytes": 474,
+      "sha256": "08bec2719836cb413a05fb1c121d4e532855933dcef80d4294948f777b6fcc8a"
+    },
+    {
+      "path": "boot.js",
+      "bytes": 1309,
+      "sha256": "27c40921f842c3d3174f485429517e4f2cf9e7955dc0fca4d08ee4629689a8de"
+    },
+    {
+      "path": "ui.js",
+      "bytes": 275699,
+      "sha256": "fe2cc0253daa3b779e26fd1c8cf60407d8fad87adeab4a65e2fe3bf77334d74c"
+    },
+    {
+      "path": "MarkdownPreview-UOVTQQ7G.js",
+      "bytes": 258,
+      "sha256": "a56be3ea754aab5f88a10b8125b9155629959039396dc2ae9566aa9a34c16889"
+    },
+    {
+      "path": "chunk-RAFBPGO6.js",
+      "bytes": 81117,
+      "sha256": "69f8f78d5217670961294734cdd53de97f1a201a8c4831393eff587578eca3ae"
+    },
+    {
+      "path": "ImagePreview-R2VZGZJQ.js",
+      "bytes": 1147,
+      "sha256": "0c92cfac5bb6a1f56bd4dc1a5a8818eb518e74a946e26ab0f29c022f16fdcd86"
+    },
+    {
+      "path": "chunk-R7SBWEKE.js",
+      "bytes": 1213,
+      "sha256": "8d968dd67534cf4919492b964d23929a1b2388132fee68ae975b9345eb41bdaf"
+    },
+    {
+      "path": "PdfPreview-HK6K3KYJ.js",
+      "bytes": 433769,
+      "sha256": "9050be52cc8664d5ec6a00f07b787ed43168407c0c7c47831ca36fb8e5e2a3dc"
+    },
+    {
+      "path": "chunk-OW72X7I2.js",
+      "bytes": 1452,
+      "sha256": "5104dfeb74d017b5471c950fd2854ca1edaaadf9f86c066efc34e8c7eb5ff134"
+    },
+    {
+      "path": "chunk-UDHOQ4TQ.js",
+      "bytes": 32413,
+      "sha256": "8fc8921615ebcb4ac59e7d0bf078f34015ec7c27cb70f06fa6cdae184c73276b"
+    },
+    {
+      "path": "ui.css",
+      "bytes": 67463,
+      "sha256": "9313bb81c9a80effa9ebfce5362d8287827b7d67d6dd3dcb04a64ddfc7a1792d"
+    },
+    {
+      "path": "pdf-worker-9536359f1b836785.js",
+      "bytes": 1264342,
+      "sha256": "9536359f1b8367850d485731ca1d5e45c159a7b7a0912325e539937aa21ceb18"
+    }
+  ]
+}

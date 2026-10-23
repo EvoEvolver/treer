@@ -132,7 +132,7 @@ function send(response: ServerResponse, status: number, body: unknown) {
 function serveFile(response: ServerResponse, file: string) {
   if (!existsSync(file) || !statSync(file).isFile()) return false;
   const headers: Record<string, string> = {
-    "cache-control": "no-store",
+    "cache-control": /\/(?:[A-Za-z]+-[A-Z0-9]{8}|pdf-worker-[a-f0-9]{16})\.js$/.test(file.replaceAll("\\", "/")) ? "private, max-age=31536000, immutable" : "no-store",
     "content-type": mime(file),
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",

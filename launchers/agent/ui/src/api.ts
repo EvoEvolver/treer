@@ -25,12 +25,38 @@ export async function uploadImage(file: File) {
   const response = await fetchRaw("api/attachments", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: file });
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error?.message || payload.error || `HTTP ${response.status}`);
-  return payload.attachment as import("./types").ImageAttachment;
+  return payload.attachment as import("./types.js").ImageAttachment;
 }
 
 // A plain same-origin GET: the browser streams the file straight to disk with the server's attachment headers.
 export function fileDownloadUrl(path: string) {
   return `v1/files/download?path=${encodeURIComponent(path)}`;
+}
+
+/** Reuse the authenticated cwd-bound download route, with a streaming memory
+ * budget independent of stale metadata and cancellation on preview teardown. */
+export async function previewBytes(path: string, signal: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {
+  const limit = 20 * 1024 * 1024;
+  const response = await fetchRaw(fileDownloadUrl(path), { signal });
+  if (!response.ok || !response.body) throw new Error("preview_unavailable");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    if (Number(response.headers.get("content-length")) > limit) throw new Error("preview_too_large");
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.length;
+      if (length > limit) throw new Error("preview_too_large");
+      chunks.push(value);
+    }
+    signal.throwIfAborted();
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+    return bytes;
+  } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
 }
 
 export function imageUrl(id: string) {

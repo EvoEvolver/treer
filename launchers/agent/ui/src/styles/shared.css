@@ -185,6 +185,15 @@ progress.meter::-moz-progress-bar{background:var(--accent)}
 .trow-dl:disabled,.tree li:hover .trow-dl:disabled,.tree li:focus-within .trow-dl:disabled{opacity:.35;cursor:not-allowed;background:none;border:0}
 .preview{display:flex;flex-direction:column;min-height:0}
 .preview pre{margin:0;overflow:auto;flex:1;white-space:pre}
+.preview-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:8px;flex-shrink:0;font-family:var(--font-sans)}
+.preview-tools .btn{min-width:44px;min-height:44px}
+.file-markdown{overflow:auto;min-height:0;padding:12px;font-family:var(--font-sans);overflow-wrap:anywhere}
+.file-markdown .markdown{min-width:0}
+.file-image,.file-pdf{display:flex;flex-direction:column;min-height:0;flex:1}
+.image-scroll,.pdf-scroll{overflow:auto;min-height:0;flex:1;padding:8px}
+.image-scroll img{display:block;max-width:100%;max-height:70vh;object-fit:contain;margin:auto}
+.image-scroll.actual img{max-width:none;max-height:none}
+.pdf-scroll canvas{display:block;margin:auto}
 .filter{display:flex;align-items:center;gap:8px}
 .filter input{flex:1;min-width:0;border:0;background:none;outline:0}
 .tlist{overflow:auto;min-height:0;flex:1}

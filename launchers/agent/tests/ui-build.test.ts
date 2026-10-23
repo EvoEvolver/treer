@@ -9,13 +9,14 @@ import { buildUi, root, scopeCss } from "../scripts/ui-build.mjs";
 test("the committed UI artifacts equal a fresh deterministic build", async () => {
   const first = await buildUi();
   const second = await buildUi();
-  assert.deepEqual([...first.keys()], ["index.html", "boot.js", "ui.js", "ui.css"]);
+  for (const name of ["index.html", "boot.js", "ui.js", "ui.css"]) assert.ok(first.has(name));
+  for (const kind of ["MarkdownPreview", "ImagePreview", "PdfPreview", "pdf-worker"]) assert.ok([...first.keys()].some(name => name.startsWith(kind + "-")), `${kind} must be a separate asset`);
   for (const [name, bytes] of first) {
     assert.ok(bytes.equals(second.get(name)!), `${name} must be reproducible`);
     assert.ok(bytes.equals(readFileSync(join(root, "public", name))), `public/${name} is stale; run npm run build:ui`);
   }
   const total = [...first.values()].reduce((sum, bytes) => sum + bytes.length, 0);
-  assert.ok(total <= 600_000, `UI payload ${total} bytes exceeds the budget`);
+  assert.ok(total <= 3_500_000, `UI payload ${total} bytes exceeds the budget`);
 });
 
 test("the built page is relative, script-only from self and free of inline code", async () => {
