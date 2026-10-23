@@ -201,7 +201,7 @@ fn run_assembled(
     }));
     let email_http = email_service
         .map(|auth| {
-            let (read, reply) = (hub.clone(), hub.clone());
+            let (read, reply, inbox) = (hub.clone(), hub.clone(), hub.clone());
             crate::email_threads::Service::new(
                 auth,
                 &config.public_url,
@@ -224,6 +224,17 @@ fn run_assembled(
                     crate::email::Queue::new(&mut h.store)?.reply(id, member, key, body, now)
                 }),
             )
+            .map(|service| {
+                service.with_inbox(Arc::new(move |member, now| {
+                    let mut h = inbox
+                        .lock()
+                        .map_err(|_| crate::email::Error::PrivateStorage)?;
+                    h.store
+                        .recheck_private_storage()
+                        .map_err(|_| crate::email::Error::PrivateStorage)?;
+                    crate::email::Queue::new(&mut h.store)?.inbox(member, now)
+                }))
+            })
         })
         .transpose()
         .map_err(|_| Error::Configuration)?;

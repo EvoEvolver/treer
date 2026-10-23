@@ -149,6 +149,20 @@ pub struct Thread {
     pub recipient_agent_id: String,
     pub messages: Vec<Text>,
 }
+/// A member-scoped index contains no message bodies or contact addresses.
+#[derive(Serialize)]
+pub struct Inbox {
+    pub threads: Vec<ThreadSummary>,
+    pub truncated: bool,
+}
+#[derive(Serialize)]
+pub struct ThreadSummary {
+    pub id: String,
+    pub endpoint_id: String,
+    pub recipient_agent_id: String,
+    pub updated_at: i64,
+    pub message_count: i64,
+}
 #[derive(Serialize)]
 pub struct Text {
     pub source_id: String,
@@ -505,6 +519,37 @@ impl<'a> Queue<'a> {
             return Err(Error::Denied);
         }
         self.thread_for(id, member.id())
+    }
+    /// Uses the same live binding/member scope as thread reads. Pausing preserves
+    /// readable history; revocation or a generation/contact change removes it.
+    pub fn inbox(&self, member: &crate::owner_auth::Member, now: i64) -> Result<Inbox, Error> {
+        if !valid_time(now) || member.expires_at() <= now {
+            return Err(Error::Denied);
+        }
+        let mut query = self.store.db.prepare(
+            "SELECT t.id,t.endpoint,t.recipient,max(m.at),count(*)
+             FROM email_threads t
+             JOIN endpoints e ON e.id=t.endpoint AND e.generation=t.generation
+             JOIN email_targets c ON c.endpoint=t.endpoint AND c.generation=t.generation
+               AND c.address=t.address AND c.member=t.member AND c.revoked=0
+             JOIN (SELECT thread,at FROM email_messages UNION ALL SELECT thread,at FROM email_replies) m ON m.thread=t.id
+             WHERE t.member=?1 GROUP BY t.id
+             ORDER BY max(m.at) DESC,t.id DESC LIMIT 51",
+        )?;
+        let mut threads = query
+            .query_map([member.id()], |r| {
+                Ok(ThreadSummary {
+                    id: r.get(0)?,
+                    endpoint_id: r.get(1)?,
+                    recipient_agent_id: r.get(2)?,
+                    updated_at: r.get(3)?,
+                    message_count: r.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let truncated = threads.len() > 50;
+        threads.truncate(50);
+        Ok(Inbox { threads, truncated })
     }
     fn thread_for(&self, id: &str, verified_member: &str) -> Result<Thread, Error> {
         let retired: bool = self.store.db.query_row(
@@ -1083,6 +1128,91 @@ mod tests {
             Err(Error::Denied)
         ));
     }
+    #[test]
+    fn email_member_inbox_is_bounded_current_and_body_free() {
+        let mut store = fixture();
+        let mut q = Queue::new(&mut store).unwrap();
+        let mut last = String::new();
+        for n in 0..51 {
+            last = q
+                .admit(
+                    "ag_email",
+                    1,
+                    &message(&format!("msg_{n}"), "PRIVATE BODY", &[]),
+                    100 + n,
+                )
+                .unwrap();
+        }
+        let inbox = q.inbox(&member("user_alice"), 200).unwrap();
+        assert!(inbox.truncated);
+        assert_eq!(inbox.threads.len(), 50);
+        assert_eq!(inbox.threads[0].id, last);
+        assert_eq!(inbox.threads[0].message_count, 1);
+        let text = serde_json::to_string(&inbox).unwrap();
+        assert!(!text.contains("PRIVATE BODY"));
+        assert!(!text.contains("example.test"));
+        assert!(q
+            .inbox(&member("user_bob"), 200)
+            .unwrap()
+            .threads
+            .is_empty());
+        assert!(q
+            .inbox(&member("user_owner"), 200)
+            .unwrap()
+            .threads
+            .is_empty());
+        assert!(q
+            .inbox(
+                &crate::owner_auth::Member::synthetic("user_alice", 200),
+                200
+            )
+            .is_err());
+        q.store
+            .db
+            .execute("UPDATE endpoints SET paused=1", [])
+            .unwrap();
+        assert_eq!(
+            q.inbox(&member("user_alice"), 200).unwrap().threads.len(),
+            50
+        );
+        q.store
+            .db
+            .execute("UPDATE email_targets SET revoked=1", [])
+            .unwrap();
+        assert!(q
+            .inbox(&member("user_alice"), 200)
+            .unwrap()
+            .threads
+            .is_empty());
+        q.store
+            .db
+            .execute("UPDATE email_targets SET revoked=0,member='user_bob'", [])
+            .unwrap();
+        assert!(q
+            .inbox(&member("user_alice"), 200)
+            .unwrap()
+            .threads
+            .is_empty());
+        assert!(q
+            .inbox(&member("user_bob"), 200)
+            .unwrap()
+            .threads
+            .is_empty());
+        q.store
+            .db
+            .execute("UPDATE email_targets SET member='user_alice'", [])
+            .unwrap();
+        q.store
+            .db
+            .execute("UPDATE endpoints SET generation=2", [])
+            .unwrap();
+        assert!(q
+            .inbox(&member("user_alice"), 200)
+            .unwrap()
+            .threads
+            .is_empty());
+    }
+
     #[test]
     fn email_thread_id_is_not_authority_and_revocation_blocks_read_and_dispatch() {
         let mut store = fixture();

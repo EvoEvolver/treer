@@ -24,6 +24,7 @@ use tokio::sync::Semaphore;
 const SESSION: &str = "__Host-treer-endpoint-member-session";
 const BROWSER: &str = "__Host-treer-endpoint-member-login";
 type Read = dyn Fn(&Member, &str, i64) -> Result<Thread, email::Error> + Send + Sync;
+type Inbox = dyn Fn(&Member, i64) -> Result<email::Inbox, email::Error> + Send + Sync;
 type Reply = dyn Fn(&Member, &str, &str, &str, i64) -> Result<i64, email::Error> + Send + Sync;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +39,7 @@ pub struct Service {
     destinations: Mutex<HashMap<[u8; 32], (String, i64)>>,
     slots: Arc<Semaphore>,
     read: Arc<Read>,
+    inbox: Option<Arc<Inbox>>,
     reply: Arc<Reply>,
 }
 fn clock() -> Result<i64, Error> {
@@ -55,6 +57,9 @@ fn thread_id(value: &str) -> bool {
 }
 fn query_thread(query: Option<&str>) -> Result<String, Error> {
     let query = query.ok_or(Error::OAuthState)?;
+    if query == "inbox=1" {
+        return Ok(String::new());
+    }
     if query.len() > 128 {
         return Err(Error::OAuthState);
     }
@@ -123,8 +128,13 @@ impl Service {
             destinations: Mutex::new(HashMap::new()),
             slots: Arc::new(Semaphore::new(4)),
             read,
+            inbox: None,
             reply,
         })
+    }
+    pub fn with_inbox(mut self, inbox: Arc<Inbox>) -> Self {
+        self.inbox = Some(inbox);
+        self
     }
     fn member(&self, headers: &HeaderMap, peer: SocketAddr, now: i64) -> Result<Member, Error> {
         let values = headers
@@ -151,7 +161,11 @@ impl Service {
     }
     fn destination(&self, id: &str) -> String {
         let mut url = self.public_url.clone();
-        url.set_fragment(Some(&format!("email-thread={id}")));
+        url.set_fragment(Some(&if id.is_empty() {
+            "inbox".into()
+        } else {
+            format!("email-thread={id}")
+        }));
         url.into()
     }
     fn start(
@@ -286,6 +300,25 @@ impl Service {
             let mut result = response(StatusCode::OK, json!({"logged_out":true}));
             cookie(&mut result, SESSION, "", 0);
             return result;
+        }
+        if path == "/api/email/inbox" {
+            if method != Method::GET {
+                return fixed(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
+            }
+            let member = match self.member(headers, peer, now) {
+                Ok(v) => v,
+                Err(e) => return error(e),
+            };
+            return match &self.inbox {
+                Some(read) => match read(&member, now) {
+                    Ok(inbox) => response(
+                        StatusCode::OK,
+                        json!({"threads":inbox.threads,"truncated":inbox.truncated}),
+                    ),
+                    Err(e) => queue_error(e),
+                },
+                None => fixed(StatusCode::SERVICE_UNAVAILABLE, "email_inbox_unavailable"),
+            };
         }
         let Some(id) = path
             .strip_prefix("/api/email/thread/")
@@ -570,6 +603,9 @@ mod tests {
     fn thread_queries_and_cookie_scopes_cannot_be_redirects_or_owner_sessions() {
         let id = "a".repeat(64);
         assert_eq!(query_thread(Some(&format!("thread={id}"))).unwrap(), id);
+        assert_eq!(query_thread(Some("inbox=1")).unwrap(), "");
+        assert!(query_thread(Some("inbox=1&thread=a")).is_err());
+        assert!(query_thread(Some("inbox=https://evil.test/")).is_err());
         for query in [
             "thread=https://evil.test/",
             "thread=short",
@@ -625,6 +661,7 @@ mod tests {
         let state = Arc::new(Mutex::new(store));
         let read = state.clone();
         let reply = state.clone();
+        let inbox = state.clone();
         let auth =
             MemberAuth::new(&proxy.url, "svc_hub", "ws_test", "https://hub.example/").unwrap();
         let service = Arc::new(
@@ -642,7 +679,12 @@ mod tests {
                         .reply(id, member, key, body, now)
                 }),
             )
-            .unwrap(),
+            .unwrap()
+            .with_inbox(Arc::new(move |member, now| {
+                Queue::new(&mut inbox.lock().unwrap())
+                    .unwrap()
+                    .inbox(member, now)
+            })),
         );
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -650,6 +692,52 @@ mod tests {
             .unwrap();
         let hosts = BTreeSet::from(["hub.example".to_owned()]);
         let path = format!("/api/email/thread/{id}");
+        let list = |token: Option<&str>, uri: &str| {
+            let mut r = axum::http::Request::builder()
+                .uri(uri)
+                .header("Host", "hub.example");
+            if let Some(token) = token {
+                r = r.header("X-Treer-Identity-Token", token);
+            }
+            let (parts, body) = r.body(Body::empty()).unwrap().into_parts();
+            let response = runtime.block_on(service.clone().handle(
+                "127.0.0.1:1234".parse().unwrap(),
+                parts,
+                body,
+                &hosts,
+            ));
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            let status = response.status();
+            let body = runtime
+                .block_on(to_bytes(response.into_body(), 65536))
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        };
+        assert_eq!(list(None, "/api/email/inbox").0, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            list(Some("synthetic.forged.signature"), "/api/email/inbox").0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, inbox) = list(Some("synthetic.alice.signature"), "/api/email/inbox");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(inbox["threads"][0]["id"], id);
+        assert!(!inbox.to_string().contains("private"));
+        assert_eq!(
+            list(Some("synthetic.bob.signature"), "/api/email/inbox").1["threads"],
+            json!([])
+        );
+        assert_eq!(
+            list(
+                Some("synthetic.alice.signature"),
+                "/api/email/inbox?member=user_bob"
+            )
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+
         for site in ["cross-site", "same-site"] {
             let (parts, body) = axum::http::Request::builder()
                 .uri(&path)
@@ -782,6 +870,10 @@ mod tests {
         assert_eq!(n, 1);
         proxy.revoked.store(true, Ordering::Release);
         assert_eq!(
+            list(Some("synthetic.alice.signature"), "/api/email/inbox").0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
             request(Method::GET, Some("synthetic.alice.signature"), None, None).status(),
             StatusCode::FORBIDDEN
         );
@@ -821,6 +913,38 @@ mod tests {
                 &hosts,
             ))
         };
+        let inbox_start = call("/api/email/auth/start?inbox=1", None, None);
+        assert_eq!(inbox_start.status(), StatusCode::SEE_OTHER);
+        let location =
+            reqwest::Url::parse(inbox_start.headers()["location"].to_str().unwrap()).unwrap();
+        let state = location
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        let cookie = inbox_start.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let returned = call(
+            &format!("/api/email/auth/callback?code=synthetic-inbox&state={state}"),
+            Some(cookie),
+            None,
+        );
+        assert_eq!(returned.status(), StatusCode::SEE_OTHER);
+        assert_eq!(returned.headers()["location"], "https://hub.example/#inbox");
+        assert_eq!(
+            call(
+                "/api/email/auth/start?inbox=1&next=https://evil.test",
+                None,
+                None
+            )
+            .status(),
+            StatusCode::FORBIDDEN
+        );
         let id = "b".repeat(64);
         let start = call(&format!("/api/email/auth/start?thread={id}"), None, None);
         assert_eq!(start.status(), StatusCode::SEE_OTHER);

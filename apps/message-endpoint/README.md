@@ -22,6 +22,31 @@ OAuth, recovery and metadata purge remain human-owner-only. No new credential or
 approval system is introduced. This code has not changed the running sandbox. The API contract above supersedes
 owner-only binding statements in the historical increment notes below.
 
+## Human conversation entry
+
+Open **My conversations** (`#inbox`) to find received email conversations without
+retaining the opaque link from a notification. The private member API
+`GET /api/email/inbox` returns at most 50 conversations, newest activity first,
+with `truncated` indicating older history. `updated_at` uses Unix seconds, like
+existing thread message timestamps. Rows contain only thread/endpoint/counterpart
+IDs, time and message count; they contain no body or email address. Select a row
+to open the existing thread and reply to its fixed Agent counterpart.
+
+Every read freshly verifies current workspace membership. The index uses the
+same member/contact/generation constraints as thread reads; owner status grants
+no access to another member's threads. Paused bindings retain readable history;
+revocation or rebinding removes that history from the current member index.
+Member sign-in at `api/email/auth/start?inbox=1` returns only to the configured
+App's `#inbox`. An unconfigured email service is reported as unavailable, not an
+empty successful inbox. This increment does not configure or activate a channel.
+
+Replies still use the existing durable queue and stable idempotency key. An
+accepted reply is **queued**, not proof of delivery to the recipient. Following
+an ambiguous response, keep its exact key and body for an explicit identical
+retry; do not automatically resend or edit that pending attempt. The embedded
+view can read conversations and links to the configured dedicated App origin
+for replies, preserving the existing Origin/CSRF boundary.
+
 ## Programs
 
 Independent Rust package under `apps/message-endpoint`, not the Core workspace:
