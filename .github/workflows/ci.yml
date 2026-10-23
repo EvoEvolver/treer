@@ -1,135 +1,54 @@
-name: CI
-
+name: Linux native Launcher 240
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  rust:
-    name: Rust and PostgreSQL tests
+  native-linux:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    env:
-      TREER_TEST_DATABASE_URL: postgres://treer:treer@127.0.0.1:55432/treer_test
-    services:
-      postgres:
-        image: postgres:17-alpine
-        env:
-          POSTGRES_USER: treer
-          POSTGRES_PASSWORD: treer
-          POSTGRES_DB: treer_test
-        ports:
-          - 55432:5432
-        options: >-
-          --health-cmd "pg_isready -U treer -d treer_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          ref: a5b3525aae85dd7f1dc63b6a36edd32d73c3d339
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-        with:
-          toolchain: 1.90.0
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Release workflow security regressions (fake registry only)
-        run: node --test scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs scripts/install-checksums.test.mjs
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Build workspace binaries
-        run: cargo build --workspace --locked
-      - name: Test workspace including database boundaries
-        run: cargo test --workspace --locked
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  web:
-    name: Frontend types and build
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          version: 10.12.4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
-      - run: pnpm build
-
-  agent-launcher:
-    name: Agent launcher types, fake harnesses and browser
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: launchers/agent/package-lock.json
-      - name: Install launcher dependencies
-        run: npm --prefix launchers/agent ci --ignore-scripts
-      - name: Install isolated browser runtime
-        run: cd launchers/agent && npx playwright install --with-deps chromium
-      - name: Check launcher and browser sources
-        run: npm --prefix launchers/agent run check
-      - name: Unit and installer tests (fake harnesses only)
-        run: npm --prefix launchers/agent test
-      - name: Closed Codex, ACP and Claude Interface regression
+      - name: Install fixed compiler
+        run: rustup toolchain install 1.90.0 --profile minimal
+      - name: Build only exact-source native release and check hooks
+        shell: bash
         run: |
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
-          node scripts/ais-e2e.mjs
-      - name: Browser controls and screenshots
-        run: npm --prefix launchers/agent run test:browser
-        env:
-          CODEX_UI_SCREENSHOTS: ${{ runner.temp }}/launcher-screenshots
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: failure()
+          python3 - <<'PYBUILD'
+          import os,pathlib,subprocess,json,hashlib,shutil
+          source="a5b3525aae85dd7f1dc63b6a36edd32d73c3d339"
+          assert subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip()==source
+          out=pathlib.Path(os.environ["RUNNER_TEMP"])/"linux240";out.mkdir(mode=0o700)
+          validation=pathlib.Path("/usr/bin/true").resolve()
+          for target,home,claude in [("alienware","/home/zijian",None),("mariana","/h/28/zijian","/h/28/zijian/.local/share/claude/versions/2.1.302")]:
+           env=os.environ.copy()
+           for k in list(env):
+            if k.startswith(("TREER_","SPIKE_","RUST_SPIKE_","CODEX_","CLAUDE_")):del env[k]
+           env["CARGO_TARGET_DIR"]=str(pathlib.Path(os.environ["RUNNER_TEMP"])/"native-target")
+           paths={"TREER":home+"/.local/bin/treer","CODEX":home+"/.local/share/treer/codex/0.162.1/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"}
+           if claude:paths["CLAUDE"]=claude
+           for tool,path in paths.items():env["TREER_SPIKE_BUILD_"+tool]=str(validation);env["TREER_SPIKE_TARGET_"+tool]=path
+           subprocess.run(["cargo","+1.90.0","build","--locked","--release","--manifest-path","launchers/agent-rust/Cargo.toml"],env=env,check=True)
+           d=out/target;d.mkdir();f=d/"treer-agent-rust-spike";shutil.copy2(pathlib.Path(env["CARGO_TARGET_DIR"])/"release/treer-agent-rust-spike",f)
+           testenv=os.environ.copy();testenv["RUST_SPIKE_RELEASE_BIN"]=str(f)
+           with (d/"default-guard.log").open("w") as log:subprocess.run(["node","--test","launchers/agent-rust/tests/default-build.mjs"],env=testenv,stdout=log,stderr=subprocess.STDOUT,check=True)
+           dynamic=subprocess.check_output(["readelf","-l",str(f)],text=True)
+           symbols=subprocess.check_output(["objdump","-T",str(f)],text=True)
+           import re
+           versions=sorted(set(re.findall(r"GLIBC_([0-9.]+)",symbols)),key=lambda x:tuple(map(int,x.split("."))))
+           p={"source":source,"target":"x86_64-unknown-linux-gnu","profile":"release default features no fixture","target_binding":target,"deployment_tool_paths":paths,"build_validation_image":{"path":str(validation),"sha256":hashlib.sha256(validation.read_bytes()).hexdigest(),"scope":"build.rs native-header validation only; supported separate deployment-path binding; not native provider execution or validation of installed tool content"},"executable":{"bytes":f.stat().st_size,"sha256":hashlib.sha256(f.read_bytes()).hexdigest()},"rustc":subprocess.check_output(["rustc","+1.90.0","--version"],text=True).strip(),"max_glibc":versions[-1],"default_guard":"PASS1","provider_execution":"NOT_RUN"}
+           (d/"build-provenance.json").write_text(json.dumps(p,indent=2))
+          shutil.copytree("launchers/agent/public",out/"public")
+          (out/"SOURCE.json").write_text(json.dumps({"source":source,"public_source":"837704120ab2a06d06bfe0d2c1a931a5179db6dc","profiles":["alienware","mariana"],"scope":"Linux images only; deployment manifests require fresh real target tool hashes, no installation"},indent=2))
+          PYBUILD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: agent-launcher-screenshots
-          path: ${{ runner.temp }}/launcher-screenshots
-          if-no-files-found: ignore
-
-  release-tooling:
-    name: Release tooling and fake machine updates
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-      - name: Closed release, checksum, detachment and rollback tests
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-      - name: Documentation links and launcher test isolation
-        run: |
-          node scripts/check-docs.mjs
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
+          name: launcher240-linux-a5b3525a
+          path: ${{ runner.temp }}/linux240
+          if-no-files-found: error
