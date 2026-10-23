@@ -71,7 +71,7 @@ async function fixture(t, extra={}, controllerOptions={}) {
   return {base,post,headers,child,root,state,launch,controller,env,logs:()=>logs,trackChild:child=>children.push(child)};
 }
 
-for(const scenario of ['completed','failed','interrupted','inProgress','legacy','missing','older'])test('restart recovery reconciles '+scenario+' without replaying accepted input',{skip:useNode,timeout:20000},async t=>{
+for(const scenario of ['completed','failed','interrupted','inProgress','legacy','legacyInterrupted','missing','older'])test('restart recovery reconciles '+scenario+' without replaying accepted input',{skip:useNode,timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1'});
   const first=await s.post({text:'first input must never replay',operation_id:'recovery-first'}).then(r=>r.json());
   const receipt=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
@@ -80,19 +80,19 @@ for(const scenario of ['completed','failed','interrupted','inProgress','legacy',
   assert.equal((await receipt(second.submission.id)).submission.state,'queued');
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');assert.equal((await exit)[0],0);
   const journalPath=join(s.state,'rust-spike.json'),journal=JSON.parse(await readFile(journalPath,'utf8'));
-  if(scenario==='legacy') {
+  if(['legacy','legacyInterrupted'].includes(scenario)) {
     journal.records[0].submission.state='failed';
     journal.records[0].submission.error='Experiment restarted; dispatch outcome uncertain; inspect transcript before retry';
     await writeFile(journalPath,JSON.stringify(journal),{mode:0o600});
   }
-  const restarted=await s.launch({RECOVERY_HOLD:'0',RECOVERY_STATUS:['legacy','missing','older'].includes(scenario)?'completed':scenario,RECOVERY_MISSING:scenario==='missing'?'1':'0',RECOVERY_OLD:scenario==='older'?'1':'0'});
+  const restarted=await s.launch({RECOVERY_HOLD:'0',RECOVERY_STATUS:scenario==='legacyInterrupted'?'interrupted':['legacy','missing','older'].includes(scenario)?'completed':scenario,RECOVERY_MISSING:scenario==='missing'?'1':'0',RECOVERY_OLD:scenario==='older'?'1':'0'});
   const get=id=>fetch(restarted.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
   if(scenario==='missing') {
     assert.equal((await fetch(restarted.base+'/api/state').then(r=>r.json())).runtime.state,'blocked');
     assert.equal((await get(second.submission.id)).submission.state,'queued');
   } else {
     await until(()=>get(second.submission.id),r=>r.submission?.state==='done');
-    assert.equal((await get(first.submission.id)).submission.state,['completed','legacy','inProgress','older'].includes(scenario)?'done':scenario);
+    assert.equal((await get(first.submission.id)).submission.state,['completed','legacy','inProgress','older'].includes(scenario)?'done':scenario==='legacyInterrupted'?'interrupted':scenario);
     const state=await fetch(restarted.base+'/api/state').then(r=>r.json());
     assert.equal(state.thread.id,'recovery-thread');assert.equal(state.runtime.state,'idle');
     assert.equal(state.queue.length,0);assert.equal(state.thread.lastError,null);
