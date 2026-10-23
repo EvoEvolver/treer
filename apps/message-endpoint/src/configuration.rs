@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    PreviewEmailSetup,
     PreviewCreate {
         endpoint_id: String,
         generation: i64,
@@ -110,7 +111,8 @@ impl Command {
     pub(crate) fn consumes_write_quota(&self) -> bool {
         !matches!(
             self,
-            Self::PreviewCreate { .. }
+            Self::PreviewEmailSetup
+                | Self::PreviewCreate { .. }
                 | Self::Pause { .. }
                 | Self::InspectRecovery { .. }
                 | Self::InspectEmailDelivery { .. }
@@ -133,6 +135,14 @@ pub struct Preview {
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
+    EmailSetup {
+        email_configured: bool,
+        mode: Option<crate::email::Mode>,
+        activation_enabled: bool,
+        provider_readiness: &'static str,
+        members: Vec<crate::email::proxy::Member>,
+        members_truncated: bool,
+    },
     Preview {
         preview: Preview,
     },
@@ -380,6 +390,23 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
         return Err(Failure::Forbidden);
     }
     match command {
+        Command::PreviewEmailSetup => {
+            // Never hold the store lock across token mint or directory I/O.
+            let members = (activation.email_members)()?;
+            check_owner(owner)?;
+            let h = shared.lock().map_err(|_| Failure::Unavailable)?;
+            h.store
+                .recheck_private_storage()
+                .map_err(|_| Failure::Unavailable)?;
+            Ok(Outcome::EmailSetup {
+                email_configured: activation.email_enabled,
+                mode: activation.email_mode,
+                activation_enabled: activation.enabled,
+                provider_readiness: "unverified",
+                members,
+                members_truncated: false,
+            })
+        }
         Command::PreviewResume { endpoint_id } => activation::preview_resume(
             shared,
             directory,

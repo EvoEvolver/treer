@@ -290,6 +290,8 @@ fn run_assembled(
         })
     });
     let member_core = core.clone();
+    let setup_core = core.clone();
+    let setup_directory = email_directory.clone();
     let mutation = Arc::new(crate::configuration::core_executor(
         hub.clone(),
         core,
@@ -298,6 +300,12 @@ fn run_assembled(
             enabled: activation_enabled,
             account_ready,
             email_enabled: email_configured,
+            email_mode: config.email.as_ref().map(|c| c.mode),
+            email_members: Arc::new(move || {
+                setup_directory
+                    .members(&setup_core)
+                    .map_err(|_| crate::configuration::Failure::Unavailable)
+            }),
             member_current: Arc::new(move |id| {
                 email_directory
                     .current_member(&member_core, id)

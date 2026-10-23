@@ -942,7 +942,7 @@ fn email_runtime_chain_review(
     let running = f.start_email_mode(true, Some(mode));
     let preview=f.command(json!({"action":"preview_create","endpoint_id":"ag_endpoint","recipient":"ag_recipient","generation":1}))["preview"].clone();
     f.command(json!({"action":"create","endpoint_id":"ag_endpoint","recipient":"ag_recipient","generation":1,"expected":preview,"confirm":true}));
-    f.command(json!({"action":"bind_email","endpoint_id":"ag_endpoint","revision":1,"contact":{"address":crate::email::REAL_RECIPIENT,"member_id":"user_member"},"confirm":true}));
+    f.command(json!({"action":"bind_email","endpoint_id":"ag_endpoint","revision":1,"contact":{"address":"member@example.test","member_id":"user_member"},"confirm":true}));
     let root = f._root.path().canonicalize().unwrap();
     let cli = root.join("endpoint-cli");
     let config = crate::relay::Config {
@@ -1013,7 +1013,7 @@ fn email_runtime_chain_review(
         });
         f.status()["emails"][0].clone()
     };
-    assert_eq!(notification["to"], crate::email::REAL_RECIPIENT);
+    assert_eq!(notification["to"], "member@example.test");
     assert!(!notification.to_string().contains("private original"));
     let text = notification["text"].as_str().unwrap();
     let thread = text
@@ -1375,4 +1375,63 @@ fn telegram_stopped_cutoff_handoff_and_pretraffic_rollback_never_overlap_pollers
     assert!(status["sent"].as_array().unwrap().is_empty());
     assert!(status["core_messages"].as_array().unwrap().is_empty());
     eprintln!("PASS local HTTP poller handoff: synthetic legacy join -> real stopped-store journal -> actual Hub polling offset42 paused -> joined Hub -> pretraffic journal reverse -> synthetic legacy offset42; max concurrent polls1; no real bot/Core/platform acceptance");
+}
+
+#[test]
+fn email_setup_real_assembly_reports_config_without_enabling_or_sending() {
+    let f = Fixture::new();
+    for mode in [
+        None,
+        Some(crate::email::Mode::Outbox),
+        Some(crate::email::Mode::Proxy),
+    ] {
+        let running = f.start_email_mode(false, mode);
+        let result = f.command(json!({"action":"preview_email_setup"}));
+        assert_eq!(result["status"], "email_setup");
+        assert_eq!(result["email_configured"], mode.is_some());
+        assert_eq!(result["mode"], serde_json::to_value(mode).unwrap());
+        assert_eq!(result["activation_enabled"], false);
+        assert_eq!(result["provider_readiness"], "unverified");
+        assert_eq!(result["members"].as_array().unwrap().len(), 2);
+        assert_eq!(result["members_truncated"], false);
+        f.control("revoke-member", json!({"revoked":true}));
+        assert_eq!(
+            f.command(json!({"action":"preview_email_setup"}))["members"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        f.control("revoke-member", json!({"revoked":false}));
+        let url = f.data["public_url"].as_str().unwrap();
+        for (identity, origin, expected) in [
+            (None, Some(url.trim_end_matches('/')), 401),
+            (
+                Some("synthetic.member.token159"),
+                Some(url.trim_end_matches('/')),
+                403,
+            ),
+            (
+                Some("synthetic.owner.token159"),
+                Some("https://foreign.example"),
+                403,
+            ),
+        ] {
+            let mut request = f
+                .client
+                .post(format!("{url}api/configuration"))
+                .header("X-Endpoint-Request", "1")
+                .json(&json!({"action":"preview_email_setup"}));
+            if let Some(identity) = identity {
+                request = request.header("X-Treer-Identity-Token", identity);
+            }
+            if let Some(origin) = origin {
+                request = request.header("Origin", origin);
+            }
+            assert_eq!(request.send().unwrap().status().as_u16(), expected);
+        }
+        assert!(f.status()["emails"].as_array().unwrap().is_empty());
+        assert_eq!(f.settings()["settings"]["activation_enabled"], false);
+        drop(running);
+    }
 }

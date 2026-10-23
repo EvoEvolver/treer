@@ -15,6 +15,9 @@ fn conflict(_guard: &str) -> Failure {
 pub(crate) struct Activation {
     pub(crate) enabled: bool,
     pub(crate) email_enabled: bool,
+    pub(crate) email_mode: Option<crate::email::Mode>,
+    pub(crate) email_members:
+        Arc<dyn Fn() -> Result<Vec<crate::email::proxy::Member>, Failure> + Send + Sync>,
     pub(crate) member_current: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     pub(crate) account_ready: Arc<dyn Fn(&str) -> bool + Send + Sync>,
 }
@@ -23,6 +26,8 @@ impl Default for Activation {
         Self {
             enabled: false,
             email_enabled: false,
+            email_mode: None,
+            email_members: Arc::new(|| Err(Failure::Unavailable)),
             member_current: Arc::new(|_| false),
             account_ready: Arc::new(|_| false),
         }

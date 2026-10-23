@@ -20,6 +20,7 @@ pub mod delivery;
 #[path = "email_proxy.rs"]
 pub mod proxy;
 
+#[cfg(test)]
 pub const REAL_RECIPIENT: &str = "doomspec@outlook.com";
 const MAX_MESSAGES: i64 = 10_000;
 const MAX_BYTES: i64 = 128 * 1024 * 1024;
@@ -108,10 +109,7 @@ pub struct Intent {
     address: String,
 }
 impl Intent {
-    pub fn notification(&self, public_url: &str, mode: Mode) -> Result<Notification, Error> {
-        if mode == Mode::Proxy && self.address != REAL_RECIPIENT {
-            return Err(Error::Denied);
-        }
+    pub fn notification(&self, public_url: &str, _mode: Mode) -> Result<Notification, Error> {
         if public_url.len() > 2048 {
             return Err(Error::Invalid);
         }
@@ -770,9 +768,6 @@ impl<'a> Queue<'a> {
         if delivery::exists(&self.store.db, &intent.id)? {
             return Err(Error::Denied);
         }
-        if mode == Mode::Proxy && intent.address != REAL_RECIPIENT {
-            return Err(Error::Denied);
-        }
         let changed=self.store.db.execute("UPDATE email_intents SET state=1,mode=?3,nonce=NULL,lease_until=NULL WHERE id=?1 AND nonce=?2 AND endpoint=?4 AND generation=?5 AND state=0",params![intent.id,intent.nonce,if mode==Mode::Outbox{"outbox"}else{"proxy"},intent.endpoint,intent.generation])?;
         if changed != 1 {
             return Err(Error::Lease);
@@ -1016,7 +1011,7 @@ mod tests {
         assert_eq!(contact.address, "person+tag@example.test");
     }
     #[test]
-    fn email_fixed_template_never_contains_message_text_and_proxy_has_immutable_cap() {
+    fn email_fixed_template_uses_bound_contact_for_both_transports() {
         let mut store = fixture();
         let mut q = Queue::new(&mut store).unwrap();
         q.admit(
@@ -1037,14 +1032,13 @@ mod tests {
         assert!(notification
             .text
             .contains("https://hub.example.test/#email-thread="));
-        assert!(matches!(
-            intent.notification("https://hub.example.test/", Mode::Proxy),
-            Err(Error::Denied)
-        ));
-        assert!(matches!(
-            q.complete(&intent, Mode::Proxy),
-            Err(Error::Denied)
-        ));
+        assert_eq!(
+            intent
+                .notification("https://hub.example.test/", Mode::Proxy)
+                .unwrap()
+                .to,
+            "person@example.test"
+        );
         for origin in [
             "https://hub.example.test/?next=evil",
             "https://secret@hub.example.test/",

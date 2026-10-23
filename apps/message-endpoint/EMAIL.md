@@ -15,8 +15,9 @@ counterpart. Address-to-human matching is an owner assertion; Treer OAuth does
 not itself prove ownership of the address. Nonmembers are `reply_unavailable`.
 No invitations, guest creation, public links or one-time login credentials are
 created. Retargeting/reassignment requires a paused, drained new generation;
-old threads never transfer to a different contact. Agent JSON cannot choose a
-new destination or member. A thread's initiating Agent must be the fixed
+old threads never transfer to a different contact. Verified workspace management Agents may use the existing binding API under
+the owner-selected delegation in [AGENT-API.md](AGENT-API.md); arbitrary message
+bodies cannot choose a new destination or member. A thread's initiating Agent must be the fixed
 counterpart, so replies cannot turn the relay into an arbitrary recipient deputy.
 
 Email journal inspection/recovery remains current-human-owner only; binding management uses the existing scoped manager API described in [AGENT-API.md](AGENT-API.md). Thread reads/replies use a distinct
@@ -63,12 +64,16 @@ loopback only for tests), no redirects, bounded request/response/deadline and
 fixed error codes. An ambiguous provider result can duplicate mail; do not
 promise exactly-once external delivery. Core/Proxy owns provider idempotency.
 
-For this task, all tests use outbox or a fake loopback Proxy. Real sending stays
-off unless separately authorized, and the only permitted real recipient is
-`doomspec@outlook.com`, further restricted by the existing Treer email allowlist.
-This cap cannot be broadened by Agent text or an email binding. Missing provider
-configuration produces an explicit unavailable/outbox result, never a fake sent
-receipt. No full Core body, user-controlled email HTML or external URL goes into
+Tests use private outbox or a closed loopback Proxy; they send no real email.
+The Hub uses the owner's normalized, generation-bound contact address rather
+than a hardcoded historical test mailbox. The existing Treer email API still
+requires the real App/workspace identity and `email.send` Policy, and accepts
+only verified organization-member addresses or its operator-managed allowlist.
+A member ID/address association asserted in Hub is not an exemption from those
+platform checks. Live sends require the intended recipient/content to be
+coordinated separately; this source change does not initiate any send. Missing
+platform configuration or denied recipients never produce a fake sent receipt.
+No full Core body, user-controlled email HTML or external URL goes into
 mail: fixed subject, a template with no text derived from Core/external
 messages, and the configured dedicated hub App origin plus generated thread ID.
 No caller-selected URL, redirect or link credential is permitted.
@@ -88,21 +93,56 @@ Agents sharing the OS user. Use dedicated OS users/containers and narrow enforce
 Policy/mount/network access. No automatic production migration, old email-thread
 URL transfer, inbound email or nonmember participation is implemented yet.
 
-## Current outbox increment
+## Runtime transport and owner setup
 
-The production assembly opts in only when private config has
-`"email":{"outbox_directory":"/absolute/private/email-outbox"}`. Omission
-keeps all member routes and email workers absent. The config accepts no mail
-mode/provider token: runtime is **outbox only**. The Proxy sender is a separately
-tested unused library helper; no real mail can be enabled from the browser or
-this config. The existing default-off operator activation gate and owner resume
-checks apply before either direction can leave a queue.
+The production assembly opts in through private configuration:
+
+```json
+{"email":{"outbox_directory":"/absolute/private/email-outbox","mode":"proxy"}}
+```
+
+Omission keeps member routes and email workers absent. `mode` defaults to
+`outbox`; it publishes private files without sending email. Explicit `proxy`
+constructs the existing Proxy sender and dispatches committed journal attempts
+from the real runtime worker. No SMTP/provider key belongs in Hub configuration
+or its browser UI: this uses Treer's built-in App email API. The operator's
+`activation_enabled` gate and each endpoint's pause/resume state still apply.
+Choosing Proxy mode is not evidence that a provider is configured, that an
+address is allowed or that any recipient received mail.
+
+The owner setup card uses the existing authenticated, CSRF-protected
+`POST /api/configuration` with `{"action":"preview_email_setup"}`. It reports
+`email_configured`, nullable `mode`, `activation_enabled`,
+`provider_readiness:"unverified"`, and current visible human `members`
+(`id`, `name`, `role`). A failed directory lookup is unavailable, never an empty
+success. Results are bounded to 1,000 principals / 256 KiB, have no email
+addresses, and are not cached for authorization. A directory name is a display
+label, not verified ownership of the typed address. Management Agents cannot
+read this owner-only setup preview.
+
+Start with the setup card, have the operator select private `email` configuration
+and retain pause until the intended contact/relay is bound. Select a current
+human member and enter their email, then bind it to an existing paused relay
+using `bind_email`. If no relay exists, use the existing endpoint preview/create
+flow with the real relay Agent and fixed internal counterpart; this does not
+provision a new relay automatically. Binding rechecks membership and revision;
+the preview does not grant later access. Resume only after reviewing the existing
+endpoint conditions. The browser does not write startup configuration, enable
+the global activation gate, provision a provider, or send a test email.
+
+Inspect delivery for each bound endpoint: `outbox` is local publication,
+`provider_accepted` is acceptance by the Proxy/provider (not mailbox delivery),
+and `uncertain` is held for reconciliation, never automatically resent. A queued
+human reply means it entered the existing Core handoff path, not that the Agent
+has processed it. Configuration, binding, runtime and delivery status are
+separate facts.
 
 Owner `bind_email` goes through the unchanged owner authenticator, confirms a
 fresh directory member outside the hub state lock, checks paused state/revision,
 and atomically commits target, revision and audit. The target is immutable and
 exclusive with Telegram for that endpoint. Failed membership, storage or CAS
-cannot partially install a target. Agent JSON cannot configure contacts.
+cannot partially install a target. The new human setup preview does not expand
+the existing delegated binding authority.
 
 The per-endpoint outbox worker verifies current member visibility with a token
 minted from the hub's own workload identity, refreshes actual Core metadata,

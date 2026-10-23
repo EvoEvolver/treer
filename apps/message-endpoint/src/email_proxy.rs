@@ -23,6 +23,53 @@ pub enum Error {
     #[error("email_proxy_outcome_uncertain")]
     Uncertain,
 }
+/// Current visible human principal. Address ownership is deliberately not inferred.
+#[derive(serde::Serialize)]
+pub struct Member {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+}
+fn members(value: &Value) -> Result<Vec<Member>, Error> {
+    let principals = value
+        .get("principals")
+        .and_then(Value::as_array)
+        .filter(|p| p.len() <= 1000)
+        .ok_or(Error::Unavailable)?;
+    let mut ids = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for p in principals {
+        let id = p
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or(Error::Unavailable)?;
+        if !crate::store::valid_id(id) || id.len() > 128 || !ids.insert(id) {
+            return Err(Error::Unavailable);
+        }
+        if p.get("kind").and_then(Value::as_str) != Some("human") {
+            continue;
+        }
+        let role = p
+            .get("role")
+            .and_then(Value::as_str)
+            .ok_or(Error::Unavailable)?;
+        if !matches!(role, "owner" | "member") {
+            continue;
+        }
+        // Legacy directories omit names; stable ID remains an honest label.
+        let name = p.get("name").and_then(Value::as_str).unwrap_or(id);
+        if name.len() > 512 || name.chars().any(char::is_control) {
+            return Err(Error::Unavailable);
+        }
+        result.push(Member {
+            id: id.into(),
+            name: name.into(),
+            role: role.into(),
+        });
+    }
+    result.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(result)
+}
 pub struct Sender {
     client: Client,
     url: Url,
@@ -88,6 +135,10 @@ impl Sender {
         if !crate::store::valid_id(member) || member.len() > 128 {
             return Err(Error::Rejected);
         }
+        Ok(self.members(core)?.iter().any(|p| p.id == member))
+    }
+    /// Read-only, bounded directory lookup using this App's normal service audience.
+    pub fn members(&self, core: &Core) -> Result<Vec<Member>, Error> {
         let token = core
             .app_service_token(&self.service)
             .map_err(|_| Error::Unavailable)?;
@@ -111,21 +162,7 @@ impl Sender {
             return Err(Error::Unavailable);
         }
         let value: Value = serde_json::from_slice(&bytes).map_err(|_| Error::Unavailable)?;
-        let principals = value
-            .get("principals")
-            .and_then(Value::as_array)
-            .filter(|p| p.len() <= 1000)
-            .ok_or(Error::Unavailable)?;
-        let matches = principals
-            .iter()
-            .filter(|p| p.get("id").and_then(Value::as_str) == Some(member))
-            .collect::<Vec<_>>();
-        Ok(matches.len() == 1
-            && matches[0].get("kind").and_then(Value::as_str) == Some("human")
-            && matches!(
-                matches[0].get("role").and_then(Value::as_str),
-                Some("owner" | "member")
-            ))
+        members(&value)
     }
     /// The fence runs after minting, so a pause or lease expiry while the CLI
     /// was waiting cannot dispatch a newly stale intent. No queue mutex may be
@@ -226,6 +263,34 @@ impl Sender {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn email_setup_directory_is_bounded_current_and_not_an_address_claim() {
+        use serde_json::json;
+        let rows = super::members(&json!({"principals":[
+            {"id":"ag_worker","kind":"agent","name":"Agent"},
+            {"id":"user_b","kind":"human","role":"member","name":"<b>Member</b>"},
+            {"id":"user_a","kind":"human","role":"owner"}
+        ]}))
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "user_a");
+        assert_eq!(rows[0].name, "user_a");
+        assert_eq!(rows[1].name, "<b>Member</b>");
+        for value in [
+            json!({"principals":[{"id":"user_a","kind":"human","role":"member"},{"id":"user_a","kind":"human","role":"owner"}]}),
+            json!({"principals":[{"id":"","kind":"human","role":"member"}]}),
+            json!({"principals":[{"id":"user_a","kind":"human","role":"member","name":"bad\nname"}]}),
+            json!({"principals":[{"id":"user_a","kind":"human","role":"member","name":"a".repeat(513)}]}),
+            json!({"principals":vec![json!({"id":"ag_a","kind":"agent"});1001]}),
+            json!({}),
+        ] {
+            assert!(super::members(&value).is_err());
+        }
+        assert!(super::members(&json!({"principals":[]}))
+            .unwrap()
+            .is_empty());
+    }
+
     use super::*;
     use std::{io::Write, net::TcpListener, thread};
     fn intent(address: &str) -> Intent {
@@ -239,7 +304,7 @@ mod tests {
         }
     }
     #[test]
-    fn proxy_configuration_and_real_recipient_cap_fail_before_network() {
+    fn proxy_configuration_rejects_untrusted_origin_before_network() {
         for url in [
             "http://example.test/",
             "https://user:secret@example.test/",
@@ -250,15 +315,6 @@ mod tests {
             assert!(Sender::new(url, "svc_hub").is_err());
         }
         assert!(Sender::new("https://proxy.example/", "svc_../evil").is_err());
-        let sender = Sender::new("http://127.0.0.1:1/", "svc_hub").unwrap();
-        assert_eq!(
-            sender.post(
-                "synthetic.app.signature",
-                &intent("not-allowed@example.test"),
-                "https://hub.example/"
-            ),
-            Err(Error::Rejected)
-        );
     }
     #[test]
     fn proxy_fixed_route_bearer_summary_and_response_classification() {

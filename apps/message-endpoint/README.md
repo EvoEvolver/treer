@@ -1,8 +1,10 @@
 # Message endpoint (#159)
 
-**Telegram candidate plus opt-in email outbox development slice.**
-This branch extends the reviewed Telegram slice with owner-bound email threads,
-member replies and an outbox worker. No real email transport is activated;
+**Telegram and opt-in email endpoint runtime.**
+The Hub includes owner-bound email threads, member replies, a private outbox
+worker and explicit Proxy email transport. Selecting `email.mode:"proxy"` uses
+Treer’s built-in email API; provider credentials are never configured here.
+The current persistent deployment has email omitted and channels paused;
 public HTTP lifecycle/RPC stays on its separate development branch. Default
 activation remains off. No production migration/cutover is approved by this code.
 User direction3479 supersedes the socket design and research's routing details.
@@ -21,6 +23,19 @@ New bindings stay paused and activation remains operator-gated. Transport secret
 OAuth, recovery and metadata purge remain human-owner-only. No new credential or
 approval system is introduced. This code has not changed the running sandbox. The API contract above supersedes
 owner-only binding statements in the historical increment notes below.
+
+## Email contact and relay setup
+
+The owner’s email setup preview shows current runtime mode, operator activation
+state and fresh workspace human choices, including when email is unconfigured.
+Select a member, assert the matching email address, and bind an existing paused
+relay to its fixed internal counterpart. Existing endpoint preview/create is
+used when a relay is not yet registered. It does not install a relay or enable
+transport automatically. Private startup configuration remains an operator step;
+no provider key or SMTP settings are requested in the browser.
+[EMAIL.md](EMAIL.md#runtime-transport-and-owner-setup) describes the exact
+configuration and distinguishes outbox, provider acceptance and unknown outcome.
+The setup preview never claims provider or recipient readiness.
 
 ## Human conversation entry
 
