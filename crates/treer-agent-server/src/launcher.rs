@@ -192,6 +192,10 @@ enum LauncherCommand {
 
 #[derive(Debug, Args)]
 struct InstallArgs {
+    /// Refuse activation unless this binary's payload has a verified Rust default.
+    /// Older Controllers reject this flag; never retry without it to bypass refusal.
+    #[arg(long, value_parser = ["rust"])]
+    require_runtime: Option<String>,
     /// Profile provider (repeatable); defaults to all six bundled profiles.
     #[arg(long = "agent", value_parser = ["codex", "claude", "gemini", "grok", "cursor", "opencode"])]
     agents: Vec<String>,
@@ -646,6 +650,46 @@ fn validate_controller(value: &Value) -> Result<()> {
     validate_controller_with_floor(value, treer_protocol::MINIMUM_LAUNCHER_SECURITY_EPOCH)
 }
 
+fn validate_required_runtime(status: &Value) -> Result<()> {
+    anyhow::ensure!(
+        status["default"] == "rust" && status["codex"] == "rust",
+        "launcher_runtime_required: candidate must have a verified Rust default and Codex provider; no activation performed"
+    );
+    Ok(())
+}
+
+async fn require_rust_runtime(node: &Path, stage: &Path) -> Result<()> {
+    // This module and the binding are from the verified, extracted candidate,
+    // never from current.json or the previously installed runtime. Do not run
+    // install.mjs until this read-only check has completed successfully.
+    for relative in ["scripts/native-runtime.mjs", "native-runtime.json"] {
+        anyhow::ensure!(
+            payload_path(stage, relative).is_file(),
+            "launcher_runtime_required: embedded candidate lacks a Rust runtime binding; no activation performed"
+        );
+    }
+    let mut probe = command(node);
+    probe.args(["--input-type=module", "--eval", r#"
+import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
+try {
+  const root = process.argv[1];
+  const { runtimeStatus } = await import(pathToFileURL(join(root, 'scripts/native-runtime.mjs')).href);
+  const status = runtimeStatus(root);
+  process.stdout.write(JSON.stringify({default:status.default,codex:status.codex}));
+} catch { process.exitCode = 1; }
+"#]);
+    probe.arg(node_entry_path(stage.to_path_buf()));
+    let output = bounded_output(probe, None, 30).await.context(
+        "launcher_runtime_required: candidate runtime verification failed; no activation performed",
+    )?;
+    anyhow::ensure!(output.status.success(), "launcher_runtime_required: candidate runtime binding is unavailable, incompatible or changed; no activation performed");
+    let status = serde_json::from_slice(&output.stdout).context(
+        "launcher_runtime_required: invalid candidate runtime status; no activation performed",
+    )?;
+    validate_required_runtime(&status)
+}
+
 fn validate_controller_with_floor(value: &Value, minimum_epoch: u32) -> Result<()> {
     let reported: treer_protocol::LauncherControllerContract =
         serde_json::from_value(value.clone())
@@ -737,12 +781,17 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
         .map(|path| trusted_file(path, false))
         .transpose()?;
     let stage = extract(&root)?;
+    let required_runtime = install.and_then(|options| options.require_runtime.as_deref());
+    if required_runtime == Some("rust") {
+        require_rust_runtime(&node, &stage.0).await?;
+    }
     let manifest: Value = serde_json::from_str(MANIFEST_JSON)?;
     let request = json!({"schema":"treer.launcher-install/v1", "operation":operation,
         "bundle_dir":stage.0, "version":format!("sha256-{PAYLOAD_DIGEST}"), "source_commit":SOURCE_COMMIT,
         "root":root, "cwd":install.and_then(|options| options.cwd.as_deref()).unwrap_or("."),
         "agents":install.map(|options| options.agents.clone()).unwrap_or_default(), "node":node,"treer":treer,
         "npm_cli":npm_cli,
+        "require_runtime":required_runtime,
         "allow_network":install.is_some_and(|options| options.allow_network),"controller":controller.unwrap_or(Value::Null),
         "payload_manifest":manifest, "rollback_version":rollback});
     let mut install_cmd = command(&node);
@@ -1195,6 +1244,98 @@ mod tests {
             "/usr/bin/node"
         ])
         .is_ok());
+        for operation in ["install", "update"] {
+            let parsed = crate::Args::try_parse_from([
+                "treer-agent-server",
+                "launcher",
+                operation,
+                "--require-runtime",
+                "rust",
+            ])
+            .unwrap();
+            let Some(crate::Command::Launcher(args)) = parsed.command else {
+                panic!("launcher expected")
+            };
+            let options = match args.command {
+                LauncherCommand::Install(options) | LauncherCommand::Update(options) => options,
+                _ => panic!("install options expected"),
+            };
+            assert_eq!(options.require_runtime.as_deref(), Some("rust"));
+        }
+        for operation in ["status", "rollback"] {
+            assert!(crate::Args::try_parse_from([
+                "treer-agent-server",
+                "launcher",
+                operation,
+                "--require-runtime",
+                "rust",
+            ])
+            .is_err());
+        }
+        assert!(crate::Args::try_parse_from([
+            "treer-agent-server",
+            "launcher",
+            "update",
+            "--require-runtime",
+            "node",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn required_runtime_rejects_old_unconfigured_and_incomplete_candidates() {
+        for status in [
+            Value::Null,
+            json!({"default":"node","codex":"node"}),
+            json!({"default":"unconfigured","codex":"unconfigured"}),
+            json!({"default":"rust","codex":"unavailable-provider"}),
+            json!({"default":"rust"}),
+        ] {
+            assert!(validate_required_runtime(&status)
+                .unwrap_err()
+                .to_string()
+                .starts_with("launcher_runtime_required"));
+        }
+        validate_required_runtime(
+            &json!({"default":"rust","codex":"rust","claude":"unavailable-provider"}),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicit trusted Node22+ via TREER_TEST_NODE; no installed configuration used"]
+    async fn required_runtime_candidate_probe_runs_before_installer() {
+        let node = node_executable(Some(
+            std::env::var_os("TREER_TEST_NODE")
+                .expect("TREER_TEST_NODE")
+                .into(),
+        ))
+        .unwrap();
+        let root =
+            std::env::temp_dir().join(format!("trr-required-runtime-{}", uuid::Uuid::new_v4()));
+        treer_platform::secure_directory(&root).unwrap();
+        fs::create_dir(root.join("scripts")).unwrap();
+        assert!(require_rust_runtime(&node, &root).await.is_err());
+        fs::write(root.join("native-runtime.json"), "{}").unwrap();
+        let module = root.join("scripts/native-runtime.mjs");
+        // Synthetic producer: exercises the actual Node/module/JSON boundary.
+        // Native image/hash validation itself belongs to native-runtime tests.
+        for code in [
+            "export function runtimeStatus() { throw new Error('fixture invalid hash'); }",
+            "export function runtimeStatus() { return {default:'node',codex:'node'}; }",
+            "export function runtimeStatus() { return {default:'unconfigured'}; }",
+        ] {
+            fs::write(&module, code).unwrap();
+            assert!(require_rust_runtime(&node, &root)
+                .await
+                .unwrap_err()
+                .to_string()
+                .starts_with("launcher_runtime_required"));
+        }
+        fs::write(&module, "export function runtimeStatus() { return {default:'rust',codex:'rust',claude:'unavailable-provider'}; }").unwrap();
+        require_rust_runtime(&node, &root).await.unwrap();
+        assert!(!root.join("current.json").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
