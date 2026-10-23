@@ -64,3 +64,45 @@ export async function testThreadScroll239({browser,base,snapshot,screenshots}) {
  }
  return results;
 }
+
+// Images resolve only after initial layout; no state frame, turn replacement,
+// manual resize event or scroll assignment causes the subsequent column growth.
+export async function testAsyncColumnGrowth239({browser,base,snapshot}) {
+ const image=Buffer.from('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','base64');
+ const results=[];
+ for(const width of [1280,390]) {
+  const context=await browser.newContext({viewport:{width,height:900},reducedMotion:'reduce'});
+  let releaseFollow,releaseReader;
+  const followGate=new Promise(r=>{releaseFollow=r;}),readerGate=new Promise(r=>{releaseReader=r;});
+  try {
+   const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
+   const turns=Array.from({length:40},(_,i)=>({id:`growth-${i}`,status:'completed',startedAt:new Date(1700000000000+i*1000).toISOString(),items:[{id:`growth-text-${i}`,kind:'agentMessage',text:`History ${i}\n\n${'Existing history paragraph. '.repeat(20)}`}]}));
+   turns.at(-1).items.push({id:'delayed-images',kind:'agentMessage',text:'![follow growth](./scroll239-follow.png)\n\n![reader growth](./scroll239-reader.png)'});
+   const state={...snapshot,type:'state',ready:true,history:{limit:50,cursor:null,totalTurns:40},thread:{...snapshot.thread,id:'async-column239',status:'idle',activeTurnId:null,hasOlderItems:false,turns}};
+   await page.route('**/scroll239-follow.png',async route=>{await followGate;await route.fulfill({contentType:'image/png',body:image});});
+   await page.route('**/scroll239-reader.png',async route=>{await readerGate;await route.fulfill({contentType:'image/png',body:image});});
+   await page.route('**/api/state',route=>route.fulfill({json:state}));
+   await page.routeWebSocket('**/ws',ws=>ws.send(JSON.stringify(state)));
+   await page.goto(base+'/index.html?lang=en');
+   const thread=page.locator('#thread'),col=thread.locator(':scope > .col');
+   await expect(thread).toContainText('History 39');
+   const distance=()=>thread.evaluate(e=>e.scrollHeight-e.clientHeight-e.scrollTop);
+   await expect.poll(distance).toBeLessThan(24);
+   const originalHeight=await col.evaluate(e=>e.getBoundingClientRect().height);
+   releaseFollow();
+   await expect.poll(()=>col.evaluate(e=>e.getBoundingClientRect().height)).toBeGreaterThan(originalHeight+500);
+   await expect.poll(distance,{message:'late image growth without turns/dock change must follow bottom'}).toBeLessThan(24);
+   await thread.hover();await page.mouse.wheel(0,-1200);
+   await expect.poll(distance).toBeGreaterThan(250);
+   const before=await thread.evaluate(e=>e.scrollTop),height=await col.evaluate(e=>e.getBoundingClientRect().height);
+   releaseReader();
+   await expect.poll(()=>col.evaluate(e=>e.getBoundingClientRect().height)).toBeGreaterThan(height+500);
+   await page.waitForTimeout(250);
+   const after=await thread.evaluate(e=>e.scrollTop);
+   assert.ok(Math.abs(after-before)<60,`late image moved active reader ${before}->${after}`);
+   assert.deepEqual(errors,[]);
+   results.push({width,late_image_bottom:true,late_image_reader_preserved:true,scope:'real browser image layout; controlled presentation snapshot'});
+  } finally {releaseFollow();releaseReader();await context.close();}
+ }
+ return results;
+}
