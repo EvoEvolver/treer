@@ -124,6 +124,35 @@ test('Claude cached terminal display cannot clear an uncertain acknowledged rece
   assert.match(retained.records[0].submission.error,/uncertain/);
   assert.equal((await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').length,1);
 });
+test('Claude explicit unknown disposition uses current idle adapter, never cached terminal authority or input replay',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_HOLD:'never-created'});
+  await f.post({prompt:'original ambiguous input'});
+  let state=await until(f.snapshot,s=>s.thread.activeTurnId&&s.thread.turns.some(t=>t.items.some(i=>i.kind==='commandExecution'&&i.status==='completed')));
+  let saved=JSON.parse(await readFile(join(f.state,'rust-spike.json'),'utf8'));
+  const id=saved.records[0].submission.id,thread=state.thread.id;
+  const action=(base,receipt)=>fetch(base+'/api/recovery',{method:'POST',body:JSON.stringify({action:'acknowledge_unknown',submission_id:id,thread_id:thread,expected_turn_id:receipt.turn_id,expected_error:receipt.error,accept_unknown_outcome:true})});
+  assert.equal((await action(f.base,saved.records[0].submission)).status,400,'live active adapter must refuse');
+  await stop(f.child);
+  const resumed=await f.launch({CLAUDE_FIXTURE_HOLD:''});
+  state=await resumed.snapshot();assert.equal(state.runtime.state,'blocked');
+  saved=JSON.parse(await readFile(join(f.state,'rust-spike.json'),'utf8'));
+  const original=saved.records[0].submission;
+  const queued=await resumed.post({prompt:'new input after disposition',mode:'queue'});assert.equal(queued.status,200);
+  assert.equal((await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').length,1);
+  assert.equal((await action(resumed.base,original)).status,202);
+  state=await until(resumed.snapshot,s=>s.thread.status==='idle'&&s.queue.length===0&&s.thread.turns.length===2);
+  const result=JSON.parse(await readFile(join(f.state,'rust-spike.json'),'utf8'));
+  assert.equal(result.records[0].submission.state,'interrupted');
+  assert.equal(result.records[0].submission.recovery_disposition.providerOutcome,'unknown');
+  assert.equal(result.records[0].submission.recovery_disposition.originalError,original.error);
+  assert.equal(result.records[0].submission.recovery_disposition.idleEvidence,'initialized_current_adapter_no_active_request');
+  const calls=(await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(calls.length,2);assert.equal(calls[1].resume,true);assert.equal(calls[1].session,thread);
+  await stop(resumed.child);const again=await f.launch({CLAUDE_FIXTURE_HOLD:''});
+  const retained=JSON.parse(await readFile(join(f.state,'rust-spike.json'),'utf8'));
+  assert.deepEqual(retained.records[0].submission,result.records[0].submission);
+  assert.equal((await again.snapshot()).thread.id,thread);
+});
 test('actual Claude interrupt is correlated and only result completes the interrupted turn',async t=>{
   const f=await fixture(t,{CLAUDE_FIXTURE_HOLD:'never-created'});
   assert.equal((await f.post({prompt:'interrupt this turn'})).status,200);

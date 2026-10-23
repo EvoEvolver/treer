@@ -125,6 +125,11 @@ pub fn import_history(
     Ok(())
 }
 impl Adapter {
+    // Current process state only. This says nothing about historical effects
+    // and must never be used as terminal receipt/history authority.
+    pub fn idle_for_disposition(&self) -> bool {
+        self.active.is_none() && self.pending_interrupts.is_empty()
+    }
     pub fn new(session: String) -> Result<Self> {
         if session.is_empty()
             || session.len() > 1024

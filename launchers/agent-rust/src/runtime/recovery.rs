@@ -2,6 +2,169 @@
 //! No input is submitted here, and missing history never proves completion.
 use super::*;
 
+pub(super) struct Connection {
+    pub rpc: Rpc,
+    pub child: crate::rpc::ProviderChild,
+    pub events: mpsc::Receiver<Value>,
+    pub snapshot: Value,
+    pub targets: Vec<Value>,
+    pub buffered: Vec<Value>,
+}
+
+struct Budget {
+    bytes: usize,
+    nodes: usize,
+}
+impl std::io::Write for Budget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.bytes {
+            return Err(std::io::Error::other("recovery_buffer_limit"));
+        }
+        self.bytes -= bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl Budget {
+    fn admit(&mut self, value: &Value) -> Result<()> {
+        let nodes = crate::provider_stream::shape_nodes(value);
+        if nodes > self.nodes {
+            bail!("recovery_buffer_limit");
+        }
+        self.nodes -= nodes;
+        serde_json::to_writer(self, value).map_err(|_| anyhow!("recovery_buffer_limit"))
+    }
+}
+
+// This task cannot submit input, change a goal or publish a journal. Its owned
+// child is killed on cancellation/refusal. Keep reads and event buffering bounded.
+pub(super) async fn connect(
+    config: Config,
+    session: String,
+    targets: Vec<String>,
+) -> Result<Connection> {
+    let (rpc, mut child, mut events) = Rpc::spawn(
+        &config.codex,
+        &config.codex_args,
+        &config.cwd,
+        config.capture_stderr,
+    )
+    .map_err(|_| anyhow!("recovery_validation_refused"))?;
+    let mut buffered = Vec::new();
+    // Count the entire retained attempt, not merely each individual frame.
+    let mut budget = Budget {
+        bytes: 32 * 1024 * 1024,
+        nodes: 500_000,
+    };
+    let result = timeout(Duration::from_secs(30), async {
+    read(&rpc, &mut events, &mut buffered, &mut budget, "initialize", json!({"clientInfo":{"name":"treer-recovery","version":"0.0.1"},"capabilities":{"experimentalApi":true}}), None).await?;
+    rpc.write(json!({"method":"initialized"})).await?;
+    let snapshot = read(&rpc, &mut events, &mut buffered, &mut budget, "thread/resume", json!({"threadId":session,"cwd":config.cwd,"approvalPolicy":"never","sandbox":"danger-full-access","persistExtendedHistory":true}), None).await?;
+    validate(&snapshot, &json!(session))?;
+    let mut found = Vec::new();
+    if targets.len() > receipts::PENDING_LIMIT { bail!("recovery_target_limit"); }
+    for id in targets {
+        let observed = read(&rpc, &mut events, &mut buffered, &mut budget, "thread/read", json!({"threadId":session,"includeTurns":true}), Some(id)).await?;
+        validate(&observed, &json!(session))?;
+        found.push(observed);
+    }
+    Ok::<_, anyhow::Error>((snapshot, found))
+    }).await.unwrap_or_else(|_|Err(anyhow!("recovery_deadline")));
+    match result {
+        Ok((snapshot, found)) => Ok(Connection {
+            rpc,
+            child,
+            events,
+            snapshot,
+            targets: found,
+            buffered,
+        }),
+        Err(error) => {
+            // A failed replacement is a new owned process, not the original
+            // child's confirmed exit. No next attempt until this exit is proven.
+            if !matches!(
+                timeout(Duration::from_secs(5), child.kill()).await,
+                Ok(Ok(()))
+            ) {
+                bail!("recovery_cleanup_unverified");
+            }
+            if matches!(
+                error.to_string().as_str(),
+                "recovery_authority_unavailable"
+                    | "recovery_target_limit"
+                    | "recovery_events_unavailable"
+                    | "recovery_buffer_limit"
+            ) || (rpc.failed()
+                && !matches!(
+                    rpc.diagnostics()["transport"].as_str(),
+                    Some(
+                        "stdout_eof" | "rpc_timeout" | "stdin_write_error" | "stdin_write_timeout"
+                    )
+                ))
+            {
+                bail!("recovery_validation_refused");
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn read(
+    rpc: &Rpc,
+    events: &mut mpsc::Receiver<Value>,
+    buffered: &mut Vec<Value>,
+    budget: &mut Budget,
+    method: &str,
+    params: Value,
+    target: Option<String>,
+) -> Result<Value> {
+    timeout(Duration::from_secs(12), async {
+        let request = rpc.request_target(method, params, target);
+        tokio::pin!(request);
+        loop {
+            tokio::select! {
+                result = &mut request => {
+                    let value = result?;
+                    budget.admit(&value)?;
+                    return Ok(value);
+                },
+                event = events.recv() => {
+                    let event = event.ok_or_else(|| anyhow!("recovery_transport_unavailable"))?;
+                    if event["method"] == "spike/provider-exit" || event.get("id").is_some() || buffered.len() >= 64 { bail!("recovery_events_unavailable"); }
+                    budget.admit(&event)?;
+                    buffered.push(event);
+                }
+            }
+        }
+    }).await.map_err(|_|anyhow!("recovery_read_timeout"))?
+}
+
+pub(super) fn validate(observed: &Value, thread: &Value) -> Result<()> {
+    if observed["thread"]["id"] != *thread
+        || !matches!(
+            observed["thread"]["status"]["type"].as_str(),
+            Some("idle" | "active")
+        )
+        || !observed["thread"]["turns"].is_array()
+    {
+        bail!("recovery_authority_unavailable");
+    }
+    Ok(())
+}
+
+pub(super) fn targets(records: &VecDeque<Record>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    records
+        .iter()
+        .filter(|r| needs_recovery(r))
+        .filter_map(|r| r.submission["turn_id"].as_str())
+        .filter(|id| seen.insert((*id).to_owned()))
+        .map(str::to_owned)
+        .collect()
+}
+
 fn uncertain(record: &Record) -> bool {
     record.submission["error"]
         .as_str()
@@ -64,6 +227,25 @@ pub(super) fn reconcile_record(record: &mut Record, turn: Option<&Value>) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_budget_bounds_aggregate_bytes_and_shape() {
+        let value = json!({"text":"bounded"});
+        let bytes = serde_json::to_vec(&value).unwrap().len();
+        let nodes = crate::provider_stream::shape_nodes(&value);
+        let mut budget = Budget {
+            bytes: bytes * 2,
+            nodes: nodes * 3,
+        };
+        budget.admit(&value).unwrap();
+        budget.admit(&value).unwrap();
+        assert!(budget.admit(&value).is_err());
+        let mut budget = Budget {
+            bytes: bytes * 3,
+            nodes,
+        };
+        budget.admit(&value).unwrap();
+        assert!(budget.admit(&value).is_err());
+    }
     fn record(state: &str, id: Value, error: Value) -> Record {
         Record {
             operation: "op".into(),

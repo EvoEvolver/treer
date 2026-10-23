@@ -105,6 +105,130 @@ for(const scenario of ['completed','failed','interrupted','inProgress','legacy',
   if(scenario==='older')assert.ok(calls.some(c=>c.method==='thread/read'),'older turn is actually fetched via provider protocol');
 });
 
+for(const status of ['completed','interrupted'])test('runtime recovery unblocks an exact older receipt after initially unavailable history '+status,{skip:useNode,timeout:25000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1'});
+  const first=await s.post({text:'never resend exact accepted input',operation_id:'live-exact-first'}).then(r=>r.json());
+  const second=await s.post({text:'FIFO second',operation_id:'live-exact-second'}).then(r=>r.json());
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const restarted=await s.launch({RECOVERY_HOLD:'0',RECOVERY_LATE:'1',RECOVERY_OLD:'1',RECOVERY_TERMINAL:status});
+  const get=id=>fetch(restarted.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
+  assert.equal((await fetch(restarted.base+'/api/state').then(r=>r.json())).runtime.state,'blocked');
+  try { await until(()=>get(second.submission.id),r=>r.submission?.state==='done',18000); }
+  catch(error) { throw Error(error.message+' '+JSON.stringify(await fetch(restarted.base+'/api/state').then(r=>r.json()))+' '+s.logs()+' '+JSON.stringify(await providerCalls(s))); }
+  assert.equal((await get(first.submission.id)).submission.state,status==='completed'?'done':'interrupted');
+  assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['never resend exact accepted input','FIFO second']);
+  const stop=once(restarted.child,'exit');restarted.child.kill('SIGTERM');assert.equal((await stop)[0],0);
+  const again=await s.launch({RECOVERY_HOLD:'0'});
+  assert.equal((await fetch(again.base+'/v1/submissions/'+first.submission.id,{headers:s.headers}).then(r=>r.json())).submission.state,status==='completed'?'done':'interrupted');
+});
+
+for(const old of [false,true,'resume-race'])test('runtime recovery reconnects same-thread transport and continues FIFO without replay '+old,{skip:useNode,timeout:25000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_OLD_DISCONNECT:old===true?'1':'0',RECOVERY_RESUME_RACE:old==='resume-race'?'1':'0'});
+  const first=await s.post({text:'one accepted input',operation_id:'reconnect-first'}).then(r=>r.json());
+  const second=await s.post({text:'second queued',operation_id:'reconnect-second'}).then(r=>r.json());
+  const get=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
+  try { await until(()=>get(first.submission.id),r=>r.submission?.state==='interrupted',18000); }
+  catch(error) { throw Error(error.message+' '+JSON.stringify(await fetch(s.base+'/api/state').then(r=>r.json()))+' '+s.logs()+' '+JSON.stringify(await providerCalls(s))); }
+  await until(()=>get(second.submission.id),r=>r.submission?.state==='running');
+  const snapshot=await fetch(s.base+'/api/state').then(r=>r.json());
+  assert.equal(snapshot.thread.id,'recovery-thread');assert.equal(snapshot.runtime.recovery.reconnectAttempts,1);
+  if(old===true) { assert.ok(snapshot.history.totalTurns>=66);assert.equal(snapshot.thread.hasOlderItems,true);assert.ok(snapshot.thread.turns.length<=50); }
+  assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['one accepted input','second queued']);
+  assert.equal((await fetch(s.base+'/v1/abort',{method:'POST',headers:s.headers,body:'{}'})).status,202);
+});
+
+test('runtime recovery stops after three refused replacement attempts and remains observable/stoppable',{skip:useNode,timeout:30000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_REFUSE_RESUME:'1'});
+  const first=await s.post({text:'accepted once',operation_id:'exhaust-first'}).then(r=>r.json());
+  const second=await s.post({text:'FIFO preserved',operation_id:'exhaust-second'}).then(r=>r.json());
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.state==='reconnect_exhausted',24000);
+  assert.equal(state.runtime.recovery.reconnectAttempts,3);
+  assert.equal((await fetch(s.base+'/v1/submissions/'+first.submission.id,{headers:s.headers}).then(r=>r.json())).submission.state,'running');
+  assert.equal((await fetch(s.base+'/v1/submissions/'+second.submission.id,{headers:s.headers}).then(r=>r.json())).submission.state,'queued');
+  const calls=await providerCalls(s);assert.equal(calls.filter(c=>c.method==='thread/resume').length,3);
+  assert.equal(calls.filter(c=>c.method==='turn/start').length,1);
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');assert.equal((await exit)[0],0);
+});
+
+test('runtime recovery slow reconnect leaves state reads and shutdown responsive',{skip:useNode,timeout:15000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_STALL_RESUME:'1'});
+  await s.post({text:'first only',operation_id:'slow-reconnect'});
+  await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.state==='reconnecting');
+  await until(()=>providerCalls(s),x=>x.some(c=>c.method==='thread/resume'));
+  const pids=(await readFile(join(s.root,'cwd/recovery-provider-pids.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(pids.length,2);
+  const start=Date.now();assert.equal((await fetch(s.base+'/api/state')).status,200);assert.ok(Date.now()-start<1000);
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');assert.equal((await exit)[0],0);assert.ok(Date.now()-start<5000);
+  await until(()=>Promise.resolve(pids.every(({pid})=>{try{process.kill(pid,0);return false;}catch(error){return error.code==='ESRCH';}})),Boolean,3000);
+});
+
+test('runtime recovery wrong-thread replacement is a sticky integrity refusal, not a retryable transport fault',{skip:useNode,timeout:18000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_WRONG_THREAD:'1'});
+  await s.post({text:'one original',operation_id:'wrong-thread'});
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.state==='integrity_failure');
+  assert.equal(state.runtime.recovery.reconnectAttempts,1);
+  await new Promise(r=>setTimeout(r,4200));
+  assert.equal((await providerCalls(s)).filter(c=>c.method==='thread/resume').length,1);
+  assert.equal((await fetch(s.base+'/api/recovery',{method:'POST',headers:s.headers,body:JSON.stringify({action:'recheck'})})).status,400);
+});
+
+test('runtime recovery active unknown cannot be disposed using idle or missing-ID guesses',{skip:useNode,timeout:12000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_NO_ID:'1',RECOVERY_HOLD:'1'});
+  const first=await s.post({text:'active unknown',operation_id:'active-unknown'}).then(r=>r.json());
+  await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.readCount>0);
+  const original=(await fetch(s.base+'/v1/submissions/'+first.submission.id,{headers:s.headers}).then(r=>r.json())).submission;
+  const response=await fetch(s.base+'/api/recovery',{method:'POST',headers:s.headers,body:JSON.stringify({action:'acknowledge_unknown',submission_id:first.submission.id,thread_id:'recovery-thread',expected_turn_id:null,expected_error:original.error,accept_unknown_outcome:true})});
+  assert.equal(response.status,400);
+  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
+});
+
+test('runtime recovery failed durable settlement never dispatches the queued successor',{skip:useNode,timeout:20000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1'});
+  await s.post({text:'first once',operation_id:'write-first'});
+  const second=await s.post({text:'must remain queued',operation_id:'write-second'}).then(r=>r.json());
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const restarted=await s.launch({RECOVERY_LATE:'1',RECOVERY_HOLD:'0'});
+  const path=join(s.state,'rust-spike.json'),before=await readFile(path,'utf8');
+  try {
+    await chmod(path,0o400);await chmod(s.state,0o500);
+    const blocked=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.state==='storage_failure');
+    assert.equal(blocked.runtime.recovery.reconnectAttempts,0);
+    assert.equal(await readFile(path,'utf8'),before);
+    assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
+    assert.equal((await fetch(restarted.base+'/v1/submissions/'+second.submission.id,{headers:s.headers}).then(r=>r.json())).submission.state,'queued');
+    const stop=once(restarted.child,'exit');restarted.child.kill('SIGTERM');assert.notEqual((await stop)[0],0);
+  } finally {await chmod(s.state,0o700);await chmod(path,0o600);}
+});
+
+test('runtime recovery missing ID requires explicit bound disposition and fresh idle, never automatic replay',{skip:useNode,timeout:20000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_NO_ID:'1'});
+  const first=await s.post({text:'unknown accepted input',operation_id:'unknown-first'}).then(r=>r.json());
+  const second=await s.post({text:'queued after explicit disposition',operation_id:'unknown-second'}).then(r=>r.json());
+  const get=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
+  const original=(await get(first.submission.id)).submission;
+  const action=body=>fetch(s.base+'/api/recovery',{method:'POST',headers:s.headers,body:JSON.stringify(body)});
+  assert.equal((await action({action:'acknowledge_unknown',submission_id:first.submission.id})).status,400);
+  await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.readCount>0);
+  assert.equal((await get(second.submission.id)).submission.state,'queued');
+  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
+  const bound={action:'acknowledge_unknown',submission_id:first.submission.id,thread_id:'recovery-thread',expected_turn_id:null,expected_error:original.error,accept_unknown_outcome:true};
+  assert.equal((await action({...bound,expected_error:'stale'})).status,400);
+  assert.equal((await action(bound)).status,202);
+  assert.equal((await action(bound).then(r=>r.json())).duplicate,true);
+  try { await until(()=>get(second.submission.id),r=>r.submission?.state==='done'); }
+  catch(error) { throw Error(error.message+' '+JSON.stringify(await fetch(s.base+'/api/state').then(r=>r.json()))+' '+s.logs()+' '+JSON.stringify(await providerCalls(s))); }
+  const resolved=(await get(first.submission.id)).submission;
+  assert.equal(resolved.state,'interrupted');assert.equal(resolved.recovery_disposition.originalError,original.error);
+  assert.equal(resolved.recovery_disposition.providerOutcome,'unknown');
+  const stop=once(s.child,'exit');s.child.kill('SIGTERM');assert.equal((await stop)[0],0);
+  const restarted=await s.launch({});
+  const after=(await fetch(restarted.base+'/v1/submissions/'+first.submission.id,{headers:s.headers}).then(r=>r.json())).submission;
+  assert.deepEqual(after,resolved);
+  const duplicate=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'unknown accepted input',operation_id:'unknown-first'})}).then(r=>r.json());
+  assert.equal(duplicate.duplicate,true);assert.equal(duplicate.submission.id,first.submission.id);
+  assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['unknown accepted input','queued after explicit disposition']);
+});
+
 for(const mode of ['omitted','native','summary'])test('history order keeps receipt steering between observed activity and its response, including restart '+mode,{skip:useNode,timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/history-order-provider.mjs'),ORDER_HISTORY_FILE:'order-history.json',ORDER_NATIVE_ECHO:mode==='native'?'1':'0',ORDER_SUMMARY:mode==='summary'?'1':'0'});
   const read=()=>fetch(s.base+'/api/state').then(r=>r.json());

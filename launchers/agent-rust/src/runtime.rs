@@ -105,12 +105,19 @@ struct Runtime {
     // Sticky stop for history admission OR private journal failure.
     history_failed: bool,
     state_failed: bool,
+    transport_failed: bool,
     last_disk_snapshot: Option<std::time::Instant>,
     disk_history_status: &'static str,
     provider_exit: &'static str,
     final_projection: Value,
     records: VecDeque<Record>,
     dispatch_blocked: bool,
+    reconnect_attempts: u32,
+    reconnect_due: std::time::Instant,
+    recovering: bool,
+    recovery_reads: u64,
+    idle_proof: Option<std::time::Instant>,
+    recovery_generation: u64,
     goals: Goals,
     // Last successfully published state; rollback is centralized for every
     // checkpoint caller, including provider events and notification acks.
@@ -132,6 +139,7 @@ impl Drop for AbortTask {
     fn drop(&mut self) { self.0.abort(); }
 }
 
+#[derive(Clone)]
 pub struct Config {
     pub claude:bool,
     pub cwd: PathBuf,
@@ -188,12 +196,19 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
         last_history_page: None,
         history_failed: false,
         state_failed: false,
+        transport_failed: false,
         last_disk_snapshot: None,
         disk_history_status: "not_requested",
         provider_exit: "not_requested",
         final_projection: Value::Null,
         records: VecDeque::new(),
         dispatch_blocked: false,
+        reconnect_attempts: 0,
+        reconnect_due: std::time::Instant::now(),
+        recovering: false,
+        recovery_reads: 0,
+        idle_proof: None,
+        recovery_generation: 0,
         goals: Goals::default(),
         checkpoint: (VecDeque::new(), Goals::default()),
         goals_supported: false,
@@ -243,11 +258,10 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
         let mut notification_pending = false;
         // Read-only reconciliation stays outside the actor with one pending
         // read/result, so a slow read cannot block interrupts or grow a backlog.
-        let (observe_tx, mut observe_rx) = mpsc::channel::<Value>(1);
+        let (observe_tx, mut observe_rx) = mpsc::channel::<(u64, u64, Rpc, Value)>(1);
         let (observed_tx, mut observed_rx) = mpsc::channel(1);
-        let observer_rpc = rt.rpc.clone();
         let observer = AbortTask(tokio::spawn(async move {
-            while let Some(thread) = observe_rx.recv().await {
+            while let Some((epoch, generation, observer_rpc, thread)) = observe_rx.recv().await {
                 let result = observer_rpc
                     .request_target(
                         "thread/read",
@@ -255,12 +269,16 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
                         thread["targetTurnId"].as_str().map(str::to_owned),
                     )
                     .await;
-                if observed_tx.send(result).await.is_err() {
+                if observed_tx.send((epoch, generation, result)).await.is_err() {
                     break;
                 }
             }
         }));
         let mut observation_pending = false;
+        let mut provider_epoch = 0u64;
+        let (reconnected_tx, mut reconnected_rx) = mpsc::channel(1);
+        let mut reconnect_worker: Option<AbortTask> = None;
+        let mut recovery_cursor = 0usize;
         let mut provider_stopped = false;
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         loop {
@@ -271,18 +289,36 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
                 },
                 event = rt.events.recv(), if !rt.history_failed => match event {
                     Some(event) => {
-                        if event["method"] == "spike/provider-exit" { let _ = rt.stop_for_transport_error(); break; }
+                        if event["method"] == "spike/provider-exit" { let _ = rt.stop_for_transport_error(); continue; }
                         if rt.event(event).await.is_err() { eprintln!("Rust spike: provider event failed"); }
                     }
-                    None => { let _ = rt.stop_for_transport_error(); break; },
+                    None => { let _ = rt.stop_for_transport_error(); },
                 },
                 _ = tick.tick() => {
                     if !rt.history_failed && rt.goals.edits.iter().any(|e| !e.sent && e.error.is_null()) && rt.flush_goals().await.is_err() {
                         eprintln!("Rust spike: goal edit retained for reconciliation");
                     }
                     if rt.drain().await.is_err() { eprintln!("Rust spike: queue dispatch failed; retained"); }
-                    if !rt.claude && !observation_pending && !rt.dispatch_blocked && rt.thread["activeTurnId"].is_string() {
-                        observation_pending = observe_tx.try_send(json!({"threadId":rt.thread["id"],"targetTurnId":rt.thread["activeTurnId"]})).is_ok();
+                    if !rt.claude && !rt.history_failed && !observation_pending {
+                        let targets = recovery::targets(&rt.records);
+                        let target = targets.get(recovery_cursor % targets.len().max(1)).cloned();
+                        recovery_cursor = recovery_cursor.wrapping_add(1);
+                        if target.is_some() || rt.dispatch_blocked || rt.thread["activeTurnId"].is_string() {
+                            observation_pending = observe_tx.try_send((provider_epoch, rt.recovery_generation, rt.rpc.clone(), json!({"threadId":rt.thread["id"],"targetTurnId":target.or_else(||rt.thread["activeTurnId"].as_str().map(str::to_owned))}))).is_ok();
+                        }
+                    }
+                    if rt.can_reconnect() && !rt.recovering && rt.reconnect_attempts < 3 && rt.reconnect_due <= std::time::Instant::now() && rt.provider_exit == "confirmed" {
+                        rt.reconnect_attempts += 1;
+                        rt.recovering = true;
+                        rt.publish();
+                        let config = config.clone();
+                        let session = rt.thread["id"].as_str().unwrap().to_owned();
+                        let targets = recovery::targets(&rt.records);
+                        let tx = reconnected_tx.clone();
+                        reconnect_worker = Some(AbortTask(tokio::spawn(async move {
+                            let result = recovery::connect(config, session, targets).await;
+                            let _ = tx.send(result).await;
+                        })));
                     }
                     if !rt.history_failed && !notification_pending {
                         if let Some(job) = rt.next_notification() {
@@ -301,19 +337,70 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
                         }
                     }
                 }
-                Some(observed) = observed_rx.recv() => {
+                Some((epoch, generation, observed)) = observed_rx.recv() => {
                     observation_pending = false;
-                    if let Ok(observed) = observed {
-                        if rt.observe(observed).await.is_err() { eprintln!("Rust spike: observation failed"); }
+                    if let (true, Ok(observed)) = (epoch == provider_epoch && generation == rt.recovery_generation, observed) {
+                        if rt.observe(&observed).await.is_err() && !rt.state_failed {
+                            (rt.records, rt.goals) = rt.checkpoint.clone();
+                            let _ = rt.stop_for_history_error("Recovery observation refused; queued work preserved".into());
+                        }
                     }
+                }
+                Some(result) = reconnected_rx.recv() => {
+                    reconnect_worker.take();
+                    rt.recovering = false;
+                    rt.reconnect_due = std::time::Instant::now() + Duration::from_secs(2u64.pow(rt.reconnect_attempts));
+                    if let Err(error) = &result {
+                        let reason = match error.to_string().as_str() {
+                            "recovery_cleanup_unverified" => Some("Recovery child exit unverified; reconnect refused; queued work preserved"),
+                            "recovery_validation_refused" => Some("Recovery authority/validation refused; queued work preserved"),
+                            _ => None,
+                        };
+                        if let Some(reason) = reason {
+                            rt.transport_failed = false;
+                            rt.thread["lastError"] = json!(reason);
+                        }
+                    }
+                    if let Ok(connection) = result {
+                        let recovery::Connection { rpc, child: mut replacement, events, snapshot, targets, buffered } = connection;
+                        if rt.state_failed || !rt.transport_failed {
+                            let _ = timeout(Duration::from_secs(5), replacement.kill()).await;
+                            rt.publish();
+                            continue;
+                        }
+                        rt.rpc = rpc;
+                        provider_epoch += 1;
+                        child = replacement;
+                        rt.events = events;
+                        provider_stopped = false;
+                        rt.provider_exit = "not_requested";
+                        rt.history_failed = false;
+                        rt.transport_failed = false;
+                        rt.ready = true;
+                        let result = async {
+                            rt.observe(&snapshot).await?;
+                            rt.refresh_recovery_history(&snapshot)?;
+                            // Exact target reads follow resume and may already
+                            // contain a newer terminal status. Never rebuild the
+                            // window from the older snapshot after applying them.
+                            for observed in targets { rt.observe(&observed).await?; }
+                            for event in buffered { rt.event(event).await?; }
+                            rt.persist()?;
+                            Ok::<_,anyhow::Error>(())
+                        }.await;
+                        if result.is_err() && !rt.history_failed {
+                            (rt.records, rt.goals) = rt.checkpoint.clone();
+                            let _ = rt.stop_for_history_error("Recovery validation failed; queued work preserved".into());
+                        }
+                    }
+                    rt.publish();
                 }
             }
             if rt.rpc.failed() && !rt.history_failed {
                 let _ = rt.stop_for_transport_error();
             }
             if rt.history_failed && !provider_stopped {
-                notification_worker.0.abort();
-                observer.0.abort();
+                if !rt.can_reconnect() { notification_worker.0.abort(); }
                 rt.publish();
                 rt.record_provider_stop(timeout(Duration::from_secs(5), child.kill()).await);
                 rt.events.close();
@@ -323,6 +410,7 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
         }
         drop(notification_worker);
         drop(observer);
+        drop(reconnect_worker);
         } => {},
         }
         requests.close();
@@ -396,35 +484,70 @@ impl Runtime {
             }
         }
     }
-    async fn observe(&mut self, observed: Value) -> Result<()> {
-        if self.history_failed
-            || self.dispatch_blocked
-            || observed["thread"]["id"] != self.thread["id"]
-        {
+    fn refresh_recovery_history(&mut self, observed: &Value) -> Result<()> {
+        let mut fresh = Transcript::default();
+        for wire in observed["thread"]["turns"].as_array().ok_or(HistoryLimit)? {
+            let mapped = model::turn(wire);
+            let projected = self.projected(vec![mapped], false)?;
+            let mut turn = projected.first().ok_or(HistoryLimit)?.clone();
+            if let Some(old) = self.turns.iter().find(|t|t["id"] == turn["id"]) {
+                let mut prior = old.clone();
+                if prior["projectionOnly"] == true { prior["status"] = json!("inProgress"); }
+                model::retain_final_items(&prior, &mut turn)?;
+            }
+            fresh.insert(turn)?;
+        }
+        self.history_start = observed["treerHistory"]["start"].as_u64().ok_or(HistoryLimit)? as usize;
+        self.history_total = observed["treerHistory"]["total"].as_u64().ok_or(HistoryLimit)? as usize;
+        self.turns = fresh;
+        Ok(())
+    }
+    async fn observe(&mut self, observed: &Value) -> Result<()> {
+        if self.history_failed || self.claude {
             return Ok(());
         }
-        // Absence and idle flags are not completion. Only an explicit terminal
-        // accepted turn settles a running receipt; uncertainty is never cleared.
-        let terminal = observed["thread"]["turns"]
-            .as_array()
-            .and_then(|turns| {
-                turns.iter().find(|turn| {
-                    turn["id"] == self.thread["activeTurnId"]
-                        && matches!(
-                            turn["status"].as_str(),
-                            Some("completed" | "failed" | "interrupted")
-                        )
-                        && self.records.iter().any(|r| {
-                            r.submission["turn_id"] == turn["id"]
-                                && r.submission["state"] == "running"
-                        })
-                })
-            })
-            .cloned();
-        if let Some(turn) = terminal {
-            self.event(json!({"method":"turn/completed","params":{"threadId":self.thread["id"],"turn":turn}})).await?;
+        recovery::validate(observed, &self.thread["id"])?;
+        self.recovery_reads += 1;
+        self.idle_proof = (observed["thread"]["status"]["type"] == "idle").then(std::time::Instant::now);
+        for wire in observed["thread"]["turns"].as_array().unwrap() {
+            if self.thread["activeTurnId"] != wire["id"] && !self.records.iter().any(|r| recovery::needs_recovery(r) && r.submission["turn_id"].is_string() && r.submission["turn_id"] == wire["id"]) { continue; }
+            let terminal = matches!(wire["status"].as_str(), Some("completed" | "failed" | "interrupted"));
+            let mapped = if terminal {model::final_turn(wire)?} else {model::turn(wire)};
+            let projected = self.projected(vec![mapped], false)?;
+            let mut turn = projected.first().ok_or(HistoryLimit)?.clone();
+            if let Some(old) = self.turns.iter().find(|t|t["id"] == wire["id"]) {
+                if terminal {
+                    let mut prior = old.clone();
+                    if prior["projectionOnly"] == true { prior["status"] = json!("inProgress"); }
+                    model::retain_final_items(&prior, &mut turn)?;
+                }
+            }
+            // Do not insert an exact older target into the recent window or
+            // infer identity from projected/local history. Only this fresh read
+            // settles matching acknowledged receipts.
+            for record in &mut self.records {
+                if record.submission["turn_id"] == wire["id"] { recovery::reconcile_record(record, Some(&turn)); }
+            }
+            if terminal && self.thread["activeTurnId"] == wire["id"] {
+                self.thread["activeTurnId"] = Value::Null;
+            }
+            if wire["status"] == "inProgress" {
+                if self.thread["activeTurnId"].is_string() && self.thread["activeTurnId"] != wire["id"] { bail!("recovery_active_identity_mismatch"); }
+                self.thread["activeTurnId"] = wire["id"].clone();
+            }
+            if self.turns.iter().any(|t|t["id"] == wire["id"]) { self.upsert_turn(turn)?; }
         }
+        self.dispatch_blocked = self.records.iter().any(|r| recovery::needs_recovery(r) && (r.submission["state"] != "running" || !r.submission["turn_id"].is_string()));
+        if observed["thread"]["status"]["type"] == "active" && !self.thread["activeTurnId"].is_string() { self.dispatch_blocked = true; }
+        self.thread["status"] = json!(if self.thread["activeTurnId"].is_string() {"running"} else {"idle"});
+        if !self.dispatch_blocked { self.thread["lastError"] = Value::Null; }
+        self.persist()?;
+        self.publish();
         Ok(())
+    }
+    fn can_reconnect(&self) -> bool {
+        !self.claude && self.history_failed && self.transport_failed && !self.state_failed && self.thread["id"].is_string()
+            && matches!(self.rpc.diagnostics()["transport"].as_str(), Some("stdout_eof" | "rpc_timeout" | "stdin_write_error" | "stdin_write_timeout"))
     }
     async fn start(&mut self, config: &Config, saved: Option<Value>) -> Result<()> {
         if let Some(saved) = &saved {
@@ -584,6 +707,7 @@ impl Runtime {
         // Existing durable intent remains authoritative on restart.
         self.history_failed = true;
         self.state_failed = true;
+        self.transport_failed = false;
         self.ready = false;
         self.dispatch_blocked = true;
         self.thread["status"] = json!("error");
@@ -610,6 +734,9 @@ impl Runtime {
             snapshot["thread"]["historyUnavailable"]=json!(true);
         }
         snapshot["runtime"]["provider"] = self.rpc.diagnostics();
+        let unresolved: Vec<_> = self.records.iter().filter(|r| recovery::needs_recovery(r))
+            .map(|r|json!({"submissionId":r.submission["id"],"turnId":r.submission["turn_id"],"state":if r.submission["turn_id"].is_string(){"exact_turn_pending"}else{"unknown_dispatch"}})).collect();
+        snapshot["runtime"]["recovery"] = json!({"state":if self.state_failed {"storage_failure"} else if self.recovering {"reconnecting"} else if self.can_reconnect() && self.reconnect_attempts>=3 {"reconnect_exhausted"} else if self.history_failed && !self.transport_failed {"integrity_failure"} else if self.history_failed {"provider_unavailable"} else if self.dispatch_blocked {"reconciliation_required"} else {"observing"},"readCount":self.recovery_reads,"reconnectAttempts":self.reconnect_attempts,"unresolved":unresolved,"endpoint":"/api/recovery","freshHistorySupported":!self.claude,"automaticReplay":false});
         snapshot["runtime"]["provider"]["finalProjection"] = self.final_projection.clone();
         snapshot["runtime"]["journalHistory"] = json!({"state":self.disk_history_status,"diskLimitBytes":crate::disk_history::DISK_LIMIT,"sampleIntervalSeconds":300});
         self.changed.send_replace(Arc::new(snapshot));
@@ -637,7 +764,7 @@ impl Runtime {
                     .filter_map(|r| r.submission["turn_id"].as_str())
                     .find_map(|next| turns.iter().position(|t| t["id"] == next))
                     .unwrap_or(turns.len());
-                turns.insert(next,json!({"id":id,"status":if record.submission["state"] == "running" {"inProgress"} else {"completed"},"startedAt":record.submission["created_at"],"error":null,"items":[]}));
+                turns.insert(next,json!({"id":id,"projectionOnly":true,"status":if record.submission["state"] == "running" {"inProgress"} else {"completed"},"startedAt":record.submission["created_at"],"error":null,"items":[]}));
             }
             let Some(submission_id) = record.submission["id"].as_str() else {
                 continue;
@@ -705,7 +832,7 @@ impl Runtime {
         Ok(bounded)
     }
     async fn command(&mut self, method: &str, body: Value) -> Result<Value> {
-        if self.history_failed && !matches!(method, "queue" | "submission") {
+        if self.history_failed && !matches!(method, "queue" | "submission" | "recovery") {
             anyhow::bail!("runtime_blocked; queue paused");
         }
         if !matches!(method, "queue" | "submission") && self.store.recheck().is_err() {
@@ -713,6 +840,65 @@ impl Runtime {
             bail!("private_state_write_failed");
         }
         match method {
+            "recovery" => {
+                if self.state_failed { bail!("recovery_storage_unavailable"); }
+                match body["action"].as_str() {
+                    Some("recheck") => {
+                        if self.claude { bail!("claude_fresh_recovery_authority_unavailable"); }
+                        if self.history_failed && !self.can_reconnect() { bail!("recovery_validation_failure_requires_source_fix"); }
+                        if self.recovering { return Ok(json!({"accepted":true,"state":"reconnecting"})); }
+                        self.reconnect_attempts = 0;
+                        self.reconnect_due = std::time::Instant::now();
+                        Ok(json!({"accepted":true,"automaticReplay":false}))
+                    }
+                    Some("acknowledge_unknown") => {
+                        if let Some(record) = self.records.iter().find(|r|r.submission["id"] == body["submission_id"] && r.submission["recovery_disposition"]["action"] == "acknowledge_unknown") {
+                            if body["thread_id"] == self.thread["id"] && body["accept_unknown_outcome"] == true
+                                && body.get("expected_turn_id").is_some() && body.get("expected_error").is_some() && body["expected_turn_id"] == record.submission["turn_id"]
+                                && body["expected_error"] == record.submission["recovery_disposition"]["originalError"] {
+                                return Ok(json!({"accepted":true,"duplicate":true,"automaticReplay":false}));
+                            }
+                            bail!("recovery_disposition_binding_changed");
+                        }
+                        let current_idle = if self.claude {self.ready && self.rpc.claude_idle_for_disposition()} else {self.idle_proof.is_some_and(|at|at.elapsed()<=Duration::from_secs(5))};
+                        if self.history_failed || self.recovering || !current_idle
+                            || body["thread_id"] != self.thread["id"] || body["accept_unknown_outcome"] != true
+                        { bail!("recovery_requires_fresh_idle_and_explicit_disposition"); }
+                        let record = self.records.iter_mut().find(|r| r.submission["id"] == body["submission_id"] && recovery::needs_recovery(r)).ok_or_else(||anyhow!("recovery_submission_unavailable"))?;
+                        if body.get("expected_turn_id").is_none() || body.get("expected_error").is_none() || record.submission["turn_id"] != body["expected_turn_id"] || record.submission["error"] != body["expected_error"] { bail!("recovery_disposition_binding_changed"); }
+                        if self.thread["activeTurnId"].is_string() && self.thread["activeTurnId"] != record.submission["turn_id"] { bail!("recovery_other_active_turn"); }
+                        record.submission["recovery_disposition"] = json!({"originalState":record.submission["state"],"originalError":record.submission["error"],"action":"acknowledge_unknown","at":now(),"providerOutcome":"unknown","replayed":false,"idleEvidence":if self.claude {"initialized_current_adapter_no_active_request"} else {"fresh_provider_idle_read"}});
+                        record.submission["state"] = json!("interrupted");
+                        record.submission["error"] = json!("User acknowledged unknown provider outcome; input not replayed");
+                        let disposed_turn = record.submission["turn_id"].clone();
+                        let disposition = record.submission["recovery_disposition"].clone();
+                        let other_pending = self.records.iter().any(|r| recovery::needs_recovery(r) && r.submission["turn_id"] == disposed_turn);
+                        self.recovery_generation += 1;
+                        if !other_pending && self.thread["activeTurnId"] == disposed_turn {
+                            self.thread["activeTurnId"] = Value::Null;
+                            self.thread["status"] = json!("idle");
+                        }
+                        if self.claude && !other_pending {
+                            if let Some(mut turn) = self.turns.iter().find(|turn|turn["id"] == disposed_turn).cloned() {
+                                turn["status"] = json!("interrupted");
+                                turn["projectionOnly"] = json!(true);
+                                turn["recoveryDisposition"] = disposition;
+                                if let Err(error) = self.turns.insert(turn) {
+                                    (self.records, self.goals) = self.checkpoint.clone();
+                                    self.stop_for_history_error("Recovery display admission failed; queue preserved".into())?;
+                                    return Err(error);
+                                }
+                            }
+                        }
+                        self.dispatch_blocked = self.records.iter().any(recovery::needs_recovery);
+                        if !self.dispatch_blocked { self.thread["lastError"] = Value::Null; }
+                        self.persist()?;
+                        self.publish();
+                        Ok(json!({"accepted":true,"automaticReplay":false}))
+                    }
+                    _ => bail!("recovery_action_invalid"),
+                }
+            },
             "history_page" => {
                 if self.claude {bail!("claude_older_history_unavailable");}
                 let cursor=body["cursor"].as_str().ok_or_else(||anyhow!("history_cursor_invalid"))?;
@@ -1172,6 +1358,8 @@ impl Runtime {
                 .and_then(|item| item["id"].as_str()).map(str::to_owned);
         }
         // Persist intent BEFORE contacting the provider. No ambiguous replay.
+        self.idle_proof = None;
+        self.recovery_generation += 1;
         self.records[index].submission["state"] = json!("running");
         self.dispatch_blocked = true;
         self.persist()?;
@@ -1298,7 +1486,17 @@ impl Runtime {
         // published receipts/goals may become durable with the failure fence.
         (self.records, self.goals) = self.checkpoint.clone();
         if self.thread["id"].is_string() {
-            return self.stop_for_history_error(reason.into());
+            // Publish the failure class atomically with its fence. A temporary
+            // integrity classification must not escape before transport retry.
+            self.transport_failed = matches!(self.rpc.diagnostics()["transport"].as_str(), Some("stdout_eof" | "rpc_timeout" | "stdin_write_error" | "stdin_write_timeout"));
+            self.history_failed = true;
+            self.ready = false;
+            self.dispatch_blocked = true;
+            self.thread["status"] = json!("error");
+            self.thread["lastError"] = json!(reason);
+            self.persist()?;
+            self.publish();
+            return Ok(());
         }
         // Initialization may fail before a thread exists. Preserve the previous
         // durable journal instead of replacing it with an invalid thread ID.
@@ -1311,6 +1509,7 @@ impl Runtime {
         Ok(())
     }
     fn stop_for_history_error(&mut self, reason: String) -> Result<()> {
+        self.transport_failed = false;
         self.history_failed = true;
         self.ready = false;
         self.dispatch_blocked = true;
@@ -1393,7 +1592,10 @@ impl Runtime {
                 self.persist()?;
             }
             "turn/started" => {
+                self.idle_proof = None;
+                self.recovery_generation += 1;
                 if self.turns.iter().any(|t| t["id"] == p["turn"]["id"]
+                    && t["projectionOnly"] != true
                     && matches!(t["status"].as_str(), Some("completed" | "interrupted" | "failed")))
                 {
                     self.stop_for_history_error("Provider reopened a terminal turn".into())?;
@@ -1410,6 +1612,8 @@ impl Runtime {
                 self.thread["activeTurnId"] = p["turn"]["id"].clone();
             }
             "turn/completed" => {
+                self.idle_proof = None;
+                self.recovery_generation += 1;
                 self.final_projection = json!({"retainedOnly":0,"sameIdUpdates":0,"conflicts":0,"refusals":0});
                 let turn_id = p["turn"]["id"].clone();
                 if !turn_id.is_string() { return Err(InvalidTurnIdentity.into()); }
@@ -1419,7 +1623,9 @@ impl Runtime {
                 let projected = self.projected(vec![model::final_turn(&p["turn"])?], false)?;
                 let mut turn = projected.first().ok_or(HistoryLimit)?.clone();
                 let counts = if let Some(old) = self.turns.iter().find(|t| t["id"] == turn_id) {
-                    model::retain_final_items(old, &mut turn)?
+                    let mut prior = old.clone();
+                    if prior["projectionOnly"] == true { prior["status"] = json!("inProgress"); }
+                    model::retain_final_items(&prior, &mut turn)?
                 } else { (0, 0) };
                 let status = if turn["status"] == "failed" {
                     "failed"
@@ -1442,7 +1648,7 @@ impl Runtime {
                 self.final_projection["sameIdUpdates"] = json!(counts.1);
                 for record in &mut self.records {
                     if record.submission["turn_id"] == turn_id
-                        && record.submission["state"] == "running"
+                        && recovery::needs_recovery(record)
                     {
                         record.submission["state"] = json!(status);
                         record.submission["assistant_preview"] = json!(assistant);
@@ -1452,6 +1658,10 @@ impl Runtime {
                 if self.thread["activeTurnId"] == turn_id {
                     self.thread["activeTurnId"] = Value::Null;
                     self.thread["status"] = json!("idle");
+                }
+                if self.dispatch_blocked {
+                    self.dispatch_blocked = self.records.iter().any(|r| recovery::needs_recovery(r) && (r.submission["state"] != "running" || !r.submission["turn_id"].is_string()));
+                    if !self.dispatch_blocked { self.thread["lastError"] = Value::Null; }
                 }
                 self.persist()?;
             }
@@ -1536,7 +1746,9 @@ impl Runtime {
                 .as_str()
                 .or(r.submission["sender"]["agent_id"].as_str());
             let Some(recipient) = recipient else { continue };
-            let payload = json!({"type":"treer.prompt.completed","status":state,"submission_id":r.submission["id"],"submission_ids":[r.submission["id"]],"turn_id":r.submission["turn_id"],"assistant_preview":r.submission["assistant_preview"],"error":r.submission["error"]}).to_string();
+            let mut payload = json!({"type":"treer.prompt.completed","status":state,"submission_id":r.submission["id"],"submission_ids":[r.submission["id"]],"turn_id":r.submission["turn_id"],"assistant_preview":r.submission["assistant_preview"],"error":r.submission["error"]});
+            if r.submission["recovery_disposition"].is_object() { payload["recovery_disposition"] = r.submission["recovery_disposition"].clone(); }
+            let payload = payload.to_string();
             let args = vec![
                 "send".into(),
                 "--to".into(),

@@ -508,6 +508,7 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
         }
     };
     match path.as_str() {
+        "/api/recovery" => call(&app, "recovery", body, StatusCode::ACCEPTED).await,
         "/api/goal" if method == "PUT" || method == "DELETE" => {
             let limit = history_limit(&body);
             body["clear"] = json!(method == "DELETE");

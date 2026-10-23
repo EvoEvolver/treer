@@ -202,6 +202,9 @@ impl Rpc {
         if diagnostic["transport"] == "open" { diagnostic["transport"] = json!(reason); }
     }
     pub fn failed(&self) -> bool { self.diagnostics.lock().unwrap()["transport"] != "open" }
+    pub fn claude_idle_for_disposition(&self) -> bool {
+        !self.failed() && self.claude.as_ref().is_some_and(|adapter|adapter.lock().unwrap().idle_for_disposition())
+    }
     pub fn stderr_saved(&self, saved: bool) {
         self.diagnostics.lock().unwrap()["stderrCapture"] = json!(if saved { "saved" } else { "failed" });
     }
