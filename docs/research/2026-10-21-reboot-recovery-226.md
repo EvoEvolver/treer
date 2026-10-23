@@ -104,7 +104,10 @@ without notifications or required receipts; the default queued prompt contract
 is not relaxed. Thus preparation failures remain
 distinct from cold Host loss and restore. Cold stop/start, absent-Host identity,
 restart guidance, first refusal, post-refusal Host identity/cache, provider health,
-second restore/report and final identity/revision each have a fixed check label. A failed run is not a
+second restore/report and final identity/revision each have a fixed check label. After restarting Proxy containers, refresh the
+harness API base from the actual new Docker port mapping before browser API
+queries. `policy226.json` contains at most two fixed projections (HTTP status,
+failure mode, revision and error-present boolean), never provider/error bodies. A failed run is not a
 successful recovery or proof of historical incident cause.
 
 Focused entry controls (no Docker or managed configuration needed):

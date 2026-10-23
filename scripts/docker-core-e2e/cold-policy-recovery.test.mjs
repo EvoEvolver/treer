@@ -1,7 +1,7 @@
 // Orchestration controls only: fake adapters are NOT native/Policy acceptance.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {runColdPolicyRecovery, restoreReport, sameRegistration, scenario} from './cold-policy-recovery.mjs';
+import {runColdPolicyRecovery, restoreReport, sameRegistration, scenario, policyObservation} from './cold-policy-recovery.mjs';
 
 function harness(fault) {
   let cold = false, restored = 0, paused = false;
@@ -15,9 +15,9 @@ function harness(fault) {
     cli: async()=>({agent_id:'agent'}),
     command: async()=>({enabled:fault!=='startup'}),
     api: async (route, body)=> {
-      if(route.endsWith('/output')) return {data:{text:'READY cold'}};
-      if(route.endsWith('/default-app')) return {data:{provider:{app_id:'policy'}, app:{port:9000}}};
-      return {data:{provider:{app_id:'policy',failure_mode:'fail_closed',max_stale_seconds:0},
+      if(route.endsWith('/output')) return {status:200,data:{text:'READY cold'}};
+      if(route.endsWith('/default-app')) return {status:200,data:{provider:{app_id:'policy'}, app:{port:9000}}};
+      return {status:200,data:{provider:{app_id:'policy',failure_mode:'fail_closed',max_stale_seconds:0},
         cache:{revision: restored < 2 ? (fault==='stale' ? 1 : null) : 7,last_error:null}}};
     },
     docker: async (...args)=> {
@@ -77,4 +77,13 @@ test('unknown scenario and incomplete registration proof refuse',()=>{
   assert.throws(()=>scenario('remote'));
   const reg={workspace_id:'ws',server_id:'a',registration_hashes:{},credentials_present:true,service_manager:'nohup'};
   assert.throws(()=>sameRegistration(reg,reg));
+});
+
+test('Policy observation retains bounded facts without provider/error bodies', () => {
+  const observed = policyObservation({status:200,data:{provider:{failure_mode:'fail_closed',secret:'credential'},cache:{revision:7,last_error:'private detail'}}}, 'unavailable');
+  assert.equal(observed.cache_revision,7);
+  assert.equal(observed.cache_error_present,true);
+  assert(!JSON.stringify(observed).includes('credential'));
+  assert(!JSON.stringify(observed).includes('private detail'));
+  assert.equal(policyObservation({status:503,data:{error:'private'}}, 'recovered').cache_revision,'unavailable');
 });

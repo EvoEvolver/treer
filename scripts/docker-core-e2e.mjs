@@ -112,6 +112,7 @@ const snapshot = async () => (await api(`/api/workspaces/${ws}/snapshot`)).data;
 const appInfo = async id => (await api(`/api/workspaces/${ws}/apps/${id}`)).data.app;
 const agents = {}, services = {}, apps = {};
 const recovery = {};
+const policyObservations = [];
 const proxyEntries = {};
 const probe = (agent, label, mode, target) => command(agent,label,[],{program:['python3','/fixtures/proxy_probe.py',mode,target]});
 let networkCreated = false;
@@ -190,10 +191,16 @@ try {
     const receipt = await runColdPolicyRecovery({api, cli, command, docker, names, snapshot, wait, check, sleep, workspace: ws,
       fingerprint: async () => JSON.parse(await docker('exec', '-e', 'TREER_SYNTHETIC_RECOVERY_226=1',
         names('machine-a'), 'python3', '/fixtures/recovery_fingerprint.py', ws, server)),
+      observePolicy: async observation => {
+        policyObservations.push(observation);
+        fs.writeFileSync(path.join(dir, 'policy226.json'), JSON.stringify(policyObservations));
+      },
       proxyReady: async () => {
         for (const side of ['a', 'b']) {
           const url = 'http://' + await docker('port', names('proxy-' + side), '8787/tcp');
           await wait('226 restarted Proxy ' + side, async () => (await fetch(url + '/api/health')).ok);
+          // Docker may allocate a different ephemeral host port after restart.
+          if (side === 'a') base = url;
         }
       },
     });

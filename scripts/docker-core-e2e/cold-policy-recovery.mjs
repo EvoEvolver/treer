@@ -26,6 +26,17 @@ export function sameRegistration(before, after) {
   assert.equal(after.credentials_present, true);
   assert.equal(after.service_manager, 'nohup');
 }
+export function policyObservation(response, phase) {
+  assert(['unavailable', 'recovered'].includes(phase));
+  const data = response.data;
+  return {schema: 1, phase,
+    http_status: Number.isInteger(response.status) ? response.status : 0,
+    failure_mode: ['fail_closed', 'fail_open'].includes(data?.provider?.failure_mode) ? data.provider.failure_mode : 'unavailable',
+    cache_revision: data?.cache?.revision === null ? null
+      : Number.isSafeInteger(data?.cache?.revision) ? data.cache.revision : 'unavailable',
+    cache_error_present: typeof data?.cache?.last_error === 'string',
+  };
+}
 export async function runColdPolicyRecovery(h) {
   const {api, cli, docker, names, snapshot, wait, check, sleep, fingerprint} = h;
   const workspace = h.workspace;
@@ -119,7 +130,10 @@ export async function runColdPolicyRecovery(h) {
       receipt.denied_host_identity = denied.host_identity;
       });
       await check('226 unavailable provider has no cached revision', async () => {
-      const status = (await api(`/api/workspaces/${workspace}/policy-provider`)).data;
+      const response = await api(`/api/workspaces/${workspace}/policy-provider`, undefined, {raw: true});
+      await h.observePolicy?.(policyObservation(response, 'unavailable'));
+      assert.equal(response.status, 200, 'Policy status HTTP unavailable');
+      const status = response.data;
       assert.equal(status.provider.failure_mode, 'fail_closed');
       assert.equal(status.cache.revision, null, 'no stale compiled Policy allowance');
       receipt.first_restore = 'policy_provider_unavailable';
@@ -148,7 +162,10 @@ export async function runColdPolicyRecovery(h) {
       assert.equal(after.proxy_connected, true);
       });
       await check('226 recovered Policy revision and machine identities', async () => {
-      const status = (await api(`/api/workspaces/${workspace}/policy-provider`)).data;
+      const response = await api(`/api/workspaces/${workspace}/policy-provider`, undefined, {raw: true});
+      await h.observePolicy?.(policyObservation(response, 'recovered'));
+      assert.equal(response.status, 200, 'Policy status HTTP unavailable');
+      const status = response.data;
       assert.equal(status.provider.app_id, receipt.provider_app_id);
       assert.equal(status.provider.failure_mode, 'fail_closed');
       assert(Number.isInteger(status.cache.revision));
