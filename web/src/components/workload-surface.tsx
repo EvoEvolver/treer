@@ -10,6 +10,7 @@ import { MachineRecovery } from "@/components/control-plane-ui"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { t } from "@/i18n"
+import { AppInterface } from '@/components/app-interface'
 import { IsolatedAgentInterface } from '@/components/isolated-agent-interface'
 import type { AgentEmbedMode } from '@/components/use-agent-origin-capability'
 
@@ -45,7 +46,7 @@ export const WorkloadSurface = forwardRef<TerminalPaneHandle, {
   if (url && agentInterface && embedMode !== 'legacy') return <IsolatedAgentInterface key={`${interfaceFrameKey(agent.agent_id, agentInterface.instance_id, agentInterface.registered_at, tab.revision)}:${embedMode}:${embedOrigin ?? ''}`} workspaceId={workspaceId} agentId={agent.agent_id} origin={embedMode === 'isolated' ? embedOrigin : undefined} pending={embedMode === 'pending'} fallbackUrl={url} title={`${path || 'Agent'} interface`} theme={theme} />
   if (url) return <div className="flex size-full min-h-0 min-w-0 flex-col overflow-hidden">
     {showApp && <p role="note" className="shrink-0 border-b bg-sidebar px-3 py-2 text-xs leading-5 text-foreground">{t("surface.app_shared_origin")}</p>}
-    <iframe ref={frame} key={interfaceFrameKey(agent.agent_id, agentInterface?.instance_id ?? app?.hostname ?? "", agentInterface?.registered_at ?? String(agent.run_generation ?? ""), tab.revision)} src={url} title={`${path || "Agent"} interface`} className="block w-full min-h-0 flex-1 border-0 bg-background" style={{ colorScheme: theme }} sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox" onLoad={() => { loadedFrame.current = frame.current; postEmbedTheme(frame.current, theme, readEmbedAppearance()) }} />
+    {showApp ? <AppInterface key={`${workspaceId}:${app!.app_id}:${interfaceFrameKey(agent.agent_id, app?.hostname ?? "", String(agent.run_generation ?? ""), tab.revision)}`} workspaceId={workspaceId} appId={app!.app_id} url={url} title={`${path || "App"} interface`} theme={theme} visible={visible} /> : <iframe ref={frame} key={interfaceFrameKey(agent.agent_id, agentInterface?.instance_id ?? app?.hostname ?? "", agentInterface?.registered_at ?? String(agent.run_generation ?? ""), tab.revision)} src={url} title={`${path || "Agent"} interface`} className="block w-full min-h-0 flex-1 border-0 bg-background" style={{ colorScheme: theme }} sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox" onLoad={() => { loadedFrame.current = frame.current; postEmbedTheme(frame.current, theme, readEmbedAppearance()) }} />}
   </div>
   return <div className={cn("flex size-full min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16", mobile && "!p-0")}>
     <div className={cn("grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]", mobile && "max-w-none grid-rows-[44px_minmax(0,1fr)_auto] rounded-none border-0 shadow-none")}>

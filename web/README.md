@@ -178,6 +178,57 @@ Handlers remain active until the last replay write has parsed, then are disposed
 before queued live output parses. Live queries still respond; user input is never
 filtered by this replay guard. See the [reproduction and impact report](terminal-replay-report.md).
 
+## Managed App restart recovery
+
+An App's current runtime generation and explicit tab reload revision each own a
+fresh interface recovery budget. Before the initial iframe navigation, the
+Console sends credentialed, uncached **HEAD** requests to the same fixed App UI
+root (including its appearance parameters). It never guesses a health endpoint,
+follows a probe redirect, falls back to GET, reads arbitrary App content, or
+replays a user POST. A successful response, HEAD-not-supported 405, or manual
+redirect means only that the route responded; the iframe still performs its
+ordinary authenticated root GET and any normal navigation redirects.
+
+Recovery makes at most eight HEAD attempts within 30 seconds, with a three-second
+request timeout and backoff. Authentication refusals stop immediately; other
+non-transient responses and an exhausted budget show an accessible error and
+**Retry connection**. A hung iframe load also stops with an explicit retry.
+Hidden workload tabs defer probes; already loaded normal Apps are not polled or
+reloaded by appearance changes or later in-App navigation. A fresh user retry
+starts a new finite budget. App identity/generation changes cancel old requests.
+
+A matching Proxy additionally emits `treer.app-ui.unavailable` only for its own
+pre-response transient tunnel failures on an initial root iframe GET. This closes
+the HEAD-success / failed-GET race without inspecting an App's HTML or adding
+scripts to successful pages. The parent checks the exact current iframe window,
+Proxy origin, workspace and App IDs, and consumes the same recovery budget.
+The bridge is a narrow startup signal, not an authentication or health authority;
+trusted App code sharing that origin retains its existing authority. It does not
+classify upstream App-generated errors or failures after response headers, and
+older Proxies cannot report this final navigation race.
+
+Console-to-Proxy probing requires the existing configured credentialed CORS and
+normal workspace cookie contract. Missing CORS, cookies, or browser permission
+is an unavailable check, never opaque `no-cors` success or an identity workaround.
+The Agent isolated/compatibility iframe paths are unchanged.
+
+Focused actual-HTTP regression entry (no managed process restart):
+`TREER_APP_UI_ERROR_FIXTURE=/absolute/path/error-response.json node e2e/run.mjs --config playwright.app-reconnect.config.ts --project chromium` from `web/`.
+First export the actual error HTML/status/nonce CSP for the fixture Console origin
+using the explicit ignored Core test (no runtime endpoint is added):
+`TREER_APP_UI_FIXTURE_CONSOLE_ORIGIN=http://127.0.0.1:19142 cargo test --locked -p treer-proxy api::app_ui::tests::export_navigation_error_browser_fixture -- --ignored --nocapture`.
+Save only the JSON following `TREER_APP_UI_ERROR_FIXTURE` as the named input;
+the browser gateway serves its status, headers and body unchanged.
+It uses production-origin configuration with the real WorkloadSurface component,
+a disposable HTTP gateway and an independently delayed listener. The gateway
+serves the actual production renderer's exported error response, not reconstructed
+JavaScript; this is not a claim of deployed Proxy execution.
+Core owns the real bridge's focused route tests. The local fixture owner cookie
+is synthetic and never represents a real human session. Historical old-version
+control: use the unchanged baseline component and `TREER_EXPECT_OLD=1` with the
+Playwright CLI in a sanitized environment; it must retain raw `stream_failed`
+after the five-second listener recovery.
+
 ## Live Managed App discovery
 
 The console refreshes its authoritative Core App list after App-like runtime
