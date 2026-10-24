@@ -5,6 +5,8 @@ export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "
 export interface ImageAttachment { id: string; mime: "image/png" | "image/jpeg" | "image/webp" | "image/gif"; size: number }
 
 export interface HistoryItem {
+  /** Retained local input whose historical position has no provider/receipt anchor. */
+  positionUnavailable?: boolean;
   attachments?: ImageAttachment[];
   id: string;
   kind: "userMessage" | "agentMessage" | "reasoning" | "commandExecution" | "fileChange" | "plan" | "toolCall" | "other";

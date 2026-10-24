@@ -120,9 +120,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     let socket: WebSocket | null = null;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let closed = false;
+    let socketSnapshotReceived = false;
     request<Snapshot>("api/state")
-      .then((snapshot) => dispatch({ type: "snapshot", snapshot, source: "http" }))
-      .catch((error: Error) => dispatch({ type: "error", message: error.message }));
+      // This read started before the socket. Once a live state arrived, its
+      // delayed response (or error) must not rewind the initial history window.
+      .then((snapshot) => { if (!closed && !socketSnapshotReceived) dispatch({ type: "snapshot", snapshot, source: "http" }); })
+      .catch((error: Error) => { if (!closed && !socketSnapshotReceived) dispatch({ type: "error", message: error.message }); });
     function connect() {
       clearTimeout(timer);
       socket = openSocket();
@@ -136,7 +139,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       socket.addEventListener("message", (event) => {
         try {
           const payload = JSON.parse(String(event.data)) as Snapshot;
-          if (payload?.type === "state") dispatch({ type: "snapshot", snapshot: payload, source: "ws" });
+          if (payload?.type === "state") {
+            socketSnapshotReceived = true;
+            dispatch({ type: "snapshot", snapshot: payload, source: "ws" });
+          }
           dispatch({ type: "connected", value: true });
         } catch { /* ignore malformed frames */ }
       });

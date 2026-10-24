@@ -779,6 +779,14 @@ images may only be same-origin, `data:` raster or `blob:` and open in a zoomable
 long output opens in a dialog. Earlier history loads through "Load earlier messages"
 without losing the reader's place; scrolling up shows "Jump to latest" instead of
 pulling the page.
+Returning from a bounded history page to "Back to latest messages" resets its
+reading anchor and follows the latest message. Legacy steering inputs whose
+original position is absent are shown at the turn's tail with an explicit
+position-unavailable note until an ordered native snapshot supplies the position;
+their relative place is not guessed from receipt timestamps.
+During initial load, a received live WebSocket state takes precedence over the
+earlier bootstrap HTTP read, including when both use the same history limit.
+Later explicit history and prompt requests still apply their HTTP responses.
 
 File links in messages open the read-only file browser and immediately preview the
 file (the Preview tab on phones). Workspace-relative paths, absolute paths inside

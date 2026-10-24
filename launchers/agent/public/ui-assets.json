@@ -13,23 +13,23 @@
     },
     {
       "path": "ui.js",
-      "bytes": 277904,
-      "sha256": "04b478b0fd851cfe1713c7a6b418c890875681425ba6e5080e8451ef7780a381"
+      "bytes": 278168,
+      "sha256": "0a4c4382dee18f7d176885765a4b190bbff43c6b3f92076cf00df7f1c9860d19"
     },
     {
-      "path": "MarkdownPreview-U7TEUGZP.js",
+      "path": "MarkdownPreview-EVCNX3ML.js",
       "bytes": 258,
-      "sha256": "ef7708a069814990119b203792e8fda0dc7f0f11bddec8fed6985e21dc5a634b"
+      "sha256": "a8a136b7bd6b9578c7273fbdc68718fe72eb36800dadbf3c37578c32160d0454"
     },
     {
-      "path": "chunk-WC7B5MXR.js",
+      "path": "chunk-BE6JHFJG.js",
       "bytes": 81117,
-      "sha256": "92b14d8a2e0a0e4b1bbd5816a7ead4e21517d515a46aad99ae738cbfc32dd4c0"
+      "sha256": "7e853817b60fa30d487bf53c070153e24c38ed64a9f3d61403812817727621b9"
     },
     {
-      "path": "ImagePreview-VKW74ORS.js",
+      "path": "ImagePreview-6GAG3PNT.js",
       "bytes": 1147,
-      "sha256": "dba428f4c0e5e4f11c807f440b74e6d03b593fc0534da0ef567991041ba20bed"
+      "sha256": "d630e5693db6b4096a69593f59094fd75f487b4cde9b071fa8cdff58279838de"
     },
     {
       "path": "chunk-R7SBWEKE.js",
@@ -37,9 +37,9 @@
       "sha256": "8d968dd67534cf4919492b964d23929a1b2388132fee68ae975b9345eb41bdaf"
     },
     {
-      "path": "PdfPreview-R6UPT22R.js",
+      "path": "PdfPreview-I6KRJ4WJ.js",
       "bytes": 433769,
-      "sha256": "1bb959b428955c3b960baef2e57380e2a6f1190ebb067a85aa3d8a3e0bb3131e"
+      "sha256": "9dc32a4c1837fb0d4f39c524891164a4ec5a6d4f572622d0671fb1eb25dc487e"
     },
     {
       "path": "chunk-OW72X7I2.js",
@@ -47,14 +47,14 @@
       "sha256": "5104dfeb74d017b5471c950fd2854ca1edaaadf9f86c066efc34e8c7eb5ff134"
     },
     {
-      "path": "chunk-AAWGHNGN.js",
-      "bytes": 33182,
-      "sha256": "edb22f7a210fec0412c7920cf496d3c08df2f4bf8e20acdedcf0c540f19cbb74"
+      "path": "chunk-OVPCE5YK.js",
+      "bytes": 33427,
+      "sha256": "1724eeca2d424df91966cd880c750c066d22879d64a42fccaa81f6e4fe259c7f"
     },
     {
       "path": "ui.css",
-      "bytes": 67840,
-      "sha256": "bd4b6b5a966fbf31b45448444caca772ccef9e4cba54bbf154a0b1262a2d5c59"
+      "bytes": 67902,
+      "sha256": "8d625d88308a7c58fbccd738ed50062edffaae0810c10d8cc80e62bef41c52ac"
     },
     {
       "path": "pdf-worker-9536359f1b836785.js",

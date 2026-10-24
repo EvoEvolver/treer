@@ -52,6 +52,7 @@ export const zh: Partial<Record<MessageKey, string>> = {
   "banner.reconnecting": "正在重新连接,草稿会保留。",
   "banner.retry": "立即重试",
   "message.you": "你",
+  "message.positionUnavailable": "已保留的输入 · 原始历史未提供消息位置",
   "message.from": "来自 {{name}}",
   "activity.items": "{{count}} 项活动",
   "composer.placeholder": "给 {{name}} 发消息",

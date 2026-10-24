@@ -494,7 +494,7 @@ impl Runtime {
             if let Some(old) = self.turns.iter().find(|t|t["id"] == turn["id"]) {
                 let mut prior = old.clone();
                 if prior["projectionOnly"] == true { prior["status"] = json!("inProgress"); }
-                model::retain_final_items(&prior, &mut turn)?;
+                self.retain_projected_items(&prior, &mut turn)?;
             }
             fresh.insert(turn)?;
         }
@@ -520,7 +520,7 @@ impl Runtime {
                 if terminal {
                     let mut prior = old.clone();
                     if prior["projectionOnly"] == true { prior["status"] = json!("inProgress"); }
-                    model::retain_final_items(&prior, &mut turn)?;
+                    self.retain_projected_items(&prior, &mut turn)?;
                 }
             }
             // Do not insert an exact older target into the recent window or
@@ -749,6 +749,28 @@ impl Runtime {
     fn history(&self) -> Result<Transcript> {
         self.projected(self.turns.to_vec(),self.history_start==0 && self.turns.dropped==0)
     }
+    fn retain_projected_items(&self, old: &Value, next: &mut Value) -> Result<(usize, usize), model::InvalidFinalSnapshot> {
+        let mut prior = old.clone();
+        // Legacy steering receipts have no persisted item-position evidence.
+        // Their guessed display slot must not veto a later ordered native
+        // snapshot. Remove only that receipt's positional constraint; native
+        // activity ordering, terminal/output guards and dispatch authority stay
+        // with retain_final_items. An omitted echo supplies no new position.
+        if let Some(items) = prior["items"].as_array_mut() {
+            items.retain(|item| !self.records.iter().any(|record|
+                record.receipt["disposition"] == "steered" && record.projection_after.is_none()
+                && record.submission["turn_id"] == old["id"]
+                && item["kind"] == "userMessage" && item["submissionId"] == record.submission["id"]
+                && item["sourceTurnId"] == old["id"] && item["text"] == record.text
+                && (item["providerAssignedId"] != true || item["positionProvisional"] == true)
+                && next["items"].as_array().is_some_and(|incoming| incoming.iter().any(|native|
+                    native["providerAssignedId"] == true && native["kind"] == "userMessage"
+                    && native["sourceTurnId"] == old["id"]
+                    && native["submissionId"] == record.submission["id"]
+                    && native["text"] == record.text))));
+        }
+        model::retain_final_items(&prior, next)
+    }
     fn projected(&self, mut turns: Vec<Value>, synthesize: bool) -> Result<Transcript> {
         // Provider snapshots may omit locally submitted user items. The journal
         // already owns their durable text and attested metadata; project it
@@ -787,12 +809,28 @@ impl Runtime {
             // identical accepted steer inputs remain distinct submissions.
             let local = items.iter().position(|item| item["kind"] == "userMessage" && item["submissionId"] == record.submission["id"]);
             let native = items.iter().position(|item| item["kind"] == "userMessage" && item["text"] == record.text && !item["submissionId"].is_string());
+            let unpositioned = record.receipt["disposition"] == "steered" && record.projection_after.is_none();
             if let (Some(local), Some(native)) = (local, native) {
                 // Keep the receipt-owned first-observed position when a late
                 // native echo arrives after tool items. Removing the local
                 // slot would otherwise reorder shared completion anchors.
-                let echoed = items.remove(native);
-                items[local - usize::from(native < local)] = echoed;
+                if unpositioned && (items[local]["providerAssignedId"] != true || items[local]["positionProvisional"] == true) {
+                    // A legacy fallback is not evidence that this user spoke
+                    // before all the tools. Keep the native occurrence in its
+                    // own slot instead of moving it to the guessed prefix.
+                    items.remove(local);
+                } else {
+                    let echoed = items.remove(native);
+                    items[local - usize::from(native < local)] = echoed;
+                }
+            } else if let Some(local) = local.filter(|&at| unpositioned && items[at]["providerAssignedId"] != true) {
+                // No historical slot can be reconstructed without an anchor
+                // or a native occurrence. Keep the input visible separately at
+                // the turn's tail, explicitly marked as unpositioned, rather
+                // than inventing an earlier place in the conversation.
+                let mut item = items.remove(local);
+                item["positionUnavailable"] = json!(true);
+                items.push(item);
             }
             let existing = items.iter().position(|item| {
                 item["kind"] == "userMessage"
@@ -827,8 +865,10 @@ impl Runtime {
                             .or_else(|| previous[..boundary].iter().rev()
                                 .find_map(|old| items.iter().position(|item| item["id"] == old["id"]).map(|at| at + 1)))
                     })
-                    .unwrap_or_else(|| items.iter().take_while(|i| i["kind"] == "userMessage").count());
-                items.insert(before, json!({"id":item_id,"kind":"userMessage","text":record.text,"sender":record.submission["sender"],"submissionId":record.submission["id"],"detailText":null,"sourceTurnId":id,"attachments":record.images}));
+                    .unwrap_or_else(|| if unpositioned {items.len()} else {items.iter().take_while(|i| i["kind"] == "userMessage").count()});
+                let mut item = json!({"id":item_id,"kind":"userMessage","text":record.text,"sender":record.submission["sender"],"submissionId":record.submission["id"],"detailText":null,"sourceTurnId":id,"attachments":record.images});
+                if unpositioned { item["positionUnavailable"] = json!(true); }
+                items.insert(before, item);
                 matched.insert((id.to_string(), json!(item_id).to_string()));
             }
         }
@@ -1630,7 +1670,7 @@ impl Runtime {
                 let counts = if let Some(old) = self.turns.iter().find(|t| t["id"] == turn_id) {
                     let mut prior = old.clone();
                     if prior["projectionOnly"] == true { prior["status"] = json!("inProgress"); }
-                    model::retain_final_items(&prior, &mut turn)?
+                    self.retain_projected_items(&prior, &mut turn)?
                 } else { (0, 0) };
                 let status = if turn["status"] == "failed" {
                     "failed"
@@ -1676,7 +1716,18 @@ impl Runtime {
                     let items = turn["items"]
                         .as_array_mut()
                         .ok_or_else(|| anyhow!("invalid turn items"))?;
-                    let mapped = model::item(&p["item"], turn_id, items.len());
+                    let mut mapped = model::item(&p["item"], turn_id, items.len());
+                    // A late user lifecycle event tells us the item identity,
+                    // but not its place among earlier items in a resumed turn.
+                    // Only the ordered turn snapshot establishes that position.
+                    if mapped["kind"] == "userMessage" && self.records.iter().any(|record|
+                        record.receipt["disposition"] == "steered" && record.projection_after.is_none()
+                        && record.submission["turn_id"] == turn_id && record.text == mapped["text"]
+                        && items.iter().any(|old| old["submissionId"] == record.submission["id"]
+                            && (old["providerAssignedId"] != true || old["positionProvisional"] == true))) {
+                        mapped["positionProvisional"] = json!(true);
+                        mapped["positionUnavailable"] = json!(true);
+                    }
                     if let Some(old) = items.iter_mut().find(|i| i["id"] == mapped["id"]) {
                         *old = mapped;
                     } else {

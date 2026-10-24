@@ -52,6 +52,7 @@ export const en = {
   "banner.reconnecting": "Reconnecting. Your draft is kept.",
   "banner.retry": "Retry now",
   "message.you": "You",
+  "message.positionUnavailable": "Retained input · its position in the provider history is unavailable",
   "message.from": "From {{name}}",
   "activity.items": "{{count}} activity items",
   "composer.placeholder": "Message {{name}}",

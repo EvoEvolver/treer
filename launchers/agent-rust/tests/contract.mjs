@@ -258,6 +258,61 @@ for(const mode of ['omitted','native','summary'])test('history order keeps recei
   assert.equal(calls.filter(c=>c.method==='turn/start').length,2);assert.equal(calls.filter(c=>c.method==='turn/steer').length,1);
 });
 
+for(const scenario of ['distinct','identical','contradiction'])test('legacy unanchored steering yields to ordered native echoes instead of pinning users at top '+scenario,{skip:useNode,timeout:20000},async t=>{
+  const identical=scenario==='identical';
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/legacy-steer-order-provider.mjs')});
+  const first=await s.post({text:'initial question',operation_id:'legacy-first'}).then(r=>r.json());
+  const steers=[];
+  for(let n=0;n<2;n++){
+    steers.push(await s.post({text:'steering question '+(identical?0:n),operation_id:'legacy-steer-'+n,delivery:'steer'}).then(r=>r.json()));
+    await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.thread.turns[0]?.items.some(i=>i.text==='after steering '+n));
+  }
+  const unbound=await s.post({text:'cancelled input has no provider turn',operation_id:'legacy-unbound'}).then(r=>r.json());
+  const unboundRecord=await fetch(s.base+'/v1/submissions/'+unbound.submission.id,{headers:s.headers}).then(r=>r.json());
+  assert.equal(unboundRecord.submission.turn_id,null);
+  assert.equal((await fetch(s.base+'/api/queue/'+unbound.submission.id,{method:'DELETE'})).status,200);
+  const cancelled=await fetch(s.base+'/v1/submissions/'+unbound.submission.id,{headers:s.headers}).then(r=>r.json());
+  assert.equal(cancelled.submission.state,'interrupted');
+  assert.equal(cancelled.submission.turn_id,null);
+  const exited=once(s.child,'exit');s.child.kill('SIGTERM');await exited;
+  const path=join(s.state,'rust-spike.json'),journal=JSON.parse(await readFile(path,'utf8'));
+  // Exact legacy shape: receipt turn identity/state exists but display anchor
+  // was never persisted by the old runtime. Fixture-owned state only.
+  for(const record of journal.records)delete record.projection_after;
+  await writeFile(path,JSON.stringify(journal),{mode:0o600});
+  const resumed=await s.launch({LEGACY_ORDER_ECHO:'1',LEGACY_ORDER_CONTRADICT:scenario==='contradiction'?'1':'0'});
+  const pending=await fetch(resumed.base+'/api/state').then(r=>r.json());
+  assert.deepEqual(pending.thread.turns[0].items.filter(i=>i.positionUnavailable).map(i=>i.submissionId),steers.map(x=>x.submission.id));
+  assert.deepEqual(pending.thread.turns[0].items.slice(0,3).map(i=>i.text),['initial question','before steering','read-only tool']);
+  assert.ok(pending.thread.turns.every(turn=>turn.items.every(i=>i.submissionId!==unbound.submission.id)),'receipt without turn_id must never borrow a turn');
+  const final=await until(()=>fetch(resumed.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked'||x.thread.turns[0]?.status==='completed');
+  assert.notEqual(final.runtime.state,'blocked',JSON.stringify(final.runtime));
+  assert.deepEqual(final.thread.turns[0].items.map(i=>i.text),['initial question','before steering','read-only tool','steering question 0','after steering 0','steering question '+(identical?0:1),'after steering 1']);
+  assert.ok(final.thread.turns[0].items.every(i=>!i.positionUnavailable));
+  assert.deepEqual(final.thread.turns[0].items.filter(i=>i.kind==='userMessage').map(i=>i.submissionId),[first.submission.id,...steers.map(x=>x.submission.id)]);
+  const calls=await providerCalls(s);
+  assert.equal(calls.filter(c=>c.method==='turn/start').length,1);
+  assert.equal(calls.filter(c=>c.method==='turn/steer').length,2);
+  if(scenario==='contradiction'){
+    const refused=await until(()=>fetch(resumed.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked');
+    assert.match(refused.runtime.error,/Conflicting provider final snapshot/);
+    assert.deepEqual(refused.thread.turns[0].items,final.thread.turns[0].items,'learned native order remains immutable');
+    return;
+  }
+  const stop=once(resumed.child,'exit');resumed.child.kill('SIGTERM');await stop;
+  const again=await s.launch({});
+  const restored=await fetch(again.base+'/api/state').then(r=>r.json());
+  assert.deepEqual(restored.thread.turns[0].items.map(i=>[i.text,i.submissionId]),final.thread.turns[0].items.map(i=>[i.text,i.submissionId]));
+  const cancelledAgain=await fetch(again.base+'/v1/submissions/'+unbound.submission.id,{headers:s.headers}).then(r=>r.json());
+  assert.equal(cancelledAgain.submission.state,'interrupted');
+  assert.equal(cancelledAgain.submission.turn_id,null);
+  // Optional evidence is synthetic fixture state only, for the browser owner.
+  if(process.env.HISTORY239_EVIDENCE_DIR&&!identical){
+    await writeFile(join(process.env.HISTORY239_EVIDENCE_DIR,'pending.json'),JSON.stringify(pending));
+    await writeFile(join(process.env.HISTORY239_EVIDENCE_DIR,'final.json'),JSON.stringify(final));
+  }
+});
+
 test('Rust serves its manifest while Controller registration probes it',{skip:useNode},async t=>{
   const s=await fixture(t,{RUST_SPIKE_REGISTER:'1',PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH});
   const manifest=await until(()=>readFile(join(s.root,'registration.json'),'utf8').then(JSON.parse),x=>x.instance_id==='contract-instance');

@@ -22,6 +22,7 @@ function Message({ item }: { item: HistoryItem }) {
     return (
       <article className={`msg user${bodyText.trim() ? "" : " image-only"}`}>
         <div className="who">{origin ? t("message.from", { name: origin[1] ?? "" }) : t("message.you")}</div>
+        {item.positionUnavailable && <p className="position-note">{t("message.positionUnavailable")}</p>}
         {!!bodyText.trim() && <Markdown className="body" text={bodyText} />}
         {!!item.attachments?.length && <div className="image-list sent-images">{item.attachments.map((image, index) => <img key={image.id} src={safeImageUrl(imageUrl(image.id))} alt={t("images.preview", { number: index + 1 })} loading="lazy" />)}</div>}
       </article>

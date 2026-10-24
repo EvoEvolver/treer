@@ -147,6 +147,14 @@ This distinguishes depth, nodes, duplicate keys, malformed history and history
 selection bounds that previously all appeared as `provider_json_limit`.
 Accepted user projections merge with one native echo across item lifecycle
 events; matching identical text does not collapse distinct receipt IDs.
+Legacy receipts with `disposition: steered` but no `projection_after` have no
+attested historical item position. An omitted input is retained at the turn's
+tail with `positionUnavailable`, never silently prepended. A late item event
+establishes identity but remains position-provisional until an ordered native
+turn snapshot supplies its slot. That snapshot replaces only the unproven
+user-slot constraint; after native order is learned, contradictory reordering
+still refuses. Inputs without `turn_id` never borrow another turn. This changes
+display projection only, not receipt settlement, dispatch or recovery authority.
 Final event and observer summaries retain already observed same-turn items even
 when a nonempty final item list omits them. Stable provider IDs (1–256 UTF-8
 bytes), or existing receipt-owned user identities, match once; display fallback
@@ -164,7 +172,8 @@ may extend recursively (nonempty arrays cannot shrink, strings may append).
 All other existing invocation metadata must remain equal; conflicts refuse.
 The reconciliation moves owned detail values
 rather than deep-cloning every recursive level. Receipt-owned late user echoes
-replace the native payload at the original receipt slot, preserving order.
+keep an existing anchored receipt slot; unpositioned legacy inputs instead use
+the ordered native slot as described above.
 The merged candidate passes
 the existing byte/node/window admission before receipts settle. Refusal retains
 the previously accepted turn and uncertain receipt, with no automatic replay.

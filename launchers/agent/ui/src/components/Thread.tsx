@@ -22,6 +22,7 @@ export function Thread() {
   const anchor = useRef<{ height: number; top: number } | null>(null);
   const seen = useRef<TurnDto[]>([]);
   const initialHistory = useRef<string | null>(null);
+  const previousPage = useRef(false);
   const [away, setAway] = useState(false);
   const [fresh, setFresh] = useState(false);
   const turns = snapshot?.thread?.turns ?? [];
@@ -64,8 +65,12 @@ export function Thread() {
     const previous = seen.current;
     seen.current = turns;
     const threadId = snapshot?.thread?.id;
-    if (threadId && turns.length && initialHistory.current !== threadId) {
+    const page = Boolean(snapshot?.history.page);
+    const returnedLatest = previousPage.current && !page;
+    previousPage.current = page;
+    if (threadId && turns.length && (initialHistory.current !== threadId || returnedLatest)) {
       initialHistory.current = threadId;
+      anchor.current = null;
       stuck.current = true;
       setAway(false);
       setFresh(false);
@@ -78,7 +83,7 @@ export function Thread() {
       anchor.current = null;
     } else if (stuck.current) element.scrollTop = element.scrollHeight;
     else setFresh(true);
-  }, [turns, snapshot?.thread?.id, view]);
+  }, [turns, snapshot?.thread?.id, snapshot?.history.page, view]);
 
   async function older() {
     const element = ref.current;
@@ -107,7 +112,7 @@ export function Thread() {
             <div className="v-loading" role="status" aria-label={t("loading.label")}><div className="sk sk-user" /><div className="sk sk-l1" /><div className="sk sk-l2" /><div className="sk sk-l3" /><div className="sk sk-row" /></div>
           )}
           <div className="chat">
-            {snapshot?.history.page && <div className="older"><span role="status">{t("thread.olderPage")}</span><button type="button" className="btn" onClick={() => void actions.loadLatest().then(() => ref.current?.focus())}>{t("thread.latestPage")}</button></div>}
+            {snapshot?.history.page && <div className="older"><span role="status">{t("thread.olderPage")}</span><button type="button" className="btn" onClick={() => void actions.loadLatest().then(() => ref.current?.focus({ preventScroll: true }))}>{t("thread.latestPage")}</button></div>}
             {snapshot?.thread?.hasOlderItems && (
               <div className="older"><button type="button" className="btn" disabled={state.loadingOlder} onClick={() => void older()}>{state.loadingOlder ? t("thread.loadingOlder") : t("thread.older")}</button></div>
             )}
