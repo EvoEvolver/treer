@@ -29,7 +29,10 @@ for await(const line of readline.createInterface({input:process.stdin})) {
     }
     result={goal};
   }
-  if(request.method==='model/list')result={data:[]};
+  if(request.method==='model/list') {
+    if(mode==='model-list-timeout')continue;
+    result={data:[]};
+  }
   if(mode==='burst-startup'&&request.method==='initialize') {
     process.stdout.write(Array.from({length:64},(_,n)=>JSON.stringify({method:'synthetic/startup',params:{n}})+'\n').join(''));
   }

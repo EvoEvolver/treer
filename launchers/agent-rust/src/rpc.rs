@@ -231,12 +231,15 @@ impl Rpc {
     }
 
     pub async fn request_selected(&self, method: &str, params: Value, selection: Option<(usize,usize)>) -> Result<Value> {
-        self.request_history(method,params,selection.map(|range|crate::provider_stream::Selection{range:Some(range),..Default::default()})).await
+        self.request_history(method,params,selection.map(|range|crate::provider_stream::Selection{range:Some(range),..Default::default()}),true).await
     }
     pub async fn request_target(&self, method: &str, params: Value, target: Option<String>) -> Result<Value> {
-        self.request_history(method,params,target.map(|target|crate::provider_stream::Selection{target:Some(target),..Default::default()})).await
+        self.request_history(method,params,target.map(|target|crate::provider_stream::Selection{target:Some(target),..Default::default()}),true).await
     }
-    async fn request_history(&self, method: &str, params: Value, selection: Option<crate::provider_stream::Selection>) -> Result<Value> {
+    pub async fn request_optional(&self, method: &str, params: Value) -> Result<Value> {
+        self.request_history(method,params,None,false).await
+    }
+    async fn request_history(&self, method: &str, params: Value, selection: Option<crate::provider_stream::Selection>, fatal_timeout: bool) -> Result<Value> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         if let Some(adapter)=&self.claude{
             if selection.is_some(){bail!("claude_older_history_unavailable");}
@@ -272,9 +275,10 @@ impl Rpc {
             rx.await.map_err(|_| anyhow!("Codex disconnected"))?
         };
         // The whole request includes mutex acquisition and write/flush.
-        let result = match timeout(Duration::from_secs(60), result).await {
+        let result = match timeout(Duration::from_secs(if fatal_timeout {60} else {5}), result).await {
             Ok(result) => result,
-            Err(_) => { self.fail("rpc_timeout"); Err(anyhow!("provider_rpc_timeout")) },
+            Err(_) if fatal_timeout => { self.fail("rpc_timeout"); Err(anyhow!("provider_rpc_timeout")) },
+            Err(_) => Err(anyhow!("provider_optional_rpc_timeout")),
         };
         self.pending.lock().await.remove(&id);
         self.selections.lock().unwrap().remove(&id);

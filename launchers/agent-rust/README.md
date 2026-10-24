@@ -199,6 +199,9 @@ Outbound operations include mutex acquisition, writing and flushing within a
 five-second deadline; the event-pumping RPC wait has an absolute 60-second
 deadline. A write timeout can mean partial delivery. It poisons the transport,
 preserves accepted-operation uncertainty and stops further dispatch without retry.
+Startup model discovery is optional: it has a separate five-second response
+deadline and falls back to an empty model list without poisoning the transport,
+so a slow `model/list` cannot prevent the subsequent thread start or resume.
 The same five-second deadline applies to every valid RPC input (at most 128 KiB),
 so a slow provider can also trigger it. Oversized input is refused before writing.
 Before fencing after a cancelled wait, receipts and goals are restored from the

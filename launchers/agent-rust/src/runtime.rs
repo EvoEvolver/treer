@@ -561,10 +561,13 @@ impl Runtime {
         }
         self.provider_request("initialize", json!({"clientInfo":{"name":"treer-rust-spike","title":"Treer Agent","version":"0.0.1"},"capabilities":{"experimentalApi":true}})).await?;
         self.rpc.write(json!({"method":"initialized"})).await?;
-        self.models = self.provider_request("model/list", json!({}))
-            .await
-            .unwrap_or(json!({"data":[]}))["data"]
-            .clone();
+        self.models = match self.rpc.request_optional("model/list", json!({})).await {
+            Ok(result) => result["data"].clone(),
+            Err(_) => {
+                eprintln!("Rust spike: optional model/list unavailable; continuing startup");
+                json!([])
+            }
+        };
         let session = config
             .session
             .as_deref()
