@@ -1303,6 +1303,10 @@ UI_SCREENSHOTS=/tmp/agent-ui-screenshots npm --prefix launchers/agent run test:b
 # markdown component, eval, unsafe URLs, absolute network paths).
 npm --prefix launchers/agent run build:ui
 npm --prefix launchers/agent run check:ui
+# The UI build preserves logical dependency paths, so a worktree sharing locked
+# node_modules through a symlink produces the same chunk names/bytes as npm ci.
+# prepare-bundle still rejects stale or extra public assets; regenerate and
+# commit the full inventory instead of skipping that check.
 # Look at the page in a browser with sample data (a stand-in Proxy adds the identity headers):
 node launchers/agent/tests/serve-ui-fixture.mjs --port 8099
 # Opt-in: real Claude credentials/inference, new sessions in a temporary cwd only.

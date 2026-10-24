@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -17,6 +17,21 @@ test("the committed UI artifacts equal a fresh deterministic build", async () =>
   }
   const total = [...first.values()].reduce((sum, bytes) => sum + bytes.length, 0);
   assert.ok(total <= 3_500_000, `UI payload ${total} bytes exceeds the budget`);
+});
+
+test("relocated worktrees with shared dependencies produce the exact same asset closure", async () => {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "ui-build-layout-")));
+  try {
+    cpSync(join(root, "ui"), join(directory, "ui"), { recursive: true });
+    cpSync(join(root, "package.json"), join(directory, "package.json"));
+    symlinkSync(join(root, "node_modules"), join(directory, "node_modules"), "junction");
+    const physical = await buildUi(root);
+    const shared = await buildUi(directory);
+    assert.deepEqual([...shared.keys()], [...physical.keys()], "fingerprinted names must not depend on dependency realpaths");
+    for (const [name, bytes] of physical) assert.ok(bytes.equals(shared.get(name)!), `${name} must be byte-identical across layouts`);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("the built page is relative, script-only from self and free of inline code", async () => {

@@ -66,6 +66,10 @@ export async function buildUi(base = root) {
   const js = await build({
     entryPoints: { ui: join(base, "ui/src/main.tsx") }, outdir: join(base, "public"), write: false, bundle: true,
     format: "esm", splitting: true, chunkNames: "[name]-[hash]", platform: "browser", target: "es2022", jsx: "automatic", minify: true, legalComments: "inline", logLevel: "silent",
+    // Keep dependency identities relative to this launcher, including when a
+    // worktree reuses node_modules through a symlink. Real dependency locations
+    // otherwise enter esbuild's chunk hashes and change the committed closure.
+    preserveSymlinks: true,
     define: { "process.env.NODE_ENV": '"production"' }, absWorkingDir: base,
     plugins: [{ name: "local-pdf-worker", setup(build) {
       build.onLoad({ filter: /pdf\.worker\.min\.mjs$/ }, () => ({ contents: `export default ${JSON.stringify(`./${workerName}`)}`, loader: "js" }));
