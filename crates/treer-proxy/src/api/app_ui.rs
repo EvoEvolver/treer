@@ -235,6 +235,44 @@ mod tests {
         .unwrap()
     }
 
+    // Export the production renderer's actual response for the isolated Web
+    // delayed-listener fixture. No test-only endpoint or production flag.
+    #[tokio::test]
+    #[ignore = "explicit browser fixture export; requires Console origin"]
+    async fn export_navigation_error_browser_fixture() {
+        let origin = std::env::var("TREER_APP_UI_FIXTURE_CONSOLE_ORIGIN")
+            .expect("set the isolated fixture Console origin");
+        let browser = BrowserAccess::new(
+            &Url::parse(&origin).unwrap(),
+            &Url::parse("http://127.0.0.1/").unwrap(),
+        )
+        .unwrap();
+        let response = app_navigation_failure(
+            ApiFailure::bad_gateway("stream_failed", "isolated listener unavailable"),
+            true,
+            &browser,
+            "workspace",
+            "app",
+        )
+        .unwrap();
+        let status = response.status().as_u16();
+        let headers: std::collections::BTreeMap<_, _> = response
+            .headers()
+            .iter()
+            .map(|(key, value)| (key.as_str().to_owned(), value.to_str().unwrap().to_owned()))
+            .collect();
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        println!(
+            "TREER_APP_UI_ERROR_FIXTURE {}",
+            serde_json::json!({
+                "status":status,"headers":headers,"body":std::str::from_utf8(&body).unwrap(),
+                "console_origin":&*browser.origin_text,
+            })
+        );
+    }
+
     #[test]
     fn error_bridge_requires_an_explicit_get_iframe_html_navigation() {
         let request = |method: Method, dest: &str, mode: &str, accept: &str| {
