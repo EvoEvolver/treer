@@ -414,11 +414,15 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             self.nodes = 0;
             let begin = self.count;
             self.turn_begin = Some(begin);
-            let value = self.value(depth + 1, vec!["#turn".into()]).await?;
+            let mut value = self.value(depth + 1, vec!["#turn".into()]).await?;
             self.turn_begin = None;
             if self.count - begin > WINDOW_BYTES {
                 return Err("provider_value_too_large");
             }
+            // Reserve provenance bytes/nodes in every retained window BEFORE
+            // admission; only a locally rewritten status keeps this marker.
+            if let Some(object) = value.as_object_mut() { object.remove("treerStatusProjected"); }
+            if value["status"] == "inProgress" { value["treerStatusProjected"] = Value::Bool(true); }
             let bytes = serde_json::to_vec(&value)
                 .map_err(|_| "invalid_json")?
                 .len() + usize::from(value["status"] == "inProgress"); // interrupted is one byte longer
@@ -631,7 +635,7 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                 {
                     let size = serde_json::to_vec(&*active)
                         .map_err(|_| "invalid_json")?
-                        .len();
+                        .len() + usize::from(active["status"] == "inProgress");
                     let nodes = shape_nodes(&active);
                     while window.values.len() >= WINDOW_TURNS
                         || window.bytes + size > WINDOW_BYTES
@@ -669,6 +673,11 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                         if normalize && turn["status"] == "inProgress" && !is_live
                         {
                             turn["status"] = Value::String("interrupted".into());
+                            // Presentation of stale history is not an explicit
+                            // provider terminal outcome for an accepted input.
+                            turn["treerStatusProjected"] = Value::Bool(true);
+                        } else if let Some(object) = turn.as_object_mut() {
+                            object.remove("treerStatusProjected");
                         }
                         turn
                     })
@@ -703,8 +712,11 @@ mod tests {
                 let result = Reader::new(wire.as_bytes(), selections).next().await.unwrap().unwrap();
                 let turns = result["result"]["thread"]["turns"].as_array().unwrap();
                 assert_eq!(turns[0]["status"], "interrupted");
+                assert_eq!(turns[0]["treerStatusProjected"], true);
                 assert_eq!(turns[1]["status"], "completed");
+                assert!(turns[1].get("treerStatusProjected").is_none());
                 assert_eq!(turns[2]["status"], if status == "idle" { "interrupted" } else { "inProgress" });
+                assert_eq!(turns[2]["treerStatusProjected"] == true, status == "idle");
             }
         }
         for status in [Value::Null, json!({"type":"unknown"}), json!({"type":"systemError"})] {

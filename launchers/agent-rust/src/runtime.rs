@@ -263,8 +263,7 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
         let observer = AbortTask(tokio::spawn(async move {
             while let Some((epoch, generation, observer_rpc, thread)) = observe_rx.recv().await {
                 let result = observer_rpc
-                    .request_target(
-                        "thread/read",
+                    .request_observation(
                         json!({"threadId":thread["threadId"],"includeTurns":true}),
                         thread["targetTurnId"].as_str().map(str::to_owned),
                     )
@@ -383,8 +382,12 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
                             // Exact target reads follow resume and may already
                             // contain a newer terminal status. Never rebuild the
                             // window from the older snapshot after applying them.
-                            for observed in targets { rt.observe(&observed).await?; }
-                            for event in buffered { rt.event(event).await?; }
+                            for observed in &targets { rt.observe(observed).await?; }
+                            for event in buffered {
+                                if let Some(covered) = recovery::covering_terminal(&snapshot, &targets, &event) {
+                                    rt.merge_covered_lifecycle(&event, covered)?;
+                                } else { rt.event(event).await?; }
+                            }
                             rt.persist()?;
                             Ok::<_,anyhow::Error>(())
                         }.await;
@@ -503,6 +506,20 @@ impl Runtime {
         self.turns = fresh;
         Ok(())
     }
+    fn merge_covered_lifecycle(&mut self, event: &Value, covered: &Value) -> Result<()> {
+        let wire = &event["params"]["turn"];
+        let prior = if event["method"] == "turn/completed" { model::final_turn(wire)? } else { model::turn(wire) };
+        let prior = self.projected(vec![prior], false)?;
+        let prior = prior.first().ok_or(HistoryLimit)?;
+        let current = self.turns.iter().find(|turn| turn["id"] == covered["id"]).cloned();
+        let mut terminal = current.clone().unwrap_or(model::final_turn(covered)?);
+        // Preserve tool/item evidence, and keep the normal identity/output and
+        // terminal-contradiction guards. This cannot settle another receipt or
+        // clear a newer active turn. Out-of-window turns stay out of the window.
+        self.retain_projected_items(prior, &mut terminal)?;
+        if current.is_some() { self.upsert_turn(terminal)?; }
+        Ok(())
+    }
     async fn observe(&mut self, observed: &Value) -> Result<()> {
         if self.history_failed || self.claude {
             return Ok(());
@@ -512,6 +529,9 @@ impl Runtime {
         self.idle_proof = (observed["thread"]["status"]["type"] == "idle").then(std::time::Instant::now);
         for wire in observed["thread"]["turns"].as_array().unwrap() {
             if self.thread["activeTurnId"] != wire["id"] && !self.records.iter().any(|r| recovery::needs_recovery(r) && r.submission["turn_id"].is_string() && r.submission["turn_id"] == wire["id"]) { continue; }
+            // Thread idle/ordering may normalize stale inProgress history for
+            // display, but cannot interrupt a live input or release its FIFO.
+            if wire["treerStatusProjected"] == true { continue; }
             let terminal = matches!(wire["status"].as_str(), Some("completed" | "failed" | "interrupted"));
             let mapped = if terminal {model::final_turn(wire)?} else {model::turn(wire)};
             let projected = self.projected(vec![mapped], false)?;

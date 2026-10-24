@@ -43,6 +43,15 @@ for await(const line of createInterface({input:process.stdin})) {
     }
     if(request.method==='thread/resume'&&process.env.RECOVERY_WRONG_THREAD==='1')result.thread.id='unrelated-thread';
     if(hidden&&process.env.RECOVERY_LATE==='1')result.thread.status.type='idle';
+    // A history thread status is not an explicit terminal turn status. Model
+    // a lagging idle summary while the accepted input is still executing.
+    if(request.method==='thread/read'&&process.env.RECOVERY_IDLE_SUMMARY==='1') {
+      result=structuredClone(result);result.thread.status.type='idle';
+    }
+    if(request.method==='thread/resume'&&process.env.RECOVERY_IDLE_RESUME==='1'&&turns[0]) {
+      result=structuredClone(result);result.thread.status.type='idle';
+      setTimeout(()=>finish(turns[0]),2000);
+    }
   }
   if(request.method==='turn/start') {
     const turn={id:`accepted-${turns.length}`,status:'inProgress',items:[{id:`user-${turns.length}`,type:'userMessage',content:request.params.input}]};
@@ -54,8 +63,29 @@ for await(const line of createInterface({input:process.stdin})) {
       writeFileSync(file,JSON.stringify(turns));
       setTimeout(()=>process.exit(0),600);
     }
-    if(process.env.RECOVERY_HOLD!=='1')setTimeout(()=>finish(turn),30);
+    if(process.env.RECOVERY_HOLD!=='1'||(process.env.RECOVERY_BUFFER_ORDER&&turns.length>1))setTimeout(()=>finish(turn),30);
+    if(process.env.RECOVERY_IDLE_SUMMARY==='1'&&process.env.RECOVERY_HOLD==='1')setTimeout(()=>finish(turn),6500);
+    if(process.env.RECOVERY_OBSERVER_STALL==='1') {
+      const delay=turns.length===1?4500:turns.length===2?68000:30;
+      const progress=setInterval(()=>emit('thread/tokenUsage/updated',{tokenUsage:{last:{inputTokens:1,outputTokens:1},total:{inputTokens:1,outputTokens:1}}}),700);
+      setTimeout(()=>{clearInterval(progress);finish(turn);},delay);
+    }
+  }
+  if(request.method==='thread/read'&&process.env.RECOVERY_OBSERVER_STALL==='1'&&reads===1) {
+    const stale=structuredClone(result);
+    setTimeout(()=>console.log(JSON.stringify({id:request.id,result:stale})),65000);
+    continue;
+  }
+  if(request.method==='thread/resume'&&['before','completed-before'].includes(process.env.RECOVERY_BUFFER_ORDER)&&turns[0]) {
+    const old=structuredClone(turns[0]);
+    old.items.push({id:'buffered-tool',type:'commandExecution',status:'completed',command:'synthetic-only',aggregatedOutput:'retained-before-terminal'});
+    const completing=process.env.RECOVERY_BUFFER_ORDER==='completed-before';
+    if(!completing)old.status='inProgress';
+    emit(completing?'turn/completed':'turn/started',{turn:old});
   }
   console.log(JSON.stringify({id:request.id,result}));
+  if(request.method==='thread/read'&&process.env.RECOVERY_BUFFER_ORDER==='after'&&reads===1&&turns[0]) {
+    const old=structuredClone(turns[0]);old.status='inProgress';emit('turn/started',{turn:old});
+  }
   if(request.method==='thread/goal/get'&&process.env.RECOVERY_STATUS==='inProgress')setTimeout(()=>finish(turns[0]),80);
 }

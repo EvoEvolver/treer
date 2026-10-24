@@ -154,6 +154,22 @@ pub(super) fn validate(observed: &Value, thread: &Value) -> Result<()> {
     Ok(())
 }
 
+// A buffered lifecycle can predate the terminal snapshot already applied by
+// reconnect. Only explicit same-turn coverage and reader-owned receive order
+// permit merging it as older content instead of reopening the terminal turn.
+pub(super) fn covering_terminal<'a>(snapshot: &'a Value, targets: &'a [Value], event: &Value) -> Option<&'a Value> {
+    if !matches!(event["method"].as_str(), Some("turn/started" | "turn/completed")) { return None; }
+    let sequence = event["treerWireSequence"].as_u64()?;
+    let turn = event["params"]["turn"]["id"].as_str()?;
+    std::iter::once(snapshot).chain(targets).filter(|response|
+        response["thread"]["id"] == event["params"]["threadId"]
+        && response["treerWireSequence"].as_u64().is_some_and(|watermark| sequence < watermark))
+        .filter_map(|response| response["thread"]["turns"].as_array()?.iter().find(|wire|
+            wire["id"] == turn && wire["treerStatusProjected"] != true
+            && matches!(wire["status"].as_str(), Some("completed" | "failed" | "interrupted"))))
+        .next_back()
+}
+
 pub(super) fn targets(records: &VecDeque<Record>) -> Vec<String> {
     let mut seen = HashSet::new();
     records
@@ -190,7 +206,7 @@ pub(super) fn reconcile_record(record: &mut Record, turn: Option<&Value>) -> boo
     if !needs_recovery(record) {
         return false;
     }
-    let state = turn.and_then(|turn| match turn["status"].as_str() {
+    let state = turn.filter(|turn| turn["projectionOnly"] != true).and_then(|turn| match turn["status"].as_str() {
         Some("completed") => Some("done"),
         Some("failed") => Some("failed"),
         Some("interrupted") => Some("interrupted"),
@@ -227,6 +243,20 @@ pub(super) fn reconcile_record(record: &mut Record, turn: Option<&Value>) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn buffered_lifecycle_needs_exact_terminal_coverage_and_reader_order() {
+        let event = json!({"method":"turn/started","treerWireSequence":3,"params":{"threadId":"thread","turn":{"id":"turn"}}});
+        let proof = json!({"treerWireSequence":4,"thread":{"id":"thread","turns":[{"id":"turn","status":"completed"}]}});
+        assert!(covering_terminal(&proof, &[], &event).is_some());
+        for changed in [
+            json!({"treerWireSequence":3,"thread":proof["thread"]}),
+            json!({"thread":proof["thread"]}),
+            json!({"treerWireSequence":4,"thread":{"id":"other","turns":proof["thread"]["turns"]}}),
+            json!({"treerWireSequence":4,"thread":{"id":"thread","turns":[]}}),
+            json!({"treerWireSequence":4,"thread":{"id":"thread","turns":[{"id":"turn","status":"interrupted","treerStatusProjected":true}]}}),
+            json!({"treerWireSequence":4,"thread":{"id":"thread","turns":[{"id":"turn","status":"inProgress"}]}}),
+        ] { assert!(covering_terminal(&changed, &[], &event).is_none()); }
+    }
     #[test]
     fn recovery_budget_bounds_aggregate_bytes_and_shape() {
         let value = json!({"text":"bounded"});
@@ -314,6 +344,19 @@ mod tests {
         }
         let mut records = VecDeque::from([record("running", json!("accepted"), Value::Null)]);
         assert!(reconcile(&mut records, &history("unknown")));
+    }
+    #[test]
+    fn projected_interruption_is_never_terminal_receipt_authority() {
+        let mut records = VecDeque::from([record("running", json!("accepted"), Value::Null)]);
+        let mut turns = history("interrupted");
+        let mut turn = turns.iter().next().unwrap().clone();
+        turn["projectionOnly"] = json!(true);
+        turns = Transcript::default();turns.insert(turn).unwrap();
+        assert!(reconcile(&mut records, &turns));
+        assert_eq!(records[0].submission["state"], "failed");
+        assert!(uncertain(&records[0]));
+        assert!(!reconcile(&mut records, &history("completed")));
+        assert_eq!(records[0].submission["state"], "done");
     }
     #[test]
     fn ordinary_terminal_receipts_never_reopen() {

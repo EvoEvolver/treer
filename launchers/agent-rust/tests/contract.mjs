@@ -122,6 +122,78 @@ for(const status of ['completed','interrupted'])test('runtime recovery unblocks 
   assert.equal((await fetch(again.base+'/v1/submissions/'+first.submission.id,{headers:s.headers}).then(r=>r.json())).submission.state,status==='completed'?'done':'interrupted');
 });
 
+test('startup normalized interruption stays uncertain until explicit same-turn completion',{skip:useNode,timeout:16000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1'});
+  const first=await s.post({text:'one original input',operation_id:'projected-resume-first'}).then(r=>r.json());
+  const second=await s.post({text:'keep queued until completion',operation_id:'projected-resume-second'}).then(r=>r.json());
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const restarted=await s.launch({RECOVERY_IDLE_RESUME:'1',RECOVERY_IDLE_SUMMARY:'1',RECOVERY_HOLD:'0'});
+  const get=id=>fetch(restarted.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
+  const unresolved=(await get(first.submission.id)).submission;
+  assert.equal(unresolved.state,'failed');assert.match(unresolved.error,/dispatch outcome uncertain/);
+  assert.equal((await get(second.submission.id)).submission.state,'queued');
+  await until(()=>get(first.submission.id),x=>x.submission.state==='done');
+  await until(()=>get(second.submission.id),x=>x.submission.state==='done');
+  assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['one original input','keep queued until completion']);
+});
+
+for(const order of ['before','completed-before','after'])test('reconnect buffered lifecycle obeys same-reader terminal coverage '+order,{skip:useNode,timeout:18000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_BUFFER_ORDER:order});
+  const first=await s.post({text:'one accepted input',operation_id:'buffer-order-first'}).then(r=>r.json());
+  const get=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
+  if(order==='after') {
+    await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.state==='integrity_failure');
+    assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
+  } else {
+    const recovered=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.ready&&x.runtime.recovery.reconnectAttempts===1&&x.runtime.state==='idle');
+    assert.equal((await get(first.submission.id)).submission.state,'interrupted','explicit raw terminal history is still honored');
+    assert.equal(recovered.thread.turns.find(t=>t.id==='accepted-0').items.find(i=>i.id==='buffered-tool').detailText,'retained-before-terminal');
+    const second=await s.post({text:'next input after ordered recovery',operation_id:'buffer-order-second'}).then(r=>r.json());
+    await until(()=>get(second.submission.id),x=>x.submission.state==='done');
+    assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['one accepted input','next input after ordered recovery']);
+  }
+});
+
+test('stale background observation deadline cannot kill a healthy successor turn and late reply cannot settle it',{skip:useNode,timeout:90000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_OBSERVER_STALL:'1'});
+  const first=await s.post({text:'complete A while its read stalls',operation_id:'stalled-observer-A'}).then(r=>r.json());
+  const second=await s.post({text:'B remains active past stale A deadline',operation_id:'stalled-observer-B'}).then(r=>r.json());
+  const get=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
+  await until(()=>get(first.submission.id),x=>x.submission.state==='done');
+  await until(()=>get(second.submission.id),x=>x.submission.state==='running');
+  // Real production 60-second deadline, not a shortened fixture-only timer.
+  // The late first response arrives during B, after its own newer read starts.
+  await new Promise(resolve=>setTimeout(resolve,63500));
+  const active=await fetch(s.base+'/api/state').then(r=>r.json());
+  assert.equal(active.runtime.provider.transport,'open',JSON.stringify(active.runtime));
+  assert.equal(active.runtime.recovery.reconnectAttempts,0,JSON.stringify(active.runtime));
+  assert.equal(active.runtime.provider.observationTimeouts,1);
+  assert.equal((await get(first.submission.id)).submission.state,'done');
+  assert.equal((await get(second.submission.id)).submission.state,'running');
+  assert.equal((await readFile(join(s.root,'cwd/recovery-provider-pids.jsonl'),'utf8')).trim().split('\n').length,1,'original healthy provider must not be killed/replaced');
+  await until(()=>get(second.submission.id),x=>x.submission.state==='done');
+  const third=await s.post({text:'C after late reply',operation_id:'stalled-observer-C'}).then(r=>r.json());
+  await until(()=>get(third.submission.id),x=>x.submission.state==='done');
+  assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['complete A while its read stalls','B remains active past stale A deadline','C after late reply']);
+});
+
+test('history idle summary cannot interrupt an executing turn or dispatch its successor before explicit completion',{skip:useNode,timeout:22000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_IDLE_SUMMARY:'1'});
+  const first=await s.post({text:'still executing input',operation_id:'idle-summary-first'}).then(r=>r.json());
+  const second=await s.post({text:'must wait for actual completion',operation_id:'idle-summary-second'}).then(r=>r.json());
+  const get=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
+  await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.readCount>=1);
+  assert.equal((await get(first.submission.id)).submission.state,'running','inferred history interruption must not settle receipt');
+  assert.equal((await get(second.submission.id)).submission.state,'queued');
+  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
+  await until(()=>get(first.submission.id),x=>x.submission.state==='done');
+  await until(()=>get(second.submission.id),x=>x.submission.state==='done');
+  const state=await fetch(s.base+'/api/state').then(r=>r.json());
+  assert.equal(state.runtime.state,'idle');assert.equal(state.runtime.provider.transport,'open');
+  assert.equal(state.runtime.recovery.reconnectAttempts,0);
+  assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['still executing input','must wait for actual completion']);
+});
+
 for(const old of [false,true,'resume-race'])test('runtime recovery reconnects same-thread transport and continues FIFO without replay '+old,{skip:useNode,timeout:25000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_OLD_DISCONNECT:old===true?'1':'0',RECOVERY_RESUME_RACE:old==='resume-race'?'1':'0'});
   const first=await s.post({text:'one accepted input',operation_id:'reconnect-first'}).then(r=>r.json());

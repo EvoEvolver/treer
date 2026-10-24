@@ -213,13 +213,28 @@ deadline and falls back to an empty model list without poisoning the transport,
 so a slow `model/list` cannot prevent the subsequent thread start or resume.
 That response deadline starts only after successful write/flush; write failures,
 malformed frames, and required initialize/thread/history requests remain fatal.
+The periodic background `thread/read` observer has a separate response-only
+60-second deadline. A slow or unanswered observation does not kill an otherwise
+healthy provider or interrupt its active input; it increments the content-free
+`runtime.provider.observationTimeouts` counter. Exact pending/selection cleanup
+keeps late replies from affecting a successor turn. Startup, explicit history
+and reconnect requests retain their required deadlines; EOF, invalid frames and
+any write failure still fence. A history `inProgress` normalized to interrupted
+is marked display-only: neither startup recovery nor the observer can use it to
+settle a receipt or release queued work. Only an explicit same-turn provider
+terminal result/event can settle that operation; unknown effects are not success.
+Reconnect assigns response and event order at its single stdout reader. An older
+buffered lifecycle covered by a newer explicit same-thread/turn terminal snapshot
+merges its retained items without reopening that turn or clearing another active
+input. Missing/bounded-away turns and normalized statuses are not coverage;
+lifecycle events received after that snapshot retain the terminal-reopen guard.
 The runtime continues pumping the bounded event channel during discovery, so a
 burst of notifications cannot hide an otherwise available model response.
 Cancelled requests remove their exact pending reply and history selection via
 drop cleanup; late replies cannot settle a newer request or change model options.
 Focused controls: actual-entry `optional model discovery` in `tests/contract.mjs`
 and fixture-feature `rpc::tests` (set `TREER_TEST_NODE` to an absolute native Node
-image for the two synthetic child controls).
+image for the synthetic child controls).
 The same five-second deadline applies to every valid RPC input (at most 128 KiB),
 so a slow provider can also trigger it. Oversized input is refused before writing.
 Before fencing after a cancelled wait, receipts and goals are restored from the

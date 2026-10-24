@@ -71,6 +71,8 @@ type Pending = Arc<std::sync::Mutex<HashMap<u64, Reply>>>;
 // Outer actor deadlines and shutdown can drop a request future. Cleanup must
 // not depend on polling that future again, or a late reply can retain state.
 struct PendingRequest { id: u64, pending: Pending, selections: Selections }
+#[derive(Clone, Copy)]
+enum ResponsePolicy { Required, Discovery, Observation }
 impl Drop for PendingRequest {
     fn drop(&mut self) {
         self.pending.lock().unwrap().remove(&self.id);
@@ -157,6 +159,7 @@ impl Rpc {
         });
         let reader_rpc = rpc.clone();
         let stdout_reader = tokio::spawn(async move {
+            let mut wire_sequence = 0u64;
             let (mut codex_lines,mut claude_lines)=if reader_rpc.claude.is_some(){(None,Some(BufReader::new(stdout)))}else{(Some(Reader::new(stdout,reader_rpc.selections.clone())),None)};
             let reason = loop {
                 let next=if let Some(lines)=&mut claude_lines{crate::claude::line(lines).await.map_err(|_|"claude_invalid_frame")}else{codex_lines.as_mut().unwrap().next().await};
@@ -172,6 +175,14 @@ impl Rpc {
                     match adapter.lock().unwrap().consume(line){Ok(messages)=>messages,Err(_)=>break "claude_protocol_refused"}
                 }else{vec![line]};
                 for mut message in messages {
+                // One reader owns response/event ordering for this provider
+                // incarnation. Never trust a producer-supplied watermark.
+                wire_sequence = wire_sequence.checked_add(1).expect("provider receive sequence overflow");
+                if message.get("method").is_some() {
+                    message["treerWireSequence"] = json!(wire_sequence);
+                } else if let Some(result) = message.get_mut("result").and_then(Value::as_object_mut) {
+                    result.insert("treerWireSequence".into(),json!(wire_sequence));
+                }
                 let history=&message["result"]["treerHistory"];
                 if history.is_object() {
                     reader_rpc.diagnostics.lock().unwrap()["historyScan"]=json!({"frameBytes":history["frameBytes"],"turnCount":history["total"],"nodeCount":history["nodeCount"],"elapsedMs":history["elapsedMs"],"staleInProgressCount":history["staleInProgressCount"],"threadStatus":history["threadStatus"],"historyAuthority":history["historyAuthority"]});
@@ -241,16 +252,22 @@ impl Rpc {
     }
 
     pub async fn request_selected(&self, method: &str, params: Value, selection: Option<(usize,usize)>) -> Result<Value> {
-        self.request_history(method,params,selection.map(|range|crate::provider_stream::Selection{range:Some(range),..Default::default()}),true).await
+        self.request_history(method,params,selection.map(|range|crate::provider_stream::Selection{range:Some(range),..Default::default()}),ResponsePolicy::Required).await
     }
     pub async fn request_target(&self, method: &str, params: Value, target: Option<String>) -> Result<Value> {
-        self.request_history(method,params,target.map(|target|crate::provider_stream::Selection{target:Some(target),..Default::default()}),true).await
+        self.request_history(method,params,target.map(|target|crate::provider_stream::Selection{target:Some(target),..Default::default()}),ResponsePolicy::Required).await
+    }
+    pub async fn request_observation(&self, params: Value, target: Option<String>) -> Result<Value> {
+        // Only the periodic read-only observer may time out without poisoning
+        // a healthy shared transport. Startup/reconnect/authority RPCs remain
+        // required; all writes still use the same fatal five-second deadline.
+        self.request_history("thread/read",params,target.map(|target|crate::provider_stream::Selection{target:Some(target),..Default::default()}),ResponsePolicy::Observation).await
     }
     pub async fn request_optional(&self, method: &str, params: Value) -> Result<Value> {
         if method != "model/list" { bail!("unsupported_optional_rpc"); }
-        self.request_history(method,params,None,false).await
+        self.request_history(method,params,None,ResponsePolicy::Discovery).await
     }
-    async fn request_history(&self, method: &str, params: Value, selection: Option<crate::provider_stream::Selection>, fatal_timeout: bool) -> Result<Value> {
+    async fn request_history(&self, method: &str, params: Value, selection: Option<crate::provider_stream::Selection>, policy: ResponsePolicy) -> Result<Value> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let _pending = PendingRequest { id, pending: self.pending.clone(), selections: self.selections.clone() };
         if let Some(adapter)=&self.claude{
@@ -284,10 +301,21 @@ impl Rpc {
         self.pending.lock().unwrap().insert(id, tx);
         // Optional discovery tolerates only a missing response AFTER a full,
         // successful write. Never cancel a partial write at the optional timer.
-        if !fatal_timeout {
+        if !matches!(policy, ResponsePolicy::Required) {
             self.write(json!({"id":id,"method":method,"params":params})).await?;
-            return timeout(Duration::from_secs(5), rx).await
-                .map_err(|_| anyhow!("provider_optional_rpc_timeout"))?
+            let (seconds, reason) = match policy {
+                ResponsePolicy::Discovery => (5, "provider_optional_rpc_timeout"),
+                ResponsePolicy::Observation => (60, "provider_observation_timeout"),
+                ResponsePolicy::Required => unreachable!(),
+            };
+            return timeout(Duration::from_secs(seconds), rx).await
+                .map_err(|_| {
+                    if matches!(policy, ResponsePolicy::Observation) {
+                        let mut diagnostic = self.diagnostics.lock().unwrap();
+                        diagnostic["observationTimeouts"] = json!(diagnostic["observationTimeouts"].as_u64().unwrap_or(0).saturating_add(1));
+                    }
+                    anyhow!(reason)
+                })?
                 .map_err(|_| anyhow!("Codex disconnected"))?;
         }
         let result = async {
@@ -313,12 +341,24 @@ mod tests {
     use super::*;
     #[cfg(all(unix, feature="fixture-harness"))]
     #[tokio::test]
+    async fn required_response_deadline_remains_fatal_and_cleans_exact_target() {
+        let node = std::env::var("TREER_TEST_NODE").expect("fixture requires explicit native Node path");
+        let (rpc, mut child, _) = Rpc::spawn(&node, &["-e".into(),"process.stdin.resume();setInterval(()=>{},1000)".into()], &std::env::temp_dir(), false).unwrap();
+        let result = rpc.request_target("thread/read", json!({"includeTurns":true}), Some("required".into())).await;
+        assert_eq!(result.unwrap_err().to_string(), "provider_rpc_timeout");
+        assert_eq!(rpc.diagnostics()["transport"], "rpc_timeout");
+        assert!(rpc.pending.lock().unwrap().is_empty());
+        assert!(rpc.selections.lock().unwrap().is_empty());
+        child.kill().await.unwrap();
+    }
+    #[cfg(all(unix, feature="fixture-harness"))]
+    #[tokio::test]
     async fn cancelled_request_cleans_selection_and_ignores_late_reply() {
         let node = std::env::var("TREER_TEST_NODE").expect("fixture requires explicit native Node path");
         let script = "const r=require('readline').createInterface({input:process.stdin});r.on('line',l=>{const q=JSON.parse(l);setTimeout(()=>console.log(JSON.stringify({id:q.id,result:{token:q.params.token}})),150)});";
         let (rpc, mut child, _) = Rpc::spawn(&node, &["-e".into(),script.into()], &std::env::temp_dir(), false).unwrap();
         let clone=rpc.clone();
-        let task=tokio::spawn(async move { clone.request_selected("synthetic/read",json!({"token":"cancelled"}),Some((0,1))).await });
+        let task=tokio::spawn(async move { clone.request_observation(json!({"token":"cancelled","includeTurns":true}),Some("exact".into())).await });
         for _ in 0..100 {
             if !rpc.pending.lock().unwrap().is_empty() { break; }
             tokio::time::sleep(Duration::from_millis(10)).await;

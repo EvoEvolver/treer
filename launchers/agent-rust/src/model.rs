@@ -90,7 +90,9 @@ pub fn item(raw: &Value, turn: &str, order: usize) -> Value {
 }
 pub fn turn(raw: &Value) -> Value {
     let id = raw["id"].as_str().unwrap_or("turn");
-    json!({"id":raw["id"],"status":raw["status"].as_str().unwrap_or("completed"),"startedAt":null,"error":raw["error"]["message"],"items":raw["items"].as_array().unwrap_or(&vec![]).iter().enumerate().map(|(n,i)|item(i,id,n)).collect::<Vec<_>>()})
+    let mut mapped = json!({"id":raw["id"],"status":raw["status"].as_str().unwrap_or("completed"),"startedAt":null,"error":raw["error"]["message"],"items":raw["items"].as_array().unwrap_or(&vec![]).iter().enumerate().map(|(n,i)|item(i,id,n)).collect::<Vec<_>>()});
+    if raw["treerStatusProjected"] == true { mapped["projectionOnly"] = json!(true); }
+    mapped
 }
 
 #[derive(Debug)]
