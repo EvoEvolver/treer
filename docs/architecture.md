@@ -284,6 +284,15 @@ mobile. This tunnel uses the App's owned virtual host and adjusts only embedding
 headers to allow the configured control-plane origin and the Proxy's own origin;
 all other App CSP directives remain enforced. Public origins and ordinary
 virtual-host tunnels retain their original embedding headers.
+For a root GET explicitly identified as an iframe HTML navigation, a known
+Proxy tunnel transport failure retains its failing HTTP status but returns a
+restricted, noncached HTML bridge. It posts `treer.app-ui.unavailable` with
+`workspaceId` and `appId` only to the configured Console origin. The Console
+must check the Proxy event origin, current frame source and both target IDs
+before spending its bounded reconnect budget. HEAD probes, API requests,
+authentication failures and upstream App responses retain their normal behavior.
+This signals a failed document navigation, not application health; it never
+replays a POST or another App action.
 Stopped Apps and offline machines show their
 state instead. The workload menu's Logs action opens the runtime terminal, and
 App views can switch between their interface and logs. Each App has a settings

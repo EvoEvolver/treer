@@ -54,6 +54,7 @@ async fn proxy_app_ui(
     mut request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
     browser.validate_tunnel_if_present(request.headers())?;
+    let navigation = path.is_empty() && is_iframe_html_navigation(&request);
     let app = auth.resolve_app_deployment(&workspace_id, &app_id).await?;
     if !auth.authentication_disabled() {
         let session = request
@@ -72,9 +73,112 @@ async fn proxy_app_ui(
         .await?;
         request.extensions_mut().insert(ForwardedAppIdentity(token));
     }
-    let mut response =
-        proxy_virtual_network_host(state, auth, workspace_id, app.hostname, path, request).await?;
+    let mut response = match proxy_virtual_network_host(
+        state,
+        auth,
+        workspace_id.clone(),
+        app.hostname,
+        path,
+        request,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return app_navigation_failure(error, navigation, &browser, &workspace_id, &app_id)
+        }
+    };
     allow_control_plane_frame(response.headers_mut(), &browser)?;
+    Ok(response)
+}
+
+fn is_iframe_html_navigation(request: &Request<Body>) -> bool {
+    request.method() == Method::GET
+        && request
+            .headers()
+            .get("sec-fetch-dest")
+            .is_some_and(|v| v == "iframe")
+        && request
+            .headers()
+            .get("sec-fetch-mode")
+            .is_some_and(|v| v == "navigate")
+        && request
+            .headers()
+            .get(header::ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| {
+                v.split(',').any(|part| {
+                    part.split(';')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .eq_ignore_ascii_case("text/html")
+                })
+            })
+}
+
+// Only Proxy-generated transient transport failures get a navigation bridge.
+// Upstream App responses, auth failures, HEAD probes and API calls are untouched.
+fn app_navigation_failure(
+    error: ApiFailure,
+    navigation: bool,
+    browser: &BrowserAccess,
+    workspace: &str,
+    app: &str,
+) -> Result<Response, ApiFailure> {
+    if !navigation
+        || !matches!(
+            error.status,
+            StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT
+        )
+        || !matches!(
+            error.error.code.as_str(),
+            "stream_failed"
+                | "server_offline"
+                | "no_online_server"
+                | "network_open_timeout"
+                | "network_stream_closed"
+                | "stream_closed"
+                | "tunnel_handshake_failed"
+                | "tunnel_request_failed"
+        )
+    {
+        return Err(error);
+    }
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    // Escape HTML-significant bytes even though the values are JSON strings.
+    let payload =
+        serde_json::json!({"type":"treer.app-ui.unavailable","workspaceId":workspace,"appId":app})
+            .to_string()
+            .replace('<', "\\u003c")
+            .replace('&', "\\u0026");
+    let origin = serde_json::json!(&*browser.origin_text)
+        .to_string()
+        .replace('<', "\\u003c")
+        .replace('&', "\\u0026");
+    let html = format!("<!doctype html><html><head><meta charset=\"utf-8\"><title>App unavailable</title></head><body><p>App connection unavailable.</p><script nonce=\"{nonce}\">parent.postMessage({payload},{origin});</script></body></html>");
+    let mut response = (error.status, axum::response::Html(html)).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_str(&format!(
+            "default-src 'none'; script-src 'nonce-{nonce}'; base-uri 'none'; form-action 'none'"
+        ))
+        .map_err(|_| {
+            ApiFailure::internal("app_error_bridge_failed", "invalid error page policy")
+        })?,
+    );
+    allow_control_plane_frame(response.headers_mut(), browser)?;
     Ok(response)
 }
 
@@ -129,6 +233,87 @@ mod tests {
             &Url::parse("https://proxy.treer.example/").unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn error_bridge_requires_an_explicit_get_iframe_html_navigation() {
+        let request = |method: Method, dest: &str, mode: &str, accept: &str| {
+            Request::builder()
+                .method(method)
+                .header("sec-fetch-dest", dest)
+                .header("sec-fetch-mode", mode)
+                .header(header::ACCEPT, accept)
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert!(is_iframe_html_navigation(&request(
+            Method::GET,
+            "iframe",
+            "navigate",
+            "text/html,application/xhtml+xml"
+        )));
+        for (method, dest, mode, accept) in [
+            (Method::HEAD, "iframe", "navigate", "text/html"),
+            (Method::POST, "iframe", "navigate", "text/html"),
+            (Method::GET, "document", "navigate", "text/html"),
+            (Method::GET, "iframe", "cors", "text/html"),
+            (Method::GET, "iframe", "navigate", "application/json"),
+        ] {
+            assert!(!is_iframe_html_navigation(&request(
+                method, dest, mode, accept
+            )));
+        }
+    }
+
+    #[tokio::test]
+    async fn error_bridge_preserves_failure_and_scopes_signal_without_error_details() {
+        let response = app_navigation_failure(
+            ApiFailure::bad_gateway("stream_failed", "private upstream diagnostic"),
+            true,
+            &browser(),
+            "ws_test",
+            "app_</script><script>bad()",
+        )
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+        let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert!(policy.contains("default-src 'none'; script-src 'nonce-"));
+        assert!(policy.contains("frame-ancestors 'self' https://app.treer.example"));
+        assert!(!policy.contains("unsafe-inline"));
+        let body = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("parent.postMessage("));
+        assert!(body.contains("\"type\":\"treer.app-ui.unavailable\""));
+        assert!(body.contains("\"workspaceId\":\"ws_test\""));
+        assert!(body.contains(",\"https://app.treer.example\");"));
+        assert!(!body.contains("private upstream diagnostic"));
+        assert!(!body.contains("</script><script>bad()"));
+        for error in [
+            ApiFailure::unauthorized("authentication_required", "session required"),
+            ApiFailure::forbidden("csrf_denied", "origin required"),
+            ApiFailure::bad_gateway("invalid_app_csp", "invalid policy"),
+            ApiFailure::bad_gateway("unrecognized_failure", "unknown"),
+        ] {
+            assert!(app_navigation_failure(error, true, &browser(), "ws", "app").is_err());
+        }
+        assert!(app_navigation_failure(
+            ApiFailure::bad_gateway("stream_failed", "offline"),
+            false,
+            &browser(),
+            "ws",
+            "app"
+        )
+        .is_err());
     }
 
     #[test]

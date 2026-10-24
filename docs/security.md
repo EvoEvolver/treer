@@ -1220,6 +1220,17 @@ limits same-site sibling origins from framing the authenticated Agent UI, but
 does not isolate Agent JavaScript from the Proxy authority described above.
 Embedded content remains trusted workspace code, not an isolation boundary.
 
+Known Proxy transport failures on a Managed App root iframe GET may return a
+nonce-restricted, noncached HTML error bridge with the original failure status.
+Its `treer.app-ui.unavailable` message targets only the configured Console
+origin and contains the workspace and App IDs, never transport diagnostics or
+credentials. The Console must validate the Proxy origin, current iframe source
+and both IDs before bounded recovery. This is a navigation failure hint, not a
+new authentication capability or proof of application health. Normal upstream
+responses, API/HEAD calls and authentication/CSRF failures are not rewritten;
+the bridge does not replay App writes. Trusted App code sharing the Proxy origin
+can imitate such a hint, so it does not establish a stronger trust boundary.
+
 ### Agent interface origins
 
 When wildcard ingress is configured, an Agent's registered interface UI is also
