@@ -199,6 +199,18 @@ Outbound operations include mutex acquisition, writing and flushing within a
 five-second deadline; the event-pumping RPC wait has an absolute 60-second
 deadline. A write timeout can mean partial delivery. It poisons the transport,
 preserves accepted-operation uncertainty and stops further dispatch without retry.
+Startup model discovery is optional: it has a separate five-second response
+deadline and falls back to an empty model list without poisoning the transport,
+so a slow `model/list` cannot prevent the subsequent thread start or resume.
+That response deadline starts only after successful write/flush; write failures,
+malformed frames, and required initialize/thread/history requests remain fatal.
+The runtime continues pumping the bounded event channel during discovery, so a
+burst of notifications cannot hide an otherwise available model response.
+Cancelled requests remove their exact pending reply and history selection via
+drop cleanup; late replies cannot settle a newer request or change model options.
+Focused controls: actual-entry `optional model discovery` in `tests/contract.mjs`
+and fixture-feature `rpc::tests` (set `TREER_TEST_NODE` to an absolute native Node
+image for the two synthetic child controls).
 The same five-second deadline applies to every valid RPC input (at most 128 KiB),
 so a slow provider can also trigger it. Oversized input is refused before writing.
 Before fencing after a cancelled wait, receipts and goals are restored from the

@@ -10,6 +10,9 @@ if(mode==='descendant') {
 }
 const threadId='fault-thread';let started=0, timer;
 let turns=['receipt','burst-previous'].includes(mode)?[{id:'initial',status:'inProgress',items:[]}]:[];
+if(mode?.startsWith('model-list-')&&existsSync('.synthetic-model-history.json')) {
+  turns=JSON.parse(readFileSync('.synthetic-model-history.json','utf8'));started=turns.length;
+}
 const emit=(method,params)=>console.log(JSON.stringify({method,params:{threadId,...params}}));
 for await(const line of readline.createInterface({input:process.stdin})) {
   const request=JSON.parse(line);
@@ -29,7 +32,18 @@ for await(const line of readline.createInterface({input:process.stdin})) {
     }
     result={goal};
   }
-  if(request.method==='model/list')result={data:[]};
+  if(request.method==='model/list') {
+    if(mode==='model-list-burst') {
+      process.stdout.write(Array.from({length:64},(_,n)=>JSON.stringify({method:'synthetic/discovery',params:{n}})+'\n').join(''));
+      result={data:[{id:'synthetic-model',model:'synthetic-model',displayName:'Synthetic model'}]};
+    }
+    if(mode==='model-list-late') {
+      setTimeout(()=>console.log(JSON.stringify({id:request.id,result:{data:[{id:'late-model',model:'late-model'}]}})),6500);continue;
+    }
+    if(mode==='model-list-refused') {console.log(JSON.stringify({id:request.id,error:{code:-1,message:'synthetic unavailable'}}));continue;}
+    if(mode==='model-list-timeout')continue;
+    if(mode!=='model-list-burst')result={data:[]};
+  }
   if(mode==='burst-startup'&&request.method==='initialize') {
     process.stdout.write(Array.from({length:64},(_,n)=>JSON.stringify({method:'synthetic/startup',params:{n}})+'\n').join(''));
   }
@@ -137,9 +151,10 @@ for await(const line of readline.createInterface({input:process.stdin})) {
       result={turn:{id:turn.id}};
       setTimeout(()=>{
         if(mode==='observe') turn.status='completed'; // no event; thread/read is authoritative
-        if(mode==='sparse'||mode==='goal-ack-lost') {
+        if(mode==='sparse'||mode==='goal-ack-lost'||mode?.startsWith('model-list-')) {
           turn.status='completed';
           turn.items=[{id:'answer',type:'agentMessage',text:'sparse answer'}];
+          if(mode?.startsWith('model-list-'))writeFileSync('.synthetic-model-history.json',JSON.stringify(turns));
           emit('turn/completed',{turn});
         }
         if(mode==='stream'&&started===1) {

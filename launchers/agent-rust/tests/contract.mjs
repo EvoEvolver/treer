@@ -1271,6 +1271,35 @@ test('Rust journal restart never replays an uncertain turn and preserves queued 
 
 const faultEnv=mode=>({CODEX_BIN:process.execPath,RUST_SPIKE_CODEX_ARGS:JSON.stringify([resolve(import.meta.dirname,'fixtures/fault-codex.mjs')]),RUST_SPIKE_FAULT:mode});
 const providerCalls=async s=>(await readFile(join(s.root,'provider.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+for(const mode of ['model-list-timeout','model-list-late','model-list-burst','model-list-refused'])test('Rust optional model discovery startup and resume remain usable '+mode,{skip:useNode,timeout:35000},async t=>{
+  const s=await fixture(t,faultEnv(mode));
+  const state=await fetch(s.base+'/api/state').then(r=>r.json());
+  assert.equal(state.ready,true);
+  assert.equal(state.runtime.provider.transport,'open');
+  assert.equal(state.runtime.state,'idle');
+  assert.deepEqual(state.modelOptions,mode==='model-list-burst'?[{id:'synthetic-model',model:'synthetic-model',displayName:'Synthetic model'}]:[]);
+  const calls=await providerCalls(s);
+  assert.ok(calls.some(call=>call.method==='model/list'));
+  assert.ok(calls.some(call=>call.method==='thread/start'));
+  if(mode==='model-list-burst')assert.doesNotMatch(s.logs(),/optional model\/list unavailable/,'event backpressure must be pumped before response deadline');
+  else assert.match(s.logs(),/optional model\/list unavailable; continuing startup/);
+  const first=await s.post({text:'after discovery startup',operation_id:'discovery-startup'}).then(r=>r.json());
+  await until(()=>fetch(s.base+'/v1/submissions/'+first.submission.id,{headers:s.headers}).then(r=>r.json()),r=>r.submission?.state==='done');
+  if(mode==='model-list-late') {
+    await new Promise(r=>setTimeout(r,1800));
+    const late=await fetch(s.base+'/api/state').then(r=>r.json());
+    assert.deepEqual(late.modelOptions,[]);assert.equal(late.runtime.provider.transport,'open');
+  }
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');assert.equal((await exit)[0],0);
+  const resumed=await s.launch({AGENT_UI_SESSION_ID:'fault-thread'});
+  const resumeState=await fetch(resumed.base+'/api/state').then(r=>r.json());
+  assert.equal(resumeState.thread.id,'fault-thread');assert.equal(resumeState.runtime.state,'idle');
+  assert.equal(resumeState.runtime.provider.transport,'open');
+  const second=await fetch(resumed.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'after discovery resume',operation_id:'discovery-resume'})}).then(r=>r.json());
+  await until(()=>fetch(resumed.base+'/v1/submissions/'+second.submission.id,{headers:s.headers}).then(r=>r.json()),r=>r.submission?.state==='done');
+  assert.ok((await providerCalls(s)).some(c=>c.method==='thread/resume'));
+  assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['after discovery startup','after discovery resume']);
+});
 const incomingNotice=(n,delivery='dlv_'+n)=>({delivery_id:delivery,recipient:{kind:'agent',id:'ag_contract'},message:{message_id:'msg_'+n,sender:{kind:'agent',id:'sender_'+n,name:'Sender '+n,path:'/team/sender-'+n},body:'Synthetic notice '+n,created_at:'2026-10-21T00:00:00Z'}});
 const messageFixtureEnv={AGENT_UI_MESSAGE_WATCH:'1',RUST_SPIKE_MESSAGE_INPUT:'incoming.json',PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH,CODEX_BIN:resolve(import.meta.dirname,'../../agent/tests/fake-codex.mjs'),FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_COMPLETE_TURNS:'1'};
 const receiptFixtureEnv={CODEX_BIN:resolve(import.meta.dirname,'../../agent/tests/fake-codex.mjs'),FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_COMPLETE_TURNS:'1'};

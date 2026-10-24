@@ -67,6 +67,16 @@ impl Drop for ProviderChild {
 }
 
 type Reply = oneshot::Sender<Result<Value>>;
+type Pending = Arc<std::sync::Mutex<HashMap<u64, Reply>>>;
+// Outer actor deadlines and shutdown can drop a request future. Cleanup must
+// not depend on polling that future again, or a late reply can retain state.
+struct PendingRequest { id: u64, pending: Pending, selections: Selections }
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        self.pending.lock().unwrap().remove(&self.id);
+        self.selections.lock().unwrap().remove(&self.id);
+    }
+}
 fn reviewed_provider_version(result: &Value) -> bool {
     // Only a fixed allowlist result is retained. Never persist userAgent:
     // its platform, originator and suffix are unrelated private metadata.
@@ -84,7 +94,7 @@ fn full_history_request(method: &str, params: &Value) -> bool {
 #[derive(Clone)]
 pub struct Rpc {
     input: Arc<Mutex<ChildStdin>>,
-    pending: Arc<Mutex<HashMap<u64, Reply>>>,
+    pending: Pending,
     next: Arc<AtomicU64>,
     reviewed_provider: Arc<AtomicBool>,
     diagnostics: Arc<std::sync::Mutex<Value>>,
@@ -173,7 +183,7 @@ impl Rpc {
                         return;
                     }
                 } else if let Some(id) = message["id"].as_u64() {
-                    if let Some(reply) = reader_rpc.pending.lock().await.remove(&id) {
+                    if let Some(reply) = reader_rpc.pending.lock().unwrap().remove(&id) {
                         let result = if message.get("error").is_some() {
                             Err(anyhow!("Codex RPC refused"))
                         } else {
@@ -185,7 +195,7 @@ impl Rpc {
                 }
             };
             reader_rpc.fail(reason);
-            reader_rpc.pending.lock().await.clear();
+            reader_rpc.pending.lock().unwrap().clear();
             let _ = events.send(json!({"method":"spike/provider-exit","params":{"reason":reason}})).await;
         });
         #[cfg(unix)]
@@ -231,13 +241,18 @@ impl Rpc {
     }
 
     pub async fn request_selected(&self, method: &str, params: Value, selection: Option<(usize,usize)>) -> Result<Value> {
-        self.request_history(method,params,selection.map(|range|crate::provider_stream::Selection{range:Some(range),..Default::default()})).await
+        self.request_history(method,params,selection.map(|range|crate::provider_stream::Selection{range:Some(range),..Default::default()}),true).await
     }
     pub async fn request_target(&self, method: &str, params: Value, target: Option<String>) -> Result<Value> {
-        self.request_history(method,params,target.map(|target|crate::provider_stream::Selection{target:Some(target),..Default::default()})).await
+        self.request_history(method,params,target.map(|target|crate::provider_stream::Selection{target:Some(target),..Default::default()}),true).await
     }
-    async fn request_history(&self, method: &str, params: Value, selection: Option<crate::provider_stream::Selection>) -> Result<Value> {
+    pub async fn request_optional(&self, method: &str, params: Value) -> Result<Value> {
+        if method != "model/list" { bail!("unsupported_optional_rpc"); }
+        self.request_history(method,params,None,false).await
+    }
+    async fn request_history(&self, method: &str, params: Value, selection: Option<crate::provider_stream::Selection>, fatal_timeout: bool) -> Result<Value> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let _pending = PendingRequest { id, pending: self.pending.clone(), selections: self.selections.clone() };
         if let Some(adapter)=&self.claude{
             if selection.is_some(){bail!("claude_older_history_unavailable");}
             let request=adapter.lock().unwrap().request(id,method,&params)?;
@@ -249,10 +264,10 @@ impl Rpc {
                         self.write(wire).await?;
                         Ok(dispatched)
                     }else{
-                        let(tx,rx)=oneshot::channel();self.pending.lock().await.insert(id,tx);
+                        let(tx,rx)=oneshot::channel();self.pending.lock().unwrap().insert(id,tx);
                         let result=async{self.write(wire).await?;rx.await.map_err(|_|anyhow!("Claude disconnected"))?};
                         let result=match timeout(Duration::from_secs(60),result).await{Ok(r)=>r,Err(_)=>{self.fail("claude_control_timeout");Err(anyhow!("claude_control_timeout"))}};
-                        self.pending.lock().await.remove(&id);result
+                        result
                     }
                 }
             };
@@ -266,7 +281,15 @@ impl Rpc {
             self.selections.lock().unwrap().insert(id,selection);
         }
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
+        self.pending.lock().unwrap().insert(id, tx);
+        // Optional discovery tolerates only a missing response AFTER a full,
+        // successful write. Never cancel a partial write at the optional timer.
+        if !fatal_timeout {
+            self.write(json!({"id":id,"method":method,"params":params})).await?;
+            return timeout(Duration::from_secs(5), rx).await
+                .map_err(|_| anyhow!("provider_optional_rpc_timeout"))?
+                .map_err(|_| anyhow!("Codex disconnected"))?;
+        }
         let result = async {
             self.write(json!({"id":id,"method":method,"params":params})).await?;
             rx.await.map_err(|_| anyhow!("Codex disconnected"))?
@@ -276,8 +299,6 @@ impl Rpc {
             Ok(result) => result,
             Err(_) => { self.fail("rpc_timeout"); Err(anyhow!("provider_rpc_timeout")) },
         };
-        self.pending.lock().await.remove(&id);
-        self.selections.lock().unwrap().remove(&id);
         if method == "initialize" {
             let reviewed = result.as_ref().is_ok_and(reviewed_provider_version);
             self.reviewed_provider.store(reviewed,Ordering::Relaxed);
@@ -290,6 +311,46 @@ impl Rpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(unix, feature="fixture-harness"))]
+    #[tokio::test]
+    async fn cancelled_request_cleans_selection_and_ignores_late_reply() {
+        let node = std::env::var("TREER_TEST_NODE").expect("fixture requires explicit native Node path");
+        let script = "const r=require('readline').createInterface({input:process.stdin});r.on('line',l=>{const q=JSON.parse(l);setTimeout(()=>console.log(JSON.stringify({id:q.id,result:{token:q.params.token}})),150)});";
+        let (rpc, mut child, _) = Rpc::spawn(&node, &["-e".into(),script.into()], &std::env::temp_dir(), false).unwrap();
+        let clone=rpc.clone();
+        let task=tokio::spawn(async move { clone.request_selected("synthetic/read",json!({"token":"cancelled"}),Some((0,1))).await });
+        for _ in 0..100 {
+            if !rpc.pending.lock().unwrap().is_empty() { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(rpc.pending.lock().unwrap().len(),1);
+        assert_eq!(rpc.selections.lock().unwrap().len(),1);
+        task.abort();let _=task.await;
+        assert!(rpc.pending.lock().unwrap().is_empty());
+        assert!(rpc.selections.lock().unwrap().is_empty());
+        assert_eq!(rpc.request_optional("thread/resume",json!({})).await.unwrap_err().to_string(),"unsupported_optional_rpc");
+        let reply=rpc.request_selected("synthetic/read",json!({"token":"next"}),None).await.unwrap();
+        assert_eq!(reply["token"],"next");
+        assert!(!rpc.failed());
+        assert!(rpc.pending.lock().unwrap().is_empty());
+        child.kill().await.unwrap();
+    }
+    #[cfg(all(unix, feature="fixture-harness"))]
+    #[tokio::test]
+    async fn optional_discovery_stalled_write_still_poisoned_and_cleaned() {
+        let node = std::env::var("TREER_TEST_NODE").expect("fixture requires explicit native Node path");
+        let (rpc, mut child, _) = Rpc::spawn(&node, &["-e".into(),"process.stdin.pause();setInterval(()=>{},1000)".into()], &std::env::temp_dir(), false).unwrap();
+        // Hold the writer to model backpressure, without relying on pipe size.
+        let writer=rpc.input.lock().await;
+        let result=rpc.request_optional("model/list",json!({})).await;
+        assert_eq!(result.unwrap_err().to_string(),"provider_write_timeout");
+        assert_eq!(rpc.diagnostics()["transport"],"stdin_write_timeout");
+        assert!(rpc.pending.lock().unwrap().is_empty());
+        assert!(rpc.selections.lock().unwrap().is_empty());
+        drop(writer);
+        assert!(rpc.request_selected("thread/resume",json!({}),None).await.is_err());
+        child.kill().await.unwrap();
+    }
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_provider_job_terminates_owned_descendant() {

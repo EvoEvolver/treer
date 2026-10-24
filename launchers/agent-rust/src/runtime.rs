@@ -442,11 +442,11 @@ impl Runtime {
         self.provider_selected(method,params,None).await
     }
     async fn provider_selected(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>) -> Result<Value> {
-        self.provider_query(method, params, selection, None).await
+        self.provider_query(method, params, selection, None, false).await
     }
-    async fn provider_query(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>, target: Option<String>) -> Result<Value> {
+    async fn provider_query(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>, target: Option<String>, optional: bool) -> Result<Value> {
         // This outer deadline is polled even during an event's reply write.
-        let result = match timeout(Duration::from_secs(60), self.wait_provider_response(method, params, selection, target)).await {
+        let result = match timeout(Duration::from_secs(60), self.wait_provider_response(method, params, selection, target, optional)).await {
             Ok(result) => result,
             Err(_) => { self.rpc.fail("rpc_timeout"); Err(anyhow!("provider_rpc_timeout")) },
         };
@@ -456,11 +456,12 @@ impl Runtime {
         }
         result
     }
-    async fn wait_provider_response(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>, target: Option<String>) -> Result<Value> {
+    async fn wait_provider_response(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>, target: Option<String>, optional: bool) -> Result<Value> {
         self.rpc_completed_turns.clear();
         let rpc = self.rpc.clone();
         let response = async {
-            if target.is_some() { rpc.request_target(method, params, target).await }
+            if optional { rpc.request_optional(method, params).await }
+            else if target.is_some() { rpc.request_target(method, params, target).await }
             else { rpc.request_selected(method, params, selection).await }
         };
         tokio::pin!(response);
@@ -561,10 +562,14 @@ impl Runtime {
         }
         self.provider_request("initialize", json!({"clientInfo":{"name":"treer-rust-spike","title":"Treer Agent","version":"0.0.1"},"capabilities":{"experimentalApi":true}})).await?;
         self.rpc.write(json!({"method":"initialized"})).await?;
-        self.models = self.provider_request("model/list", json!({}))
-            .await
-            .unwrap_or(json!({"data":[]}))["data"]
-            .clone();
+        self.models = match self.provider_query("model/list", json!({}), None, None, true).await {
+            Ok(result) => result["data"].clone(),
+            Err(error) if self.rpc.failed() || self.history_failed => return Err(error),
+            Err(_) => {
+                eprintln!("Rust spike: optional model/list unavailable; continuing startup");
+                json!([])
+            }
+        };
         let session = config
             .session
             .as_deref()
@@ -613,7 +618,7 @@ impl Runtime {
                 .collect::<Vec<_>>();
             if missing.len() > receipts::PENDING_LIMIT { bail!("recovery_target_limit"); }
             for (submission_id,id) in missing {
-                let observed=self.provider_query("thread/read",json!({"threadId":self.thread["id"],"includeTurns":true}),None,Some(id.clone())).await?;
+                let observed=self.provider_query("thread/read",json!({"threadId":self.thread["id"],"includeTurns":true}),None,Some(id.clone()),false).await?;
                 if observed["thread"]["id"] != self.thread["id"] { bail!("recovery_thread_mismatch"); }
                 if !matches!(observed["thread"]["status"]["type"].as_str(),Some("idle"|"active")) { bail!("recovery_thread_status_unavailable"); }
                 let turn=observed["thread"]["turns"].as_array().and_then(|turns|turns.iter().find(|turn|turn["id"]==id)).map(model::turn);
