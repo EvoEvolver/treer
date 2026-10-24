@@ -232,6 +232,11 @@ The runtime continues pumping the bounded event channel during discovery, so a
 burst of notifications cannot hide an otherwise available model response.
 Cancelled requests remove their exact pending reply and history selection via
 drop cleanup; late replies cannot settle a newer request or change model options.
+Native response parsing consults the exact pending-ID registry after validating
+the full JSON frame and streaming limits. An expired response is discarded before
+history-status interpretation, so stale multi-active history cannot poison a
+newer request merely because its old selection was removed. Malformed/over-limit
+wire frames and notifications/control requests keep their existing checks.
 Focused controls: actual-entry `optional model discovery` in `tests/contract.mjs`
 and fixture-feature `rpc::tests` (set `TREER_TEST_NODE` to an absolute native Node
 image for the synthetic child controls).

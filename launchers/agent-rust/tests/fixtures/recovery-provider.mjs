@@ -73,6 +73,9 @@ for await(const line of createInterface({input:process.stdin})) {
   }
   if(request.method==='thread/read'&&process.env.RECOVERY_OBSERVER_STALL==='1'&&reads===1) {
     const stale=structuredClone(result);
+    // Producer history can contain several old raw inProgress statuses. The
+    // expired reply has no remaining selection authority and must be ignored.
+    stale.thread.turns.unshift({id:'historical-stale',status:'inProgress',items:[]});
     setTimeout(()=>console.log(JSON.stringify({id:request.id,result:stale})),65000);
     continue;
   }

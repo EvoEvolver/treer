@@ -160,7 +160,14 @@ impl Rpc {
         let reader_rpc = rpc.clone();
         let stdout_reader = tokio::spawn(async move {
             let mut wire_sequence = 0u64;
-            let (mut codex_lines,mut claude_lines)=if reader_rpc.claude.is_some(){(None,Some(BufReader::new(stdout)))}else{(Some(Reader::new(stdout,reader_rpc.selections.clone())),None)};
+            let pending = reader_rpc.pending.clone();
+            let selections = reader_rpc.selections.clone();
+            let (mut codex_lines,mut claude_lines)=if reader_rpc.claude.is_some(){(None,Some(BufReader::new(stdout)))}else{(Some(Reader::new(stdout,reader_rpc.selections.clone()).with_response_filter(move |id| {
+                // Admission and selection capture are atomic with Drop's
+                // pending removal. Never re-read a cancelled selection later.
+                let replies = pending.lock().unwrap();
+                replies.contains_key(&id).then(||selections.lock().unwrap().get(&id).cloned().unwrap_or_default())
+            })),None)};
             let reason = loop {
                 let next=if let Some(lines)=&mut claude_lines{crate::claude::line(lines).await.map_err(|_|"claude_invalid_frame")}else{codex_lines.as_mut().unwrap().next().await};
                 let line = match next {
@@ -349,6 +356,26 @@ mod tests {
         assert_eq!(rpc.diagnostics()["transport"], "rpc_timeout");
         assert!(rpc.pending.lock().unwrap().is_empty());
         assert!(rpc.selections.lock().unwrap().is_empty());
+        child.kill().await.unwrap();
+    }
+    #[cfg(all(unix, feature="fixture-harness"))]
+    #[tokio::test]
+    async fn cancelled_observation_late_full_history_cannot_poison_new_request() {
+        let node = std::env::var("TREER_TEST_NODE").expect("fixture requires explicit native Node path");
+        let script = "require('readline').createInterface({input:process.stdin}).on('line',l=>{const q=JSON.parse(l);if(q.method==='thread/read')setTimeout(()=>console.log(JSON.stringify({id:q.id,result:{thread:{id:'thread',status:{type:'idle'},turns:[{id:'old',status:'inProgress',items:[]},{id:'recent',status:'inProgress',items:[]}]}}})),150);else console.log(JSON.stringify({id:q.id,result:{token:q.params.token}}))});";
+        let (rpc, mut child, _) = Rpc::spawn(&node, &["-e".into(),script.into()], &std::env::temp_dir(), false).unwrap();
+        let clone=rpc.clone();
+        let task=tokio::spawn(async move {clone.request_observation(json!({"threadId":"thread","includeTurns":true}),Some("old".into())).await});
+        for _ in 0..100 {
+            if !rpc.pending.lock().unwrap().is_empty() { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        task.abort();let _=task.await;
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert!(!rpc.failed(), "{}",rpc.diagnostics());
+        let next=rpc.request_selected("synthetic/read",json!({"token":"fresh"}),None).await.unwrap();
+        assert_eq!(next["token"],"fresh");
+        assert!(rpc.pending.lock().unwrap().is_empty());assert!(rpc.selections.lock().unwrap().is_empty());
         child.kill().await.unwrap();
     }
     #[cfg(all(unix, feature="fixture-harness"))]

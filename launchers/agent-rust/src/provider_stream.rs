@@ -36,6 +36,7 @@ pub struct Reader<R> {
     in_history: bool,
     turn_begin: Option<usize>,
     selections: Selections,
+    response_filter: Option<Box<dyn Fn(u64) -> Option<Selection> + Send + Sync>>,
     windows: HashMap<u64, Window>,
     recent: Window,
     total: usize,
@@ -116,6 +117,7 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             in_history: false,
             turn_begin: None,
             selections,
+            response_filter: None,
             windows: HashMap::new(),
             recent: Window::default(),
             total: 0,
@@ -145,6 +147,10 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             history_status: "missing",
             normalization_applied: false,
         }
+    }
+    pub fn with_response_filter(mut self, active: impl Fn(u64) -> Option<Selection> + Send + Sync + 'static) -> Self {
+        self.response_filter = Some(Box::new(active));
+        self
     }
     fn shape_limit(&mut self, kind: &'static str) -> &'static str {
         self.limit_kind = kind;
@@ -553,6 +559,22 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             None => {}
             _ => return Err("invalid_json"),
         }
+        // A fully parsed late/unknown response cannot confer history authority
+        // or poison a newer request. Grammar, duplicate keys and streaming
+        // byte/depth/node/frame limits above still apply to the entire frame.
+        // Notifications/control requests are never skipped by this filter.
+        let mut admitted_selection = None;
+        if value.get("method").is_none() {
+            if let (Some(active), Some(id)) = (&self.response_filter, value["id"].as_u64()) {
+                match active(id) {
+                    Some(selection) => admitted_selection = Some(selection),
+                    None => {
+                        self.windows.clear();self.targets.clear();self.active=None;self.recent=Window::default();
+                        return Ok(Some(serde_json::json!({"id":id})));
+                    }
+                }
+            }
+        }
         if value["result"]["thread"]["turns"].is_array() {
             // Codex history can retain inProgress after a provider restart.
             // Match Node's ordered full-history interpretation only with an
@@ -561,8 +583,8 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                 Some("idle") => Some("idle"), Some("active") => Some("active"),
                 None => None, _ => Some("other"),
             };
-            let selection = self.selections.lock().unwrap()
-                .get(&value["id"].as_u64().unwrap_or(0)).cloned().unwrap_or_default();
+            let selection = admitted_selection.unwrap_or_else(|| self.selections.lock().unwrap()
+                .get(&value["id"].as_u64().unwrap_or(0)).cloned().unwrap_or_default());
             let full_history = selection.full_history;
             self.full_history = full_history;
             self.resume_history = full_history && selection.resume_history;
@@ -694,6 +716,31 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[tokio::test]
+    async fn expired_response_skips_history_authority_but_not_wire_limits_or_current_responses() {
+        let history = serde_json::to_vec(&json!({"id":1,"result":{"thread":{"status":{"type":"idle"},"turns":[{"id":"old","status":"inProgress"},{"id":"recent","status":"inProgress"}]}}})).unwrap();
+        let ignored = Reader::new(history.as_slice(), Selections::default()).with_response_filter(|_|None).next().await.unwrap().unwrap();
+        assert_eq!(ignored,json!({"id":1}));
+        assert_eq!(Reader::new(history.as_slice(),Selections::default()).with_response_filter(|_|Some(Selection::default())).next().await.unwrap_err(),"provider_json_limit");
+        for malformed in [b"{\"id\":1,\"result\":1,\"result\":2}\n".as_slice(),b"{\"id\":1,\"result\":[}\n".as_slice()] {
+            assert!(Reader::new(malformed,Selections::default()).with_response_filter(|_|None).next().await.is_err());
+        }
+        let deep=format!("{{\"id\":1,\"result\":{}{}}}\n","[".repeat(40),"]".repeat(40));
+        assert!(Reader::new(deep.as_bytes(),Selections::default()).with_response_filter(|_|None).next().await.is_err());
+        let control=b"{\"id\":1,\"method\":\"item/commandExecution/requestApproval\",\"params\":{}}\n";
+        assert_eq!(Reader::new(control.as_slice(),Selections::default()).with_response_filter(|_|None).next().await.unwrap().unwrap()["method"],"item/commandExecution/requestApproval");
+        let selections = Selections::default();
+        selections.lock().unwrap().insert(1,Selection {full_history:true,..Selection::default()});
+        let cancelled = selections.clone();
+        let admitted = Reader::new(history.as_slice(),selections).with_response_filter(move |id| {
+            // Deterministic check/use interleaving: registry disappears after
+            // admission, before the Reader performs history interpretation.
+            let captured=cancelled.lock().unwrap().get(&id).cloned();
+            cancelled.lock().unwrap().remove(&id);
+            captured
+        }).next().await.unwrap().unwrap();
+        assert_eq!(admitted["result"]["treerHistory"]["staleInProgressCount"],2);
+    }
     #[tokio::test]
     async fn producer_history_status_normalizes_stale_turns_after_complete_metadata() {
         for status in ["idle", "active"] {
