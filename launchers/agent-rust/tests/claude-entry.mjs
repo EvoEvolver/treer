@@ -34,6 +34,58 @@ async function fixture(t,extra={},setup=async()=>({})){
 }
 async function stop(child){const exit=once(child,'exit');child.kill('SIGTERM');assert.equal((await exit)[0],0);}
 const inputCalls=async f=>(await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').map(JSON.parse);
+test('Claude task-origin followup never blocks, completes queued input or changes its model',async t=>{
+  const f=await fixture(t,{RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-task-followup.mjs')])});
+  await f.post({prompt:'original input',mode:'queue'});
+  let s=await until(f.snapshot,s=>s.thread.turns.length===1&&s.thread.status==='idle');
+  const first=s.thread.turns[0].id;
+  await writeFile(join(f.root,'cwd/start-followup'),'go');
+  await until(()=>access(join(f.root,'calls.followup')).then(()=>true),Boolean);
+  await f.post({prompt:'queued while native task speaks',mode:'queue'});
+  s=await until(f.snapshot,s=>s.thread.activeTurnId&&s.queue.length===0);
+  const active=s.thread.activeTurnId;
+  assert.notEqual(active,first);assert.equal(s.runtime.state,'working');
+  await writeFile(join(f.root,'cwd/finish-followup'),'go');
+  s=await until(f.snapshot,s=>s.thread.turns.some(t=>t.historySource==='native-task-notification'));
+  const pending=await (await fetch(f.base+'/v1/queue')).json();
+  assert.equal(pending.submissions[1].state,'running','task result must not settle queued user input');
+  assert.equal(s.thread.activeTurnId,active);assert.equal(s.runtime.state,'working');
+  await writeFile(join(f.root,'cwd/finish-input'),'go');
+  s=await until(f.snapshot,s=>s.thread.turns.length===3&&s.thread.status==='idle');
+  assert.equal(s.runtime.state,'idle');assert.equal(s.runtime.provider.transport,'open');
+  const output=s.thread.turns.find(t=>t.historySource==='native-task-notification');
+  assert.ok(output);assert.equal(output.projectionOnly,true);assert.equal(output.taskRunId,'own-run');
+  assert.equal(output.items.some(i=>i.kind==='userMessage'),false);
+  assert.equal(s.thread.model,'claude-current','task output must not change selected model');
+  const receipts=await (await fetch(f.base+'/v1/queue')).json();
+  assert.equal(receipts.submissions.length,2);
+  assert.ok(receipts.submissions.every(r=>r.state==='done'&&r.error===null));
+  assert.deepEqual(new Set(receipts.submissions.map(r=>r.turn_id)),new Set([first,active]));
+  assert.equal((await inputCalls(f)).length,2);
+  const thread=s.thread.id;await stop(f.child);const resumed=await f.launch();
+  s=await resumed.snapshot();assert.equal(s.thread.id,thread);
+  assert.equal(s.thread.turns.filter(t=>t.historySource==='native-task-notification').length,1);
+  assert.equal((await inputCalls(f)).length,2,'restart never replays task followup or user input');
+});
+for(const fault of ['BAD_TASK_ORIGIN','UNSOLICITED'])test('Claude task-followup refuses '+fault+' without replay or false receipt settlement',async t=>{
+  const f=await fixture(t,{RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-task-followup.mjs')]),['CLAUDE_FIXTURE_'+fault]:'1'});
+  await f.post({prompt:'original input',mode:'queue'});
+  await until(f.snapshot,s=>s.thread.status==='idle'&&s.thread.turns.length===1);
+  await writeFile(join(f.root,'cwd/start-followup'),'go');
+  await until(()=>access(join(f.root,'calls.followup')).then(()=>true),Boolean);
+  if(fault==='BAD_TASK_ORIGIN') {
+    await f.post({prompt:'never settled by wrong task result',mode:'queue'});
+    await until(f.snapshot,s=>!!s.thread.activeTurnId);
+    await writeFile(join(f.root,'cwd/finish-followup'),'go');
+  }
+  const s=await until(f.snapshot,s=>s.runtime.state==='blocked');
+  assert.equal(s.runtime.provider.transport,'claude_protocol_refused');
+  assert.equal(s.thread.turns.some(t=>t.historySource==='native-task-notification'),false);
+  const receipts=await (await fetch(f.base+'/v1/queue')).json();
+  assert.equal(receipts.submissions[0].state,'done');
+  if(fault==='BAD_TASK_ORIGIN')assert.notEqual(receipts.submissions[1].state,'done');
+  assert.equal((await inputCalls(f)).length,fault==='BAD_TASK_ORIGIN'?2:1);
+});
 const goalCall=(f,body,method='PUT')=>{const bytes=JSON.stringify(body);return fetch(f.base+'/api/goal',{method,body:bytes,headers:{'content-type':'application/json','content-length':Buffer.byteLength(bytes)}});};
 test('Claude native goals discover explicitly, ACK before sync, preserve FIFO and never interrupt',async t=>{
   const f=await fixture(t,{CLAUDE_FIXTURE_GOALS:'1',CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_GOAL_ACK_DELAY:'300'});

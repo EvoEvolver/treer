@@ -215,6 +215,30 @@ existing interface/origin guard protects both task routes. Windows reports task
 events but explicitly refuses task output reads until its confined reader is
 implemented; no POSIX filesystem guarantees are claimed there.
 
+### Native task followup output
+
+Claude 2.1.306 can emit a terminal task notification after the submitted input's
+`result`, then independently run another model invocation. Its `init` omits
+`user_message_uuids`, and its final `result` has
+`origin:{kind:"task-notification",producer:"session-task",runId:...}`. This is
+not another user input, a reopening of the completed turn, or an ACK for a queued
+prompt. The adapter admits this shape only following a same-session terminal
+`task_notification` with bounded task/run IDs. It buffers one separate transcript
+using the existing item/byte limits. The final result must match an unused run ID
+and explicit session and must not claim user input UUIDs. At most1024 run IDs,
+including consumed IDs for duplicate rejection, are retained per process.
+
+Only after that result validates does the runtime publish a separate display-only
+turn (`historySource:native-task-notification`, `projectionOnly:true`). It has no
+fabricated user item or receipt. Partial output is not published. Task output
+never updates selected model/effort, settles user receipts, releases an uncertainty
+fence, changes the active user input or retries anything. Local inputs may already
+be queued inside Claude; their adapter state is retained separately until native
+user output arrives. Snapshot/manual idle proof refuses while this buffer is
+active. Missing origin, foreign session, unsolicited output and interleaved init
+remain protocol failures. Restart preserves only the completed display record,
+never an executable task continuation or pending notification.
+
 ## Existing Node Claude session import
 
 `--import-node-state` is rejected for Claude. The distinct one-time

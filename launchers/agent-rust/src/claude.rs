@@ -28,6 +28,8 @@ pub struct Adapter {
     settings_epoch: u64,
     input_settings_epoch: Option<u64>,
     goals_supported: bool,
+    task_runs: BTreeMap<String, bool>,
+    task_followup: Option<Box<Adapter>>,
 }
 pub enum Request {
     Local(Value),
@@ -156,7 +158,7 @@ impl Adapter {
     // Current process state only. This says nothing about historical effects
     // and must never be used as terminal receipt/history authority.
     pub fn idle_for_disposition(&self) -> bool {
-        self.active.is_none() && self.pending_interrupts.is_empty()
+        self.active.is_none() && self.pending_interrupts.is_empty() && self.task_followup.is_none()
     }
     pub fn new(session: String) -> Result<Self> {
         if session.is_empty()
@@ -192,6 +194,8 @@ impl Adapter {
             settings_epoch: 0,
             input_settings_epoch: None,
             goals_supported: false,
+            task_runs: BTreeMap::new(),
+            task_followup: None,
         })
     }
     pub fn forget_control(&mut self, id: u64) { self.model_controls.remove(&id); self.effort_controls.remove(&id); }
@@ -517,6 +521,63 @@ impl Adapter {
         {
             bail!("claude_session_mismatch");
         }
+        // Native task completion can start its own model invocation AFTER the
+        // submitted input's result. Its result has task origin, not an input
+        // UUID. Keep all of that invocation separate, even if a new local
+        // input has already been written and is waiting in Claude's queue.
+        let task_init=event["type"]=="system" && event["subtype"]=="init"
+            && event.get("user_message_uuids").is_none()
+            && self.task_runs.values().any(|consumed| !consumed);
+        if task_init && self.task_followup.is_none() {
+            if event["session_id"]!=self.session {bail!("claude_task_session_missing");}
+            let mut followup=Self::new(self.session.clone())?;
+            followup.active=Some(uuid::Uuid::new_v4().to_string());
+            self.task_followup=Some(Box::new(followup));
+            return Ok(vec![]);
+        }
+        if self.task_followup.is_some() && matches!(event["type"].as_str(),Some("stream_event"|"assistant"|"user"|"result")) {
+            let final_result=event["type"]=="result";
+            let run=event["origin"]["runId"].as_str().unwrap_or("").to_owned();
+            if final_result && (event["session_id"]!=self.session || event["origin"]["kind"]!="task-notification"
+                || event["origin"]["producer"]!="session-task"
+                || self.task_runs.get(&run)!=Some(&false)
+                || event.get("user_message_uuids").is_some()) {
+                bail!("claude_task_result_origin");
+            }
+            // Origin admission belongs to this outer adapter. The inner
+            // transcript mapper must not interpret it as a second invocation.
+            let mut mapped_event=event;
+            if final_result {mapped_event.as_object_mut().unwrap().remove("origin");}
+            let messages=self.task_followup.as_mut().unwrap().consume(mapped_event)?;
+            // Partial content is bounded by the ordinary per-turn adapter
+            // limits. Publish only a complete origin-validated display turn.
+            if final_result {
+                self.task_runs.insert(run.clone(),true);
+                self.task_followup=None;
+                let mut turn=messages.into_iter().find(|m|m["method"]=="turn/completed")
+                    .ok_or_else(||anyhow::anyhow!("claude_task_result_missing"))?["params"]["turn"].clone();
+                turn["items"].as_array_mut().unwrap().retain(|i|i["type"]!="userMessage");
+                turn["projectionOnly"]=json!(true);
+                turn["taskRunId"]=json!(run);
+                return Ok(vec![json!({"method":"thread/claude-task-output","params":{"threadId":self.session,"turn":turn}})]);
+            }
+            return Ok(vec![]);
+        }
+        if self.task_followup.is_some() && event["type"]=="system" && event["subtype"]=="init" {
+            bail!("claude_task_input_interleaving");
+        }
+        if event["type"]=="result" && event["origin"]["kind"]=="task-notification" {
+            bail!("claude_unowned_task_result");
+        }
+        if event["type"]=="system" && event["subtype"]=="task_notification"
+            && matches!(event["status"].as_str(),Some("completed"|"failed"|"stopped")) {
+            if let (Some(task),Some(run))=(Self::model_name(&event["task_id"]),Self::model_name(&event["run_id"])) {
+                if !task.is_empty() && !self.task_runs.contains_key(run) {
+                    if self.task_runs.len()>=1024 {bail!("claude_task_run_limit");}
+                    self.task_runs.insert(run.into(),false);
+                }
+            }
+        }
         let mut out = vec![];
         if self.goals_supported {
             if let Some(turn)=&self.active {
@@ -735,6 +796,31 @@ impl Adapter {
     }
 }
 
+#[cfg(test)]
+mod task_followup_tests {
+    use super::*;
+    #[test]
+    fn unowned_task_result_cannot_complete_current_input() {
+        let mut a=Adapter::new("session".into()).unwrap();
+        a.active=Some("local-input".into());
+        assert!(a.consume(json!({"type":"result","session_id":"session","origin":{"kind":"task-notification","producer":"session-task","runId":"unknown"}})).is_err());
+        assert_eq!(a.active.as_deref(),Some("local-input"));
+    }
+    #[test]
+    fn buffered_task_is_not_idle_and_duplicate_run_cannot_arm_it_again() {
+        let mut a=Adapter::new("session".into()).unwrap();
+        let notification=json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"own-task","run_id":"run","status":"completed"});
+        a.consume(notification.clone()).unwrap();
+        a.consume(json!({"type":"system","subtype":"init","session_id":"session"})).unwrap();
+        assert!(!a.idle_for_disposition());
+        let output=a.consume(json!({"type":"result","session_id":"session","result":"task result","origin":{"kind":"task-notification","producer":"session-task","runId":"run"}})).unwrap();
+        assert_eq!(output[0]["method"],"thread/claude-task-output");
+        assert!(a.idle_for_disposition());
+        a.consume(notification).unwrap();
+        a.consume(json!({"type":"system","subtype":"init","session_id":"session"})).unwrap();
+        assert!(a.consume(json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"duplicate"}}})).is_err());
+    }
+}
 #[cfg(test)]
 mod model_tests {
     use super::*;

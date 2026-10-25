@@ -1880,6 +1880,16 @@ impl Runtime {
                     if p["condition"]==ack["args"] {ack["completion"]=p.clone();}
                 }
             }
+            "thread/claude-task-output" if self.claude => {
+                // Independent native task output is display-only. Never run
+                // user-receipt settlement or change the active input/fence.
+                let mut turn=model::final_turn(&p["turn"])?;
+                turn["projectionOnly"]=json!(true);
+                turn["historySource"]=json!("native-task-notification");
+                turn["taskRunId"]=p["turn"]["taskRunId"].clone();
+                self.upsert_turn(turn)?;
+                self.persist()?;
+            }
             "thread/tasks/updated" if self.claude => {
                 // Auxiliary metadata cannot complete a turn or poison its transport.
                 if crate::tasks::update(&mut self.terminal_tasks, &p["event"]).is_ok() {
