@@ -18,6 +18,11 @@ pub struct Adapter {
     aliases: BTreeMap<String, String>,
     current_model: Option<String>,
     model_controls: BTreeMap<u64, String>,
+    effort_controls: BTreeMap<u64, Value>,
+    effort_supported: bool,
+    current_effort: Value,
+    effort_known: bool,
+    effort_revision: u64,
     model_revision: u64,
     input_model_revision: u64,
     settings_epoch: u64,
@@ -177,6 +182,11 @@ impl Adapter {
             aliases: BTreeMap::new(),
             current_model: None,
             model_controls: BTreeMap::new(),
+            effort_controls: BTreeMap::new(),
+            effort_supported: false,
+            current_effort: Value::Null,
+            effort_known: false,
+            effort_revision: 0,
             model_revision: 0,
             input_model_revision: 0,
             settings_epoch: 0,
@@ -184,7 +194,39 @@ impl Adapter {
             goals_supported: false,
         })
     }
-    pub fn forget_control(&mut self, id: u64) { self.model_controls.remove(&id); }
+    pub fn forget_control(&mut self, id: u64) { self.model_controls.remove(&id); self.effort_controls.remove(&id); }
+    pub fn commit_effort(&mut self, result: &Value) -> Result<Value> {
+        if result["unsupported"]==true {return Ok(result.clone());}
+        if result["probe"]==true {
+            self.effort_supported=true;
+        } else {
+            if !result.get("effort").is_some_and(|e|e.is_null()||Self::effort(e).is_some()) {bail!("claude_effort_ack_invalid");}
+            self.current_effort=result["effort"].clone();
+            self.effort_known=true;
+            // Invalidate already-queued selection reports captured before ACK.
+            self.effort_revision+=1;
+        }
+        Ok(json!({"reasoningEffort":self.current_effort,"effortSelectionStatus":self.effort_status(),"effortRevision":self.effort_revision,"modelOptions":self.visible_models()}))
+    }
+    fn effort_status(&self) -> &'static str {if self.effort_known {"confirmed"}else{"unknown"}}
+    pub fn unknown_effort(&mut self) {self.current_effort=Value::Null;self.effort_known=false;self.effort_revision+=1;}
+    pub fn effort_revision(&self) -> u64 {self.effort_revision}
+    fn effort(value: &Value) -> Option<String> {
+        let value=value.as_str()?.trim().to_ascii_lowercase();
+        matches!(value.as_str(),"none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"|"ultra").then_some(value)
+    }
+    fn visible_models(&self) -> Vec<Value> {
+        self.models.iter().map(|model|{let mut model=model.clone();if !self.effort_supported {model["supportedReasoningEfforts"]=json!([]);}model}).collect()
+    }
+    fn validate_settings(&self, params: &Value) -> Result<()> {
+        if let Some(effort)=params.get("reasoningEffort") {
+            let model=match params.get("model") {Some(model)=>model.as_str().map(|s|self.resolved(s)),None=>self.current_model.clone()};
+            if !self.effort_supported || !effort.is_null() && !self.models.iter().any(|m|Some(m["model"].as_str().unwrap_or_default())==model.as_deref() && m["supportedReasoningEfforts"].as_array().is_some_and(|levels|levels.iter().any(|e|e["reasoningEffort"]==*effort))) {
+                bail!("claude_reasoning_effort_not_supported");
+            }
+        }
+        Ok(())
+    }
     pub fn model_revision(&self) -> u64 {self.model_revision}
     // Called only by the waiting RPC future after its exact response wins
     // against the response deadline. Parsing an ACK alone is not commitment.
@@ -203,12 +245,13 @@ impl Adapter {
     }
     fn observe_model(&mut self, value: &str) -> Value {
         let model = self.resolved(value);
+        if !self.current_effort.is_null() && !self.models.iter().any(|m|m["model"]==model && m["supportedReasoningEfforts"].as_array().is_some_and(|levels|levels.iter().any(|e|e["reasoningEffort"]==self.current_effort))) {self.unknown_effort();}
         if !self.models.iter().any(|m|m["model"]==model) && self.models.len()<128 {
             self.models.push(Self::option(&model,&model,&model,"Current model reported by Claude"));
         }
         self.current_model=Some(model.clone());
         self.model_revision+=1;
-        json!({"method":"thread/model/updated","params":{"threadId":self.session,"model":model,"modelOptions":self.models,"modelRevision":self.model_revision}})
+        json!({"method":"thread/model/updated","params":{"threadId":self.session,"model":model,"modelOptions":self.visible_models(),"modelRevision":self.model_revision,"reasoningEffort":self.current_effort,"effortSelectionStatus":self.effort_status(),"effortRevision":self.effort_revision}})
     }
     fn catalog(&mut self, response: &Value) -> Result<()> {
         self.goals_supported = crate::claude_goal::supported(response);
@@ -219,7 +262,14 @@ impl Adapter {
                 let Some(alias)=Self::model_name(&info["value"]).or_else(||Self::model_name(&info["id"])) else {continue;};
                 let model=Self::model_name(&info["resolvedModel"]).unwrap_or(alias);
                 self.aliases.insert(alias.into(),model.into());
-                let option=Self::option(alias,model,Self::model_name(&info["displayName"]).unwrap_or(model),info["description"].as_str().filter(|s|s.len()<=4096).unwrap_or(""));
+                let mut option=Self::option(alias,model,Self::model_name(&info["displayName"]).unwrap_or(model),info["description"].as_str().filter(|s|s.len()<=4096).unwrap_or(""));
+                if info["supportsEffort"]==true {
+                    let mut levels=Vec::new();
+                    for value in info["supportedEffortLevels"].as_array().into_iter().flatten().take(32) {
+                        if let Some(value)=Self::effort(value) {let entry=json!({"reasoningEffort":value,"description":""});if !levels.contains(&entry) {levels.push(entry);}}
+                    }
+                    option["supportedReasoningEfforts"]=json!(levels);
+                }
                 if let Some(prior)=self.models.iter_mut().find(|m|m["model"]==model) {
                     if prior["isDefault"]==true {*prior=option;}
                 } else {self.models.push(option);}
@@ -235,7 +285,16 @@ impl Adapter {
                 self.model_controls.insert(id,String::new());
                 Request::Wire(json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"initialize"}}))
             },
-            "model/list" => Request::Local(json!({"data":self.models})),
+            "model/list" => Request::Local(json!({"data":self.visible_models()})),
+            "settings/validate" => {self.validate_settings(params)?;Request::Local(json!({}))},
+            "effort/probe" | "effort/set" => {
+                let probe=method=="effort/probe";
+                if probe && !self.models.iter().any(|m|m["supportedReasoningEfforts"].as_array().is_some_and(|e|!e.is_empty())) {return Ok(Request::Local(json!({"unsupported":true})));}
+                if !probe {self.validate_settings(params)?;self.settings_epoch+=1;}
+                self.effort_controls.insert(id,if probe {json!({"probe":true})}else{json!({"effort":params["reasoningEffort"]})});
+                let settings=if probe {json!({})}else{json!({"effortLevel":params["reasoningEffort"]})};
+                Request::Wire(json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"apply_flag_settings","settings":settings}}))
+            },
             "thread/goal/get" => Request::Local(json!({"goal":null,"supported":self.goals_supported,"confirmed":false})),
             "model/set" => {
                 let model=Self::model_name(&params["model"]).ok_or_else(||anyhow::anyhow!("claude_model_invalid"))?;
@@ -253,7 +312,7 @@ impl Adapter {
                     bail!("claude_session_mismatch");
                 }
                 Request::Local(
-                    json!({"thread":{"id":self.session,"name":"Claude","status":{"type":"idle"},"turns":[]},"model":self.current_model,"modelOptions":self.models,"modelRevision":self.model_revision,"reasoningEffort":null}),
+                    json!({"thread":{"id":self.session,"name":"Claude","status":{"type":"idle"},"turns":[]},"model":self.current_model,"modelOptions":self.visible_models(),"modelRevision":self.model_revision,"reasoningEffort":self.current_effort,"effortSelectionStatus":self.effort_status(),"effortRevision":self.effort_revision}),
                 )
             }
             "turn/start" | "turn/steer" => {
@@ -496,8 +555,10 @@ impl Adapter {
                     }
                 }
                 let control=self.model_controls.remove(&id);
+                let effort=self.effort_controls.remove(&id);
                 let mut result=r["response"].clone();
                 if r["subtype"]=="success" {
+                    if let Some(candidate)=effort {result=candidate;}
                     if let Some(model)=control {
                         if model.is_empty() {self.catalog(&result)?;}
                         else {result=json!({"model":self.resolved(&model)});}
@@ -982,5 +1043,49 @@ mod tests {
             .is_err());
             assert_eq!(state, before);
         }
+    }
+}
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+    fn ack(adapter: &mut Adapter, id: u64, response: Value) -> Vec<Value> {
+        adapter.consume(json!({"type":"control_response","response":{"subtype":"success","request_id":id.to_string(),"response":response}})).unwrap()
+    }
+    #[test]
+    fn effort_probe_and_ack_are_candidates_only_until_waiter_commits() {
+        let mut a=Adapter::new("session".into()).unwrap();
+        a.request(1,"initialize",&json!({})).unwrap();
+        ack(&mut a,1,json!({"models":[{"value":"default","resolvedModel":"native","supportsEffort":true,"supportedEffortLevels":["high"," HIGH ","bad",17]}]}));
+        assert_eq!(a.visible_models()[0]["supportedReasoningEfforts"],json!([]));
+        a.request(2,"effort/probe",&json!({})).unwrap();
+        let result=ack(&mut a,2,json!({}));assert!(!a.effort_supported);
+        a.commit_effort(&result[0]["result"]).unwrap();
+        assert_eq!(a.visible_models()[0]["supportedReasoningEfforts"],json!([{"reasoningEffort":"high","description":""}]));
+        a.request(3,"effort/set",&json!({"reasoningEffort":"high"})).unwrap();
+        let result=ack(&mut a,3,json!({}));a.forget_control(3);
+        assert_eq!(result[0]["result"]["effort"],"high");assert!(!a.effort_known,"parse-before-cancel does not commit");
+        a.request(4,"effort/set",&json!({"reasoningEffort":null})).unwrap();a.forget_control(4);
+        let late=ack(&mut a,4,json!({}));assert!(a.commit_effort(&late[0]["result"]).is_err());
+        assert!(!a.effort_known);
+        a.request(5,"effort/set",&json!({"reasoningEffort":"high"})).unwrap();
+        let prior=a.observe_model("native");
+        let response=ack(&mut a,5,json!({}));let committed=a.commit_effort(&response[0]["result"]).unwrap();
+        assert!(prior["params"]["effortRevision"].as_u64()<committed["effortRevision"].as_u64(),"queued report cannot undo later effort ACK");
+        assert_eq!(prior["params"]["modelRevision"],json!(a.model_revision),"effort does not invalidate an independently learned model");
+    }
+    #[test]
+    fn effort_attempt_preserves_epoch_and_validates_target_before_mutation() {
+        let mut a=Adapter::new("session".into()).unwrap();
+        a.request(1,"initialize",&json!({})).unwrap();
+        ack(&mut a,1,json!({"models":[{"value":"default","resolvedModel":"native","supportsEffort":true,"supportedEffortLevels":["high"]},{"value":"legacy"}]}));
+        a.request(2,"effort/probe",&json!({})).unwrap();let probe=ack(&mut a,2,json!({}));a.commit_effort(&probe[0]["result"]).unwrap();
+        assert!(a.request(3,"settings/validate",&json!({"model":"legacy","reasoningEffort":"high"})).is_err());
+        assert_eq!(a.settings_epoch,0);
+        a.request(4,"turn/start",&json!({"input":[{"type":"text","text":"A"}]})).unwrap();
+        a.request(5,"effort/set",&json!({"reasoningEffort":"high"})).unwrap();
+        a.unknown_effort();a.forget_control(5);
+        let old=a.consume(json!({"type":"system","subtype":"init","model":"old"})).unwrap();
+        assert!(!old.iter().any(|e|e["method"]=="thread/model/updated"));assert!(!a.effort_known);
+        assert!(a.request(6,"settings/validate",&json!({"model":null,"reasoningEffort":"high"})).is_err());
     }
 }

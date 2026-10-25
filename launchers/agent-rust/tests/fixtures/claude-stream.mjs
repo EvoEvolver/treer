@@ -8,7 +8,9 @@ const emit=event=>process.stdout.write(JSON.stringify({session_id:session,...eve
 let active=false, timer;
 let model='claude-sonnet-test';
 let modelChanges=0;
+let effort=null;
 const models=[{value:'default',resolvedModel:'claude-sonnet-test'},{value:'sonnet',resolvedModel:'claude-sonnet-test',displayName:'Sonnet from provider'},{value:'opus',resolvedModel:'claude-opus-test'},{value:'legacy',resolvedModel:'claude-legacy-test'}];
+if(process.env.CLAUDE_FIXTURE_EFFORTS)for(const option of models)if(option.value!=='legacy'){option.supportsEffort=true;option.supportedEffortLevels=['low','medium','high',' HIGH ','invalid','low'];}
 const finish=()=>{active=false;emit({type:'result',subtype:'success',is_error:false,result:'synthetic answer'});};
 createInterface({input:process.stdin}).on('line',async line=>{
   const event=JSON.parse(line);
@@ -23,6 +25,17 @@ createInterface({input:process.stdin}).on('line',async line=>{
       appendFileSync(process.env.CLAUDE_FIXTURE_LOG+'.controls',JSON.stringify(event)+'\n');
       const reply=(subtype,response={})=>emit({type:'control_response',response:{subtype,request_id:event.request_id,response,error:subtype==='error'?'synthetic model refused':undefined}});
       if(event.request.subtype==='initialize'){reply('success',process.env.CLAUDE_FIXTURE_NO_MODELS?{}:{models});return;}
+      if(event.request.subtype==='apply_flag_settings'){
+        const probe=!Object.hasOwn(event.request.settings,'effortLevel');
+        if(process.env.CLAUDE_FIXTURE_NO_EFFORT){reply('error');return;}
+        if(probe){setTimeout(()=>reply('success'),Number(process.env.CLAUDE_FIXTURE_PROBE_DELAY||0));return;}
+        const next=event.request.settings.effortLevel;
+        if(next===process.env.CLAUDE_FIXTURE_REFUSE_EFFORT){reply('error');return;}
+        effort=next;
+        if(active&&process.env.CLAUDE_FIXTURE_MODEL_BURST)for(let i=0;i<64;i++)emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:''}}});
+        if(process.env.CLAUDE_FIXTURE_WRONG_MODEL_ACK)emit({type:'control_response',response:{subtype:'success',request_id:'999999',response:{}}});
+        setTimeout(()=>reply('success'),next===process.env.CLAUDE_FIXTURE_TIMEOUT_EFFORT?18000:Number(process.env.CLAUDE_FIXTURE_EFFORT_DELAY||0));return;
+      }
       if(event.request.subtype==='set_model'){
         const selected=event.request.model, option=models.find(m=>m.value===selected||m.resolvedModel===selected);
         if(selected==='invalid'){setTimeout(()=>reply('error'),300);return;}
@@ -54,7 +67,7 @@ createInterface({input:process.stdin}).on('line',async line=>{
     if(b.source.type!=='base64')process.exit(72);
     const bytes=Buffer.from(b.source.data,'base64');return {mime:b.source.media_type,bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')};
   }):[];
-  appendFileSync(process.env.CLAUDE_FIXTURE_LOG,JSON.stringify({type:active?'steered':'accepted',resume:args.includes('--resume'),session,...(process.env.CLAUDE_FIXTURE_MODELS||process.env.CLAUDE_FIXTURE_STEER?{model,text,uuid:event.uuid}:{}),...(process.env.CLAUDE_FIXTURE_IMAGES?{images}:{})})+'\n');
+  appendFileSync(process.env.CLAUDE_FIXTURE_LOG,JSON.stringify({type:active?'steered':'accepted',resume:args.includes('--resume'),session,...(process.env.CLAUDE_FIXTURE_MODELS||process.env.CLAUDE_FIXTURE_STEER?{model,text,uuid:event.uuid}:{}),...(process.env.CLAUDE_FIXTURE_EFFORTS?{effort}:{}),...(process.env.CLAUDE_FIXTURE_IMAGES?{images}:{})})+'\n');
   if(active){emit({type:'user',uuid:event.uuid,message:event.message});return;}
   active=true;
   if(process.env.CLAUDE_FIXTURE_GOALS&&text.startsWith('/goal ')){

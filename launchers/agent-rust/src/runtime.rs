@@ -97,6 +97,7 @@ struct Runtime {
     thread: Value,
     models: Value,
     model_revision: u64,
+    effort_revision: u64,
     ready: bool,
     turns: Transcript,
     history_start: usize,
@@ -192,6 +193,7 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
         thread: Value::Null,
         models: json!([]),
         model_revision: 0,
+        effort_revision: 0,
         ready: false,
         turns: Transcript::default(),
         history_start: 0,
@@ -456,7 +458,7 @@ impl Runtime {
     }
     async fn provider_query(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>, target: Option<String>, optional: bool) -> Result<Value> {
         // This outer deadline is polled even during an event's reply write.
-        let result = if self.claude && method=="model/set" {
+        let result = if self.claude && matches!(method,"model/set"|"effort/set"|"effort/probe") {
             // This control has its own response-only deadline after fatal
             // write/flush; keep pumping events without the required-RPC timer.
             self.wait_provider_response(method,params,selection,target,optional).await
@@ -476,6 +478,7 @@ impl Runtime {
         let claude=self.claude;
         let response = async {
             if method=="model/set" && claude {rpc.request_claude_model(params).await}
+            else if claude && matches!(method,"effort/set"|"effort/probe") {rpc.request_claude_effort(method,params).await}
             else if optional { rpc.request_optional(method, params).await }
             else if target.is_some() { rpc.request_target(method, params, target).await }
             else { rpc.request_selected(method, params, selection).await }
@@ -595,6 +598,14 @@ impl Runtime {
         }
         self.provider_request("initialize", json!({"clientInfo":{"name":"treer-rust-spike","title":"Treer Agent","version":"0.0.1"},"capabilities":{"experimentalApi":true}})).await?;
         self.rpc.write(json!({"method":"initialized"})).await?;
+        if self.claude {
+            // Empty overlay probes the native setter, not model selection.
+            // Unsupported/missing ACK hides effort; integrity/write faults stay fatal.
+            if let Err(error)=self.provider_request("effort/probe",json!({})).await {
+                if self.rpc.failed() || self.history_failed {return Err(error);}
+                eprintln!("Claude effort setter unavailable; effort controls hidden");
+            }
+        }
         self.models = match self.provider_query("model/list", json!({}), None, None, true).await {
             Ok(result) => result["data"].clone(),
             Err(error) if self.rpc.failed() || self.history_failed => return Err(error),
@@ -632,9 +643,11 @@ impl Runtime {
             bail!("active provider thread has no current turn");
         }
         self.thread = json!({"id":id,"title":result["thread"]["name"].as_str().filter(|name| *name != "Codex (Rust experiment)").unwrap_or(if self.claude {"Claude"} else {"Codex"}),"cwd":config.cwd,"model":result["model"],"reasoningEffort":result["reasoningEffort"],"status":"idle","activeTurnId":null,"lastError":null,"createdAt":now(),"updatedAt":now(),"turns":[],"hasOlderItems":false});
+        if self.claude {self.thread["effortSelectionStatus"]=result["effortSelectionStatus"].clone();}
         if self.claude {
             self.models=result["modelOptions"].clone();
             self.model_revision=result["modelRevision"].as_u64().unwrap_or(0);
+            self.effort_revision=result["effortRevision"].as_u64().unwrap_or(0);
         }
         for turn in result["thread"]["turns"].as_array().into_iter().flatten() {
             self.turns.insert(model::turn(turn))?;
@@ -1098,7 +1111,9 @@ impl Runtime {
             "settings" => {
                 if self.claude {
                     if !self.ready || self.history_failed || self.state_failed || self.dispatch_blocked {bail!("claude_settings_unavailable");}
-                    if body.get("reasoningEffort").is_some_and(|v|!v.is_null()) {bail!("claude_reasoning_effort_not_supported");}
+                    let mut validation=body.clone();
+                    if validation.get("model").is_none() {validation["model"]=self.thread["model"].clone();}
+                    self.provider_request("settings/validate",validation).await?;
                     if body.get("model").is_some() {
                         let result=match self.provider_request("model/set",json!({"model":body["model"]})).await {
                             Ok(result)=>result,
@@ -1107,8 +1122,11 @@ impl Runtime {
                                     // Mutation outcome is unknown, not a claim
                                     // that the provider retained the old model.
                                     self.model_revision=self.rpc.claude_model_revision();
+                                    self.effort_revision=self.rpc.claude_effort_revision();
                                     self.thread["model"]=Value::Null;
                                     self.thread["modelSelectionStatus"]=json!("unknown");
+                                    self.thread["reasoningEffort"]=Value::Null;
+                                    self.thread["effortSelectionStatus"]=json!("unknown");
                                     self.publish();
                                 }
                                 return Err(error);
@@ -1118,6 +1136,27 @@ impl Runtime {
                         self.model_revision=result["modelRevision"].as_u64().unwrap_or(0);
                         self.thread["modelSelectionStatus"]=json!("confirmed");
                         self.models=result["modelOptions"].clone();
+                        self.thread["reasoningEffort"]=result["reasoningEffort"].clone();
+                        self.thread["effortSelectionStatus"]=result["effortSelectionStatus"].clone();
+                        self.effort_revision=result["effortRevision"].as_u64().unwrap_or(self.effort_revision);
+                        self.publish();
+                    }
+                    if body.get("reasoningEffort").is_some() {
+                        let result=match self.provider_request("effort/set",json!({"reasoningEffort":body["reasoningEffort"]})).await {
+                            Ok(result)=>result,
+                            Err(error)=>{
+                                if error.to_string()=="claude_model_response_timeout" {
+                                    self.effort_revision=self.rpc.claude_effort_revision();
+                                    self.thread["reasoningEffort"]=Value::Null;
+                                    self.thread["effortSelectionStatus"]=json!("unknown");
+                                    self.publish();
+                                }
+                                return Err(error);
+                            }
+                        };
+                        self.thread["reasoningEffort"]=result["reasoningEffort"].clone();
+                        self.thread["effortSelectionStatus"]=result["effortSelectionStatus"].clone();
+                        self.effort_revision=result["effortRevision"].as_u64().unwrap_or(self.effort_revision);
                         self.publish();
                     }
                     return Ok(json!({"accepted":true}));
@@ -1829,6 +1868,11 @@ impl Runtime {
                     self.thread["model"]=p["model"].clone();
                     self.thread["modelSelectionStatus"]=json!("confirmed");
                     self.models=p["modelOptions"].clone();
+                }
+                if p["effortRevision"].as_u64().is_some_and(|r|r>self.effort_revision) {
+                    self.effort_revision=p["effortRevision"].as_u64().unwrap();
+                    self.thread["reasoningEffort"]=p["reasoningEffort"].clone();
+                    self.thread["effortSelectionStatus"]=p["effortSelectionStatus"].clone();
                 }
             }
             "thread/goal/updated" => {

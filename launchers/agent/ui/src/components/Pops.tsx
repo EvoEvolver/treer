@@ -116,8 +116,9 @@ export function ModelPop({ onClose, onBack }: { onClose: () => void; onBack?: ()
       </div>
       {efforts.length > 0 && (
         <div className="field"><label htmlFor="effort-select">{t("model.effort")}</label>
-          <select id="effort-select" value={thread?.reasoningEffort ?? ""} disabled={busy} onChange={(event) => void actions.settings({ reasoningEffort: event.target.value || null })}>
-            {!efforts.some((option) => option.reasoningEffort === thread?.reasoningEffort) && <option value="">{t("model.default")}</option>}
+          <select id="effort-select" value={thread?.effortSelectionStatus === "unknown" ? "__unknown" : thread?.reasoningEffort ?? ""} disabled={busy} onChange={(event) => void actions.settings({ reasoningEffort: event.target.value || null })}>
+            {thread?.effortSelectionStatus === "unknown" && <option value="__unknown" disabled>{t("model.effortUnknown")}</option>}
+            <option value="">{t("model.default")}</option>
             {efforts.map((option) => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}
           </select>
         </div>

@@ -38,8 +38,8 @@ There is no built-in model/version catalog. With no catalog, the list stays
 empty until a real `system/init` or current-input assistant model report arrives.
 The provider's default alias establishes the initial selection when available;
 restart queries the newly initialized provider rather than restoring a saved UI
-selection as authority. Reasoning-effort changes remain unsupported, including
-mixed requests: unsupported effort refuses before any model control is sent.
+selection as authority. Native reasoning effort is described below; mixed
+requests validate the target model's advertised effort before either control.
 
 `/api/settings` sends a correlated native `set_model` control in the same
 session. The actor serializes settings and prompt commands while pumping its
@@ -60,6 +60,50 @@ model override or implicit retry. A subsequent input's real model report can
 confirm selection. Refusal preserves the previous known selection. No switch
 interrupts/restarts the provider or replays an input. Required RPC deadlines,
 EOF/frame integrity and Codex discovery/recovery behavior are unchanged.
+
+## Native reasoning effort (#247)
+
+Effort choices come only from each initialized model's `supportsEffort` and
+`supportedEffortLevels`. Values are normalized to the shared UI effort vocabulary
+and deduplicated (at most32 catalog entries examined per model). No model/version
+table is added. Before advertising choices, an empty session-only
+`apply_flag_settings` overlay must receive its exact successful control ACK.
+Unsupported/refused or missing probe ACK hides all choices; the probe's five-second
+response wait starts after the normal fatal five-second write/flush. Neither
+timeout nor a late probe ACK enables the capability. Missing catalog stays empty.
+
+`reasoningEffort` uses native `apply_flag_settings {settings:{effortLevel:...}}`;
+explicit null clears the overlay. The actor serializes controls with ordinary
+input while pumping provider events. Only the exact waiter-winning success ACK
+commits effort, not parsing a response or writing a frame. Invalid target effort
+rejects a combined model/effort request before sending either mutation. A valid
+combined request is sequential, not atomic: if model ACK succeeds and effort
+refuses, the API reports failure while retaining the truthful confirmed model
+and previous effort (or unknown if incompatible with that new model).
+
+The effort response wait is15 seconds after successful write/flush. Missing ACK
+is `reasoningEffort:null, effortSelectionStatus:"unknown"`, with a localized
+unknown choice rather than a false default. Transport and queued prompts remain
+live under actual provider selection, without a per-input effort override or
+automatic retry. Late/error/wrong-ID/canceled ACKs cannot commit. Each valid
+attempt advances the existing input settings epoch, so pre-attempt assistant/init
+reports cannot become fresh selection authority. Effort has its own publication
+revision: an older queued model report cannot overwrite a newer effort ACK or
+unknown outcome, and effort does not suppress an independently learned model.
+Explicit setting ACK can resolve unknown; generic assistant model reports do
+not establish effort. Restart discovers support anew and reports effort unknown,
+never silently reapplies the saved UI selection. Model timeout also invalidates
+effort provenance. No interrupt, provider restart, goal/task replay or mutation
+of native configuration files occurs.
+
+Session transfer remains `null`/unsupported. Node's transfer is a separate bounded
+native-file bundle protocol: allowlisted JSONL/subagents/memory/project files,
+validated hashes and metadata, fresh UUID and empty dedicated import destination.
+Claude stream-json resume does not provide those export/import guarantees. Rust
+has no equivalent file selection, rewrite/import or authenticated routes yet;
+this batch does not substitute resume for transfer or expose an empty capability.
+Other native flag settings are not advertised by this API. Goal budgets/pause
+retain the explicitly documented first-batch limits.
 
 ## Native goals, first batch (#247)
 
@@ -95,8 +139,8 @@ interrupt Claude. Token/time usage are unavailable. Budget/pause/agent-exit
 requests and busy goal mutation/clear explicitly refuse before sending. To clear
 a working goal, the operator must first choose the ordinary explicit interrupt
 and wait for actual turn completion; the goal API never interrupts implicitly.
-Session transfer and extra settings remain separate batches. No shared UI,
-public assets, installer, provider pins or Codex goal protocol changes.
+Session transfer remains a separate batch. The goal implementation does not
+change the shared UI, installer, provider pins or Codex goal protocol.
 
 ## Native mid-turn steering contract
 

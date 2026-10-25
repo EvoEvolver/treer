@@ -286,13 +286,31 @@ impl Rpc {
     }
     pub async fn request_claude_model(&self, params: Value) -> Result<Value> {
         let adapter=self.claude.as_ref().ok_or_else(||anyhow!("claude_model_control_unavailable"))?;
-        let result=self.request_history("model/set",params,None,ResponsePolicy::Settings).await?;
+        let result=match self.request_history("model/set",params,None,ResponsePolicy::Settings).await {
+            Ok(result)=>result,
+            Err(error)=>{if error.to_string()=="claude_model_response_timeout" {adapter.lock().unwrap().unknown_effort();}return Err(error);}
+        };
         // No await between successful response/deadline arbitration and commit.
         // A parsed but expired ACK may produce a candidate, never model state.
         adapter.lock().unwrap().commit_model(&result)
     }
+    pub async fn request_claude_effort(&self, method: &str, params: Value) -> Result<Value> {
+        if !matches!(method,"effort/set"|"effort/probe") {bail!("unsupported_claude_effort_rpc");}
+        let adapter=self.claude.as_ref().ok_or_else(||anyhow!("claude_effort_control_unavailable"))?;
+        let policy=if method=="effort/probe" {ResponsePolicy::Discovery}else{ResponsePolicy::Settings};
+        match self.request_history(method,params,None,policy).await {
+            Ok(result)=>adapter.lock().unwrap().commit_effort(&result),
+            Err(error)=>{
+                if method=="effort/set" && error.to_string()=="claude_model_response_timeout" {adapter.lock().unwrap().unknown_effort();}
+                Err(error)
+            }
+        }
+    }
     pub fn claude_model_revision(&self) -> u64 {
         self.claude.as_ref().map(|a|a.lock().unwrap().model_revision()).unwrap_or(0)
+    }
+    pub fn claude_effort_revision(&self) -> u64 {
+        self.claude.as_ref().map(|a|a.lock().unwrap().effort_revision()).unwrap_or(0)
     }
     async fn request_history(&self, method: &str, params: Value, selection: Option<crate::provider_stream::Selection>, policy: ResponsePolicy) -> Result<Value> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
@@ -312,12 +330,13 @@ impl Rpc {
                 },
                 crate::claude::Request::Wire(wire)=>{
                         let(tx,rx)=oneshot::channel();self.pending.lock().unwrap().insert(id,tx);
-                        if matches!(policy,ResponsePolicy::Settings) {
+                        if matches!(policy,ResponsePolicy::Settings|ResponsePolicy::Discovery) {
                             // Match Node control's response-only deadline. Never
                             // cancel a partial write or poison prompt transport
                             // just because set_model acknowledgement is absent.
                             self.write(wire).await?;
-                            return timeout(Duration::from_secs(15),rx).await
+                            let seconds=if matches!(policy,ResponsePolicy::Discovery) {5}else{15};
+                            return timeout(Duration::from_secs(seconds),rx).await
                                 .map_err(|_|anyhow!("claude_model_response_timeout"))?
                                 .map_err(|_|anyhow!("Claude disconnected"))?;
                         }
@@ -477,6 +496,23 @@ mod tests {
         let adapter=rpc.claude.as_ref().unwrap();
         let late=adapter.lock().unwrap().consume(json!({"type":"control_response","response":{"subtype":"success","request_id":"1","response":{}}})).unwrap();
         assert_eq!(late.last().unwrap()["result"],json!({}));assert_eq!(rpc.claude_model_revision(),0);
+        drop(writer);child.kill().await.unwrap();
+    }
+    #[cfg(all(unix, feature="fixture-harness"))]
+    #[tokio::test]
+    async fn claude_effort_probe_stalled_write_is_fatal_and_cleans_control() {
+        let node=std::env::var("TREER_TEST_NODE").expect("explicit native Node fixture path");
+        let (rpc,mut child,_)=Rpc::spawn_claude(&node,&["-e".into(),"process.stdin.pause();setInterval(()=>{},1000)".into()],&std::env::temp_dir(),false,"session".into()).unwrap();
+        {
+            let mut adapter=rpc.claude.as_ref().unwrap().lock().unwrap();
+            adapter.request(900,"initialize",&json!({})).unwrap();
+            adapter.consume(json!({"type":"control_response","response":{"subtype":"success","request_id":"900","response":{"models":[{"value":"default","supportsEffort":true,"supportedEffortLevels":["high"]}]}}})).unwrap();
+        }
+        let writer=rpc.input.lock().await;
+        assert_eq!(rpc.request_claude_effort("effort/probe",json!({})).await.unwrap_err().to_string(),"provider_write_timeout");
+        assert_eq!(rpc.diagnostics()["transport"],"stdin_write_timeout");assert!(rpc.pending.lock().unwrap().is_empty());
+        let late=rpc.claude.as_ref().unwrap().lock().unwrap().consume(json!({"type":"control_response","response":{"subtype":"success","request_id":"1","response":{}}})).unwrap();
+        assert_eq!(late[0]["result"],json!({}));
         drop(writer);child.kill().await.unwrap();
     }
     #[cfg(all(unix, feature="fixture-harness"))]

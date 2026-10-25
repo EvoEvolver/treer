@@ -267,6 +267,88 @@ test('Claude idle steering is a normal prompt and concurrent ordinary inputs are
 });
 const settings=(f,body)=>fetch(f.base+'/api/settings',{method:'POST',body:JSON.stringify(body)});
 const modelCalls=async f=>(await readFile(join(f.root,'calls.controls'),'utf8')).trim().split('\n').map(JSON.parse);
+test('Claude effort discovers catalog and live setter, validates combined settings before mutation and resets explicitly',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_EFFORTS:'1'});
+  let state=await f.snapshot();const thread=state.thread.id;
+  assert.deepEqual(state.modelOptions[0].supportedReasoningEfforts.map(e=>e.reasoningEffort),['low','medium','high']);
+  assert.equal(state.thread.effortSelectionStatus,'unknown');
+  assert.equal(state.harness.capabilities.sessionTransfer,null);
+  assert.equal((await settings(f,{model:'legacy',reasoningEffort:'high'})).status,400);
+  assert.equal((await modelCalls(f)).length,2,'invalid mixed setting sends neither model nor effort');
+  assert.equal((await settings(f,{model:'opus',reasoningEffort:'high'})).status,200);
+  state=await f.snapshot();assert.equal(state.thread.model,'claude-opus-test');assert.equal(state.thread.reasoningEffort,'high');assert.equal(state.thread.effortSelectionStatus,'confirmed');
+  assert.equal((await settings(f,{reasoningEffort:null})).status,200);
+  assert.equal((await f.snapshot()).thread.reasoningEffort,null);assert.equal((await f.snapshot()).thread.effortSelectionStatus,'confirmed');
+  assert.equal((await settings(f,{reasoningEffort:'ultra'})).status,400);
+  await stop(f.child);const resumed=await f.launch();state=await resumed.snapshot();
+  assert.equal(state.thread.id,thread);assert.equal(state.thread.reasoningEffort,null);assert.equal(state.thread.effortSelectionStatus,'unknown','saved UI selection is not native authority after restart');
+});
+for(const env of [{CLAUDE_FIXTURE_NO_EFFORT:'1'},{CLAUDE_FIXTURE_PROBE_DELAY:'5500'}])test('Claude effort unsupported or absent probe ACK hides capability without killing prompt transport '+JSON.stringify(env),async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_EFFORTS:'1',...env});
+  assert.ok((await f.snapshot()).modelOptions.every(m=>m.supportedReasoningEfforts.length===0));
+  assert.equal((await settings(f,{reasoningEffort:'high'})).status,400);
+  await f.post({prompt:'probe failure does not block prompt'});
+  await until(f.snapshot,s=>s.thread.status==='idle'&&s.thread.turns.length===1);
+  await new Promise(r=>setTimeout(r,650));
+  assert.ok((await f.snapshot()).modelOptions.every(m=>m.supportedReasoningEfforts.length===0),'late probe ACK cannot enable setter');
+  assert.equal((await inputCalls(f)).length,1);assert.equal((await f.snapshot()).runtime.provider.transport,'open');
+});
+test('Claude effort slow ACK pumps completion, preserves pending display, serializes prompt and truthful partial rejection',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_EFFORTS:'1',CLAUDE_FIXTURE_EFFORT_DELAY:'1200',CLAUDE_FIXTURE_MODEL_BURST:'1',CLAUDE_FIXTURE_WRONG_MODEL_ACK:'1',CLAUDE_FIXTURE_REFUSE_EFFORT:'medium'});
+  await f.post({prompt:'active A'});
+  const changing=settings(f,{reasoningEffort:'high'});
+  await until(async()=>modelCalls(f),calls=>calls.some(c=>c.request.settings?.effortLevel==='high'));
+  const prompt=f.post({prompt:'next B',mode:'queue'});
+  assert.equal((await f.snapshot()).thread.reasoningEffort,null,'wrong or pending ACK cannot publish selection');
+  assert.equal((await changing).status,200);assert.equal((await prompt).status,200);
+  await until(f.snapshot,s=>s.thread.status==='idle'&&s.thread.turns.length===2);
+  assert.deepEqual((await inputCalls(f)).map(c=>[c.text,c.effort]),[['active A',null],['next B','high']]);
+  assert.equal((await settings(f,{model:'opus',reasoningEffort:'medium'})).status,400);
+  let state=await f.snapshot();assert.equal(state.thread.model,'claude-opus-test','model ACK remains truthful when subsequent effort refuses');assert.equal(state.thread.reasoningEffort,'high');
+  await f.post({prompt:'after rejected effort'});await until(f.snapshot,s=>s.thread.status==='idle'&&s.thread.turns.length===3);
+  assert.deepEqual((await inputCalls(f)).map(c=>c.text),['active A','next B','after rejected effort']);
+  assert.ok(!(await modelCalls(f)).some(c=>c.request.subtype==='interrupt'));
+});
+test('Claude effort real fifteen-second timeout is unknown; next prompt once, late ACK cannot overwrite newer effort',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_EFFORTS:'1',CLAUDE_FIXTURE_TIMEOUT_EFFORT:'high'});
+  const changing=settings(f,{reasoningEffort:'high'});
+  await until(async()=>modelCalls(f),calls=>calls.some(c=>c.request.settings?.effortLevel==='high'));
+  const prompt=f.post({prompt:'after unknown effort',mode:'queue'});
+  assert.equal((await changing).status,400);assert.equal((await prompt).status,200);
+  let state=await until(f.snapshot,s=>s.thread.status==='idle'&&s.thread.turns.length===1);
+  assert.equal(state.thread.reasoningEffort,null);assert.equal(state.thread.effortSelectionStatus,'unknown');assert.equal(state.thread.model,'claude-sonnet-test');
+  assert.equal((await settings(f,{reasoningEffort:'low'})).status,200);
+  await new Promise(r=>setTimeout(r,3200));state=await f.snapshot();
+  assert.equal(state.thread.reasoningEffort,'low');assert.equal(state.thread.effortSelectionStatus,'confirmed');assert.equal(state.runtime.provider.transport,'open');
+  assert.deepEqual((await inputCalls(f)).map(c=>[c.text,c.effort]),[['after unknown effort','high']]);
+  assert.equal((await modelCalls(f)).filter(c=>Object.hasOwn(c.request.settings||{},'effortLevel')).length,2,'no implicit effort retry or per-prompt override');
+});
+test('Claude effort shared browser shows unknown/ACK/refusal with accessible desktop and mobile controls',{skip:!process.env.CLAUDE_EFFORT_BROWSER},async t=>{
+  const {chromium,expect}=createRequire(resolve(process.env.NODE_LAUNCHER_ROOT||'../agent','package.json'))('@playwright/test');
+  const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
+  const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_EFFORTS:'1',CLAUDE_FIXTURE_EFFORT_DELAY:'1200',CLAUDE_FIXTURE_REFUSE_EFFORT:'medium',TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'effort-fixture'},async({state})=>({env:{TREER_AGENT_PRIVATE_STATE_DIR:state}}));
+  const browser=await chromium.launch({env:hermeticEnv({HOME:process.env.HOME})});t.after(()=>browser.close());
+  const pages=[];
+  for(const [lang,theme,width] of [['en','light',1280],['zh','dark',390],['en','dark',390],['zh','light',1280]]){
+    const page=await browser.newPage({viewport:{width,height:850},extraHTTPHeaders:{'x-treer-interface-source':'proxy-ui','x-treer-agent-id':'ag_contract','x-treer-interface-instance':'effort-fixture'}});pages.push(page);
+    await page.goto(f.base+'/?lang='+lang+'&theme='+theme);
+    await page.getByRole('button',{name:lang==='zh'?'输入选项':'Composer actions',exact:true}).click();
+    await page.getByRole('menuitem',{name:lang==='zh'?/^模型/:/^Model/}).click();
+    await expect(page.locator('#effort-select option:checked')).toHaveText(lang==='zh'?'思考强度未知':'Effort unknown');
+    await page.locator('#effort-select').focus();await expect(page.locator('#effort-select')).toBeFocused();
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+  }
+  const page=pages[0],response=page.waitForResponse(r=>r.url().endsWith('/api/settings'));
+  await page.locator('#effort-select').selectOption('high');
+  await expect(page.locator('#effort-select')).toBeDisabled();await expect(page.locator('#effort-select')).toHaveValue('__unknown');
+  assert.equal((await response).status(),200);
+  for(const p of pages)await expect(p.locator('#effort-select')).toHaveValue('high');
+  const refused=page.waitForResponse(r=>r.url().endsWith('/api/settings'));await page.locator('#effort-select').selectOption('medium');assert.equal((await refused).status(),400);
+  await expect(page.locator('#effort-select')).toBeEnabled();await expect(page.locator('#effort-select')).toHaveValue('high');
+  const cleared=page.waitForResponse(r=>r.url().endsWith('/api/settings'));await page.locator('#effort-select').selectOption('');assert.equal((await cleared).status(),200);
+  await expect(page.locator('#effort-select option:checked')).toHaveText('Default');
+  const shots=process.env.CLAUDE_EFFORT_SHOTS;if(shots){await mkdir(shots,{recursive:true});for(let i=0;i<pages.length;i++)await pages[i].screenshot({path:join(shots,'effort-'+i+'.png')});}
+});
 test('Claude model catalog aliases and acknowledged switching preserve session and reject mixed effort atomically',async t=>{
   const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1'});
   let state=await f.snapshot();const thread=state.thread.id;
