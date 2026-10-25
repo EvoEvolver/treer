@@ -1,3 +1,4 @@
+import { preparedClaudeArgs } from "@/lib/prepared-claude"
 import { useAgentEmbedPrewarm } from "@/components/use-agent-embed-prewarm"
 import { useAgentOriginCapability } from "@/components/use-agent-origin-capability"
 import { agentOriginUrl, interfaceSignature } from "@/lib/agent-origin"
@@ -90,6 +91,7 @@ function WorkspaceAppContent() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null)
+  const [preparedCreated, setPreparedCreated] = useState(false)
   const [tabNotice, setTabNotice] = useState("")
   const [theme, setTheme] = useState<Theme>(() => readTheme())
   const [mainView, setMainView] = useState<MainView>("overview")
@@ -106,6 +108,7 @@ function WorkspaceAppContent() {
   const [creationFailure, setCreationFailure] = useState<AgentCreationFailure | null>(null)
   const dialogState = useWorkspaceDialogState()
   const {
+    preparedClaude, preparedAttempted, setPreparedAttempted,
     setSettingsOpen, setCreateOrganizationOpen, setCreateWorkspaceOpen, setDeleteWorkspaceOpen,
     createAgentOpen, setCreateAgentOpen, agentFolder, setAgentFolder, setRenameError,
     setCreateAgentError, creatingAgent, setCreatingAgent, deletingApp, setDeletingApp,
@@ -611,7 +614,13 @@ function WorkspaceAppContent() {
     setCreatingAgent(true); setCreateAgentError(""); setCreationFailure(null); setReservationCleaned(false)
     try {
       let agent
-      if (agentProfileId === "terminal") {
+      if (agentProfileId === "prepared-claude") {
+        const machine = snapshot?.servers.find(item => item.server_id === agentServerId)
+        const args = machine && preparedClaudeArgs(agentServerId, machine.root, agentCwd, preparedClaude)
+        if (preparedAttempted || !args) throw new Error(t("prepared.invalid"))
+        setPreparedAttempted(true)
+        agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ ...placement, server_id: agentServerId, kind: "command", name: agentName, cwd: agentCwd, args, cols: 120, rows: 36 }) })
+      } else if (agentProfileId === "terminal") {
         agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents`, { method: "POST", body: JSON.stringify({ ...placement, server_id: agentServerId, kind: "shell", name: agentName, cwd: agentCwd, args: [], cols: 120, rows: 36 }) })
       } else if (agentProfileId === "manual") {
         const parsed = parseCommandLine(agentCommandLine)
@@ -630,7 +639,10 @@ function WorkspaceAppContent() {
       if (workspaceIdRef.current !== creationWorkspaceId) return
       setCreateAgentOpen(false)
       await refreshSnapshot()
-      if (workspaceIdRef.current === creationWorkspaceId) showAgentTerminal(agentId)
+      if (workspaceIdRef.current === creationWorkspaceId) {
+        showAgentTerminal(agentId)
+        if (agentProfileId === "prepared-claude") setPreparedCreated(true)
+      }
     } catch (reason) { if (workspaceIdRef.current === creationWorkspaceId) {
       const failure = reason instanceof ApiError ? agentCreationFailure(reason.details, creationMachineId) : null
       setCreationFailure(failure)
@@ -645,6 +657,7 @@ function WorkspaceAppContent() {
   }
 
   function openCreateAgent(reset = true, folder: NewAgentFolder | null = null) {
+    setPreparedCreated(false)
     setCreateAgentError("")
     setCreationCommandMissing(false)
     if (creatingAgent) return
@@ -667,7 +680,7 @@ function WorkspaceAppContent() {
     openCreateAgent(true, folder ?? null)
   }
 
-  useEffect(() => { setCreateAgentOpen(false); setAgentFolder(null); setCreationFailure(null); setReservationCleaned(false) }, [workspaceId])
+  useEffect(() => { setPreparedCreated(false); setCreateAgentOpen(false); setAgentFolder(null); setCreationFailure(null); setReservationCleaned(false) }, [workspaceId])
 
   function selectAgentProfile(profileId: string) {
     changeAgentProfile(profileId)
@@ -1074,6 +1087,7 @@ function WorkspaceAppContent() {
       <section className={cn("min-h-0 min-w-0 flex-col", treeWidth.dragging && "pointer-events-none", mobileTerminalIdle ? "hidden md:flex" : "flex")}>
         {focusedId ? <WorkloadFocusBar path={tabLabels.get(focusedId)?.path ?? focusedId} status={tabLabels.get(focusedId)?.agent.status ? statusLabel(tabLabels.get(focusedId)!.agent.status) : undefined} consoleHref={workloadPath(organizationId, workspaceId, focusedId)} onOpenConsole={() => routingRef.current.navigate({ pathname: location.pathname, search: "", hash: location.hash })} /> : <WorkspaceTabBar key={`${user.user_id}:${workspaceId}`} tabs={tabs.tabs} labels={tabLabels} activeId={mainView === "overview" ? OVERVIEW_TAB : mainView === "terminal" ? selectedAgentId : null} limit={tabs.limit} liveCount={tabs.liveCount} mobile={isMobile} onOpen={selectTab} onClose={closeTab} actions={tabActions} onAction={tabAction} onCloseMany={closeTabs} onBrowseTree={browseMobileTree} sidebarCollapsed={treeWidth.collapsed} expandRef={treeWidth.expandRef} onExpandSidebar={treeWidth.toggle} />}
         <p role="status" className="sr-only">{tabNotice}</p>
+        {preparedCreated && <p role="status" className="px-4 py-2 text-sm">{t("prepared.created")}</p>}
         {mainView !== "terminal" && <header className="flex h-12 shrink-0 min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
 
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">

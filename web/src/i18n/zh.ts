@@ -2,6 +2,16 @@ import type { Messages } from "./en"
 
 // 简体中文。键必须与 en.ts 完全一致(缺键会导致类型检查失败)。术语沿用 launcher 的中英对照。
 export const zh: Messages = {
+  "prepared.mode": "已准备的 Claude 目标",
+  "prepared.description": "在所选机器启动已准备的隔离 Claude 目标；此操作不导出或导入会话。请使用可信的已安装 launcher 入口。工作目录须相对机器根目录，并匹配下方物理准备目录。",
+  "prepared.entry": "可信 launcher 入口（绝对路径）",
+  "prepared.directory": "已准备目录（绝对路径）",
+  "prepared.session": "准备计划中的会话 UUID",
+  "prepared.ack": "我确认此目标已在所选机器准备好，launcher 入口可信，且环境认证已配置。此处不输入任何凭据。",
+  "prepared.invalid": "请使用规范的 Unix 绝对路径、匹配机器根目录的相对工作目录、准备计划中的新 UUID，并确认所选目标。",
+  "prepared.attempted": "已发送创建请求。请观察已预留 Agent 或使用预留恢复；创建结果不确定时不要重新提交。",
+  "prepared.created": "Agent 已创建并保存启动配置；尚未验证 provider 或界面就绪。",
+
   "as.buckets": "合并时间桶",
   "as.chart_summary": "{category}：共 {count} 条事件，最高时间桶为 {peak} 条。精确数值见活动表格。",
   "as.zero_categories": "以下类别无事件：{categories}。",

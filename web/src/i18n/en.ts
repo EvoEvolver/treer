@@ -1,6 +1,16 @@
 // English is the source dictionary. zh.ts must define every key (checked by the type system).
 // Keys are namespaced by screen. Values may contain {name} placeholders filled by t(key, { name }).
 export const en = {
+  "prepared.mode": "Prepared Claude target",
+  "prepared.description": "Start an already prepared, isolated Claude target on this machine. This does not export or import a session. Use a trusted installed launcher entry. The working directory must be relative to this machine’s root and match the physical prepared directory below.",
+  "prepared.entry": "Trusted launcher entry (absolute path)",
+  "prepared.directory": "Prepared directory (absolute path)",
+  "prepared.session": "Prepared plan session UUID",
+  "prepared.ack": "I confirm this target was prepared on the selected machine, the launcher entry is trusted, and environment authentication is already configured. No credentials will be entered here.",
+  "prepared.invalid": "Use normalized absolute Unix paths, a matching machine-relative working directory, the prepared plan’s fresh UUID, and confirm the selected target.",
+  "prepared.attempted": "A create request was sent. Observe the reserved Agent or use reservation recovery; do not resubmit an uncertain creation.",
+  "prepared.created": "Agent created and startup saved. Provider and interface readiness are not yet verified.",
+
   "as.buckets": "Combined time buckets",
   "as.chart_summary": "{category}: {count} events, peak bucket {peak}. Exact values are in the activity table.",
   "as.zero_categories": "No events in: {categories}.",

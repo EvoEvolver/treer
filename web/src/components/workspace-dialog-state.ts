@@ -1,6 +1,7 @@
 import type { NewAgentFolder } from "@/components/workload-tree"
 import type { AgentLaunchProfile,AppDeployment } from "@/lib/api"
 import { defaultAgentName,type DeleteTarget,type RenameTarget } from "@/lib/control-plane"
+import { emptyPreparedClaude } from "@/lib/prepared-claude"
 import { useState } from "react"
 
 // State only: request handlers, validation and lifecycle behavior stay in the
@@ -29,6 +30,8 @@ export function useWorkspaceDialogState() {
   const [createWorkspaceName, setCreateWorkspaceName] = useState("")
   const [agentName, setAgentName] = useState(defaultAgentName("terminal"))
   const [agentNameCustomized, setAgentNameCustomized] = useState(false)
+  const [preparedClaude, setPreparedClaude] = useState(emptyPreparedClaude)
+  const [preparedAttempted, setPreparedAttempted] = useState(false)
   const [agentProfileId, setAgentProfileId] = useState("terminal")
   const [agentServerId, setAgentServerId] = useState("")
   const [agentCwd, setAgentCwd] = useState(".")
@@ -49,6 +52,7 @@ export function useWorkspaceDialogState() {
   const installCommand = installPlatform === "windows" ? windowsInstallCommand : unixInstallCommand
   const connectCommand = installPlatform === "windows" ? windowsConnectCommand : unixConnectCommand
   return {
+    preparedClaude, setPreparedClaude, preparedAttempted, setPreparedAttempted,
     settingsOpen,
     setSettingsOpen,
     createOrganizationOpen,

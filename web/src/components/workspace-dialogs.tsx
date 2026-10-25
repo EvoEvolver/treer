@@ -1,3 +1,4 @@
+import { preparedClaudeArgs, preparedClaudeBinding } from "@/lib/prepared-claude"
 import { MachineUploadDialog } from "@/components/machine-upload-dialog"
 import { ProviderCliInstaller } from "@/components/provider-cli-installer"
 import { AgentReservationRecovery } from "@/components/agent-reservation-recovery"
@@ -54,6 +55,7 @@ interface WorkspaceDialogsProps {
 
 export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, creationFailure, onReservationCleaned, state, user, setUser, showError, createOrganization, organization, createWorkspace, saveLaunchProfile, launchFromProfile, onlineMachines, deleteLaunchProfile, createAgent, selectAgentProfile, launchProfiles, selectedCreateProfile, changeAgentCommandLine, deleteAppDeployment, copy, submitRename, snapshot, workloadTree, uploadScopeActive, selectedAgentMachine, confirmDelete, workspaceMachineCount, workspace, confirmDeleteWorkspace }: WorkspaceDialogsProps) {
   const {
+    preparedClaude, setPreparedClaude, preparedAttempted,
     settingsOpen, setSettingsOpen, createOrganizationOpen, setCreateOrganizationOpen,
     createWorkspaceOpen, setCreateWorkspaceOpen, deleteWorkspaceOpen, setDeleteWorkspaceOpen,
     createAgentOpen, setCreateAgentOpen, agentFolder, renameError, createAgentError, creatingAgent,
@@ -68,6 +70,9 @@ export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, c
     setLaunchMachineId, launchAgentName, setLaunchAgentName, renameName, setRenameName, installPlatform,
     setInstallPlatform, inviteUrl, installCommand, connectCommand,
   } = state
+  const preparedMachine = onlineMachines.find(machine => machine.server_id === agentServerId)
+  const preparedKey = preparedClaudeBinding(agentServerId, preparedMachine?.root ?? '', agentCwd, preparedClaude)
+  const preparedArgs = preparedMachine && preparedClaudeArgs(agentServerId, preparedMachine.root, agentCwd, preparedClaude)
   return <>
     <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} user={user} onUserChange={setUser} onError={showError} />
 
@@ -99,17 +104,27 @@ export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, c
               <SelectTrigger aria-label={t("dialogs.launch")} data-tour="agent-launch"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="terminal">{t("machine.terminal")}</SelectItem>
+                <SelectItem value="prepared-claude">{t("prepared.mode")}</SelectItem>
                 <SelectItem value="manual">{t("dialogs.custom_command")}</SelectItem>
                 {launchProfiles.map((profile) => <SelectItem key={profile.profile_id} value={profile.profile_id}>{profile.name}</SelectItem>)}
               </SelectContent>
             </Select>
           </Field>
-          {agentProfileId === "terminal" || agentProfileId === "manual"
-            ? <Field label={t("apps.working_directory")}><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field>
+          {agentProfileId === "terminal" || agentProfileId === "manual" || agentProfileId === "prepared-claude"
+            ? <Field label={t("apps.working_directory")}><Input className="max-md:min-h-11" aria-label={t("apps.working_directory")} value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field>
             : selectedCreateProfile
               ? <div className="min-w-0 max-w-full overflow-hidden rounded-md border bg-muted/30 px-3 py-2"><code className="block max-w-full truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block max-w-full truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div>
               : null}
           {agentProfileId === "manual" && <Field label={t("apps.command")}><Input aria-label={t("apps.command")} className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder={t("dialogs.path_to_your_launcher_option")} required /></Field>}
+          {agentProfileId === "prepared-claude" && <fieldset className="min-w-0 space-y-3" disabled={creatingAgent || preparedAttempted}>
+            <p className="text-sm">{t("prepared.description")}</p>
+            <Field label={t("prepared.entry")}><Input className="max-md:min-h-11" aria-label={t("prepared.entry")} value={preparedClaude.entry} onChange={e => setPreparedClaude(v => ({ ...v, entry: e.target.value, acknowledgedFor: '' }))} required /></Field>
+            <Field label={t("prepared.directory")}><Input className="max-md:min-h-11" aria-label={t("prepared.directory")} value={preparedClaude.directory} onChange={e => setPreparedClaude(v => ({ ...v, directory: e.target.value, acknowledgedFor: '' }))} required /></Field>
+            <Field label={t("prepared.session")}><Input className="max-md:min-h-11" aria-label={t("prepared.session")} value={preparedClaude.sessionId} onChange={e => setPreparedClaude(v => ({ ...v, sessionId: e.target.value, acknowledgedFor: '' }))} required /></Field>
+            <label className="flex min-h-11 items-start gap-3 text-sm"><input type="checkbox" className="mt-1 size-5 shrink-0" checked={preparedClaude.acknowledgedFor === preparedKey} onChange={e => setPreparedClaude(v => ({ ...v, acknowledgedFor: e.target.checked ? preparedKey : '' }))} />{t("prepared.ack")}</label>
+            {!preparedArgs && <p role="status" className="break-words text-sm">{t("prepared.invalid")}</p>}
+          </fieldset>}
+          {agentProfileId === "prepared-claude" && preparedAttempted && <p role="status" className="text-sm">{t("prepared.attempted")}</p>}
           {selectedCreateProfile && <span className="block text-[10px] text-muted-foreground">{t("dialogs.runs_the_saved_command_on")}</span>}
           <Field label={t("dialogs.name")}><Input aria-label={t("dialogs.name")} value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field>
           {reservationCleaned && <p role="status" className="text-sm">{t("provider.cleaned")}</p>}
@@ -119,7 +134,7 @@ export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, c
           {createAgentOpen && creationCommandMissing && creationFailure?.creation_state === "identity_removed" && creationFailure.command && creationFailure.machine_id === agentServerId && workspace && snapshot?.servers.find(item => item.server_id === agentServerId) && <ProviderCliInstaller key={`${workspace.workspace_id}/${agentServerId}/${creationFailure.agent_id}`} workspaceId={workspace.workspace_id} machine={snapshot.servers.find(item => item.server_id === agentServerId)!} command={creationFailure.command} />}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>{t("common.cancel")}</Button>
-            <Button type="submit" disabled={creatingAgent || Boolean(creationFailure && creationFailure.creation_state !== "identity_removed") || !agentServerId || (agentProfileId === "manual" && !agentCommandLine.trim())}>{creatingAgent ? t("dialogs.starting") : agentProfileId === "terminal" ? t("dialogs.create_terminal") : t("dialogs.create_agent")}</Button>
+            <Button type="submit" disabled={(agentProfileId === "prepared-claude" && (!preparedArgs || preparedAttempted)) || creatingAgent || Boolean(creationFailure && creationFailure.creation_state !== "identity_removed") || !agentServerId || (agentProfileId === "manual" && !agentCommandLine.trim())}>{creatingAgent ? t("dialogs.starting") : agentProfileId === "terminal" ? t("dialogs.create_terminal") : t("dialogs.create_agent")}</Button>
           </DialogFooter>
         </form>
       </DialogContent>

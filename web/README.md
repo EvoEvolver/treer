@@ -1036,3 +1036,29 @@ document-only one-time rotation, bounded session rows, and prewarm audit label
 before advertising the capability. New tabs already start their foreground
 handshake; they do not mint an additional background session. Real-browser
 acceptance of the final Core/Web union remains required.
+
+### Explicit prepared Claude target (#247)
+
+The existing Create Agent dialog has an opt-in **Prepared Claude target** launch
+mode. It reuses machine, Tree folder, name and ordinary command creation. Supply
+the trusted installed launcher entry, physical absolute prepared directory and
+fresh UUID from the prepared plan; the working directory is machine-root-relative
+and must lexically match that directory. This UI currently supports normalized
+Unix paths. Native code remains responsible for physical-path/plan/private-root
+validation; browser checks are not proof a target exists or authentication works.
+
+The explicit acknowledgement binds the selected machine, root, paths and UUID.
+The only generated argv is `ENTRY session run --directory DIRECTORY --session-id
+UUID --auth environment`; there is no credential form, environment-source option,
+shell interpolation, automatic fallback or restart endpoint. A sent creation locks
+this prepared mode against another submission during the current page lifetime,
+including unknown outcomes; inspect the reserved Agent and existing reservation
+recovery rather than retrying blindly. Success states process creation/startup
+saved only, while ordinary snapshots establish subsequent interface readiness.
+This mode is not an export/import wizard and does not advertise sessionTransfer.
+
+Focused synthetic UI verification: from `web/`,
+`node e2e/run.mjs --config playwright.prepared-claude.config.ts`. This covers the
+actual Console Create handler with synthetic API responses, fixed argv,
+acknowledgement invalidation, unknown-result refusal, desktop/390, en/zh,
+light/dark and keyboard close. It never launches a real managed Agent/provider.
