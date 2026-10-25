@@ -2772,16 +2772,18 @@ not requirements to rerun every accepted layer:
 
 | Boundary | Current evidence / next deliverable |
 | --- | --- |
-| HTTP + PostgreSQL operation routing | Focused real HTTP/session/DB chain; synthetic Controller receipts explicitly scoped |
+| HTTP + PostgreSQL operation routing | Focused real HTTP/session/DB chain; initial synthetic receipts remain separately scoped |
 | Native Linux manager ownership | Exact c56 actual PASS; retain original predicate scope |
-| Distributor through native updater and Proxy DB | Compose approved HTTPS artifact identities, real Controller and durable API operation in one disposable target; not established by either separate proof |
-| Production Linux enablement | Source capability decision and ordinary artifact/install contract after the composed chain; currently disabled |
+| Real browser / WebSocket / native worker / Proxy DB | Exact `ad23f3bf`, run `40197073704` SUCCESS: normal human login, prepare/confirm 1/1, full same-operation equality, duplicate writes 0 and typed dispatch/reconnect 1/0; same-source isolated artifacts, not ordinary publication/activation |
+| Canonical source and CI | Main `f4691cba`, automatic CI `40205366352` four jobs and Docs `40205366388` SUCCESS; does not relabel the ad23 actual run or build an ordinary release package |
+| Production Linux enablement | Ordinary artifact/publisher/catalog/bootstrap and Linux-only source decision remain pending; see the [single-target preparation proposal](research/2026-10-25-controller-update-linux-release-plan.md); capability stays disabled |
 | macOS manager / Windows native activation | Not accepted by the Linux run; unsupported until their own implementation/acceptance leaf closes |
 | Enrolled rollout | Separate Release-owned target and activation; no installed mutation authorized by the isolated test |
 
-The next isolated input slice is a **download-only** HTTPS check, not another
-manager or Proxy DB run. In the update canonical branch (including `55eb2c4e`),
-run the explicit ignored test with Release-approved public metadata:
+The completed download-only HTTPS slice is not a reason to repeat accepted
+network, native, PG or manager matrices during release preparation. The explicit
+entry below remains available for a separately required new publisher-input
+check; it is not a production activation command or an outstanding default gate:
 
 ```bash
 TREER_UPDATE_NETWORK_INPUT='{"schema_version":1,"source_commit":"<40 hex>","platform":"linux-x86_64","artifact_base":"https://<approved origin>/artifacts/linux-x86_64/","enrollment_origin":"https://<approved proxy>/","allow_artifact_origin":false,"sums_sha256":"<64 hex>","controller":{"sha256":"<64 hex>","size":123},"cli":{"sha256":"<64 hex>","size":123}}' \
@@ -2804,8 +2806,10 @@ fetching binary bodies, stages both as private non-executable files, rehashes
 their returned handles, and witnesses cleanup. It never downloads the Host,
 executes either image, discovers an installation, or enables native capability.
 The reported source is publication metadata, **not** a measured version probe.
-The full Distributor/native worker/ProxyDB composition is still separate work;
-passing this first slice does not imply update or recovery acceptance. Missing
+The later isolated browser/native/ProxyDB composition has the exact result in
+the table above; that result does not establish an ordinary immutable publisher
+or production upgrade. Passing this first slice alone does not imply update or
+recovery acceptance. Missing
 approved network inputs are reported as NOT_RUN, not substituted by loopback
 HTTP, arbitrary artifacts or a trust-store override. Windows native activation
 and macOS manager acceptance remain independently unsupported/unaccepted.
