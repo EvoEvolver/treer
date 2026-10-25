@@ -40,7 +40,7 @@ pub enum Request {
     Local(Value),
     Wire(Value),
     Input { wire: Value, dispatched: Value },
-    Steer { wire: Value, turn: String, item: Value, after: Option<String> },
+    Steer { wire: Value, turn: String, epoch: u64, item: Value, after: Option<String> },
 }
 const IMAGE_BYTES: usize = 24*1024*1024;
 const IMAGE_BASE64_BYTES: usize = 32*1024*1024;
@@ -412,7 +412,7 @@ impl Adapter {
                 self.input_commands.insert(user_id.clone());
                 let wire=json!({"type":"user","uuid":user_id,"session_id":self.session,"message":{"role":"user","content":content},"parent_tool_use_id":null});
                 if steering {
-                    Request::Steer {wire,turn:self.active.clone().unwrap(),item:json!({"id":user_id,"type":"userMessage","text":text}),after:self.order.last().cloned()}
+                    Request::Steer {wire,turn:self.active.clone().unwrap(),epoch:self.invocation_epoch,item:json!({"id":user_id,"type":"userMessage","text":text}),after:self.order.last().cloned()}
                 } else {
                     Request::Input {wire,dispatched:self.dispatched()}
                 }
@@ -431,11 +431,12 @@ impl Adapter {
             _ => bail!("claude_method_unsupported"),
         })
     }
-    pub fn steered(&mut self, turn: &str, item: Value, after: Option<&str>) -> Result<Value> {
+    pub fn steered(&mut self, turn: &str, epoch: u64, item: Value, after: Option<&str>) -> Result<Value> {
         // A result received before successful write/flush cannot acknowledge
         // this input. It may already have been sent: refuse as UNKNOWN rather
         // than reusing the completed turn, retargeting or retrying the input.
-        if self.active.as_deref()!=Some(turn) {bail!("claude_steer_outcome_unknown");}
+        if self.active.as_deref()!=Some(turn) || self.invocation_epoch!=epoch
+            || self.task_followup.is_some() || self.native_command.is_some() {bail!("claude_steer_outcome_unknown");}
         let id=item["id"].as_str().ok_or_else(||anyhow::anyhow!("claude_item_identity"))?.to_owned();
         self.retain(id.clone(),item)?;
         self.order.retain(|entry|entry!=&id);
@@ -933,6 +934,15 @@ mod task_followup_tests {
         }
     }
     #[test]
+    fn scheduled_start_during_steer_write_is_unknown_without_retaining_input() {
+        let mut a=Adapter::new("session".into()).unwrap();
+        a.request(1,"turn/start",&json!({"input":[{"type":"text","text":"B"}]})).unwrap();
+        let Request::Steer {turn,epoch,item,after,..}=a.request(2,"turn/steer",&json!({"threadId":"session","expectedTurnId":a.active,"input":[{"type":"text","text":"not proven"}]})).unwrap() else {panic!()};
+        a.consume(json!({"type":"command_lifecycle","session_id":"session","command_uuid":"91d7ab21-8b8e-40ce-913b-4eb60e7e6fa2","state":"started"})).unwrap();
+        assert_eq!(a.steered(&turn,epoch,item,after.as_deref()).unwrap_err().to_string(),"claude_steer_outcome_unknown");
+        assert_eq!(a.dispatched()["turn"]["items"].as_array().unwrap().len(),1);
+    }
+    #[test]
     fn refusal_diagnostics_never_publish_error_context_or_native_content() {
         let a = Adapter::new("private-session".into()).unwrap();
         let refusal = a.refusal_diagnostic(&anyhow::anyhow!("claude_unowned_stream"));
@@ -1133,8 +1143,8 @@ mod tests {
         a.consume(json!({"type":"assistant","message":{"id":"before","content":[{"type":"text","text":"before steer"}]}})).unwrap();
         for id in [2,3] {
             let request=a.request(id,"turn/steer",&json!({"threadId":"synthetic-session","expectedTurnId":turn,"input":[{"type":"text","text":"same steer"}]})).unwrap();
-            let Request::Steer {wire,turn:expected,item,after}=request else {panic!("expected native steer")};
-            let dispatched=a.steered(&expected,item,after.as_deref()).unwrap();
+            let Request::Steer {wire,turn:expected,epoch,item,after}=request else {panic!("expected native steer")};
+            let dispatched=a.steered(&expected,epoch,item,after.as_deref()).unwrap();
             assert_eq!(wire["type"],"user");assert!(wire["uuid"].is_string());
             assert_eq!(wire["message"]["content"][0]["text"],"same steer");
             assert_eq!(dispatched["turn"]["id"],turn);
@@ -1151,11 +1161,11 @@ mod tests {
     fn result_during_steer_write_is_unknown_not_old_turn_completion() {
         let mut a=adapter();start(&mut a);
         let turn=a.active.clone().unwrap();
-        let Request::Steer {turn:expected,item,after,..}=a.request(2,"turn/steer",&json!({"threadId":"synthetic-session","expectedTurnId":turn,"input":[{"type":"text","text":"not acknowledged"}]})).unwrap() else {panic!()};
+        let Request::Steer {turn:expected,epoch,item,after,..}=a.request(2,"turn/steer",&json!({"threadId":"synthetic-session","expectedTurnId":turn,"input":[{"type":"text","text":"not acknowledged"}]})).unwrap() else {panic!()};
         let completed=a.consume(json!({"type":"result","result":"old turn result"})).unwrap();
         let items=completed.last().unwrap()["params"]["turn"]["items"].as_array().unwrap();
         assert!(!items.iter().any(|i|i["text"]=="not acknowledged"));
-        assert_eq!(a.steered(&expected,item,after.as_deref()).unwrap_err().to_string(),"claude_steer_outcome_unknown");
+        assert_eq!(a.steered(&expected,epoch,item,after.as_deref()).unwrap_err().to_string(),"claude_steer_outcome_unknown");
         assert!(a.active.is_none());
     }
     #[test]

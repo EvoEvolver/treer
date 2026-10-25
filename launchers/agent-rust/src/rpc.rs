@@ -331,9 +331,9 @@ impl Rpc {
                     self.write_claude_input(wire).await?;
                     Ok(dispatched)
                 },
-                crate::claude::Request::Steer {wire,turn,item,after}=>{
+                crate::claude::Request::Steer {wire,turn,epoch,item,after}=>{
                     self.write_claude_input(wire).await?;
-                    adapter.lock().unwrap().steered(&turn,item,after.as_deref())
+                    adapter.lock().unwrap().steered(&turn,epoch,item,after.as_deref())
                 },
                 crate::claude::Request::Wire(wire)=>{
                         let(tx,rx)=oneshot::channel();self.pending.lock().unwrap().insert(id,tx);
@@ -489,6 +489,36 @@ mod tests {
         assert!(rpc.pending.lock().unwrap().is_empty());
         child.kill().await.unwrap();
         std::fs::remove_file(gate).unwrap();std::fs::remove_dir(root).unwrap();
+    }
+    #[cfg(all(unix, feature="fixture-harness"))]
+    #[tokio::test]
+    async fn claude_scheduled_invocation_during_steer_write_is_unknown_even_after_completion() {
+        let node=std::env::var("TREER_TEST_NODE").expect("explicit native Node fixture path");
+        let root=std::env::temp_dir().join(format!("cron-steer-race-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&root).unwrap();
+        let gate=root.join("scheduled");
+        let script=r#"const fs=require('fs'),r=require('readline').createInterface({input:process.stdin});let count=0;const send=e=>console.log(JSON.stringify({session_id:'session',...e}));r.on('line',l=>{const q=JSON.parse(l);if(q.type==='user'&&++count===1){const timer=setInterval(()=>{if(fs.existsSync(process.argv[1])){clearInterval(timer);send({type:'command_lifecycle',command_uuid:'91d7ab21-8b8e-40ce-913b-4eb60e7e6fa2',state:'started'});send({type:'system',subtype:'init'});send({type:'result',result:'Cron only'});send({type:'command_lifecycle',command_uuid:'91d7ab21-8b8e-40ce-913b-4eb60e7e6fa2',state:'completed'});}},5);}});"#;
+        let (rpc,mut child,mut events)=Rpc::spawn_claude(&node,&["-e".into(),script.into(),gate.to_string_lossy().into()],&root,false,"session".into()).unwrap();
+        let initial=rpc.request_selected("turn/start",json!({"threadId":"session","input":[{"type":"text","text":"waiting B"}]}),None).await.unwrap();
+        let turn=initial["turn"]["id"].clone();let expected=turn.clone();
+        let writer=rpc.input.lock().await;let clone=rpc.clone();
+        let steering=async move {clone.request_selected("turn/steer",json!({"threadId":"session","expectedTurnId":turn,"input":[{"type":"text","text":"uncertain steer"}]}),None).await};
+        tokio::pin!(steering);
+        tokio::select! {biased; result=&mut steering=>panic!("write was not held: {result:?}"), _=tokio::task::yield_now()=>{}}
+        std::fs::write(&gate,b"own Cron").unwrap();
+        let output=loop {
+            let event=timeout(Duration::from_secs(3),events.recv()).await.unwrap().unwrap();
+            if event["method"]=="thread/claude-scheduled-output" {break event;}
+        };
+        assert!(!output["params"]["turn"]["items"].as_array().unwrap().iter().any(|i|i["text"]=="uncertain steer"));
+        drop(writer);
+        assert_eq!(steering.await.unwrap_err().to_string(),"claude_steer_outcome_unknown");
+        {
+            let adapter=rpc.claude.as_ref().unwrap().lock().unwrap();
+            let waiting=adapter.dispatched();assert_eq!(waiting["turn"]["id"],expected);
+            assert!(!waiting["turn"]["items"].as_array().unwrap().iter().any(|i|i["text"]=="uncertain steer"));
+        }
+        assert!(!rpc.failed());assert!(rpc.pending.lock().unwrap().is_empty());
+        child.kill().await.unwrap();std::fs::remove_file(gate).unwrap();std::fs::remove_dir(root).unwrap();
     }
     #[cfg(all(unix, feature="fixture-harness"))]
     #[tokio::test]

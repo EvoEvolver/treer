@@ -269,6 +269,10 @@ The completed record is display-only (`native-scheduled-command`), with no user
 item/receipt or selected-model change. It does not complete/interrupt a user
 input already queued inside Claude. Global interrupt and steer refuse before
 write during this scope; an earlier interrupt ACK crossing its start is unknown.
+Steer captures the invocation epoch before its write and checks the same epoch
+and active turn after successful flush. A native invocation crossing that write
+makes the input outcome unknown even if its complete lifecycle already finished;
+the input is not retained as acknowledged, retargeted or retried.
 Foreign sessions, missing init, claimed input UUIDs, unknown result origins,
 overlapping starts and mismatched/premature completion remain fenced. Restart
 retains only completed display records and never replays scheduled work. This

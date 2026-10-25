@@ -38,15 +38,25 @@ recurring jobs on a working Agent.
   running, B completion exactly once, restart without replay, missing command,
   borrowed input UUID and wrong completion ID. Three adjacent task-followup
   controls retain their previous behavior. All seven pass.
-- Final-source units6/6, scheduled entries4/4, strict all-target Clippy,
+- Followup units7/7 and focused steer units5/5 (two overlap), scheduled entries4/4, strict all-target Clippy,
   documentation and diff checks PASS. The final additional pre-write steer
   guard is covered by the invocation unit; no old full feature matrix rerun.
 - Real Claude2.1.306 on the changed runtime PASS twice in fresh owned sessions:
   one ordinary CronCreate input, one scheduled output, one subsequent ordinary
   prompt; exactly3 native results (2 distinct input UUIDs),2 done/error-null
   receipts,3 display turns, idle/open with no recovery unresolved. The final
-  source run is treer247-own-protocol-tkRqLB; the previous run mgGdJx separately
+  pre-review source run is treer247-own-protocol-tkRqLB; the previous run mgGdJx separately
   predates only the added pre-write steer guard. Both owned runtimes were closed.
+- Core's single review found that a started-and-completed Cron could cross a
+  steer write before its successful return while B remained active. Request and
+  post-flush commit now bind the same invocation epoch. A deterministic real-Rpc
+  held-writer producer executes the complete Cron lifecycle before releasing
+  write: steer returns unknown, neither B nor scheduled output contains the new
+  item, pending is empty, and no replay occurs. A second unit covers the still
+  active Cron case. Only this finding is resubmitted to the same review; no new
+  review layer. Real account runs above precede this steer-only correction, so
+  they are not relabeled as final-source runs. Clippy's initial test guard-scope
+  warning was corrected with a lexical scope before the child-cleanup await.
 - Initial fixture assertion incorrectly counted B's pending display turn; it
   was corrected to assert absence of a scheduled record before command completion.
 - Initial changed-source real probe exposed native local `queued` lifecycle
