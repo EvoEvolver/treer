@@ -89,7 +89,8 @@ async fn main() -> Result<()> {
         std::env::set_var("AGENT_UI_CWD",&launch.cwd);
         std::env::set_var("AGENT_UI_HARNESS","claude");
         std::env::set_var("AGENT_UI_SESSION_ID",&launch.id);
-        std::env::set_var("CLAUDE_CONFIG_DIR",&launch.config);
+        if launch.owner_default {std::env::remove_var("CLAUDE_CONFIG_DIR");}
+        else {std::env::set_var("CLAUDE_CONFIG_DIR",&launch.config);}
     }
     if std::env::args().nth(1).as_deref() == Some("session") {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -220,7 +221,12 @@ async fn main() -> Result<()> {
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             {None}
         },
-        claude_config_dir: if harness=="claude" {env("CLAUDE_CONFIG_DIR").map(PathBuf::from)} else {None},
+        claude_config_dir: if harness=="claude" {
+            #[cfg(any(target_os="macos",target_os="linux"))]
+            {launch.as_ref().filter(|l|!l.owner_default).map(|l|l.config.clone()).or_else(||env("CLAUDE_CONFIG_DIR").map(PathBuf::from))}
+            #[cfg(not(any(target_os="macos",target_os="linux")))]
+            {env("CLAUDE_CONFIG_DIR").map(PathBuf::from)}
+        } else {None},
         cwd,
         private_root,
         codex: if harness=="claude" {
@@ -446,7 +452,8 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
             _=>return failure(StatusCode::BAD_REQUEST,"invalid_snapshot_request"),
         };
         let body=match bounded_json::decode(&bytes) {Ok(body)=>body,_=>return failure(StatusCode::BAD_REQUEST,"invalid_snapshot_request")};
-        if !body.as_object().is_some_and(|o|o.len()==1 && o.get("threadId").is_some_and(Value::is_string)) {
+        if !body.as_object().is_some_and(|o|o.get("threadId").is_some_and(Value::is_string) &&
+            (o.len()==1 || o.len()==2 && o.get("auth")==Some(&json!("owner-default")))) {
             return failure(StatusCode::BAD_REQUEST,"snapshot_exact_thread_required");
         }
         return match app.runtime.call("session/export",body).await {

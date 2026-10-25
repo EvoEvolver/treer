@@ -1,5 +1,78 @@
 # Offline Claude session transfer (#247)
 
+## Explicit owner-default authentication (alternative to isolated environment auth)
+
+The default behavior below remains isolated `--auth environment`. A separate,
+explicit `--auth owner-default` mode uses the same owner's normal default Claude
+authentication, without extracting or copying any credential:
+
+```sh
+treer-agent session inspect --input /private/snapshot.json \
+  --directory /existing-parent/new-project --session-id NEW_UUID \
+  --sha256 SNAPSHOT_SHA256 --auth owner-default
+treer-agent session prepare --input /private/snapshot.json \
+  --directory /existing-parent/new-project --session-id NEW_UUID \
+  --sha256 SNAPSHOT_SHA256 --auth owner-default
+treer-agent session run --directory /existing-parent/new-project \
+  --session-id NEW_UUID --auth owner-default
+```
+
+This mode requires `CLAUDE_CONFIG_DIR` to be **unset** and the owner's existing
+absolute `$HOME/.claude/projects` to be trusted, owned directories. It creates
+only a new, private cwd-derived project directory there; an existing project
+directory, even empty, refuses. Neither credentials, settings, Keychain nor
+unrelated projects are read, copied or replaced. The provider receives no
+`CLAUDE_CONFIG_DIR` override or injected credential and uses its normal owner
+environment. This does not promise successful remote authentication, isolation
+from owner hooks/settings, or absence of normal provider global side effects.
+Only new cwd/UUID session records are isolated. Use the environment mode when
+separate configuration is required.
+
+Owner-default inspection/preparation requires an explicit fresh UUID and input
+SHA. Its receipt adds `auth:owner-default`, `environment:{}`, the exact
+`ownerProject` and a `publicationIntent` path. File/byte counts include the native
+project binding marker; at most1026 files (1024 imported + plan + marker).
+All imported bytes and rewritten paths/hashes are validated before staging.
+Project instructions remain in the new target; native session/memory files go
+only into the new owner project. Launch binds the owner root's device/inode,
+project marker, session/cwd and initial native hash. Persistent startup keeps
+the same exact-Agent/private-checkpoint and once-only bootstrap contract below.
+
+Two roots cannot be published atomically. Preparation stages both complete
+private directories first, then writes/syncs an exclusive
+`.claude-transfer-NEW_UUID.json` intent in the target parent, publishes the new
+provider project with NOREPLACE, syncs it, then publishes/syncs the new target.
+Failure before the intent cleans only owned stages. Failure after the intent
+retains stages/published content and reports **unknown/do not retry**; it does
+not delete provider files or automatically finish/retry publication. The
+original source session is never modified. A competing occupied destination
+cannot be overwritten. Retain the intent and sensitive snapshot for readback:
+
+```sh
+treer-agent session publication --directory /existing-parent/new-project \
+  --session-id NEW_UUID --auth owner-default
+```
+
+This command performs no mutation. It binds the intent/target/provider marker,
+reports partial publication, `prepared`, or `launch_claimed`, and always reports
+`providerReady:false`. It never resumes a failed publication or replays input.
+Create only follows an unambiguous complete prepared receipt; a lost response
+must be read back, never resent. Create/process success still is not provider
+readiness. Authentication refusal is a normal visible launch failure, not
+permission to fall back, rebootstrap or create another Agent.
+
+An authenticated managed source using the normal default root can explicitly
+request `POST /api/session/export` with `{threadId,auth:"owner-default"}`. Its
+root is the `$HOME/.claude` path captured at source startup. A source initialized
+with another `CLAUDE_CONFIG_DIR` cannot use this selector to read default-root
+history. The old exact `{threadId}` request retains its explicit-config rule;
+no arbitrary path is accepted. All same-session idle/custody/event-pump and
+allowlist checks below remain in effect. `runtimeSnapshot.auth` records the
+explicit default-root choice. No credential file is part of the snapshot.
+
+This does not enable `sessionTransfer`: the capability remains null until the
+complete user flow and real provider continuation have their own acceptance.
+
 This batch implements an offline export/import command in the native executable
 on macOS/Linux. It does not resume, stop, inspect, or modify a running runtime.
 The installed dispatcher forwards `treer-agent session ...` to its hash-bound
@@ -119,7 +192,7 @@ publication must be inspected, and there is no automatic retry.
 If stdout fails after publication, `import_published_output_failed_do_not_retry`
 likewise retains the complete directory; inspect it instead of resubmitting.
 
-Unlike Node's shared provider-home restore, this command puts provider files
+Unlike Node's shared provider-home restore, the default environment mode puts provider files
 **inside the new project**. This avoids partial publication across two separate
 roots, does not scan or modify existing provider sessions, and creates no
 credential symlink/copy. The isolated config needs its own supported authentication

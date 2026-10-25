@@ -2,7 +2,7 @@
 import { createInterface } from 'node:readline';
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-const session=process.argv.at(-1),cwd=process.cwd(),home=process.env.CLAUDE_CONFIG_DIR;
+const session=process.argv.at(-1),cwd=process.cwd(),home=process.env.CLAUDE_CONFIG_DIR||join(process.env.HOME,'.claude');
 const dir=join(home,'projects',cwd.replace(/[^a-zA-Z0-9]/g,'-')),file=join(dir,session+'.jsonl');
 mkdirSync(dir,{recursive:true,mode:0o700});
 const log=value=>appendFileSync(process.env.LAUNCH_CALLS,JSON.stringify(value)+'\n',{mode:0o600});

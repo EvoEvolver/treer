@@ -93,6 +93,7 @@ struct Runtime {
     native_bootstrap: Option<Value>,
     bootstrap_pending: bool,
     snapshot_source: Option<(PathBuf, PathBuf)>,
+    snapshot_default_source: Option<(PathBuf, PathBuf)>,
     snapshot_read_slot: Arc<tokio::sync::Semaphore>,
     terminal_tasks: Value,
     rpc: Rpc,
@@ -196,6 +197,9 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
         native_bootstrap: config.native_bootstrap.clone(),
         bootstrap_pending: config.native_bootstrap.is_some(),
         snapshot_source: config.claude_config_dir.clone().map(|root| (root,config.cwd.clone())),
+        snapshot_default_source: std::env::var_os("HOME").map(|home|PathBuf::from(home).join(".claude"))
+            .filter(|home| home.is_absolute() && config.claude_config_dir.as_ref().is_none_or(|p|p==home))
+            .map(|home|(home,config.cwd.clone())),
         snapshot_read_slot: Arc::new(tokio::sync::Semaphore::new(1)),
         rpc,
         events,

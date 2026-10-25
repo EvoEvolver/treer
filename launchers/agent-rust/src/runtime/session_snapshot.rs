@@ -29,10 +29,14 @@ impl Runtime {
     }
     pub(super) async fn session_snapshot(&mut self, body: Value) -> Result<Value> {
         self.snapshot_idle(&body["threadId"])?;
-        let (home, cwd) = self
-            .snapshot_source
-            .clone()
-            .ok_or_else(|| anyhow!("snapshot_explicit_config_required"))?;
+        let owner_default = body["auth"] == "owner-default";
+        let (home, cwd) = (if owner_default {
+            &self.snapshot_default_source
+        } else {
+            &self.snapshot_source
+        })
+        .clone()
+        .ok_or_else(|| anyhow!("snapshot_explicit_config_required"))?;
         if !home.is_absolute() {
             bail!("snapshot_explicit_config_required");
         }
@@ -101,6 +105,9 @@ impl Runtime {
                 .recheck()
                 .map_err(|_| anyhow!("snapshot_storage_changed"))?;
             value["runtimeSnapshot"] = json!({"schema":"treer.idle-claude-snapshot/v1","threadId":thread,"custody":"current_initialized_adapter_idle","includesLauncherState":false,"providerCheckpoint":false});
+            if owner_default {
+                value["runtimeSnapshot"]["auth"] = json!("owner-default");
+            }
             Ok(value)
         }
     }

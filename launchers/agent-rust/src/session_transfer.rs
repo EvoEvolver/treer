@@ -385,9 +385,40 @@ pub struct Launch {
     pub config: PathBuf,
     pub id: String,
     pub history: Value,
+    pub owner_default: bool,
     persistent: bool,
     native_hash: String,
     root: File,
+    native_root: File,
+    native_path: String,
+}
+fn owner_home() -> Result<(PathBuf, File)> {
+    // Resolve only the conventional owner root; never enumerate/read auth,
+    // settings, unrelated projects or a caller-supplied provider root.
+    ensure!(
+        std::env::var_os("CLAUDE_CONFIG_DIR").is_none(),
+        "owner_default_requires_unset_config_dir"
+    );
+    let home = PathBuf::from(std::env::var_os("HOME").context("owner_home_required")?);
+    let (path, fd) = root(&home.join(".claude"))?;
+    owner_parent(&fd)?;
+    Ok((path, fd))
+}
+fn private_dir(fd: &File) -> Result<()> {
+    let m = fd.metadata()?;
+    ensure!(
+        m.uid() == rustix::process::getuid().as_raw() && m.mode() & 0o077 == 0,
+        "owner_default_private_directory_required"
+    );
+    Ok(())
+}
+fn owner_parent(fd: &File) -> Result<()> {
+    let m = fd.metadata()?;
+    ensure!(
+        m.uid() == rustix::process::getuid().as_raw() && m.mode() & 0o022 == 0,
+        "owner_default_parent_not_trusted"
+    );
+    Ok(())
 }
 pub fn launch(args: &[String], persistent: bool) -> Result<Launch> {
     ensure!(
@@ -402,17 +433,19 @@ pub fn launch(args: &[String], persistent: bool) -> Result<Launch> {
             "invalid_launch_option"
         );
     }
+    let owner_default = options.get("--auth") == Some(&"owner-default");
     ensure!(
-        options.get("--auth") == Some(&"environment"),
-        "launch_auth_must_be_environment"
+        owner_default || options.get("--auth") == Some(&"environment"),
+        "unsupported_launch_auth"
     );
     // Do not load .credentials.json, keychains, old HOME/config or bundle env.
     // This selects a provider-supported environment credential, not proof that
     // remote authentication succeeded; that remains the provider's decision.
     ensure!(
-        ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]
-            .iter()
-            .any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty())),
+        owner_default
+            || ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]
+                .iter()
+                .any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty())),
         "launch_explicit_environment_auth_required"
     );
     let id = options
@@ -438,6 +471,39 @@ pub fn launch(args: &[String], persistent: bool) -> Result<Launch> {
             && plan["sessionId"] == id,
         "launch_binding_mismatch"
     );
+    ensure!(
+        if owner_default {
+            plan["auth"] == "owner-default"
+        } else {
+            plan.get("auth").is_none() || plan["auth"] == "environment"
+        },
+        "launch_auth_binding_mismatch"
+    );
+    let key = project_key(cwd.to_str().context("non_utf8_destination")?);
+    let (config, native_root, native_path) = if owner_default {
+        let (config, fd) = owner_home()?;
+        let m = fd.metadata()?;
+        ensure!(
+            plan["ownerConfig"] == config.to_string_lossy().as_ref()
+                && plan["ownerDevice"] == m.dev()
+                && plan["ownerInode"] == m.ino(),
+            "owner_default_root_changed"
+        );
+        let project = open_at(&fd, Path::new(&format!("projects/{key}")), true)?;
+        private_dir(&project)?;
+        let marker = read(&project, ".treer-transfer.json", 4096)?;
+        ensure!(
+            plan["ownerProjectBinding"] == hash(&marker),
+            "owner_default_project_changed"
+        );
+        (config, project, format!("{id}.jsonl"))
+    } else {
+        (
+            cwd.join(".harness/claude"),
+            dir.try_clone()?,
+            format!(".harness/claude/projects/{key}/{id}.jsonl"),
+        )
+    };
     let native_hash = plan["nativeSha256"]
         .as_str()
         .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -446,24 +512,23 @@ pub fn launch(args: &[String], persistent: bool) -> Result<Launch> {
     let history = if persistent {
         Value::Null
     } else {
-        read_launch_history(&dir, &cwd, &id, &native_hash)?
+        read_launch_history(&native_root, &native_path, &id, &native_hash)?
     };
     Ok(Launch {
-        config: cwd.join(".harness/claude"),
+        config,
         cwd,
         id,
         history,
         persistent,
         native_hash,
         root: dir,
+        native_root,
+        native_path,
+        owner_default,
     })
 }
-fn read_launch_history(dir: &File, cwd: &Path, id: &str, digest: &str) -> Result<Value> {
-    let path = format!(
-        ".harness/claude/projects/{}/{id}.jsonl",
-        project_key(cwd.to_str().context("non_utf8_destination")?)
-    );
-    let bytes = read(dir, &path, BYTES)?;
+fn read_launch_history(dir: &File, path: &str, id: &str, digest: &str) -> Result<Value> {
+    let bytes = read(dir, path, BYTES)?;
     ensure!(digest == hash(&bytes), "launch_native_hash_mismatch");
     native_history(&bytes, id)
 }
@@ -503,8 +568,12 @@ pub fn claim_launch(launch: &mut Launch, private: &Path, agent: &str) -> Result<
         }
         // Presence of an intent without a checkpoint is an earlier failed or
         // ambiguous attempt. Exclusive claim below refuses; no automatic retry.
-        launch.history =
-            read_launch_history(&launch.root, &launch.cwd, &launch.id, &launch.native_hash)?;
+        launch.history = read_launch_history(
+            &launch.native_root,
+            &launch.native_path,
+            &launch.id,
+            &launch.native_hash,
+        )?;
     }
     // The ordinary lease is already held. Never bootstrap an existing runtime,
     // including one whose journal is absent but other durable state remains.
@@ -514,13 +583,9 @@ pub fn claim_launch(launch: &mut Launch, private: &Path, agent: &str) -> Result<
             "launch_requires_fresh_private_root"
         );
     }
-    let native = format!(
-        ".harness/claude/projects/{}/{}.jsonl",
-        project_key(launch.cwd.to_str().context("non_utf8_destination")?),
-        launch.id
-    );
     ensure!(
-        hash(&read(&launch.root, &native, BYTES)?) == launch.history["nativeSha256"],
+        hash(&read(&launch.native_root, &launch.native_path, BYTES)?)
+            == launch.history["nativeSha256"],
         "launch_native_changed"
     );
     let metadata = std::fs::metadata(&private)?;
@@ -681,6 +746,7 @@ fn import(
     prepare: bool,
     inspect: bool,
     expected_hash: Option<&str>,
+    owner_default: bool,
 ) -> Result<Value> {
     ensure!(
         input.is_absolute() && destination.is_absolute(),
@@ -726,6 +792,28 @@ fn import(
     let cwd = destination.to_str().context("non_utf8_destination")?;
     // Validate every decoded and rewritten byte before creating anything.
     let mut files = decoded(bundle, id, cwd)?;
+    ensure!(!owner_default || prepare, "owner_default_requires_prepare");
+    let owner = if owner_default {
+        let (path, home) = owner_home()?;
+        let projects = open_at(&home, Path::new("projects"), true)?;
+        owner_parent(&projects)?;
+        let key = project_key(cwd);
+        ensure!(
+            !exists(&projects, &key)?,
+            "owner_default_project_must_be_new"
+        );
+        Some((path, home, projects, key))
+    } else {
+        None
+    };
+    let intent_name = format!(".claude-transfer-{id}.json");
+    if owner_default {
+        ensure!(
+            !exists(&parent, &intent_name)?,
+            "owner_default_prior_intent_do_not_retry"
+        );
+    }
+    let mut owner_files = Vec::new();
     if prepare {
         let native = format!(".harness/claude/projects/{}/{id}.jsonl", project_key(cwd));
         let bytes = &files
@@ -734,11 +822,32 @@ fn import(
             .context("native_session_missing")?
             .1;
         native_history(bytes, id)?;
-        let plan = json!({"schema":"treer.claude-launch/v1","cwd":cwd,"sessionId":id,"nativeSha256":hash(bytes)});
-        files.push((
-            ".harness/claude-launch.json".into(),
-            serde_json::to_vec(&plan)?,
-        ));
+        let mut plan = json!({"schema":"treer.claude-launch/v1","cwd":cwd,"sessionId":id,"nativeSha256":hash(bytes)});
+        if let Some((path, home, _, key)) = &owner {
+            let marker = serde_json::to_vec(
+                &json!({"schema":"treer.claude-owner-project/v1","cwd":cwd,"sessionId":id,"inputSha256":input_hash,"nativeSha256":hash(bytes)}),
+            )?;
+            ensure!(marker.len() <= 4096, "owner_marker_too_large");
+            let m = home.metadata()?;
+            plan["auth"] = json!("owner-default");
+            plan["ownerConfig"] = json!(path);
+            plan["ownerDevice"] = json!(m.dev());
+            plan["ownerInode"] = json!(m.ino());
+            plan["ownerProjectBinding"] = json!(hash(&marker));
+            let prefix = format!(".harness/claude/projects/{key}/");
+            files.retain(|(p, b)| {
+                if let Some(p) = p.strip_prefix(&prefix) {
+                    owner_files.push((p.to_owned(), b.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+            owner_files.push((".treer-transfer.json".into(), marker));
+        }
+        let plan_bytes = serde_json::to_vec(&plan)?;
+        ensure!(plan_bytes.len() <= 4096, "launch_plan_too_large");
+        files.push((".harness/claude-launch.json".into(), plan_bytes));
     }
     ensure!(!exists(&parent, name)?, "destination_must_be_new");
     let receipt = json!({
@@ -746,9 +855,15 @@ fn import(
         "phase":if inspect {"validated"} else {"prepared"},
         "inputSha256":input_hash,"sourceSessionId":source_session,
         "sessionId":id,"cwd":cwd,
-        "files":files.len(),"bytes":files.iter().map(|(_,b)|b.len()).sum::<usize>(),
-        "environment":{"CLAUDE_CONFIG_DIR":destination.join(".harness/claude")}
+        "files":files.len()+owner_files.len(),"bytes":files.iter().chain(owner_files.iter()).map(|(_,b)|b.len()).sum::<usize>(),
+        "environment":if owner_default {json!({})} else {json!({"CLAUDE_CONFIG_DIR":destination.join(".harness/claude")})}
     });
+    let mut receipt = receipt;
+    if let Some((path, _, _, key)) = &owner {
+        receipt["auth"] = json!("owner-default");
+        receipt["ownerProject"] = json!(path.join("projects").join(key));
+        receipt["publicationIntent"] = json!(parent_path.join(&intent_name));
+    }
     if inspect {
         return Ok(receipt);
     }
@@ -762,6 +877,8 @@ fn import(
             return Err(error);
         }
     };
+    let mut owner_stage: Option<(String, File)> = None;
+    let mut intent_written = false;
     let result = (|| -> Result<()> {
         for (path, bytes) in files {
             write_private(&stage, &path, &bytes)?;
@@ -782,6 +899,59 @@ fn import(
                 && current_parent.ino() == held_parent.ino(),
             "import_parent_changed"
         );
+        if let Some((config, home, projects, key)) = &owner {
+            let provider_name = format!(".session-import-{}", uuid::Uuid::new_v4());
+            fs::mkdirat(projects, provider_name.as_str(), Mode::from_raw_mode(0o700))?;
+            let fd = open_at(projects, Path::new(&provider_name), true)?;
+            owner_stage = Some((provider_name, fd));
+            let (provider_stage, fd) = owner_stage.as_ref().expect("created stage");
+            for (path, bytes) in &owner_files {
+                write_private(fd, path, bytes)?;
+            }
+            fd.sync_all()?;
+            let (_, current_home) = root(config)?;
+            let current_projects = open_at(&current_home, Path::new("projects"), true)?;
+            for (a, b) in [(home, &current_home), (projects, &current_projects)] {
+                let a = a.metadata()?;
+                let b = b.metadata()?;
+                ensure!(
+                    a.dev() == b.dev() && a.ino() == b.ino(),
+                    "owner_default_parent_changed"
+                );
+            }
+            let held = fd.metadata()?;
+            let now = open_at(projects, Path::new(provider_stage), true)?.metadata()?;
+            ensure!(
+                held.dev() == now.dev() && held.ino() == now.ino(),
+                "owner_default_stage_changed"
+            );
+            ensure!(
+                !exists(projects, key)? && !exists(&parent, name)?,
+                "owner_default_destination_occupied"
+            );
+            // From this exclusive durable intent onward, any failure is
+            // explicitly ambiguous/partial. Retain custody; never auto retry,
+            // delete published files or claim two-root atomicity.
+            let intent_bytes = serde_json::to_vec(
+                &json!({"schema":"treer.claude-owner-publication/v1","receipt":receipt,"targetStage":stage_name,"providerStage":provider_stage,"automaticRetry":false}),
+            )?;
+            ensure!(intent_bytes.len() <= 16384, "owner_intent_too_large");
+            write_private(&parent, &intent_name, &intent_bytes)?;
+            intent_written = true;
+            parent.sync_all()?;
+            fs::renameat_with(
+                projects,
+                provider_stage.as_str(),
+                projects,
+                key.as_str(),
+                fs::RenameFlags::NOREPLACE,
+            )?;
+            projects.sync_all()?;
+            #[cfg(feature = "fixture-harness")]
+            if std::env::var_os("RUST_SESSION_OWNER_FAIL_AFTER_PROVIDER").is_some() {
+                bail!("synthetic_after_provider_publication");
+            }
+        }
         fs::renameat_with(
             &parent,
             stage_name.as_str(),
@@ -792,6 +962,19 @@ fn import(
         Ok(())
     })();
     if let Err(error) = result {
+        if intent_written {
+            return Err(error.context("owner_default_publication_unknown_do_not_retry_read_intent"));
+        }
+        if let (Some((_, _, projects, _)), Some((name, fd))) = (&owner, &owner_stage) {
+            let held = fd.metadata()?;
+            let now = open_at(projects, Path::new(name), true)?.metadata()?;
+            ensure!(
+                held.dev() == now.dev() && held.ino() == now.ino(),
+                "owner_stage_cleanup_identity_changed"
+            );
+            remove_contents(fd)?;
+            fs::unlinkat(projects, name.as_str(), AtFlags::REMOVEDIR)?;
+        }
         let current = open_at(&parent, Path::new(&stage_name), true)?.metadata()?;
         let held = stage.metadata()?;
         ensure!(
@@ -816,6 +999,7 @@ fn import(
 }
 pub fn cli(args: Vec<String>) -> Result<()> {
     if args.first().map(String::as_str) == Some("--help") {
+        println!("Owner-default alternative: inspect/prepare --auth owner-default require explicit --session-id and --sha256. Launch/run use --auth owner-default only for that bound prepared plan, with CLAUDE_CONFIG_DIR unset. Provider uses existing owner authentication; no credential copying. Two-root failure retains an intent and is never automatically retried. Read it with session publication --directory ABS --session-id UUID --auth owner-default. This never claims provider readiness.");
         println!("session inspect --input ABS --directory NEW_ABS --session-id NEW_UUID --sha256 BUNDLE_SHA256\nInspect validates the full prepared target without writing. Prepare also accepts --sha256 to bind publication to inspected bytes. Receipts describe files/paths only, never provider readiness.\n");
         println!("session export --harness claude --config-dir ABS --cwd ABS --session-id UUID\nsession import --input ABS --directory NEW_ABS [--session-id NEW_UUID]\nsession prepare --input ABS --directory NEW_ABS [--session-id NEW_UUID]\nsession launch --directory PREPARED_ABS --session-id NEW_UUID --auth environment\nsession run --directory PREPARED_ABS --session-id NEW_UUID --auth environment\nImport/prepare publish a new isolated directory. Launch needs a fresh private runtime root and explicit environment auth, never copies credentials or modifies the source session. Launch is once-only. Run is the persistent startup form: first bootstrap once, then only the same Agent/private checkpoint resumes. Failed intent without checkpoint is never retried. Normal Create saves this argv; process creation is not provider readiness.");
         return Ok(());
@@ -824,10 +1008,15 @@ pub fn cli(args: Vec<String>) -> Result<()> {
     ensure!(args.len() % 2 == 1, "session_options_require_values");
     let mut options = BTreeMap::new();
     let allowed = match operation.as_str() {
+        "publication" => &["--directory", "--session-id", "--auth"][..],
         "export" => &["--harness", "--config-dir", "--cwd", "--session-id"][..],
-        "import" | "prepare" | "inspect" => {
-            &["--input", "--directory", "--session-id", "--sha256"][..]
-        }
+        "import" | "prepare" | "inspect" => &[
+            "--input",
+            "--directory",
+            "--session-id",
+            "--sha256",
+            "--auth",
+        ][..],
         _ => bail!("unknown_session_operation"),
     };
     for pair in args[1..].chunks_exact(2) {
@@ -843,7 +1032,16 @@ pub fn cli(args: Vec<String>) -> Result<()> {
             .map(String::as_str)
             .context("missing_session_option")
     };
-    let value = if operation == "export" {
+    let value = if operation == "publication" {
+        ensure!(
+            required("--auth")? == "owner-default",
+            "publication_requires_owner_default"
+        );
+        publication(
+            Path::new(required("--directory")?),
+            required("--session-id")?,
+        )?
+    } else if operation == "export" {
         ensure!(
             required("--harness")? == "claude",
             "only_claude_transfer_supported"
@@ -862,6 +1060,18 @@ pub fn cli(args: Vec<String>) -> Result<()> {
             .get("--session-id")
             .cloned()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let auth = options
+            .get("--auth")
+            .map(String::as_str)
+            .unwrap_or("environment");
+        ensure!(
+            matches!(auth, "environment" | "owner-default"),
+            "unsupported_prepare_auth"
+        );
+        if auth == "owner-default" {
+            required("--sha256")?;
+            required("--session-id")?;
+        }
         import(
             Path::new(required("--input")?),
             Path::new(required("--directory")?),
@@ -869,6 +1079,7 @@ pub fn cli(args: Vec<String>) -> Result<()> {
             operation != "import",
             operation == "inspect",
             options.get("--sha256").map(String::as_str),
+            auth == "owner-default",
         )?
     };
     let output = (|| -> Result<()> {
@@ -884,4 +1095,74 @@ pub fn cli(args: Vec<String>) -> Result<()> {
         output?;
     }
     Ok(())
+}
+fn publication(destination: &Path, id: &str) -> Result<Value> {
+    uuid(id)?;
+    let (parent_path, parent) = root(
+        destination
+            .parent()
+            .context("destination_parent_required")?,
+    )?;
+    let name = destination
+        .file_name()
+        .and_then(|s| s.to_str())
+        .context("destination_name_required")?;
+    safe(name)?;
+    let destination = parent_path.join(name);
+    let intent = crate::bounded_json::decode(&read_snapshot(
+        &parent,
+        &format!(".claude-transfer-{id}.json"),
+        16384,
+        false,
+    )?)?;
+    let receipt = &intent["receipt"];
+    let (config, home) = owner_home()?;
+    let key = project_key(destination.to_str().context("non_utf8_destination")?);
+    ensure!(
+        intent["schema"] == "treer.claude-owner-publication/v1"
+            && receipt["cwd"] == destination.to_string_lossy().as_ref()
+            && receipt["sessionId"] == id
+            && receipt["auth"] == "owner-default"
+            && receipt["ownerProject"] == json!(config.join("projects").join(&key)),
+        "publication_binding_mismatch"
+    );
+    let projects = open_at(&home, Path::new("projects"), true)?;
+    let target = exists(&parent, name)?;
+    let provider = exists(&projects, &key)?;
+    if !target || !provider {
+        return Ok(
+            json!({"schema":"treer.claude-publication-status/v1","state":"partial_or_unknown_do_not_retry","targetPublished":target,"providerPublished":provider,"receipt":receipt}),
+        );
+    }
+    let target = open_at(&parent, Path::new(name), true)?;
+    let plan = crate::bounded_json::decode(&read(&target, ".harness/claude-launch.json", 4096)?)?;
+    let project = open_at(&projects, Path::new(&key), true)?;
+    private_dir(&project)?;
+    let marker_bytes = read(&project, ".treer-transfer.json", 4096)?;
+    let marker = crate::bounded_json::decode(&marker_bytes)?;
+    let meta = home.metadata()?;
+    ensure!(
+        plan["sessionId"] == id
+            && plan["cwd"] == receipt["cwd"]
+            && plan["auth"] == "owner-default"
+            && plan["ownerConfig"] == json!(config)
+            && plan["ownerDevice"] == meta.dev()
+            && plan["ownerInode"] == meta.ino()
+            && plan["ownerProjectBinding"] == hash(&marker_bytes)
+            && marker["inputSha256"] == receipt["inputSha256"]
+            && marker["sessionId"] == id
+            && marker["cwd"] == receipt["cwd"]
+            && marker["nativeSha256"] == plan["nativeSha256"],
+        "publication_contents_mismatch"
+    );
+    let claimed = exists(&target, ".harness/launch-intent.json")?;
+    if !claimed {
+        ensure!(
+            hash(&read(&project, &format!("{id}.jsonl"), BYTES)?) == plan["nativeSha256"],
+            "publication_native_changed"
+        );
+    }
+    Ok(
+        json!({"schema":"treer.claude-publication-status/v1","state":if claimed {"launch_claimed"} else {"prepared"},"targetPublished":true,"providerPublished":true,"receipt":receipt,"providerReady":false,"automaticRetry":false}),
+    )
 }
