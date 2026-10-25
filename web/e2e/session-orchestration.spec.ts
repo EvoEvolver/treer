@@ -6,7 +6,7 @@ const sourceId = 'ag-source'
 const sourceSession = '22334455-6677-4899-aabb-ccddeeff0011'
 const machine = { server_id: 'srv-prepared', name: 'Fixture machine', root, status: 'online', capabilities: ['machine.exec.v1'], controller_build: { version: 'fixture', git_commit: 'a'.repeat(40) }, host_build: { version: 'fixture', git_commit: 'b'.repeat(40) } }
 const source = { agent_id: sourceId, server_id: machine.server_id, workspace_id: 'ws-prepared', name: 'Source Claude', kind: 'command', status: 'running' }
-async function fixture(page: Page, failure: '' | 'upload' | 'prepare' | 'receipt' | 'instance' | 'owner-env' | 'owner-intent' | 'owner-mismatch' | 'owner-auth' | 'owner-project' | 'source-auth-missing' | 'source-auth-mismatch' = '') {
+async function fixture(page: Page, failure: '' | 'upload' | 'prepare' | 'receipt' | 'instance' | 'owner-env' | 'owner-intent' | 'owner-mismatch' | 'owner-auth' | 'owner-project' | 'source-auth-missing' | 'source-auth-mismatch' | 'owner-canonical' | 'owner-key' | 'owner-canonical-change' = '') {
   let loggedIn = false, created = false, session = '', sourceStatusReads = 0
   const counts = { export: 0, upload: 0, inspect: 0, prepare: 0, create: 0 }
   let payload: any
@@ -53,7 +53,7 @@ async function fixture(page: Page, failure: '' | 'upload' | 'prepare' | 'receipt
       expect(JSON.stringify(v)).not.toContain('synthetic')
       session = v.args[7]
       if (phase === 'prepare' && failure === 'prepare') return json({ error: { code: 'unknown', message: 'synthetic unknown' } }, 503)
-      return json({ server_id: machine.server_id, cwd: v.cwd, command: v.command, args: v.args, exit_code: 0, timed_out: false, truncated: false, stdout: JSON.stringify({ schema: 'treer.claude-prepared/v1', phase: phase === 'inspect' ? 'validated' : 'prepared', inputSha256: failure === 'receipt' ? '0'.repeat(64) : v.args[9], sourceSessionId: sourceSession, sessionId: session, cwd: v.args[5], files: owner ? 1026 : 3, bytes: 200, ...(owner ? { auth: failure === 'owner-auth' ? 'environment' : 'owner-default', ownerProject: failure === 'owner-project' ? '/other/project' : `/home/fixture/.claude/projects/${v.args[5].replace(/[^a-zA-Z0-9]/g, '-')}`, publicationIntent: failure === 'owner-intent' || failure === 'owner-mismatch' && phase === 'prepare' ? '/other/intent.json' : `${root}/.claude-transfer-${session}.json`, environment: failure === 'owner-env' ? { CLAUDE_CONFIG_DIR: '/wrong' } : {} } : { environment: { CLAUDE_CONFIG_DIR: `${v.args[5]}/.harness/claude` } }) }), stderr: '' })
+      return json({ server_id: machine.server_id, cwd: v.cwd, command: v.command, args: v.args, exit_code: 0, timed_out: false, truncated: false, stdout: JSON.stringify({ schema: 'treer.claude-prepared/v1', phase: phase === 'inspect' ? 'validated' : 'prepared', inputSha256: failure === 'receipt' ? '0'.repeat(64) : v.args[9], sourceSessionId: sourceSession, sessionId: session, cwd: v.args[5], files: owner ? 1026 : 3, bytes: 200, ...(owner ? { auth: failure === 'owner-auth' ? 'environment' : 'owner-default', ownerProject: failure === 'owner-project' ? '/other/project' : failure === 'owner-key' ? '/canonical/config/projects/wrong-key' : `${failure === 'owner-canonical' || failure === 'owner-canonical-change' ? (failure === 'owner-canonical-change' && phase === 'prepare' ? '/different/config' : '/canonical/config') : '/home/fixture/.claude'}/projects/${v.args[5].replace(/[^a-zA-Z0-9]/g, '-')}`, publicationIntent: failure === 'owner-intent' || failure === 'owner-mismatch' && phase === 'prepare' ? '/other/intent.json' : `${root}/.claude-transfer-${session}.json`, environment: failure === 'owner-env' ? { CLAUDE_CONFIG_DIR: '/wrong' } : {} } : { environment: { CLAUDE_CONFIG_DIR: `${v.args[5]}/.harness/claude` } }) }), stderr: '' })
     }
     if (path === '/api/workspaces/ws-prepared/agents' && route.request().method() === 'POST') { counts.create++; payload = route.request().postDataJSON(); created = true; return json({ ...source, agent_id: 'ag-copy', name: 'Copy' }) }
     if (path === '/api/workspaces/ws-prepared/agents/ag-copy') return json({ ...source, agent_id: 'ag-copy', interface: { instance_id: 'copy-instance' } })
@@ -204,4 +204,19 @@ for (const failure of ['source-auth-missing', 'source-auth-mismatch'] as const) 
   const fx = await fixture(page, failure); const dialog = await open(page, true)
   await expect(dialog.getByRole('alert')).toContainText('Flow stopped.')
   expect(fx.counts).toEqual({ export: 1, upload: 0, inspect: 0, prepare: 0, create: 0 })
+})
+
+for (const mode of ['owner-canonical', 'owner-key', 'owner-canonical-change'] as const) test(`canonical owner project receipt helper ${mode}`, async ({ page }) => {
+  const fx = await fixture(page, mode); const dialog = await open(page, true)
+  if (mode !== 'owner-key') {
+    await expect(dialog.getByText('Native validation passed. Review this plan before preparing.', { exact: true })).toBeVisible()
+    await dialog.getByRole('checkbox', { name: /Prepare this new target and its exclusive owner project/ }).check()
+    await dialog.getByRole('button', { name: 'Prepare target once' }).click()
+  }
+  if (mode === 'owner-canonical') {
+    await expect(dialog.getByText(/Target prepared. Confirm the normal Create/)).toBeVisible()
+    await expect(dialog.getByText(/Owner project: \/canonical\/config\/projects/)).toBeVisible()
+  } else await expect(dialog.getByRole('alert')).toContainText('Flow stopped.')
+  expect(fx.counts.prepare).toBe(mode === 'owner-key' ? 0 : 1)
+  expect(fx.counts.create).toBe(0)
 })

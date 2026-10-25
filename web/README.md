@@ -1270,6 +1270,9 @@ flow starts. Owner-default inspect/prepare add fixed `--auth owner-default`;
 Create uses the same mode in its normal `session run` argv. Its receipt must
 explicitly identify that mode, contain an empty environment, and bind normalized
 absolute owner-project and publication-intent paths to the target cwd/session.
+The owner-project suffix is `/projects/<exact UTF-16 cwd key>`; its parent
+need not be named `.claude` because native canonicalizes an existing owner
+symlink. Native owns HOME/root/fd validation; the browser does not infer HOME.
 Both paths and file/byte counts must stay identical from inspect to prepare;
 owner-default allows the additional marker (1026 files). The UI shows these two
 publication locations. Partial/unknown results keep the existing no-retry latch
