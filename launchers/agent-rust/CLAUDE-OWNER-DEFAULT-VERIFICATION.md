@@ -74,3 +74,22 @@ bytes. The fixture is not proof that another machine's owner login works.
 Owner hooks/settings remain normal provider behavior; this is not config
 isolation. Real user-flow/continuation acceptance and production artifact
 binding remain separately attributed. `sessionTransfer` stays null.
+
+## Shared Console composition
+
+Combined Web tree is byte-identical to Web tip
+`7514f08e8f9ed631a89a0582b4f8cea3abc9e751` (original parents
+`074f7fd3` and `0cd5cece`). Web's author evidence is separate:
+12 initial Chromium client controls, four source-auth successor controls and
+three canonical-root receipt controls PASS, with typecheck/build/contrast64.
+See #247/9069,9070,9072 and `.treer/reviews/web247-owner-default/` in Web's
+worktree. These are authenticated synthetic client/API controls, not an actual
+managed provider migration. They were not rerun by the native author.
+
+Owner mode binds source POST/snapshot auth, inspect/prepare fixed argv, empty
+environment, exact project-key/intent path, unchanged receipt counts and paths,
+explicit nonisolated owner-policy acknowledgement and final normal Create argv.
+Unknown preparation/Create stays locked and retains normal reservation recovery.
+The existing independent interface/session readiness observation is retained;
+Create success alone is not ready. New native + dispatcher and Console delivery
+must be attributed separately by Release; existing launcher public13 is unchanged.
