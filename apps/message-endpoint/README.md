@@ -1697,3 +1697,17 @@ blockers are in [MIGRATION.md](MIGRATION.md). Retained email plaintext, quotas,
 missing purge/TTL and private outbox reconciliation remain production blockers,
 detailed in [EMAIL.md](EMAIL.md). Never remove live SQLite rows or outbox files
 to bypass a capacity or ambiguous-send condition.
+
+## Human email setup and diagnostics (#204)
+
+[Email setup](EMAIL-SETUP.md) prepares a private managed relay using its actual
+injected identity and the existing pinned CLI. The owner UI selects a current
+member and binds a paused endpoint to that member’s address; My conversations
+opens only that member’s current threads. Explicit email Proxy mode uses Treer’s
+built-in email API, without provider secrets or SMTP configuration in the Hub.
+
+The existing owner-only `inspect_email_delivery` action exposes bounded journal
+items with safe stage/category/known HTTP status. Unknown remains nonretryable,
+including after restart or when a diagnostic write fails. This source integration
+does not modify any deployed configuration, activation, existing intent or relay.
+See [the email contract](EMAIL.md) for the acceptance/receipt distinction.

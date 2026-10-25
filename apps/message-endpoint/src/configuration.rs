@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    PreviewEmailSetup,
     PreviewCreate {
         endpoint_id: String,
         generation: i64,
@@ -71,6 +72,28 @@ pub enum Command {
         operation: crate::recovery::Recovery,
         confirm: bool,
     },
+    InspectEmailDelivery {
+        endpoint_id: String,
+    },
+    PurgeEmailPayload {
+        endpoint_id: String,
+        revision: i64,
+        intent_id: String,
+        confirm: bool,
+    },
+    ResolveEmailObserved {
+        endpoint_id: String,
+        revision: i64,
+        intent_id: String,
+        reference: String,
+        confirm: bool,
+    },
+    AbandonPreparedEmail {
+        endpoint_id: String,
+        revision: i64,
+        intent_id: String,
+        confirm: bool,
+    },
     BindEmail {
         endpoint_id: String,
         revision: i64,
@@ -88,9 +111,11 @@ impl Command {
     pub(crate) fn consumes_write_quota(&self) -> bool {
         !matches!(
             self,
-            Self::PreviewCreate { .. }
+            Self::PreviewEmailSetup
+                | Self::PreviewCreate { .. }
                 | Self::Pause { .. }
                 | Self::InspectRecovery { .. }
+                | Self::InspectEmailDelivery { .. }
                 | Self::ExportMetadata { .. }
                 | Self::PreviewResume { .. }
         )
@@ -110,6 +135,14 @@ pub struct Preview {
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
+    EmailSetup {
+        email_configured: bool,
+        mode: Option<crate::email::Mode>,
+        activation_enabled: bool,
+        provider_readiness: &'static str,
+        members: Vec<crate::email::proxy::Member>,
+        members_truncated: bool,
+    },
     Preview {
         preview: Preview,
     },
@@ -128,6 +161,14 @@ pub enum Outcome {
     MetadataCleared,
     Deleted {
         endpoint_id: String,
+    },
+    EmailDeliveryStatus {
+        endpoint_id: String,
+        revision: i64,
+        paused: bool,
+        delivery: crate::email::delivery::DispatchStatus,
+        items: Vec<crate::email::delivery::RecoveryItem>,
+        truncated: bool,
     },
     RecoveryStatus {
         endpoint_id: String,
@@ -235,6 +276,33 @@ fn recovery_status<M: Mailbox + Directory>(
         next_audit_before,
     })
 }
+fn email_delivery_status<M: Mailbox + Directory>(
+    hub: &mut crate::hub::Hub<M>,
+    endpoint: &str,
+) -> Result<Outcome, Failure> {
+    let view = hub.view(endpoint).map_err(map_hub)?;
+    if crate::email::contact(&hub.store, endpoint)
+        .map_err(|_| Failure::Unavailable)?
+        .is_none()
+    {
+        return Err(Failure::Conflict);
+    }
+    let q = crate::email::Queue::new(&mut hub.store).map_err(|_| Failure::Unavailable)?;
+    let delivery = q
+        .proxy_delivery_status(endpoint)
+        .map_err(|_| Failure::Unavailable)?;
+    let (items, truncated) = q
+        .proxy_recovery_items(endpoint)
+        .map_err(|_| Failure::Unavailable)?;
+    Ok(Outcome::EmailDeliveryStatus {
+        endpoint_id: endpoint.into(),
+        revision: view.revision,
+        paused: view.paused,
+        delivery,
+        items,
+        truncated,
+    })
+}
 #[derive(Clone, Copy, Debug)]
 pub enum Failure {
     Invalid,
@@ -320,6 +388,23 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
         return Err(Failure::Forbidden);
     }
     match command {
+        Command::PreviewEmailSetup => {
+            // Never hold the store lock across token mint or directory I/O.
+            let members = (activation.email_members)()?;
+            check_owner(owner)?;
+            let h = shared.lock().map_err(|_| Failure::Unavailable)?;
+            h.store
+                .recheck_private_storage()
+                .map_err(|_| Failure::Unavailable)?;
+            Ok(Outcome::EmailSetup {
+                email_configured: activation.email_enabled,
+                mode: activation.email_mode,
+                activation_enabled: activation.enabled,
+                provider_readiness: "unverified",
+                members,
+                members_truncated: false,
+            })
+        }
         Command::PreviewResume { endpoint_id } => activation::preview_resume(
             shared,
             directory,
@@ -519,6 +604,79 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
             )
             .map_err(map_hub)?;
             recovery_status(&hub, &endpoint_id, None)
+        }
+        Command::InspectEmailDelivery { endpoint_id } => {
+            let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
+            check_owner(owner)?;
+            email_delivery_status(&mut hub, &endpoint_id)
+        }
+        Command::PurgeEmailPayload {
+            endpoint_id,
+            revision,
+            intent_id,
+            confirm,
+        } => {
+            if !confirm {
+                return Err(Failure::Invalid);
+            }
+            let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
+            check_owner(owner)?;
+            hub.purge_email_payload_now(&endpoint_id, revision, &intent_id, owner.id())
+                .map_err(|e| match e {
+                    crate::email::Error::Invalid => Failure::Invalid,
+                    crate::email::Error::Conflict | crate::email::Error::Denied => {
+                        Failure::Conflict
+                    }
+                    _ => Failure::Unavailable,
+                })?;
+            email_delivery_status(&mut hub, &endpoint_id)
+        }
+        Command::ResolveEmailObserved {
+            endpoint_id,
+            revision,
+            intent_id,
+            reference,
+            confirm,
+        } => {
+            if !confirm {
+                return Err(Failure::Invalid);
+            }
+            let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
+            check_owner(owner)?;
+            hub.resolve_email_observed_now(
+                &endpoint_id,
+                revision,
+                &intent_id,
+                &reference,
+                owner.id(),
+            )
+            .map_err(|error| match error {
+                crate::email::Error::Invalid => Failure::Invalid,
+                crate::email::Error::Conflict | crate::email::Error::Denied => Failure::Conflict,
+                _ => Failure::Unavailable,
+            })?;
+            email_delivery_status(&mut hub, &endpoint_id)
+        }
+        Command::AbandonPreparedEmail {
+            endpoint_id,
+            revision,
+            intent_id,
+            confirm,
+        } => {
+            if !confirm {
+                return Err(Failure::Invalid);
+            }
+            let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
+            check_owner(owner)?;
+            hub.abandon_prepared_email_audited_now(&endpoint_id, revision, &intent_id, owner.id())
+                .map_err(|error| match error {
+                    crate::email::Error::Invalid => Failure::Invalid,
+                    crate::email::Error::Conflict | crate::email::Error::Denied => {
+                        Failure::Conflict
+                    }
+                    _ => Failure::Unavailable,
+                })?;
+            email_delivery_status(&mut hub, &endpoint_id)
         }
         Command::BindEmail {
             endpoint_id,

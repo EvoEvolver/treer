@@ -1,0 +1,28 @@
+// Own synthetic HTTP/UI boundary only; not real Member verification/Core delivery.
+import assert from 'node:assert/strict';
+import {createServer} from 'node:http';import {readFile} from 'node:fs/promises';import {pathToFileURL} from 'node:url';
+const {chromium}=await import(pathToFileURL(process.env.EXTERNAL_PLAYWRIGHT_MODULE));
+const id='a'.repeat(64),other='b'.repeat(64);let mode='normal',replyMode='normal',posts=[],messages=[];
+const server=createServer(async(req,res)=>{res.setHeader('cache-control','no-store');res.setHeader('content-type','application/json');const p=req.url;
+ if(p==='/api/endpoint/auth/config'){res.end(JSON.stringify({settings_url:`http://127.0.0.1:${server.address().port}/`}));return;}
+ if(p==='/api/email/inbox'){
+  if(['auth','denied','offline'].includes(mode)){res.writeHead({auth:401,denied:403,offline:503}[mode]).end('{}');return;}
+  if(mode==='oversize'){res.end(' '.repeat(65537));return;}
+  const rows=mode==='empty'?[]:[{id,endpoint_id:'ag_endpoint',recipient_agent_id:'ag_counterpart',updated_at:1792724400,message_count:2},{id:other,endpoint_id:'ag_second',recipient_agent_id:'<img src=x onerror=alert(1)>',updated_at:1792724401,message_count:1}];
+  if(mode==='invalid')rows[0].id='../escape';res.end(JSON.stringify({threads:rows,truncated:mode==='truncated'}));return;
+ }
+ if(p==='/api/email/thread/'+id){if(req.method==='POST'){let b='';for await(const c of req)b+=c;assert.equal(req.headers['x-endpoint-request'],'1');posts.push(JSON.parse(b));if(replyMode==='lost'){res.writeHead(503).end('{}');return;}messages=[{source_id:'reply',body:JSON.parse(b).body,created_at:1792724400,member_id:'user_member'}];res.writeHead(202).end('{"status":"queued"}');return;}res.end(JSON.stringify({thread:{id,endpoint_id:'ag_endpoint',recipient_agent_id:'ag_counterpart',messages:[{source_id:'first',body:'<script>quoted message</script>',created_at:1792724400,member_id:null},...messages]}}));return;}
+ const file={'/':'index.html','/assets/app.js':'app.js','/assets/app.css':'app.css'}[p];if(!file){res.writeHead(404).end('{}');return;}res.setHeader('content-type',file.endsWith('.js')?'text/javascript':file.endsWith('.css')?'text/css':'text/html');res.end(await readFile(new URL('../dist/'+file,import.meta.url)));
+});
+await new Promise(r=>server.listen(0,'127.0.0.1',r));const browser=await chromium.launch();let checks=0;
+try{for(const [width,locale,colorScheme] of [[1100,'en','light'],[390,'zh','dark']]){
+ mode='normal';messages=[];replyMode='normal';const context=await browser.newContext({viewport:{width,height:900},locale,colorScheme});const page=await context.newPage();const errors=[];page.on('pageerror',()=>errors.push('pageerror'));await page.goto(`http://127.0.0.1:${server.address().port}/#inbox`);await page.locator('.conversation-link').first().waitFor();assert.equal(await page.locator('.conversation-link').count(),2);assert.equal(await page.locator('img').count(),0);assert.ok((await page.locator('main').textContent()).includes('ag_counterpart'));checks++;
+ await page.locator('.conversation-link').first().click();await page.locator('textarea').waitFor();assert.ok((await page.locator('.email-message').textContent()).includes('<script>quoted message</script>'));assert.equal(await page.locator('script:not([src])').count(),0);checks++;
+ await page.locator('textarea').fill('Human reply\nquoted content');replyMode='lost';const before=posts.length;await page.locator('form button').click();await page.getByRole('alert').waitFor();assert.equal(posts.length,before+1);assert.equal(await page.locator('textarea').getAttribute('readonly'),'');await page.waitForTimeout(50);assert.equal(posts.length,before+1);checks++;
+ replyMode='normal';await page.locator('form button').click();await page.waitForFunction(()=>document.querySelector('textarea').value==='');assert.equal(posts.length,before+2);assert.deepEqual(posts.at(-1),posts.at(-2));assert.ok(/queued|入队/.test(await page.getByRole('status').textContent()));checks++;
+ await page.locator('nav a').click();await page.locator('.conversation-link').first().waitFor();await page.goBack();await page.locator('textarea').waitFor();await page.goForward();await page.locator('.conversation-link').first().waitFor();checks++;
+ for(const state of ['empty','auth','denied','offline','invalid','oversize','truncated']){mode=state;await page.locator('header button').last().click();if(state==='truncated'){await page.locator('.conversation-link').first().waitFor();assert.ok(/50/.test(await page.locator('main').textContent()));}else if(state==='empty'){await page.getByRole('heading',{name:locale==='zh'?'会话列表':'Conversations',exact:true}).waitFor();assert.equal(await page.locator('.conversation-link').count(),0);}else{await page.getByRole('alert').waitFor();assert.equal(await page.locator('.conversation-link').count(),0);if(state==='auth')assert.ok((await page.getByRole('alert').locator('a').getAttribute('href')).endsWith('/api/email/auth/start?inbox=1'));}checks++;}
+ mode='normal';await page.locator('header button').last().click();await page.locator('.conversation-link').first().waitFor();assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);for(const b of await page.locator('button,a.button').all())assert.ok((await b.boundingBox()).height>=44);checks++;
+ if(width===390&&process.env.HUMAN_INBOX_SCREENSHOT)await page.screenshot({path:process.env.HUMAN_INBOX_SCREENSHOT,fullPage:true});assert.deepEqual(errors,[]);await context.close();
+}assert.equal(posts.length,4);console.log(`PASS ${checks} human inbox UI controls, 2 layouts/languages; lost reply identical key/body, metadata visibility/error states. Synthetic HTTP only.`);
+}finally{await browser.close();await new Promise(r=>server.close(r));}

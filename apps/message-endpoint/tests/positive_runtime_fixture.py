@@ -13,6 +13,12 @@ own='ag_endpoint' if Path(__file__).name=='endpoint-cli' else 'app_hub'
 args=sys.argv[1:]
 db=sqlite3.connect(p/'core-fixture.sqlite3',timeout=2)
 if args[:3]==['token','create','svc_hub']:
+ if (p/'revoke-on-reserved-token').exists():
+  with sqlite3.connect(p/'state'/'hub.sqlite3',timeout=2) as state:
+   reserved=state.execute("SELECT EXISTS(SELECT 1 FROM email_dispatch WHERE state='dispatching')").fetchone()[0]
+  if reserved:
+   import urllib.request
+   urllib.request.urlopen(urllib.request.Request((p/'fixture-origin').read_text()+'/fixture/revoke-member',data=b'{"revoked":true}',headers={'Content-Type':'application/json'}),timeout=2).read()
  print(json.dumps(dict(access_token='synthetic.app.signature',token_type='Bearer',audience='svc_hub',expires_in=300)))
 elif args[:3]==['agent','show','--'] and args[3] in ['ag_endpoint','ag_recipient']:
  print(json.dumps(dict(agent_id=args[3],workspace_id='ws_test',server_id='machine_fixture',kind='command',cwd='/private/fixture',status='running',path='/team/'+args[3])))
@@ -39,7 +45,7 @@ else: sys.exit(1)
 '''); cli.chmod(0o700)
 relay_cli=root/'endpoint-cli';relay_cli.write_bytes(cli.read_bytes());relay_cli.chmod(0o700)
 db=sqlite3.connect(root/'core-fixture.sqlite3');db.executescript('CREATE TABLE inbox(id INTEGER PRIMARY KEY,delivery TEXT UNIQUE,payload TEXT,recipient TEXT NOT NULL,ack INTEGER DEFAULT 0);CREATE TABLE sent(id INTEGER PRIMARY KEY,key TEXT UNIQUE,payload TEXT,sender TEXT NOT NULL,recipient TEXT NOT NULL,contexts TEXT NOT NULL);');db.close()
-lock=threading.Lock();updates=[];sent=[];operations=[];member_revoked=False
+lock=threading.Lock();updates=[];sent=[];operations=[];member_revoked=False;emails=[];email_uncertain=False
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*_):pass
  def reply(self,value,status=200):
@@ -47,7 +53,7 @@ class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
   if self.path=='/api/apps/svc_hub/directory':return self.reply(dict(principals=[dict(id='user_owner',kind='human',role='owner')]+([] if member_revoked else [dict(id='user_member',kind='human',role='member')])))
   if self.path=='/fixture/status':
-   with lock: result=dict(operations=list(operations),sent=list(sent))
+   with lock: result=dict(member_revoked=member_revoked,operations=list(operations),sent=list(sent),emails=list(emails))
    with sqlite3.connect(root/'core-fixture.sqlite3') as db:
     result['core_sent']=[json.loads(r[0]) for r in db.execute('SELECT payload FROM sent WHERE sender="app_hub" ORDER BY id')]
     result['core_messages']=[dict(id='msg_fixture_'+str(r[0]),sender=r[1],recipient=r[2],envelope=json.loads(r[3]),context_ids=json.loads(r[4])) for r in db.execute('SELECT id,sender,recipient,payload,contexts FROM sent ORDER BY id')]
@@ -55,13 +61,19 @@ class Handler(BaseHTTPRequestHandler):
    return self.reply(result)
   return self.reply({},404)
  def do_POST(self):
-  global member_revoked
+  global member_revoked,email_uncertain
   size=int(self.headers.get('Content-Length','0'));assert size<1024*1024
   value=json.loads(self.rfile.read(size))
   if self.path=='/.treer/apps/identity/verify':
    assert value.get('audience')=='svc_hub'
    if value.get('token') not in ('synthetic.owner.token159','synthetic.member.token159'):return self.reply(dict(active=False))
    return self.reply(dict(active=True,claims=dict(sub='user_member' if value['token']=='synthetic.member.token159' else 'user_owner',principal_kind='human',workspace_id='ws_test',service_id='svc_hub',exp=int(time.time())+300)))
+  if self.path=='/fixture/email-uncertain':
+   email_uncertain=bool(value['uncertain']);return self.reply({})
+  if self.path=='/api/apps/svc_hub/email':
+   assert self.headers.get('Authorization')=='Bearer synthetic.app.signature'
+   with lock:emails.append(value)
+   return self.reply(dict(status='in_progress') if email_uncertain else dict(status='sent',email_id='email_fixture'),409 if email_uncertain else 200)
   if self.path=='/fixture/revoke-member':
    member_revoked=bool(value['revoked']);return self.reply({})
   if self.path=='/fixture/update':
@@ -83,6 +95,7 @@ class Handler(BaseHTTPRequestHandler):
    else:raise AssertionError('Unexpected Bot API operation')
   self.reply(dict(ok=True,result=result))
 server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.daemon_threads=True
+(root/'fixture-origin').write_text('http://127.0.0.1:'+str(server.server_port))
 thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
 with socket.socket() as reservation:
  reservation.bind(('127.0.0.1',0));port=reservation.getsockname()[1]

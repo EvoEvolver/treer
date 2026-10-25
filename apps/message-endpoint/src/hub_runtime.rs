@@ -201,7 +201,7 @@ fn run_assembled(
     }));
     let email_http = email_service
         .map(|auth| {
-            let (read, reply) = (hub.clone(), hub.clone());
+            let (read, reply, inbox) = (hub.clone(), hub.clone(), hub.clone());
             crate::email_threads::Service::new(
                 auth,
                 &config.public_url,
@@ -224,6 +224,17 @@ fn run_assembled(
                     crate::email::Queue::new(&mut h.store)?.reply(id, member, key, body, now)
                 }),
             )
+            .map(|service| {
+                service.with_inbox(Arc::new(move |member, now| {
+                    let mut h = inbox
+                        .lock()
+                        .map_err(|_| crate::email::Error::PrivateStorage)?;
+                    h.store
+                        .recheck_private_storage()
+                        .map_err(|_| crate::email::Error::PrivateStorage)?;
+                    crate::email::Queue::new(&mut h.store)?.inbox(member, now)
+                }))
+            })
         })
         .transpose()
         .map_err(|_| Error::Configuration)?;
@@ -237,6 +248,7 @@ fn run_assembled(
     let activation_enabled = config.activation_enabled;
     let account_ready = telegram.lock().map_err(|_| Error::Runtime)?.readiness();
     let snapshot_telegram = telegram.clone();
+    let configured_email_mode = config.email.as_ref().map(|c| c.mode).unwrap_or_default();
     let snapshot_handoffs = handoffs.clone();
     let snapshot_hub = hub.clone();
     let snapshot_workers = workers.clone();
@@ -263,6 +275,7 @@ fn run_assembled(
                 Some(crate::email_workers::Snapshot::read(
                     &hub.store,
                     snapshot_email.lock().map_err(|_| ())?.as_ref(),
+                    configured_email_mode,
                 )?)
             } else {
                 None
@@ -277,6 +290,8 @@ fn run_assembled(
         })
     });
     let member_core = core.clone();
+    let setup_core = core.clone();
+    let setup_directory = email_directory.clone();
     let mutation = Arc::new(crate::configuration::core_executor(
         hub.clone(),
         core,
@@ -285,6 +300,12 @@ fn run_assembled(
             enabled: activation_enabled,
             account_ready,
             email_enabled: email_configured,
+            email_mode: config.email.as_ref().map(|c| c.mode),
+            email_members: Arc::new(move || {
+                setup_directory
+                    .members(&setup_core)
+                    .map_err(|_| crate::configuration::Failure::Unavailable)
+            }),
             member_current: Arc::new(move |id| {
                 email_directory
                     .current_member(&member_core, id)
@@ -311,6 +332,10 @@ fn run_assembled(
             .with_management_audit(management_audit)
             .with_tokens(token_mutation)
             .with_loopback_listener(config.listen)
+            .map_err(|_| Error::Configuration)?
+            // The workload HTTP proxy uses the stable service authority, while
+            // workspace ingress uses the separately configured virtual host.
+            .with_virtual_host(&format!("{}.treer", config.service_id))
             .map_err(|_| Error::Configuration)?
             .with_assets(
                 include_str!("../dist/app.js"),
@@ -393,10 +418,19 @@ mod tests {
         serde_json::from_value(json!({"hub_id":"app_hub","workspace_id":"ws_test","service_id":"svc_hub","proxy_url":"https://proxy.example/","public_url":"https://hub.example/","access":"workspace","cli":"/private/cli","cli_sha256":"a".repeat(64),"state_directory":"/private/state"})).unwrap()
     }
     #[test]
-    fn email_defaults_absent_and_cannot_enable_a_proxy_transport() {
-        assert!(config().email.is_none());
+    fn email_defaults_absent_and_proxy_transport_requires_explicit_configuration() {
+        let c = config();
+        assert!(c.email.is_none());
+        assert!(!c.activation_enabled);
+        let outbox: crate::email_workers::Config =
+            serde_json::from_value(json!({"outbox_directory":"/private/outbox"})).unwrap();
+        assert_eq!(outbox.mode, crate::email::Mode::Outbox);
+        let proxy: crate::email_workers::Config =
+            serde_json::from_value(json!({"outbox_directory":"/private/outbox","mode":"proxy"}))
+                .unwrap();
+        assert_eq!(proxy.mode, crate::email::Mode::Proxy);
         assert!(serde_json::from_value::<crate::email_workers::Config>(
-            json!({"outbox_directory":"/private/outbox","mode":"proxy"})
+            json!({"outbox_directory":"/private/outbox","mode":"smtp"}),
         )
         .is_err());
     }

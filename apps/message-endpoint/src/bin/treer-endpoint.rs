@@ -5,7 +5,7 @@ fn main() -> std::process::ExitCode {
         path::Path,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
-    use treer_message_endpoint::relay::{Config, Relay};
+    use treer_message_endpoint::relay::{Config, Relay, StatusRenewal};
     let run = || -> Result<(), treer_message_endpoint::relay::Error> {
         let arguments: Vec<_> = env::args_os().skip(1).collect();
         if arguments.len() != 2 || arguments[0] != "--config" {
@@ -20,7 +20,7 @@ fn main() -> std::process::ExitCode {
             .map_err(|_| treer_message_endpoint::relay::Error::Configuration)?
             .as_nanos();
         let boot_nonce = format!("{}-{boot}", std::process::id());
-        relay.report_binary(&actual, &boot_nonce)?;
+        let mut renewal = StatusRenewal::default();
         let mut budget_reported = false;
         loop {
             let now = SystemTime::now()
@@ -29,6 +29,10 @@ fn main() -> std::process::ExitCode {
                 .and_then(|d| i64::try_from(d.as_secs()).ok());
             match now {
                 Some(now) => {
+                    if let Err(error) = relay.renew_binary(&actual, &boot_nonce, now, &mut renewal)
+                    {
+                        eprintln!("{error}");
+                    }
                     if let Err(error) = relay.tick(now) {
                         eprintln!("{error}");
                         if matches!(error, treer_message_endpoint::relay::Error::FailureBudget)

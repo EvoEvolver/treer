@@ -11,6 +11,15 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 const FORWARDED_TTL: i64 = 48 * 60 * 60;
 
+/// Bounded production status renewal. The injected clock also drives regression
+/// tests; failed attempts consume their interval rather than spin on Core.
+#[derive(Default)]
+pub struct StatusRenewal {
+    last_attempt: Option<i64>,
+    sequence: u64,
+}
+const STATUS_RENEW_SECONDS: i64 = 120;
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("relay_configuration_unavailable")]
@@ -302,6 +311,35 @@ impl<M: Mailbox> Relay<M> {
             None,
         )?;
         Ok(())
+    }
+
+    /// A fresh idempotency key per renewal is essential: replaying the startup
+    /// key would return its old Core delivery without refreshing Hub freshness.
+    pub fn renew_binary(
+        &self,
+        actual: &str,
+        boot_nonce: &str,
+        now: i64,
+        renewal: &mut StatusRenewal,
+    ) -> Result<bool, Error> {
+        if now < crate::transfers::TOMBSTONE_TTL
+            || renewal.last_attempt.is_some_and(|last| now < last)
+        {
+            return Err(Error::Configuration);
+        }
+        if renewal
+            .last_attempt
+            .is_some_and(|last| now - last < STATUS_RENEW_SECONDS)
+        {
+            return Ok(false);
+        }
+        renewal.sequence = renewal
+            .sequence
+            .checked_add(1)
+            .ok_or(Error::Configuration)?;
+        renewal.last_attempt = Some(now);
+        self.report_binary(actual, &format!("{boot_nonce}-renew-{}", renewal.sequence))?;
+        Ok(true)
     }
 
     pub fn tick(&mut self, now: i64) -> Result<(), Error> {
@@ -730,6 +768,27 @@ mod tests {
         }
         .fragments("ag_endpoint", 1)
         .unwrap()
+    }
+    #[test]
+    fn email_setup_renewal_is_bounded_and_has_fresh_core_keys() {
+        let relay = fixture();
+        let mut renewal = StatusRenewal::default();
+        let mut keys = HashSet::new();
+        for elapsed in [0, 120, 240, 360, 480, 600] {
+            assert!(relay
+                .renew_binary(&"a".repeat(64), "boot", NOW + elapsed, &mut renewal)
+                .unwrap());
+            assert!(!relay
+                .renew_binary(&"a".repeat(64), "boot", NOW + elapsed + 1, &mut renewal)
+                .unwrap());
+            let sent = relay.mailbox.sent.borrow();
+            assert!(keys.insert(sent.last().unwrap().1.clone()));
+            let status: serde_json::Value = serde_json::from_str(&sent.last().unwrap().2).unwrap();
+            assert_eq!(status["protocol"], "treer.endpoint.status/v1");
+        }
+        assert!(relay
+            .renew_binary(&"a".repeat(64), "boot", NOW, &mut renewal)
+            .is_err());
     }
     #[test]
     fn notice_of_unrecorded_or_unfinished_transfer_is_dropped_without_sending() {

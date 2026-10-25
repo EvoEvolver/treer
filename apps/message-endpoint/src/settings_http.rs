@@ -206,8 +206,17 @@ impl Settings {
     /// Explicit trusted configuration, never a forwarded header. Core replaces
     /// ingress/tunnel Host with the App's registered virtual hostname.
     pub fn with_virtual_host(mut self, host: &str) -> Result<Self, Error> {
+        let platform_host = host
+            .strip_prefix("svc-")
+            .and_then(|value| value.strip_suffix(".internal"))
+            .is_some_and(|id| {
+                id.len() == 32
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            });
         if host.len() > 253
-            || !host.ends_with(".treer")
+            || !(host.ends_with(".treer") || platform_host)
             || !host.split('.').all(|label| {
                 !label.is_empty()
                     && label.len() <= 63
@@ -363,6 +372,34 @@ fn wants_html(headers: &HeaderMap) -> bool {
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.contains("Mozilla/"))
+}
+// Non-authoritative Console appearance hints, valid only on the root document.
+fn appearance_query(query: &str) -> bool {
+    if query.is_empty() || query.len() > 2048 {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(&format!("https://invalid.example/?{query}")) else {
+        return false;
+    };
+    let mut seen = HashSet::new();
+    url.query_pairs().all(|(key, value)| {
+        seen.insert(key.to_string())
+            && match key.as_ref() {
+                "theme" => matches!(value.as_ref(), "light" | "dark"),
+                "look" => matches!(value.as_ref(), "a" | "b" | "c"),
+                "lang" => matches!(value.as_ref(), "en" | "zh"),
+                "embed_origin" => reqwest::Url::parse(&value).is_ok_and(|u| {
+                    matches!(u.scheme(), "http" | "https")
+                        && u.host_str().is_some()
+                        && u.username().is_empty()
+                        && u.password().is_none()
+                        && u.path() == "/"
+                        && u.query().is_none()
+                        && u.fragment().is_none()
+                }),
+                _ => false,
+            }
+    })
 }
 fn callback(query: &str) -> Result<(String, String), Error> {
     if query.len() > 4096 {
@@ -863,8 +900,10 @@ fn dispatch(
             }
         }
     }
-    if query.is_some() {
-        return fixed(StatusCode::BAD_REQUEST, "query_not_allowed");
+    if let Some(query) = query {
+        if method != Method::GET || path != "/" || !appearance_query(query) {
+            return fixed(StatusCode::BAD_REQUEST, "query_not_allowed");
+        }
     }
     if method == Method::GET && path == "/api/endpoint/auth/config" {
         return response(
@@ -1277,12 +1316,19 @@ mod tests {
         let app = app("https://proxy.example/")
             .with_virtual_host("message-hub.treer")
             .unwrap()
+            .with_virtual_host("svc_0123456789abcdef0123456789abcdef.treer")
+            .unwrap()
+            .with_virtual_host("svc-0123456789abcdef0123456789abcdef.internal")
+            .unwrap()
             .with_loopback_listener("127.0.0.1:8786".parse().unwrap())
             .unwrap();
         for host in [
             "hub.example",
             "hub.example:443",
             "message-hub.treer",
+            "svc_0123456789abcdef0123456789abcdef.treer",
+            "svc-0123456789abcdef0123456789abcdef.internal",
+            "SVC-0123456789ABCDEF0123456789ABCDEF.INTERNAL",
             "127.0.0.1:8786",
         ] {
             assert_eq!(
@@ -1299,6 +1345,10 @@ mod tests {
         }
         for host in [
             "evil.example",
+            "svc_unconfigured.treer",
+            "svc_0123456789abcdef0123456789abcdef.treer.evil",
+            "svc-unconfigured.internal",
+            "svc-0123456789abcdef0123456789abcdef.internal.evil",
             "127.0.0.1:9999",
             "hub.example.evil",
             "hub.example:8443",
@@ -1530,6 +1580,131 @@ mod tests {
         assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
         let missing = invoke(&app, Method::GET, "/api/settings", None, &HeaderMap::new());
         assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+    }
+    #[test]
+    fn internal_virtual_host_is_registered_form_only_and_never_a_csrf_origin() {
+        for host in [
+            "localhost.internal",
+            "svc-short.internal",
+            "svc-0123456789abcdef0123456789abcdef.internal:80",
+            "svc-0123456789ABCDEF0123456789ABCDEF.internal",
+        ] {
+            assert!(app("https://proxy.example/")
+                .with_virtual_host(host)
+                .is_err());
+        }
+        let app = app("https://proxy.example/")
+            .with_virtual_host("svc-0123456789abcdef0123456789abcdef.internal")
+            .unwrap();
+        let result = invoke(
+            &app,
+            Method::POST,
+            "/api/endpoint/auth/logout",
+            None,
+            &headers(&[
+                ("host", "svc-0123456789abcdef0123456789abcdef.internal"),
+                (
+                    "origin",
+                    "https://svc-0123456789abcdef0123456789abcdef.internal",
+                ),
+                ("x-endpoint-request", "1"),
+            ]),
+        );
+        assert_eq!(result.status(), StatusCode::FORBIDDEN);
+    }
+    #[test]
+    fn console_iframe_root_queries_do_not_change_authority_or_csp() {
+        let app = app("https://proxy.example/").with_assets("javascript", "css");
+        for look in ["a", "b", "c"] {
+            let query = format!(
+                "theme=dark&embed_origin=https%3A%2F%2Fapp.canary.treer.ai&look={look}&lang=en"
+            );
+            let response = invoke(
+                &app,
+                Method::GET,
+                "/",
+                Some(&query),
+                &headers(&[("accept", "text/html")]),
+            );
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(response.headers()["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .contains("frame-ancestors 'none'"));
+        }
+        for query in [
+            "theme=light&lang=zh",
+            "embed_origin=https%3A%2F%2Fevil.example",
+        ] {
+            assert_eq!(
+                invoke(&app, Method::GET, "/", Some(query), &headers(&[])).status(),
+                StatusCode::OK
+            );
+        }
+        for query in [
+            "theme=dark&theme=light",
+            "unknown=x",
+            "look=default",
+            "theme=system",
+            "embed_origin=javascript%3Aevil",
+        ] {
+            assert_eq!(
+                invoke(&app, Method::GET, "/", Some(query), &headers(&[])).status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        for path in ["/api/settings", "/assets/app.js", "/assets/app.css"] {
+            assert_eq!(
+                invoke(&app, Method::GET, path, Some("theme=dark"), &headers(&[])).status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        for path in ["/assets/app.js", "/assets/app.css"] {
+            assert_eq!(
+                invoke(&app, Method::GET, path, None, &headers(&[])).status(),
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            invoke(&app, Method::GET, "/api/settings", None, &headers(&[])).status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            invoke(
+                &app,
+                Method::POST,
+                "/api/endpoint/auth/logout",
+                None,
+                &headers(&[
+                    ("origin", "https://app.canary.treer.ai"),
+                    ("x-endpoint-request", "1")
+                ])
+            )
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    #[test]
+    fn managed_service_host_does_not_grant_csrf_origin() {
+        let host = "svc_0123456789abcdef0123456789abcdef.treer";
+        let app = app("https://proxy.example/")
+            .with_virtual_host(host)
+            .unwrap();
+        let result = invoke(
+            &app,
+            Method::POST,
+            "/api/endpoint/auth/logout",
+            None,
+            &headers(&[
+                ("host", host),
+                (
+                    "origin",
+                    "http://svc_0123456789abcdef0123456789abcdef.treer",
+                ),
+                ("x-endpoint-request", "1"),
+            ]),
+        );
+        assert_eq!(result.status(), StatusCode::FORBIDDEN);
     }
     #[test]
     fn logout_needs_csrf_but_clears_expired_session_without_proxy_authority() {

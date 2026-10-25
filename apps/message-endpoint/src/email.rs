@@ -10,9 +10,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+#[path = "email_abandon.rs"]
+mod abandon;
+#[path = "email_retention.rs"]
+mod retention;
+
+#[path = "email_delivery.rs"]
+pub mod delivery;
 #[path = "email_proxy.rs"]
 pub mod proxy;
 
+#[cfg(test)]
 pub const REAL_RECIPIENT: &str = "doomspec@outlook.com";
 const MAX_MESSAGES: i64 = 10_000;
 const MAX_BYTES: i64 = 128 * 1024 * 1024;
@@ -101,10 +109,7 @@ pub struct Intent {
     address: String,
 }
 impl Intent {
-    pub fn notification(&self, public_url: &str, mode: Mode) -> Result<Notification, Error> {
-        if mode == Mode::Proxy && self.address != REAL_RECIPIENT {
-            return Err(Error::Denied);
-        }
+    pub fn notification(&self, public_url: &str, _mode: Mode) -> Result<Notification, Error> {
         if public_url.len() > 2048 {
             return Err(Error::Invalid);
         }
@@ -142,6 +147,20 @@ pub struct Thread {
     pub recipient_agent_id: String,
     pub messages: Vec<Text>,
 }
+/// A member-scoped index contains no message bodies or contact addresses.
+#[derive(Serialize)]
+pub struct Inbox {
+    pub threads: Vec<ThreadSummary>,
+    pub truncated: bool,
+}
+#[derive(Serialize)]
+pub struct ThreadSummary {
+    pub id: String,
+    pub endpoint_id: String,
+    pub recipient_agent_id: String,
+    pub updated_at: i64,
+    pub message_count: i64,
+}
 #[derive(Serialize)]
 pub struct Text {
     pub source_id: String,
@@ -170,11 +189,11 @@ fn capacity(
     bytes: usize,
 ) -> Result<(), Error> {
     let (count, size): (i64, i64) = tx.query_row(
-        "SELECT count(*),coalesce(sum(length(CAST(body AS BLOB))),0) FROM (SELECT body FROM email_messages UNION ALL SELECT body FROM email_replies)",
+        "SELECT count(*),coalesce(sum(length(CAST(body AS BLOB))),0) FROM (SELECT body FROM email_messages UNION ALL SELECT body FROM email_replies UNION ALL SELECT payload AS body FROM email_dispatch)",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let (local,local_size):(i64,i64)=tx.query_row("SELECT count(*),coalesce(sum(length(CAST(m.body AS BLOB))),0) FROM (SELECT thread,body FROM email_messages UNION ALL SELECT thread,body FROM email_replies) m JOIN email_threads t ON t.id=m.thread WHERE t.endpoint=?1",[endpoint],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    let (local,local_size):(i64,i64)=tx.query_row("SELECT count(*),coalesce(sum(length(CAST(m.body AS BLOB))),0) FROM (SELECT thread,body FROM email_messages UNION ALL SELECT thread,body FROM email_replies UNION ALL SELECT i.thread,d.payload AS body FROM email_dispatch d JOIN email_intents i ON i.id=d.id) m JOIN email_threads t ON t.id=m.thread WHERE t.endpoint=?1",[endpoint],|r|Ok((r.get(0)?,r.get(1)?)))?;
     if count >= limits.global_count.min(MAX_MESSAGES)
         || size.saturating_add(bytes as i64) > limits.global_bytes.min(MAX_BYTES)
         || local >= limits.endpoint_count.min(1000)
@@ -333,7 +352,13 @@ impl<'a> Queue<'a> {
         CREATE TABLE IF NOT EXISTS email_messages(thread TEXT NOT NULL REFERENCES email_threads(id),source TEXT NOT NULL,body TEXT NOT NULL,digest TEXT NOT NULL,at INTEGER NOT NULL,PRIMARY KEY(thread,source));
         CREATE TABLE IF NOT EXISTS email_intents(id TEXT PRIMARY KEY,thread TEXT NOT NULL REFERENCES email_threads(id),endpoint TEXT NOT NULL,generation INTEGER NOT NULL,state INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,next_try INTEGER NOT NULL DEFAULT 0,nonce TEXT,lease_until INTEGER,mode TEXT);
         CREATE TABLE IF NOT EXISTS email_replies(id TEXT PRIMARY KEY,thread TEXT NOT NULL REFERENCES email_threads(id),endpoint TEXT NOT NULL,generation INTEGER NOT NULL,member TEXT NOT NULL,body TEXT NOT NULL,digest TEXT NOT NULL,job INTEGER NOT NULL REFERENCES inbound(id),at INTEGER NOT NULL,context TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS email_purged_threads(thread TEXT PRIMARY KEY REFERENCES email_threads(id),at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS email_retired_intents(id TEXT PRIMARY KEY REFERENCES email_intents(id));
+        CREATE TABLE IF NOT EXISTS email_terminal_retention(id TEXT PRIMARY KEY REFERENCES email_intents(id),at INTEGER NOT NULL);
+        INSERT OR IGNORE INTO email_terminal_retention SELECT id,CAST(strftime('%s','now') AS INTEGER) FROM email_intents WHERE state<>0;
+        CREATE TABLE IF NOT EXISTS email_outbox_purge(id TEXT PRIMARY KEY REFERENCES email_intents(id));
         CREATE TABLE IF NOT EXISTS email_attempts(id INTEGER PRIMARY KEY,endpoint TEXT NOT NULL,at INTEGER NOT NULL);")?;
+        delivery::schema(&store.db)?;
         Ok(Self { store })
     }
     /// Owner executor must check current membership and atomically audit binding
@@ -440,6 +465,14 @@ impl<'a> Queue<'a> {
             }
             return Ok(old);
         }
+        let retired: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM email_purged_threads WHERE thread=?1)",
+            [&thread],
+            |r| r.get(0),
+        )?;
+        if retired {
+            return Err(Error::Denied);
+        }
         capacity(&tx, self.store.limits, endpoint, body.len())?;
         tx.execute(
             "INSERT OR IGNORE INTO email_threads VALUES(?1,?2,?3,?4,?5,?6)",
@@ -482,7 +515,46 @@ impl<'a> Queue<'a> {
         }
         self.thread_for(id, member.id())
     }
+    /// Uses the same live binding/member scope as thread reads. Pausing preserves
+    /// readable history; revocation or a generation/contact change removes it.
+    pub fn inbox(&self, member: &crate::owner_auth::Member, now: i64) -> Result<Inbox, Error> {
+        if !valid_time(now) || member.expires_at() <= now {
+            return Err(Error::Denied);
+        }
+        let mut query = self.store.db.prepare(
+            "SELECT t.id,t.endpoint,t.recipient,max(m.at),count(*)
+             FROM email_threads t
+             JOIN endpoints e ON e.id=t.endpoint AND e.generation=t.generation
+             JOIN email_targets c ON c.endpoint=t.endpoint AND c.generation=t.generation
+               AND c.address=t.address AND c.member=t.member AND c.revoked=0
+             JOIN (SELECT thread,at FROM email_messages UNION ALL SELECT thread,at FROM email_replies) m ON m.thread=t.id
+             WHERE t.member=?1 GROUP BY t.id
+             ORDER BY max(m.at) DESC,t.id DESC LIMIT 51",
+        )?;
+        let mut threads = query
+            .query_map([member.id()], |r| {
+                Ok(ThreadSummary {
+                    id: r.get(0)?,
+                    endpoint_id: r.get(1)?,
+                    recipient_agent_id: r.get(2)?,
+                    updated_at: r.get(3)?,
+                    message_count: r.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let truncated = threads.len() > 50;
+        threads.truncate(50);
+        Ok(Inbox { threads, truncated })
+    }
     fn thread_for(&self, id: &str, verified_member: &str) -> Result<Thread, Error> {
+        let retired: bool = self.store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM email_purged_threads WHERE thread=?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if retired {
+            return Err(Error::Denied);
+        }
         let (endpoint,generation,recipient,address,member):(String,i64,String,String,String)=self.store.db.query_row("SELECT endpoint,generation,recipient,address,member FROM email_threads WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?.ok_or(Error::Denied)?;
         let current:bool=self.store.db.query_row("SELECT EXISTS(SELECT 1 FROM email_targets t JOIN endpoints e ON e.id=t.endpoint AND e.generation=t.generation WHERE t.endpoint=?1 AND t.generation=?2 AND t.address=?3 AND t.member=?4 AND t.revoked=0)",params![endpoint,generation,address,member],|r|r.get(0))?;
         if !current || member != verified_member {
@@ -620,6 +692,27 @@ impl<'a> Queue<'a> {
         now: i64,
         lease_nonce: &str,
     ) -> Result<Option<Intent>, Error> {
+        self.claim_for(endpoint, generation, now, lease_nonce, Mode::Outbox)
+    }
+    /// Future Proxy worker only. Prepared journal rows may be reclaimed with
+    /// the same frozen bytes; ordinary outbox claims cannot see them.
+    pub fn claim_proxy(
+        &mut self,
+        endpoint: &str,
+        generation: i64,
+        now: i64,
+        lease_nonce: &str,
+    ) -> Result<Option<Intent>, Error> {
+        self.claim_for(endpoint, generation, now, lease_nonce, Mode::Proxy)
+    }
+    fn claim_for(
+        &mut self,
+        endpoint: &str,
+        generation: i64,
+        now: i64,
+        lease_nonce: &str,
+        mode: Mode,
+    ) -> Result<Option<Intent>, Error> {
         if !valid_time(now) || !nonce(lease_nonce) {
             return Err(Error::Invalid);
         }
@@ -629,8 +722,8 @@ impl<'a> Queue<'a> {
             "DELETE FROM email_attempts WHERE at<?1",
             [now.saturating_sub(172800)],
         )?;
-        tx.execute("UPDATE email_intents SET state=2,nonce=NULL,lease_until=NULL WHERE endpoint=?1 AND generation=?2 AND state=0 AND attempts>=8 AND (lease_until IS NULL OR lease_until<=?3)",params![endpoint,generation,now])?;
-        let candidate:Option<(String,String)>=tx.query_row("SELECT id,thread FROM email_intents WHERE endpoint=?1 AND generation=?2 AND state=0 AND attempts<8 AND next_try<=?3 AND (lease_until IS NULL OR lease_until<=?3) ORDER BY rowid LIMIT 1",params![endpoint,generation,now],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        tx.execute("UPDATE email_intents SET state=2,nonce=NULL,lease_until=NULL WHERE endpoint=?1 AND generation=?2 AND state=0 AND attempts>=8 AND (lease_until IS NULL OR lease_until<=?3) AND NOT EXISTS(SELECT 1 FROM email_dispatch d WHERE d.id=email_intents.id AND (?4=0 OR d.state!='prepared'))",params![endpoint,generation,now,mode==Mode::Proxy])?;
+        let candidate:Option<(String,String)>=tx.query_row("SELECT id,thread FROM email_intents WHERE endpoint=?1 AND generation=?2 AND state=0 AND attempts<8 AND next_try<=?3 AND (lease_until IS NULL OR lease_until<=?3) AND NOT EXISTS(SELECT 1 FROM email_dispatch d WHERE d.id=email_intents.id AND (?4=0 OR d.state!='prepared')) ORDER BY rowid LIMIT 1",params![endpoint,generation,now,mode==Mode::Proxy],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
         let Some((id, thread)) = candidate else {
             tx.commit()?;
             return Ok(None);
@@ -663,13 +756,13 @@ impl<'a> Queue<'a> {
     /// Fence against pause/revoke immediately before dispatch. Current directory
     /// membership and Hub Core readback are separate caller checks, never cached.
     pub fn dispatchable(&self, intent: &Intent, now: i64) -> Result<bool, Error> {
-        let current:bool=self.store.db.query_row("SELECT EXISTS(SELECT 1 FROM email_intents i JOIN endpoints e ON e.id=i.endpoint AND e.generation=i.generation JOIN email_targets t ON t.endpoint=e.id AND t.generation=e.generation WHERE i.id=?1 AND i.nonce=?2 AND i.state=0 AND i.lease_until>?3 AND e.paused=0 AND t.revoked=0 AND t.address=?4)",params![intent.id,intent.nonce,now,intent.address],|r|r.get(0))?;
+        let current:bool=self.store.db.query_row("SELECT EXISTS(SELECT 1 FROM email_intents i JOIN endpoints e ON e.id=i.endpoint AND e.generation=i.generation JOIN email_targets t ON t.endpoint=e.id AND t.generation=e.generation WHERE i.id=?1 AND i.nonce=?2 AND i.state=0 AND i.lease_until>?3 AND e.paused=0 AND t.revoked=0 AND t.address=?4 AND NOT EXISTS(SELECT 1 FROM email_dispatch d WHERE d.id=i.id))",params![intent.id,intent.nonce,now,intent.address],|r|r.get(0))?;
         Ok(current)
     }
     /// Persist acceptance even if owner paused after the send. Never turn a
     /// possible external success into a retry merely because pause raced it.
     pub fn complete(&mut self, intent: &Intent, mode: Mode) -> Result<(), Error> {
-        if mode == Mode::Proxy && intent.address != REAL_RECIPIENT {
+        if delivery::exists(&self.store.db, &intent.id)? {
             return Err(Error::Denied);
         }
         let changed=self.store.db.execute("UPDATE email_intents SET state=1,mode=?3,nonce=NULL,lease_until=NULL WHERE id=?1 AND nonce=?2 AND endpoint=?4 AND generation=?5 AND state=0",params![intent.id,intent.nonce,if mode==Mode::Outbox{"outbox"}else{"proxy"},intent.endpoint,intent.generation])?;
@@ -679,6 +772,9 @@ impl<'a> Queue<'a> {
         Ok(())
     }
     pub fn failed(&mut self, intent: &Intent, now: i64, permanent: bool) -> Result<(), Error> {
+        if delivery::reserved(&self.store.db, &intent.id)? {
+            return Err(Error::Denied);
+        }
         if !valid_time(now) {
             return Err(Error::Invalid);
         }
@@ -854,14 +950,14 @@ mod tests {
                 )
                 .unwrap();
         }
-        let snapshot = crate::email_workers::Snapshot::read(&store, None).unwrap();
+        let snapshot = crate::email_workers::Snapshot::read(&store, None, Mode::Outbox).unwrap();
         assert_eq!(snapshot.targets.len(), 20);
         assert!(snapshot.targets_truncated);
         store
             .db
             .execute("DELETE FROM email_targets WHERE endpoint='ag_email'", [])
             .unwrap();
-        let snapshot = crate::email_workers::Snapshot::read(&store, None).unwrap();
+        let snapshot = crate::email_workers::Snapshot::read(&store, None, Mode::Outbox).unwrap();
         assert_eq!(snapshot.targets.len(), 20);
         assert!(!snapshot.targets_truncated);
     }
@@ -912,7 +1008,7 @@ mod tests {
         assert_eq!(contact.address, "person+tag@example.test");
     }
     #[test]
-    fn email_fixed_template_never_contains_message_text_and_proxy_has_immutable_cap() {
+    fn email_fixed_template_uses_bound_contact_for_both_transports() {
         let mut store = fixture();
         let mut q = Queue::new(&mut store).unwrap();
         q.admit(
@@ -933,14 +1029,13 @@ mod tests {
         assert!(notification
             .text
             .contains("https://hub.example.test/#email-thread="));
-        assert!(matches!(
-            intent.notification("https://hub.example.test/", Mode::Proxy),
-            Err(Error::Denied)
-        ));
-        assert!(matches!(
-            q.complete(&intent, Mode::Proxy),
-            Err(Error::Denied)
-        ));
+        assert_eq!(
+            intent
+                .notification("https://hub.example.test/", Mode::Proxy)
+                .unwrap()
+                .to,
+            "person@example.test"
+        );
         for origin in [
             "https://hub.example.test/?next=evil",
             "https://secret@hub.example.test/",
@@ -1024,6 +1119,91 @@ mod tests {
             Err(Error::Denied)
         ));
     }
+    #[test]
+    fn email_member_inbox_is_bounded_current_and_body_free() {
+        let mut store = fixture();
+        let mut q = Queue::new(&mut store).unwrap();
+        let mut last = String::new();
+        for n in 0..51 {
+            last = q
+                .admit(
+                    "ag_email",
+                    1,
+                    &message(&format!("msg_{n}"), "PRIVATE BODY", &[]),
+                    100 + n,
+                )
+                .unwrap();
+        }
+        let inbox = q.inbox(&member("user_alice"), 200).unwrap();
+        assert!(inbox.truncated);
+        assert_eq!(inbox.threads.len(), 50);
+        assert_eq!(inbox.threads[0].id, last);
+        assert_eq!(inbox.threads[0].message_count, 1);
+        let text = serde_json::to_string(&inbox).unwrap();
+        assert!(!text.contains("PRIVATE BODY"));
+        assert!(!text.contains("example.test"));
+        assert!(q
+            .inbox(&member("user_bob"), 200)
+            .unwrap()
+            .threads
+            .is_empty());
+        assert!(q
+            .inbox(&member("user_owner"), 200)
+            .unwrap()
+            .threads
+            .is_empty());
+        assert!(q
+            .inbox(
+                &crate::owner_auth::Member::synthetic("user_alice", 200),
+                200
+            )
+            .is_err());
+        q.store
+            .db
+            .execute("UPDATE endpoints SET paused=1", [])
+            .unwrap();
+        assert_eq!(
+            q.inbox(&member("user_alice"), 200).unwrap().threads.len(),
+            50
+        );
+        q.store
+            .db
+            .execute("UPDATE email_targets SET revoked=1", [])
+            .unwrap();
+        assert!(q
+            .inbox(&member("user_alice"), 200)
+            .unwrap()
+            .threads
+            .is_empty());
+        q.store
+            .db
+            .execute("UPDATE email_targets SET revoked=0,member='user_bob'", [])
+            .unwrap();
+        assert!(q
+            .inbox(&member("user_alice"), 200)
+            .unwrap()
+            .threads
+            .is_empty());
+        assert!(q
+            .inbox(&member("user_bob"), 200)
+            .unwrap()
+            .threads
+            .is_empty());
+        q.store
+            .db
+            .execute("UPDATE email_targets SET member='user_alice'", [])
+            .unwrap();
+        q.store
+            .db
+            .execute("UPDATE endpoints SET generation=2", [])
+            .unwrap();
+        assert!(q
+            .inbox(&member("user_alice"), 200)
+            .unwrap()
+            .threads
+            .is_empty());
+    }
+
     #[test]
     fn email_thread_id_is_not_authority_and_revocation_blocks_read_and_dispatch() {
         let mut store = fixture();

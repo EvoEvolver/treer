@@ -89,6 +89,8 @@ pub struct View {
 pub struct Status {
     #[serde(default)]
     forwarded_evictions: u64,
+    #[serde(default)]
+    pub(crate) capabilities: Vec<String>,
     protocol: String,
     generation: i64,
     release_sha256: String,
@@ -103,7 +105,12 @@ impl Status {
                 && s.bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         };
-        self.protocol == "treer.endpoint.status/v1"
+        self.capabilities.len() <= 8
+            && self
+                .capabilities
+                .iter()
+                .all(|c| c.len() <= 128 && !c.chars().any(char::is_control))
+            && self.protocol == "treer.endpoint.status/v1"
             && self.generation == generation
             && hash(&self.release_sha256)
             && hash(&self.actual_sha256)
@@ -119,6 +126,8 @@ pub struct Hub<M> {
     pub(crate) mailbox: M,
     pub(crate) workspace: String,
     pub(crate) own_id: String,
+    #[cfg(feature = "hub")]
+    pub(crate) email_workers_active: bool,
 }
 fn stable(id: &str) -> bool {
     valid_id(id) && (id.starts_with("ag_") || id.starts_with("app_"))
@@ -186,6 +195,8 @@ impl<M: Mailbox + Directory> Hub<M> {
             mailbox,
             workspace: workspace.into(),
             own_id: own_id.into(),
+            #[cfg(feature = "hub")]
+            email_workers_active: false,
         };
         #[cfg(feature = "hub")]
         crate::management::schema(&hub.store.db)?;
@@ -945,6 +956,18 @@ mod tests {
     }
     fn activate(hub: &mut Hub<Fake>) {
         hub.resume("ag_endpoint", 1, NOW).unwrap();
+    }
+    #[test]
+    fn email_setup_accepts_bounded_installed_relay_status_capabilities() {
+        let mut value = serde_json::json!({"protocol":"treer.endpoint.status/v1","state":"running","generation":1,"release_sha256":"a".repeat(64),"actual_sha256":"b".repeat(64),"version":"0.1.0","capabilities":["treer.telegram.delivery-receipt/v1"]});
+        let status: Status = serde_json::from_value(value.clone()).unwrap();
+        assert!(status.valid(1));
+        value["capabilities"] = serde_json::json!(["x".repeat(129)]);
+        assert!(!serde_json::from_value::<Status>(value.clone())
+            .unwrap()
+            .valid(1));
+        value.as_object_mut().unwrap().remove("capabilities");
+        assert!(serde_json::from_value::<Status>(value).unwrap().valid(1));
     }
     #[test]
     fn unsafe_live_storage_blocks_admission_and_handoffs_without_waiting_for_maintenance() {

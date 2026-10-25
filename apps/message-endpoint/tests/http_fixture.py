@@ -78,7 +78,7 @@ def fixture(binary, editable=False, activation=False, tokens=False, email=False,
         root.chmod(0o700)
         cli = root / 'fixture-cli'
         # Fixed argv, no environment credential access and no network calls.
-        cli.write_text('#!/usr/bin/python3\nimport json,sys\nif sys.argv[1:3]==["message","receive"]: print(json.dumps({"deliveries":[],"remaining_unacknowledged":0}))\nelif sys.argv[1:4]==["token","create","svc_hub"]: print(json.dumps({"access_token":"synthetic.app.signature","token_type":"Bearer","audience":"svc_hub","expires_in":300}))\nelif sys.argv[1:4]==["agent","show","--"] and sys.argv[4] in ("ag_demo","ag_new","ag_recipient","ag_wrong_workspace","ag_unplaced"): print(json.dumps({"agent_id":sys.argv[4],"workspace_id":"ws_other" if sys.argv[4]=="ag_wrong_workspace" else "ws_test","server_id":"machine_fixture","kind":"shell" if sys.argv[4]=="ag_recipient" else "command","cwd":"/private/fixture","status":"running","path":None if sys.argv[4]=="ag_unplaced" else "/team/"+sys.argv[4]}))\nelse: sys.exit(1)\n')
+        cli.write_text('#!/usr/bin/python3\nimport json,sys\nif sys.argv[1:3]==["message","receive"]: print(json.dumps({"deliveries":[],"remaining_unacknowledged":0}))\nelif sys.argv[1:4]==["token","create","svc_hub"]: print(json.dumps({"access_token":"synthetic.app.signature","token_type":"Bearer","audience":"svc_hub","expires_in":300}))\nelif sys.argv[1:4]==["agent","show","--"] and sys.argv[4] in ("ag_demo","ag_new","ag_setup1280","ag_setup390","ag_recipient","ag_wrong_workspace","ag_unplaced"): print(json.dumps({"agent_id":sys.argv[4],"workspace_id":"ws_other" if sys.argv[4]=="ag_wrong_workspace" else "ws_test","server_id":"machine_fixture","kind":"shell" if sys.argv[4]=="ag_recipient" else "command","cwd":"/private/fixture","status":"running","path":None if sys.argv[4]=="ag_unplaced" else "/team/"+sys.argv[4]}))\nelse: sys.exit(1)\n')
         # Native management notices use the hub's own identity, never a recipient's.
         text=cli.read_text().replace('else: sys.exit(1)', 'elif sys.argv[1:3]==["message","send"]:\n import os\n envelope=json.load(sys.stdin)\n target=next(x[5:] for x in sys.argv if x.startswith("--to="))\n log=__file__+".notices"\n with open(log,"a") as f: f.write(json.dumps({"target":target,"body":envelope["body"]})+"\\n")\n os.chmod(log,0o600)\n print(json.dumps({"message":{"message_id":"msg_notice","sender":{"kind":"agent","id":"app_hub"},"body":envelope["body"]}}))\nelse: sys.exit(1)')
         cli.write_text(text)
@@ -161,6 +161,18 @@ def fixture(binary, editable=False, activation=False, tokens=False, email=False,
 if __name__=='__main__':
     signal.signal(signal.SIGTERM,lambda *_:sys.exit(0))
     with fixture(Path(sys.argv[1]).resolve(),editable='--editable' in sys.argv[2:],tokens='--token-slots' in sys.argv[2:],email='--email' in sys.argv[2:]) as f:
+        if '--seed-email-recovery' in sys.argv[2:]:
+            # New synthetic state only; workers disabled, never a live mail store.
+            db=sqlite3.connect(f['state']/'hub.sqlite3')
+            b={'endpoint_id':'ag_recovery','generation':1,'recipient':'ag_recipient','expected_path':'/team/ag_recovery','expected_cwd':'/private/fixture','expected_server_id':'machine_fixture'}
+            db.execute("INSERT INTO endpoints(id,generation,recipient,paused) VALUES('ag_recovery',1,'ag_recipient',1)")
+            db.execute("INSERT INTO hub_bindings(endpoint,definition) VALUES('ag_recovery',?)",(json.dumps(b),))
+            db.execute("INSERT INTO email_targets(endpoint,generation,address,member) VALUES('ag_recovery',1,'person@example.test','user_member')")
+            db.execute("INSERT INTO email_threads VALUES(?,'ag_recovery',1,'ag_recipient','person@example.test','user_member')",('c'*64,))
+            db.execute("INSERT INTO email_messages VALUES(?,'msg_old','synthetic retained mail','digest_old',61)",('c'*64,))
+            db.execute("INSERT INTO email_intents(id,thread,endpoint,generation) VALUES(?,?,'ag_recovery',1)",('a'*64,'c'*64))
+            db.execute("INSERT INTO email_dispatch VALUES(?,'ag_recovery',1,?,'uncertain')",('a'*64,json.dumps({'text':'Private notification\n\nReference: 0123456789abcdef','idempotency_key':'synthetic-key'}).encode()))
+            db.commit();db.close()
         if '--seed-recovery' in sys.argv[2:]:
             db=sqlite3.connect(f['state']/'hub.sqlite3')
             db.execute("INSERT INTO hub_activity(endpoint,generation,activated_at,stale_updates) VALUES('ag_demo',1,?,1)",(int(time.time()),))
