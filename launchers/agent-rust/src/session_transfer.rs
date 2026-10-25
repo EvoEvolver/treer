@@ -330,6 +330,146 @@ pub(crate) fn managed_snapshot(home: &Path, cwd: &Path, id: &str) -> Result<Valu
     }
     serde_json::to_value(export(home, cwd, id)?).map_err(Into::into)
 }
+// This is the same native user/assistant JSONL source read by Node loadHistory,
+// not a provider result or a claim that an old operation completed. Historical
+// envelopes are displayed in file order, with no transferred receipt authority.
+fn native_history(bytes: &[u8], id: &str) -> Result<Value> {
+    main_session(bytes, id)?;
+    let mut history = crate::transcript::Transcript::default();
+    let mut count = 0usize;
+    for (index, row) in rows(bytes)?.into_iter().enumerate() {
+        let kind = match row["type"].as_str() {
+            Some("user") => "userMessage",
+            Some("assistant") => "agentMessage",
+            _ => continue,
+        };
+        let content = &row["message"]["content"];
+        let mut text = if let Some(text) = content.as_str() {
+            text.to_owned()
+        } else {
+            serde_json::to_string(content)?
+        };
+        let truncated = text.len() > 32768;
+        if truncated {
+            let mut end = 32768;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            text.push_str("\n[Native history display truncated]");
+        }
+        let turn = format!("native-history-{index}");
+        history.insert(json!({"id":turn,"status":"completed","projectionOnly":true,"historySource":"native-jsonl","items":[{"id":format!("native-item-{index}"),"kind":kind,"text":text,"sourceTurnId":turn,"historySource":"native-jsonl","displayTruncated":truncated}]}))?;
+        count += 1;
+    }
+    ensure!(count > 0, "native_history_has_no_messages");
+    Ok(
+        json!({"threadId":id,"turns":&*history,"start":history.dropped,"total":count,"source":"native-jsonl","nativeSha256":hash(bytes),"providerConfirmed":false}),
+    )
+}
+pub struct Launch {
+    pub cwd: PathBuf,
+    pub config: PathBuf,
+    pub id: String,
+    pub history: Value,
+    root: File,
+}
+pub fn launch(args: &[String]) -> Result<Launch> {
+    ensure!(
+        args.len() == 6,
+        "launch_requires_directory_session_and_auth"
+    );
+    let mut options = BTreeMap::new();
+    for pair in args.chunks_exact(2) {
+        ensure!(
+            ["--directory", "--session-id", "--auth"].contains(&pair[0].as_str())
+                && options.insert(pair[0].as_str(), pair[1].as_str()).is_none(),
+            "invalid_launch_option"
+        );
+    }
+    ensure!(
+        options.get("--auth") == Some(&"environment"),
+        "launch_auth_must_be_environment"
+    );
+    // Do not load .credentials.json, keychains, old HOME/config or bundle env.
+    // This selects a provider-supported environment credential, not proof that
+    // remote authentication succeeded; that remains the provider's decision.
+    ensure!(
+        ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]
+            .iter()
+            .any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty())),
+        "launch_explicit_environment_auth_required"
+    );
+    let id = options
+        .get("--session-id")
+        .context("launch_session_required")?
+        .to_string();
+    uuid(&id)?;
+    let (cwd, dir) = root(Path::new(
+        options
+            .get("--directory")
+            .context("launch_directory_required")?,
+    ))?;
+    let plan = crate::bounded_json::decode(&read(&dir, ".harness/claude-launch.json", 4096)?)?;
+    ensure!(
+        plan["schema"] == "treer.claude-launch/v1"
+            && plan["cwd"] == cwd.to_string_lossy().as_ref()
+            && plan["sessionId"] == id,
+        "launch_binding_mismatch"
+    );
+    let path = format!(
+        ".harness/claude/projects/{}/{id}.jsonl",
+        project_key(cwd.to_str().context("non_utf8_destination")?)
+    );
+    let bytes = read(&dir, &path, BYTES)?;
+    ensure!(
+        plan["nativeSha256"] == hash(&bytes),
+        "launch_native_hash_mismatch"
+    );
+    let history = native_history(&bytes, &id)?;
+    Ok(Launch {
+        config: cwd.join(".harness/claude"),
+        cwd,
+        id,
+        history,
+        root: dir,
+    })
+}
+pub fn claim_launch(launch: &Launch, private: &Path) -> Result<()> {
+    // The ordinary lease is already held. Never bootstrap an existing runtime,
+    // including one whose journal is absent but other durable state remains.
+    for entry in std::fs::read_dir(private)? {
+        ensure!(
+            entry?.file_name() == ".rust-launcher.lock",
+            "launch_requires_fresh_private_root"
+        );
+    }
+    let (_, current) = root(&launch.cwd)?;
+    let a = current.metadata()?;
+    let b = launch.root.metadata()?;
+    ensure!(
+        a.dev() == b.dev() && a.ino() == b.ino(),
+        "launch_directory_changed"
+    );
+    let native = format!(
+        ".harness/claude/projects/{}/{}.jsonl",
+        project_key(launch.cwd.to_str().context("non_utf8_destination")?),
+        launch.id
+    );
+    ensure!(
+        hash(&read(&launch.root, &native, BYTES)?) == launch.history["nativeSha256"],
+        "launch_native_changed"
+    );
+    write_private(
+        &launch.root,
+        ".harness/launch-intent.json",
+        &serde_json::to_vec(
+            &json!({"schema":"treer.claude-launch-intent/v1","sessionId":launch.id,"nativeSha256":launch.history["nativeSha256"],"automaticRetry":false}),
+        )?,
+    )?;
+    launch.root.sync_all()?;
+    Ok(())
+}
 fn decoded(bundle: Bundle, id: &str, cwd: &str) -> Result<Vec<(String, Vec<u8>)>> {
     ensure!(
         bundle.schema == "treer.agent-session/v1" && bundle.harness == "claude",
@@ -470,7 +610,7 @@ fn remove_contents(dir: &File) -> Result<()> {
     }
     Ok(())
 }
-fn import(input: &Path, destination: &Path, id: &str) -> Result<Value> {
+fn import(input: &Path, destination: &Path, id: &str, prepare: bool) -> Result<Value> {
     ensure!(
         input.is_absolute() && destination.is_absolute(),
         "absolute_path_required"
@@ -498,7 +638,21 @@ fn import(input: &Path, destination: &Path, id: &str) -> Result<Value> {
     let destination = parent_path.join(name);
     let cwd = destination.to_str().context("non_utf8_destination")?;
     // Validate every decoded and rewritten byte before creating anything.
-    let files = decoded(bundle, id, cwd)?;
+    let mut files = decoded(bundle, id, cwd)?;
+    if prepare {
+        let native = format!(".harness/claude/projects/{}/{id}.jsonl", project_key(cwd));
+        let bytes = &files
+            .iter()
+            .find(|(path, _)| *path == native)
+            .context("native_session_missing")?
+            .1;
+        native_history(bytes, id)?;
+        let plan = json!({"schema":"treer.claude-launch/v1","cwd":cwd,"sessionId":id,"nativeSha256":hash(bytes)});
+        files.push((
+            ".harness/claude-launch.json".into(),
+            serde_json::to_vec(&plan)?,
+        ));
+    }
     ensure!(!exists(&parent, name)?, "destination_must_be_new");
     let stage_name = format!(".session-import-{}", uuid::Uuid::new_v4());
     fs::mkdirat(&parent, stage_name.as_str(), Mode::from_raw_mode(0o700))?;
@@ -562,7 +716,7 @@ fn import(input: &Path, destination: &Path, id: &str) -> Result<Value> {
 }
 pub fn cli(args: Vec<String>) -> Result<()> {
     if args.first().map(String::as_str) == Some("--help") {
-        println!("session export --harness claude --config-dir ABS --cwd ABS --session-id UUID\nsession import --input ABS --directory NEW_ABS [--session-id NEW_UUID]\nOffline only; no credentials or running-session mutation. Import uses isolated CLAUDE_CONFIG_DIR. Existing destinations (even empty) are refused.");
+        println!("session export --harness claude --config-dir ABS --cwd ABS --session-id UUID\nsession import --input ABS --directory NEW_ABS [--session-id NEW_UUID]\nsession prepare --input ABS --directory NEW_ABS [--session-id NEW_UUID]\nsession launch --directory PREPARED_ABS --session-id NEW_UUID --auth environment\nImport/prepare publish a new isolated directory. Launch needs a fresh private runtime root and explicit environment auth, never copies credentials or modifies the source session. Launch is once-only; failed intent is retained, never automatically retried.");
         return Ok(());
     }
     let operation = args.first().context("session_operation_required")?;
@@ -570,7 +724,7 @@ pub fn cli(args: Vec<String>) -> Result<()> {
     let mut options = BTreeMap::new();
     let allowed = match operation.as_str() {
         "export" => &["--harness", "--config-dir", "--cwd", "--session-id"][..],
-        "import" => &["--input", "--directory", "--session-id"][..],
+        "import" | "prepare" => &["--input", "--directory", "--session-id"][..],
         _ => bail!("unknown_session_operation"),
     };
     for pair in args[1..].chunks_exact(2) {
@@ -605,6 +759,7 @@ pub fn cli(args: Vec<String>) -> Result<()> {
             Path::new(required("--input")?),
             Path::new(required("--directory")?),
             &id,
+            operation == "prepare",
         )?
     };
     let output = (|| -> Result<()> {
@@ -614,7 +769,7 @@ pub fn cli(args: Vec<String>) -> Result<()> {
         stdout.flush()?;
         Ok(())
     })();
-    if operation == "import" {
+    if matches!(operation.as_str(), "import" | "prepare") {
         output.context("import_published_output_failed_do_not_retry")?;
     } else {
         output?;

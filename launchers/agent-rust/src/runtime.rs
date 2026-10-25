@@ -90,6 +90,8 @@ struct Record {
 }
 struct Runtime {
     claude:bool,
+    native_bootstrap: Option<Value>,
+    bootstrap_pending: bool,
     snapshot_source: Option<(PathBuf, PathBuf)>,
     snapshot_read_slot: Arc<tokio::sync::Semaphore>,
     terminal_tasks: Value,
@@ -149,6 +151,7 @@ impl Drop for AbortTask {
 #[derive(Clone)]
 pub struct Config {
     pub claude:bool,
+    pub native_bootstrap: Option<Value>,
     pub claude_config_dir: Option<PathBuf>,
     pub cwd: PathBuf,
     pub private_root: PathBuf,
@@ -164,11 +167,12 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
     if config.claude {
         if let Some(saved)=&saved {
             if saved["harness"]!="claude" {bail!("private_state_harness_mismatch");}
-        } else if config.session.is_some() {bail!("claude_resume_requires_supported_history_checkpoint");}
+        } else if config.session.is_some() && config.native_bootstrap.is_none() {bail!("claude_resume_requires_supported_history_checkpoint");}
     } else if saved.as_ref().is_some_and(|s|s["harness"]=="claude") {bail!("private_state_harness_mismatch");}
     // Refuse malformed durable dispatch state before starting a provider. Never
     // discard an invalid record: it may contain an uncertain dispatch intent.
     if let Some(saved) = &saved {
+        if config.native_bootstrap.is_some() {bail!("claude_bootstrap_requires_new_state");}
         decode_records(saved)?;
         Goals::load(&saved["goals"])?;
         if config.session.as_ref().is_some_and(|session| saved["threadId"].as_str() != Some(session.as_str())) {
@@ -177,7 +181,7 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
     }
     let (rpc, mut child, events) = if config.claude {
         let session=config.session.clone().or_else(||saved.as_ref().and_then(|s|s["threadId"].as_str()).map(str::to_owned)).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
-        config.codex_args.extend([if saved.is_some(){"--resume"}else{"--session-id"}.into(),session.clone()]);
+        config.codex_args.extend([if saved.is_some() || config.native_bootstrap.is_some(){"--resume"}else{"--session-id"}.into(),session.clone()]);
         Rpc::spawn_claude(&config.codex,&config.codex_args,&config.cwd,config.capture_stderr,session)?
     }else{Rpc::spawn(&config.codex, &config.codex_args, &config.cwd, config.capture_stderr)?};
     let (commands, mut requests) = mpsc::channel::<Request>(64);
@@ -189,6 +193,8 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
     ));
     let mut rt = Runtime {
         claude:config.claude,
+        native_bootstrap: config.native_bootstrap.clone(),
+        bootstrap_pending: config.native_bootstrap.is_some(),
         snapshot_source: config.claude_config_dir.clone().map(|root| (root,config.cwd.clone())),
         snapshot_read_slot: Arc::new(tokio::sync::Semaphore::new(1)),
         rpc,
@@ -685,6 +691,12 @@ impl Runtime {
             recovery_blocked=self.records.iter().any(|record| recovery::needs_recovery(record) && record.submission["state"] != "running");
         }
         if self.claude {
+            if let Some(native)=&config.native_bootstrap {
+                if native["threadId"]!=self.thread["id"] || native["source"]!="native-jsonl" || native["providerConfirmed"]!=false {bail!("claude_native_bootstrap_invalid");}
+                for turn in native["turns"].as_array().ok_or_else(||anyhow!("claude_native_bootstrap_invalid"))? {self.turns.insert(turn.clone())?;}
+                self.history_start=native["start"].as_u64().ok_or_else(||anyhow!("claude_native_bootstrap_invalid"))? as usize;
+                self.history_total=native["total"].as_u64().ok_or_else(||anyhow!("claude_native_bootstrap_invalid"))? as usize;
+            }
             if let Some(saved)=&saved {
                 let turns=saved["claudeTurns"].as_array().filter(|turns|turns.len()<=50).ok_or_else(||anyhow!("claude_history_checkpoint_invalid"))?;
                 for turn in turns { self.turns.insert(turn.clone())?; }
@@ -738,10 +750,14 @@ impl Runtime {
         }
         self.ready = true;
         self.persist()?;
+        self.bootstrap_pending = false;
         self.publish();
         Ok(())
     }
     fn persist(&mut self) -> Result<()> {
+        // Fresh launch has no dispatch intents. Initialization events may update
+        // memory, but must not publish a partial bootstrap before startup ACKs.
+        if self.bootstrap_pending && !self.ready {return Ok(());}
         if self.state_failed {
             (self.records, self.goals) = self.checkpoint.clone();
             bail!("private_state_write_failed");
@@ -749,6 +765,7 @@ impl Runtime {
         receipts::prune(&mut self.records, self.dispatch_blocked, &self.thread["activeTurnId"]);
         let mut state=json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records,"goals":self.goals});
         if self.claude {
+            if let Some(native)=&self.native_bootstrap {state["claudeNativeHistory"]=json!({"source":"native-jsonl","sha256":native["nativeSha256"],"providerConfirmed":false});}
             state["harness"]=json!("claude");state["claudeTurns"]=json!(&*self.turns);
             state["claudeHistoryStart"]=json!(self.history_start+self.turns.dropped);
             state["claudeHistoryTotal"]=json!(self.history_total);

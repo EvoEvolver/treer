@@ -132,16 +132,93 @@ that no other same-UID writer exists. It does not include Launcher private state
 receipts, queue, goals, task authority or credentials. The original session and
 files remain in place. No import or new runtime starts through this endpoint.
 
+## Prepare and explicitly launch a new runtime
+
+The smallest native/runtime loop is now separate explicit commands:
+
+```sh
+treer-agent session prepare --input /absolute/snapshot.json \
+  --directory /absolute/existing-parent/new-project
+# Read the returned NEW_UUID and isolated CLAUDE_CONFIG_DIR.
+# Supply provider-supported environment auth separately, never as argv/bundle.
+treer-agent session launch --directory /absolute/existing-parent/new-project \
+  --session-id NEW_UUID --auth environment
+```
+
+`prepare` reuses the same all-entry validation, fresh UUID and atomic NOREPLACE
+import. It additionally writes `.harness/claude-launch.json` in that same stage,
+binding the final cwd, new UUID and rewritten main JSONL hash. All validation,
+including admission of at least one user/assistant history envelope, precedes
+publication. Ordinary offline `import` remains unchanged and does not produce a
+launch plan. `prepare` never starts a provider or initializes private runtime
+state. The source files/session are retained unchanged.
+
+`launch` requires exactly directory/session/auth options. It reopens the prepared
+directory with the existing nofollow/same-fd boundary, verifies the native hash
+and ID, and derives history from the **actual imported native JSONL**, the source
+used by Node `loadHistory`. It does not fabricate a supported AIS seed or a
+provider result. Each user/assistant envelope is a display-only historical entry,
+in native file order, with `projectionOnly:true` and `historySource:native-jsonl`.
+`completed` on these entries means a closed *display entry*, never provider
+terminal confirmation. No old turn IDs, receipts, input obligations, task/goal
+execution or model/effort authority are imported. Non-string native content is
+shown as JSON text; this is not full rich historical UI parity. The most recent
+50 envelopes are retained, text capped at32KiB with an explicit truncation label,
+and older-prefix counts describe envelopes, not reconstructed provider turns.
+The full validated native JSONL remains available to the provider for context.
+
+The caller supplies the normal new Agent identity/private-root environment, or
+an explicit unmanaged private root for a local foreground invocation. The root
+must already exist, pass normal private placement checks and contain no state
+other than the ordinary single-writer lease. Existing even idle journals or
+auxiliary files refuse. No identity/Agent is created, migrated or restarted by
+these commands. A new managed launch retains its normal authenticated quota
+checks; the installed dispatcher requires a Claude native binding, selects the
+bundled public assets and registers its new AIS through the usual CLI.
+
+Authentication is explicitly **environment** mode: a nonempty
+`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` must be supplied by the new
+invocation. Values are not emitted, copied into the plan, or read from old
+config/HOME/keychains by transfer code. `CLAUDE_CONFIG_DIR` is forcibly the
+new project's isolated directory. This selects the provider-supported auth
+mechanism; initialize ACK does not prove remote account authentication or native
+history completeness. The provider still decides auth success on its real
+operations. No automatic test prompt or network auth probe is sent.
+
+Before spawning, launch rechecks the main native hash, takes the private lease
+and writes an exclusive durable `.harness/launch-intent.json` in the prepared
+directory. That target permits **one launch attempt**. Startup uses native
+`--resume NEW_UUID` with the isolated config; initialized-current-adapter state
+is distinct from historical wire authority. Only successful normal initialization
+and complete private checkpoint persistence permits port/interface publication.
+Events still pump during initialization; auxiliary task events cannot publish
+an early partial bootstrap checkpoint. The checkpoint contains empty imported
+receipts/goals/tasks and identifies native history as `providerConfirmed:false`.
+
+Failure never replays inputs, retargets to a fresh session or retries a launch.
+The intent and complete imported directory remain for inspection; no checkpoint
+or public port is published on initialization refusal. An ordinary complete
+checkpoint that was already atomically published before a later port/durability
+failure is retained, not rolled back or labelled absent. Port-publication errors
+await owned provider shutdown. Existing port-file destinations refuse before
+the launch intent/provider. No cross-root atomic transaction is claimed.
+
+After a successful first launch, normal process recovery uses the ordinary
+entry with the returned cwd, isolated `CLAUDE_CONFIG_DIR`, `AGENT_UI_SESSION_ID`
+and the **same private root**. That path loads the real checkpoint and does not
+rerun prepare/launch. The once-only command is not a reusable Host startup
+recipe; updating a newly created Agent's persistent startup remains an explicit
+owner/operator action. Tests exercise this ordinary restart without resending
+the first prompt. These commands do not change any existing startup.
+
 ## Remaining live-transfer contract
 
 `capabilities.sessionTransfer` remains **null**. The offline command is usable,
-and managed snapshot is separately usable, but neither is a complete new-runtime
-transfer workflow or shared UI action. A new Rust Claude runtime currently
-requires a supported private history checkpoint to resume an existing session;
-the offline importer intentionally does not fabricate that checkpoint. The next
-leaf must implement explicit fresh private checkpoint/bootstrap and new-session
-launch wiring, including independent supported authentication of the isolated
-config, without importing old receipt/queue/task execution authority. Passing
-the returned UUID to resume alone does not implement that contract. Windows transfer is explicitly
+and managed snapshot plus prepare/explicit launch now form an independently
+usable POSIX loop. Shared UI/Agent creation/persistent-startup orchestration and
+full historical rich rendering are not implemented, so the live capability is
+not advertised. Ordinary resume alone still cannot bootstrap an arbitrary old
+session without a supported checkpoint; only the explicit validated new-target
+launch path admits native-read display history. Windows transfer is explicitly
 unsupported; its native private-file/DACL backend is not replaced by POSIX mode
 checks. No real Claude private files or credentials are used by the tests.

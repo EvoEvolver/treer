@@ -78,9 +78,22 @@ fn env(name: &str) -> Option<String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let launch = if std::env::args().nth(1).as_deref()==Some("session") && std::env::args().nth(2).as_deref()==Some("launch") {
+        Some(session_transfer::launch(&std::env::args().skip(3).collect::<Vec<_>>())?)
+    } else {None};
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Some(launch)=&launch {
+        // Before any child or background task. Select only the newly imported
+        // isolated config; never copy auth files or use the source HOME.
+        std::env::set_var("AGENT_UI_CWD",&launch.cwd);
+        std::env::set_var("AGENT_UI_HARNESS","claude");
+        std::env::set_var("AGENT_UI_SESSION_ID",&launch.id);
+        std::env::set_var("CLAUDE_CONFIG_DIR",&launch.config);
+    }
     if std::env::args().nth(1).as_deref() == Some("session") {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        return session_transfer::cli(std::env::args().skip(2).collect());
+        if launch.is_none() {return session_transfer::cli(std::env::args().skip(2).collect());}
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         bail!("offline_session_transfer_unsupported_platform");
     }
@@ -139,6 +152,16 @@ async fn main() -> Result<()> {
         private_status(&agent).await?;
     }
     let _state_lease = store::Lease::acquire(&private_root, &cwd, &agent)?;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Some(launch)=&launch {
+        if let Some(path)=env("AGENT_UI_PORT_FILE") {
+            match std::fs::symlink_metadata(path) {
+                Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},
+                _=>bail!("explicit_launch_port_destination_unavailable"),
+            }
+        }
+        session_transfer::claim_launch(launch,&private_root)?;
+    }
     if std::env::args().nth(1).as_deref() == Some("--restore-node-backup") {
         node_import::restore(&private_root, &cwd, &agent)?;
         println!("node_state_backup_restored; set startup back to Node before starting it");
@@ -191,6 +214,12 @@ async fn main() -> Result<()> {
     };
     let handle = runtime::spawn(runtime::Config {
         claude:harness=="claude",
+        native_bootstrap: {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            {launch.as_ref().map(|l|l.history.clone())}
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {None}
+        },
         claude_config_dir: if harness=="claude" {env("CLAUDE_CONFIG_DIR").map(PathBuf::from)} else {None},
         cwd,
         private_root,
@@ -207,7 +236,25 @@ async fn main() -> Result<()> {
         attachments: attachments.clone(),
         capture_stderr: env("RUST_SPIKE_CAPTURE_STDERR").as_deref() == Some("1"),
     })?;
-    if let Some(file) = env("AGENT_UI_PORT_FILE") {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if launch.is_some() {
+        // No interface registration/port publication before successful startup.
+        let mut state=handle.state.clone();
+        let started=tokio::time::timeout(std::time::Duration::from_secs(100),async {
+            loop {
+                let snapshot=state.borrow_and_update().clone();
+                if snapshot["thread"]["status"]=="error" || snapshot["runtime"]["state"]=="blocked" {bail!("explicit_launch_startup_refused");}
+                if snapshot["ready"]==true && snapshot["runtime"]["state"]=="idle" && snapshot["thread"]["id"]==launch.as_ref().unwrap().id {return Ok::<_,anyhow::Error>(());}
+                state.changed().await.map_err(|_|anyhow::anyhow!("explicit_launch_stopped"))?;
+            }
+        }).await;
+        if !matches!(started,Ok(Ok(()))) {
+            handle.shutdown().await?;
+            bail!("explicit_launch_failed_intent_retained_no_retry");
+        }
+    }
+    let publication=(|| -> Result<()> {
+      if let Some(file) = env("AGENT_UI_PORT_FILE") {
         use std::io::Write;
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -223,7 +270,10 @@ async fn main() -> Result<()> {
         #[cfg(windows)] treer_platform::secure_file(std::path::Path::new(&file))?;
         output.write_all(port.to_string().as_bytes())?;
         output.sync_all()?;
-    }
+      }
+      Ok(())
+    })();
+    if let Err(error)=publication {handle.shutdown().await?;return Err(error);}
     let app = App {
         runtime: handle.clone(),
         port,
