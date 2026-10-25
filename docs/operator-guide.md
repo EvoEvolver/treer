@@ -2617,3 +2617,243 @@ commands run in-process under the signed-in user. Clients choose how to present
 the returned `reply`; no native TTS client is shipped in this repository.
 Vendor LLM keys stay in the Proxy process. This is not the later Voice Live
 confirm-card protocol.
+
+## Controller updates from the Console (integration in progress)
+
+The Controller-update HTTP adapter reuses the human-session membership and
+`machine.exec` Policy boundary used by **Install agent CLIs**. Its machine-scoped
+routes are `GET controller-update`, `POST controller-update/prepare`,
+`POST controller-update/confirm`, `GET controller-update/operations`, and
+`GET controller-update/operations/{job_uuid}` under
+`/api/workspaces/{workspace_id}/machines/{server_id}/`. Bodies contain only a
+reviewed target ID or confirmation token. Commands, paths, download URLs and
+trust overrides are not accepted. All responses disable caching.
+
+A preview binds a short-lived token to the user session, machine, installed
+identity, reviewed catalog revision and exact target/plan. Confirmation commits
+the hashed token consumption, exclusive machine claim, operation intent and
+audit before sending one typed Controller command. Repeated confirmation only
+recovers the existing operation; it never dispatches again. Install CLI and
+Controller-update acceptance share the same database transaction lock. An
+unconfirmed/partial/rollback-failed update keeps its claim across restarts;
+refresh and reconnect are read-only recovery, never an automatic retry. A
+terminal success requires the complete native receipt projection, matching
+Controller and CLI identity, and correlated health. A reconnect alone proves
+none of those things. Resolved operations remain discoverable for seven days.
+
+Provision a reviewed local release catalog with Proxy startup option
+`--controller-update-catalog /absolute/path/catalog.json` (or
+`TREER_CONTROLLER_UPDATE_CATALOG`). This is an operator trust decision, not
+signature verification or a browser catalog-write route. The file is bounded
+to 64 KiB and has this shape:
+
+```json
+{"schema_version":1,"catalogs":[{"platform":"linux-x86_64","revision":1,"entries":[{"release_sequence":1,"target":{"target_id":"reviewed-release-id","identity":{"release_sha":"<40 lowercase hex>","artifact_source_sha":"<40 lowercase hex>","controller_sha256":"<64 lowercase hex>","cli_sha256":"<64 lowercase hex>"},"platform":"linux-x86_64","version_label":"reviewed version"}}]}]}
+```
+
+Replace the illustrative digest placeholders with reviewed release identities.
+Include the installed identity and at most sixteen newer targets per platform;
+`release_sequence` explicitly defines upgrade order. There are at most five
+platform catalogs, with unique positive revision/sequence values below 2^53.
+Import is atomic, repeated identical revisions are safe, and a revision cannot
+be reinterpreted or decreased. An absent or invalid catalog disables preview;
+there is no remote `latest` lookup. Explicit ordering and a persisted per-platform
+revision floor reject unknown ordering, same-release updates and rollback of
+catalog metadata. Provisioning records alone does not enable machine updates.
+
+The Proxy advertises its typed API; the Controller update capability remains
+source-gated off until whole worker/launcher native acceptance is reviewed for
+that platform. Both capabilities are required; a browser or environment flag
+cannot bypass this gate. Discovery of already persisted operations remains
+available. The adapter never substitutes machine Exec, the legacy updater,
+PowerShell or Python for the typed native path. Local PostgreSQL and owned-child
+tests do not demonstrate a real machine upgrade. The focused
+`authenticated_http_db_update_survives_proxy_restart_without_redispatch` test
+uses a real loopback HTTP listener, the production Router/session/Origin
+middleware and a fresh PostgreSQL schema. It covers session-bound confirmation,
+durable claim-before-dispatch, repeated confirmation, loss/recreation of Proxy
+transport state, offline discovery, query-only reconnect and terminal slot
+release. Its Controller receipt producer is synthetic: it does not establish
+artifact download, native publication or platform acceptance. Run it against
+an owned private PostgreSQL instance, never a shared/production database:
+
+```bash
+TREER_TEST_DATABASE_URL=postgres://USER@127.0.0.1:PRIVATE_PORT/PRIVATE_DB \
+  cargo test --locked -p treer-proxy \
+  authenticated_http_db_update_survives_proxy_restart_without_redispatch
+```
+
+See the
+[reviewed wire contract](research/2026-10-20-controller-update-web-contract.md).
+
+The Unix native reader opens only the fixed service jobs directory and canonical
+job UUID. It requires a matching durable submission binding and native receipt,
+including original and target image digests. Old unbound jobs are not adopted.
+A raw `complete` or `rolled_back` receipt alone cannot produce success. A private
+whole-health outcome and durable release of the matching native active claim
+must also match; observation refuses an incomplete final-evidence write rather
+than publishing a conflicting result at the same receipt revision.
+
+The Controller-side native adapter also requires a private, locally provisioned
+`controller-update-catalog.json` in its service configuration directory. Its
+schema is `{schema_version:1, revision, accept_shared_binaries, entries}`. Each
+entry contains `release_sequence`, the same complete `target` as the Proxy
+catalog, a pinned `sums_sha256`, a fixed HTTPS `artifact_base` ending in `/`,
+`allow_pinned:true` and explicit `allow_artifact_origin`. These are local operator
+choices; the browser cannot supply them. Only a strictly increasing sequence is
+eligible. Same-release and downgrade overrides are absent. Explicit checksum
+pins are transition acknowledgments, not publisher signatures or freshness.
+
+Provision this file as the service account in its existing private configuration
+directory (0700), with catalog mode 0600. Publish reviewed replacement bytes by
+atomic rename within that same private directory; do not use a shared writable
+directory or weaken permissions. For catalog rotation, increase the revision in
+both the Proxy and Controller catalogs and preserve the exact release identities
+and pins required by outstanding operations. Never reuse a revision for changed
+bytes or decrease it. Rotation changes future admission; it does not resume,
+rebind, or authorize retry of an outstanding operation.
+The private job also saves the exact catalog byte digest, revision, original and
+target identities and sequences, SUMS pin and consent flags before downloading.
+After SAME-lock handoff, the original worker reopens the local catalog and
+rechecks this evidence and the installed pair before Core activation. Any byte
+change, including a same-revision edit or rotation during preparation, refuses
+activation and retains the unresolved claim. Finish or explicitly reconcile an
+outstanding operation before rotating; a missing proof in an older job cannot
+be adopted as authorization. These private records contain no download URL,
+filesystem path, credential or child output and are not public receipts.
+
+The Controller owns submission independently of its Proxy websocket. Update
+commands do not block heartbeat or operation queries. Disconnect drops response
+waiting only; the original task continues without resubmission. A Controller
+process exit can leave preparation unresolved, and discovery never restarts it.
+
+Native preparation revalidates the installed Controller/CLI against those local
+pins and holds installation and enrollment locks. Before downloading it writes
+an exclusive private active claim and the complete operation binding, then
+verifies both artifacts, saves startup/Host/Controller baseline evidence, stages
+both replacements and the original-image activator, and probes the authenticated
+staged pair. It does not replace installed names, restart services, or launch an
+installer. An existing job or active claim is never resumed by another POST;
+owner death and elapsed time do not clear it. Read-only operation lookup works
+from its fixed journal after restart. Capability remains disabled until the
+complete worker/launcher execution and whole-health reconciliation pass native
+acceptance; preparation tests alone do not enable Console updates.
+After the report grace period (600 seconds without receipt progress), a
+nonterminal native receipt is no longer accepted as a fresh Updating observation.
+Proxy discovery retains an unconfirmed result and the active claim. This age
+bound does not prove worker death, release a lock, or authorize another attempt.
+Distinct partial and rollback-failed recovery results remain readable.
+
+The native handoff copies the original installed Controller into the private
+job, starts only that fixed worker with its UUID, and authenticates the running
+image, OS parent and exact socket peer before transferring the same lock file
+descriptions once. Lost acknowledgment never starts another worker. Its private
+entry runs before normal Controller startup, metrics helpers or runtime threads;
+it cannot be reused as a metrics GPU probe or an ordinary Controller fallback.
+Before enabling this path alongside metrics, verify that helper re-exec
+compares the running OS image to the installed Controller inode and refuses a
+stale replaced image or job-local activator. Never execute the newly replaced
+path as an old Controller helper, and never run ordinary metrics startup in
+the private worker. This integration check is part of native acceptance.
+The worker uses the existing Rust image publication, Host restart, workload
+health and verified rollback transaction; it never restarts the Host.
+Native acceptance must also demonstrate that this worker survives replacement
+of the old Controller under the actual service manager in a disposable OS
+account or VM on Linux and macOS. A separate session/process group alone does
+not establish survival under systemd control-group termination or launchd
+cleanup. The exact `c56b8920` disposable Linux transient user-manager run
+`39709601135` passed with the real Host as MainPID, authenticated same-cgroup
+worker, zero restarts and empty stopped cgroup cleanup. This is same-source
+physical replacement evidence; later canonical exact ActiveState/SubState
+assertions were only focused-tested and are not attributed to that old run.
+Do not repeat that passed manager fixture merely to reconcile documentation.
+Capability remains off: the following are separate remaining delivery leaves,
+not requirements to rerun every accepted layer:
+
+| Boundary | Current evidence / next deliverable |
+| --- | --- |
+| HTTP + PostgreSQL operation routing | Focused real HTTP/session/DB chain; synthetic Controller receipts explicitly scoped |
+| Native Linux manager ownership | Exact c56 actual PASS; retain original predicate scope |
+| Distributor through native updater and Proxy DB | Compose approved HTTPS artifact identities, real Controller and durable API operation in one disposable target; not established by either separate proof |
+| Production Linux enablement | Source capability decision and ordinary artifact/install contract after the composed chain; currently disabled |
+| macOS manager / Windows native activation | Not accepted by the Linux run; unsupported until their own implementation/acceptance leaf closes |
+| Enrolled rollout | Separate Release-owned target and activation; no installed mutation authorized by the isolated test |
+
+The next isolated input slice is a **download-only** HTTPS check, not another
+manager or Proxy DB run. In the update canonical branch (including `55eb2c4e`),
+run the explicit ignored test with Release-approved public metadata:
+
+```bash
+TREER_UPDATE_NETWORK_INPUT='{"schema_version":1,"source_commit":"<40 hex>","platform":"linux-x86_64","artifact_base":"https://<approved origin>/artifacts/linux-x86_64/","enrollment_origin":"https://<approved proxy>/","allow_artifact_origin":false,"sums_sha256":"<64 hex>","controller":{"sha256":"<64 hex>","size":123},"cli":{"sha256":"<64 hex>","size":123}}' \
+CARGO_TARGET_DIR=/absolute/task-owned/target \
+cargo test --locked -p treer-agent-server --bin treer-agent-server \
+  self_update::artifacts::network_acceptance::approved_https_distributor_stages_exact_controller_and_cli_without_activation \
+  -- --ignored --exact --nocapture
+```
+
+Replace every placeholder with Release-authenticated checksum and artifact metadata;
+cross-origin sources require the explicit `allow_artifact_origin` consent.
+For this download-only check a mutable URL is permitted: the supplied SUMS digest
+and independent image hashes/sizes must still match, so changed contents fail
+closed. A pass does not establish immutable or signed release publication and
+does not authorize product activation.
+This entry enforces production HTTPS URL validation even in a unit build and
+uses the unchanged Distributor client/TLS roots, no redirects or ambient proxy.
+It checks the SUMS document pin, agrees independent Controller/CLI pins before
+fetching binary bodies, stages both as private non-executable files, rehashes
+their returned handles, and witnesses cleanup. It never downloads the Host,
+executes either image, discovers an installation, or enables native capability.
+The reported source is publication metadata, **not** a measured version probe.
+The full Distributor/native worker/ProxyDB composition is still separate work;
+passing this first slice does not imply update or recovery acceptance. Missing
+approved network inputs are reported as NOT_RUN, not substituted by loopback
+HTTP, arbitrary artifacts or a trust-store override. Windows native activation
+and macOS manager acceptance remain independently unsupported/unaccepted.
+
+For the owned systemd/launchd topology procedure and exact
+disposable-account commands, see the
+[owned-child acceptance procedure](research/2026-10-21-controller-update-owned-child.md#resumed-terminal-death-coverage-and-manager-fixture).
+Preparing that fixture alone neither registers a service nor proves native
+update survival; do not execute its manager commands on an enrolled machine.
+
+After Core health, the original owned worker directly owns each fixed launcher
+install/status child. It persists exclusive start intent before each spawn,
+retains authenticated Controller/CLI and Node handles, clears inherited
+environment and uses bounded output and process-group quiescence. This lifecycle
+assumes trusted cooperating installers whose descendants retain the group and
+remain signalable; it is not a sandbox. A timeout, cancellation, failed result
+or unproven quiescence remains unresolved/partial and never authorizes retry or
+rollback over a possibly running installer. Only strict launcher result matching
+and a final Controller/CLI/Host/workload health check permit whole completion.
+No permit/EOF fixture or reconstructed supervisor marker supplies authority.
+Immediately after spawn, the worker authenticates the owned child's running
+Controller image and records its PID, creation identity, parent identity and
+intent digest through the original journal directory. This exclusive record is
+synced and read back; empty, changed or replaced records refuse completion.
+The interval between durable intent and recorded completion always means an
+installer may have run, including when the child identity record is missing.
+On Linux the child starts a private session and sets `PR_SET_PDEATHSIG(SIGKILL)`
+before exec, checking that its original parent still exists. The private worker
+uses a single-thread runtime because Linux ties this signal to the spawning
+thread. This kills the direct child on worker death; it proves neither descendant
+quiescence nor that an installer made no changes. macOS has no equivalent wired
+here and remains unaccepted. Neither platform may clear its claim on this basis.
+
+An unresolved launcher attempt requires explicit audited local operator
+reconciliation; no automatic recovery or claim-clearing command is provided.
+Preserve the private job, intent, child identity and active claim, and keep new
+updates blocked. Establish the exact recorded process identity using creation
+identity and checked image identity as well as PID; never signal a saved numeric
+PID that may have been reused. Independently prove that identity is gone and
+its process group is quiescent, then verify launcher state with the fixed
+authenticated status recipe and independently recheck Controller/CLI image,
+Host and workload health. A missing or partial child identity requires broader
+independent process inventory or isolated-machine investigation; it is not proof
+that spawn never happened. Record the evidence and obtain an explicit local
+operator disposition before any future claim reconciliation. Do not delete the
+claim, replay install, adopt a copied receipt, or infer success from elapsed time,
+a free lock, exit status or a status response alone. These investigation steps
+do not manufacture the original worker's terminal-success authority.
+The legacy CLI updater now holds the same local installation locks and refuses
+an unresolved native active claim, including corrupt or empty claims. It also
+refuses an ambient CLI path that differs from its saved installed sibling.

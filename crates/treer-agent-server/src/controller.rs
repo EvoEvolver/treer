@@ -1869,6 +1869,9 @@ impl ControllerRuntime {
         if !crate::machine_upload::chunked_upload_supported() {
             capabilities.retain(|value| value != treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3);
         }
+        if crate::controller_update::capability_available() {
+            capabilities.push(treer_protocol::controller_update::CAPABILITY.to_string());
+        }
         if self.inner.provider_cli.capability_available() {
             capabilities.push(treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL.to_string());
             // v2 (#134): installations are observed and consent-gated.

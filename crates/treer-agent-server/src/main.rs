@@ -2,6 +2,7 @@ mod agent_interface;
 mod cli_command;
 mod cli_session;
 mod controller;
+mod controller_update;
 mod host_client;
 mod interface_cache;
 mod launcher;
@@ -13,8 +14,14 @@ mod private_state;
 mod provider_cli;
 mod proxy;
 mod release_update;
+#[cfg(unix)]
+pub mod self_update;
 mod service;
 mod startup_store;
+// Test-only envelope used by the Unix journal's foreign-record refusal test.
+// This does not add any Windows updater entry or runtime.
+#[cfg(test)]
+mod windows_update_envelope;
 mod tui;
 mod workload_proxy;
 
@@ -196,6 +203,48 @@ struct ServerArgs {
 }
 
 fn main() -> Result<()> {
+    // Private old-image worker MUST branch before Tokio, normal Controller
+    // startup, metrics helpers or any other threads/forks. Never fall back to
+    // ordinary service execution after malformed or failed worker bootstrap.
+    #[cfg(unix)]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--controller-update-worker"))
+    {
+        let mut arguments = std::env::args_os().skip(2);
+        let selector = arguments
+            .next()
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| anyhow::anyhow!("update_worker_bootstrap_failed"))?;
+        if arguments.next().is_some() {
+            anyhow::bail!("update_worker_bootstrap_failed");
+        }
+        let worker = self_update::web_adapter::enter_worker(&selector)
+            .map_err(|_| anyhow::anyhow!("update_worker_bootstrap_failed"))?;
+        return self_update::web_adapter::run_worker(worker)
+            .map_err(|_| anyhow::anyhow!("update_recovery_required"));
+    }
+    // Only a dedicated non-release acceptance build contains this entry. The
+    // ordinary capability gate is unchanged; no remote route invokes it.
+    #[cfg(all(unix, feature = "native-update-acceptance"))]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--hosted-native-update-acceptance"))
+    {
+        if std::env::args_os().len() != 2 {
+            anyhow::bail!("hosted_update_acceptance_refused");
+        }
+        return self_update::hosted_acceptance::submit();
+    }
+
+    // Evaluate the explicit hosted selector before service environment cleanup
+    // can erase evidence of an inherited managed caller. Absent release builds.
+    #[cfg(all(unix, feature = "native-update-acceptance"))]
+    if let Ok(Args {
+        command: Some(Command::Run { config }),
+        ..
+    }) = Args::try_parse()
+    {
+        self_update::hosted_controller_dispatch::configure(&config)?;
+    }
     // Saved service configuration supplies identity; never let a launcher or
     // service manager's inherited workload identity override it.
     if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--execute-cli"))

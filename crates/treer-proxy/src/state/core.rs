@@ -46,6 +46,8 @@ impl AppState {
         let (events, _) = broadcast::channel(512);
         Self {
             inner: std::sync::Arc::new(Inner {
+                #[cfg(test)]
+                controller_update_dispatch_attempts: std::sync::atomic::AtomicUsize::new(0),
                 workspaces: RwLock::new(HashMap::new()),
                 connections: RwLock::new(HashMap::new()),
                 cluster_snapshot_revisions: Mutex::new(HashMap::new()),
@@ -334,10 +336,10 @@ impl AppState {
     }
 
     /// Capabilities the browser read models expose per machine. The Web only
-    /// decides between the legacy and the chunked upload route; every other
-    /// Controller capability stays in the connection table (#153 data
-    /// minimization, #173).
+    /// decides between upload routes and whether the typed update entry exists;
+    /// unrelated Controller capabilities stay in the connection table.
     pub(crate) const READ_MODEL_CAPABILITIES: &'static [&'static str] = &[
+        treer_protocol::controller_update::CAPABILITY,
         treer_protocol::CAPABILITY_MACHINE_UPLOAD,
         treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3,
     ];
@@ -830,6 +832,17 @@ impl AppState {
         })
         .await?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn close_fixture_server_connection(&self, workspace: &str, server: &str) {
+        self.release_server_runtime(
+            workspace,
+            server,
+            "fixture disconnect",
+            "fixture_disconnect",
+        )
+        .await;
     }
 
     pub(super) async fn release_server_runtime(

@@ -3723,6 +3723,7 @@ dependencies = [
 name = "treer-platform"
 version = "0.1.14"
 dependencies = [
+ "libc",
  "rustix",
  "tokio",
  "tracing",
@@ -3777,6 +3778,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "treer-platform",
  "treer-protocol",
  "url",
  "uuid",

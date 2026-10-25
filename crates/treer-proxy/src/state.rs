@@ -47,6 +47,8 @@ pub struct AppState {
 }
 
 struct Inner {
+    #[cfg(test)]
+    controller_update_dispatch_attempts: std::sync::atomic::AtomicUsize,
     workspaces: RwLock<HashMap<String, WorkspaceState>>,
     connections: RwLock<HashMap<ServerKey, ServerConnection>>,
     cluster_snapshot_revisions: Mutex<HashMap<ServerKey, u64>>,

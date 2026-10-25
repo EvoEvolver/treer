@@ -395,6 +395,15 @@ pub enum AgentCommand {
         request: ReplaceAgentStartupRequest,
         revision: u64,
     },
+    /// Controller update (#222): inspect readiness, dispatch an exact prepared
+    /// binding once, and recover the durable operation by ID.
+    ControllerUpdateInspect {},
+    ControllerUpdateDispatch {
+        binding: crate::controller_update_runtime::DispatchBinding,
+    },
+    ControllerUpdateOperation {
+        operation_id: String,
+    },
     /// Provider CLI installation (#123): recipe table for this machine, exact
     /// recipe check, token-confirmed install dispatch and operation polling.
     ProviderCliRecipes {},
@@ -603,6 +612,13 @@ impl AgentCommand {
                 Some(CAPABILITY_AGENT_STARTUP)
             }
             Self::Exec { .. } => Some(CAPABILITY_MACHINE_EXEC),
+            Self::ControllerUpdateInspect {} | Self::ControllerUpdateDispatch { .. } => {
+                Some(crate::controller_update::CAPABILITY)
+            }
+            // Reading an existing, workspace/server-bound receipt must survive
+            // replacement by an ordinary capOFF image. This never admits an
+            // update; the authenticated Proxy route owns the durable operation.
+            Self::ControllerUpdateOperation { .. } => None,
             Self::ProviderCliRecipes {}
             | Self::ProviderCliCheck { .. }
             | Self::ProviderCliOperation { .. } => {

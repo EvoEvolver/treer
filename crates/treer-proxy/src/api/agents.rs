@@ -3,6 +3,7 @@ use super::*;
 #[path = "agents/agent.rs"]
 mod agent;
 mod context;
+mod controller_update;
 mod interface;
 #[path = "agents/machine.rs"]
 mod machine;
@@ -18,6 +19,7 @@ mod terminal;
 
 pub(super) use agent::*;
 pub(super) use context::*;
+pub(super) use controller_update::*;
 pub(super) use interface::*;
 pub(super) use machine::*;
 pub(super) use machine_files::*;

@@ -91,3 +91,73 @@ tests pass on the main-based tree; the complete protocol package also passes
 (82 unit tests and 2 integration tests). Both imported files have the same Git
 blob IDs as `ad23f3bf`. `git diff --check` passes. No hosted stack, native worker,
 PG matrix, browser acceptance or lifecycle was repeated for this source leaf.
+
+## Completed main-based source composition
+
+The candidate now includes the Unix runtime, typed command and Proxy/Auth/PG
+registrations, Machine entry, focused test entries and their documentation. This
+supersedes the prerequisite's remaining-composition note above. It is a source
+integration, not a new hosted acceptance or production activation.
+
+The 103 subsequently added modules, tests, scripts and research documents all
+have the same Git blob IDs as accepted source `ad23f3bf`; the two protocol model
+files imported in the prerequisite also retain their accepted blob IDs. A local
+per-file comparison is retained in
+`.treer/reviews/core222-canonical-integration-20261025/IMPORTS.json`. Existing
+files were composed by updater-only hunks against `c0ebb797`:
+
+- Unix platform registrations and `rustix` net/event features plus macOS libc.
+  The lockfile only adds existing libc to platform dependencies and platform to
+  Proxy dev-dependencies; no version changes or Windows bootstrap are imported.
+- Controller early private worker/acceptance entry, guarded advertisement,
+  asynchronous typed command dispatch and read-only operation query. The legacy
+  update guard, installed-path inventory and authenticated signed metadata reuse
+  hooks are retained. `launcher.rs` only widens `node_executable` to crate scope;
+  canonical Rust-required launcher logic remains intact.
+- Proxy catalog option, machine-scoped authenticated routes, durable tables,
+  machine mutation lock reuse and pending-update no-replay reconciliation. Test
+  dispatch counters remain `cfg(test)` and the real WebSocket/browser entries
+  remain ignored opt-in tests.
+- Console updater imports/props, Machine entry, translations and authenticated
+  session epoch. Canonical prepared-Claude orchestration and App reconnect logic
+  are preserved; no unrelated older Workspace tree is copied.
+
+The default Playwright configuration excludes only
+`controller-update-native.spec.ts`: that explicitly configured opt-in leaf
+requires the private Core fixture binding, so selecting it in the ordinary
+browser suite would be invalid. Its dedicated configuration still lists exactly
+one test. This is an integration-only test-selection adjustment, not a change to
+the browser acceptance implementation or product.
+
+The only Windows-named addition is the unchanged test-only opaque envelope used
+by the Unix journal's foreign-record refusal test. There is no Windows native
+runtime, protected bootstrap, record-state machine or shipping capability added.
+Host, host-protocol, launchers, Apps, CLI command parsing and workflows have zero
+diff against the canonical base. No acceptance feature is a default feature.
+
+Focused integration validation:
+
+- Controller default check and feature-enabled check including tests: PASS.
+- Controller feature-enabled and Proxy test-target strict Clippy: PASS.
+- Protocol: 83 unit and 2 integration tests PASS, including capability-OFF and
+  read-only receipt recovery gating.
+- Unix platform: 64 tests PASS; 6 existing owned-subprocess fixture helpers are
+  ignored by their normal test selectors.
+- Web typecheck and production build: PASS; 12 observer/diagnostic mechanisms
+  PASS. Three closed client browser checks PASS: normal single prepare/confirm,
+  stale previous-session response isolation, and refreshed retained operation
+  detail reconciliation with capability OFF. Native browser entry lists once;
+  it was not executed again.
+- Documentation check and diff whitespace check: PASS.
+
+Initial `--locked` validation correctly required the two dependency-edge lockfile
+updates; offline Cargo resolution made only those changes and later locked
+checks pass. Missing sibling visibility for the reused Policy/audit helpers and
+the test-only foreign envelope were resolved from their accepted-source hooks
+before final checks. These were composition dependencies, not new runtime fixes.
+
+The single integration handoff must bind this candidate SHA and this canonical
+base. Review only the composed shared hooks and source bindings; retain the
+already reviewed implementation and exact `40197073704` result as prior-source
+evidence. Do not relabel that hosted run as executing the integration candidate,
+restart CI/acceptance to reconstruct it, or activate an ordinary installation.
