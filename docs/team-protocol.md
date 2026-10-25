@@ -54,6 +54,36 @@ newer ticket comment disagree, the ticket wins and this file should be updated.
 - Say what was not run or not verified. A check that could not start (for
   example a missing build output) is a finding to report, not a baseline.
 
+## Agent self-service and minimal human input
+
+New work defaults to Agent self-service through supported APIs and commands.
+Owners gather normally accessible facts, choose routine implementation details,
+prepare inputs and verify results themselves. Missing packaging, test fixtures,
+internal coordination or a discoverable ID is not a user decision. Do not ask
+users to perform technical steps that an authorized Agent can complete.
+
+Before setting `waiting_on=user`, separate work that can proceed independently
+and complete it. Record the exact remaining authorization or decision, its
+effect, the prepared scope and the responsible executor. An unavailable external
+resource may instead require an explicit deferral and a condition for resuming;
+do not manufacture a pending user decision for it.
+
+The leader collects genuine decisions into one short set of yes/no questions.
+Each question names the concrete target and impact; "no" has an explicit defer,
+skip or alternative outcome. Do not repeatedly request an authorization already
+given. Facts that cannot yet be verified remain unknown: do not turn a yes/no
+answer into fabricated identity, access or acceptance evidence.
+
+Human choices remain human choices, including actual external email delivery,
+data deletion and access expansion. Prepare a specific recipient, content,
+quantity or target scope before requesting authorization. Agent self-service
+does not authorize inventing approval, bypassing access controls, copying
+credentials or automatically replaying an uncertain operation.
+
+An individual external dependency must not block unrelated acceptance or source
+work on the same ticket. Update `waiting_on` when that dependency changes, and
+preserve what was actually skipped rather than claiming it passed.
+
 ## Comment titles (v1.2)
 
 Tickets grow to many comments of several KB each, and reading all of them costs
