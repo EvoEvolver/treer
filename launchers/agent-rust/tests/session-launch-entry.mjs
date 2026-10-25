@@ -43,6 +43,32 @@ test('managed snapshot -> atomic prepare -> explicit authenticated-config launch
   const restarted=await f.running([],env);assert.equal((await restarted.state()).thread.id,p.imported.sessionId);
   calls=(await readFile(p.env.LAUNCH_CALLS,'utf8')).trim().split('\n').map(JSON.parse);assert.deepEqual(calls.filter(e=>e.text).map(e=>e.text),['continue imported context']);await f.checkSource();
 });
+
+test('orchestrated snapshot inspect/hash prepare and persistent target ready preserve source, prompt once',async t=>{
+  const f=await source(t),destination=join(f.root,'orchestrated'),sessionId=crypto.randomUUID();
+  // Model the ordinary upload boundary using only task-owned bytes/directories.
+  // No shell, snapshot content, authentication value or provider control in argv.
+  const upload=join(f.root,'uploaded-snapshot.json'),bytes=await readFile(f.input);
+  await writeFile(upload,bytes,{flag:'wx',mode:0o600});
+  const options=['--input',upload,'--directory',destination,'--session-id',sessionId,'--sha256',sha(bytes)];
+  function operation(op){return spawnSync(binary,['session',op,...options],{env:clean({HOME:f.root}),encoding:'utf8',timeout:10000});}
+  const inspected=operation('inspect');assert.equal(inspected.status,0,inspected.stderr);
+  const validation=JSON.parse(inspected.stdout);assert.equal(validation.phase,'validated');await assert.rejects(stat(destination));
+  const prepared=operation('prepare');assert.equal(prepared.status,0,prepared.stderr);const receipt=JSON.parse(prepared.stdout);
+  assert.deepEqual(receipt,{...validation,phase:'prepared'});
+  const privateRoot=join(f.root,'orchestrated-private');await mkdir(privateRoot,{mode:0o700});
+  const env=f.environment(privateRoot,join(f.root,'orchestrated-port'),join(f.root,'orchestrated-calls'));
+  const startup=['session','run','--directory',receipt.cwd,'--session-id',receipt.sessionId,'--auth','environment'];
+  const target=await f.running(startup,env),state=await target.state();
+  assert.equal(state.ready,true);assert.equal(state.thread.id,sessionId);assert.notEqual(sessionId,f.id);
+  assert.equal(state.harness.capabilities.sessionTransfer,null);
+  assert.equal((await fetch(target.base+'/api/health').then(r=>r.json())).ready,true);
+  assert.equal((await fetch(target.base+'/api/prompt',{method:'POST',body:JSON.stringify({prompt:'explicit new target input',mode:'queue'})})).status,200);
+  await until(target.state,s=>s.thread.status==='idle'&&s.thread.turns.some(turn=>turn.items.some(item=>item.text==='explicit new target input')));
+  const calls=(await readFile(env.LAUNCH_CALLS,'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(calls.filter(c=>c.text).length,1);assert.equal(calls.find(c=>c.spawn).session,sessionId);assert.equal(calls.find(c=>c.spawn).resume,true);
+  await f.checkSource();
+});
 test('prepare validation and launch auth/hash/private-root refusals precede provider/publication',async t=>{
   const f=await source(t);const bad=structuredClone(f.bundle);bad.files[0].sha256='0'.repeat(64);const file=join(f.root,'bad.json');await writeFile(file,JSON.stringify(bad),{mode:0o600});const refused=f.prepare('invalid',file);assert.notEqual(refused.result.status,0);await assert.rejects(stat(refused.destination));
   const p=await f.target();

@@ -29,6 +29,39 @@ search, stdin input, network fetch, provider command or runtime journal access.
 
 ## Bundle and filesystem boundary
 
+The authenticated Console flow can bind inspection and preparation to the exact
+snapshot bytes, without passing file contents or credentials in process argv:
+
+```sh
+treer-agent session inspect --input /absolute/uploaded-snapshot.json \
+  --directory /absolute/existing-parent/new-project \
+  --session-id NEW_UUID --sha256 SNAPSHOT_SHA256
+# After explicit confirmation, use exactly the same selectors and hash:
+treer-agent session prepare --input /absolute/uploaded-snapshot.json \
+  --directory /absolute/existing-parent/new-project \
+  --session-id NEW_UUID --sha256 SNAPSHOT_SHA256
+```
+
+`inspect` performs the complete import/prepare admission, including native history,
+new UUID, destination absence and rewritten size limits, without creating a stage,
+destination, intent or provider. Both commands hash the same bounded descriptor
+bytes that are parsed. Preparation revalidates everything; a changed upload or a
+newly occupied destination refuses before publication. A successful inspection
+is descriptive evidence, not a lock on the destination or a provider checkpoint.
+Its `treer.claude-prepared/v1` receipt binds `inputSha256`, `sourceSessionId`,
+new `sessionId`, canonical `cwd`, isolated config path and rewritten file/byte
+counts (including the launch plan). `phase:validated` becomes `phase:prepared`
+only after atomic publication. Counts do not describe Launcher receipts or
+provider readiness. Hash is required on inspection and optional for backward
+compatible CLI prepare/import; the Console flow always supplies it.
+Hash-bound operations additionally require a current-user private input parent
+directory (0700) and private regular input file (0600), using the same opened
+descriptors. The Console requires an operator-prepared private scratch directory,
+uploads one newly named file with overwrite disabled and binds the returned path
+and byte count. It does not copy secrets or automatically delete that sensitive
+snapshot. Inspection confirms filesystem custody after upload; it cannot
+retrospectively prove that a previously exposed file was never read.
+
 The schema, base64/SHA256 entries and allowlist match Node
 `src/harness/session-files.ts`: main `session/session.jsonl`, Claude
 `session/subagents/**/*.jsonl`, native `memory/**/*.md`, project `AGENTS.md`,

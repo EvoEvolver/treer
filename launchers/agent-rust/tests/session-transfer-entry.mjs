@@ -72,6 +72,60 @@ test('actual entry: allowlisted export, fresh UUID isolated import, canonical re
   await f.noStages();
 }));
 
+test('actual entry: inspect is readonly; hash-bound prepare publishes only reviewed bytes', async () => fixture(async f => {
+  const input = await f.save(f.get()), bytes = await fs.readFile(input), expected = digest(bytes);
+  const destination = path.join(f.root, 'reviewed-target'), id = randomUUID();
+  const options = ['--input', input, '--directory', destination, '--session-id', id, '--sha256', expected];
+  const inspection = f.run(['inspect', ...options]);
+  assert.equal(inspection.status, 0, inspection.stderr);
+  const checked = JSON.parse(inspection.stdout);
+  assert.equal(checked.schema, 'treer.claude-prepared/v1');
+  assert.equal(checked.phase, 'validated');
+  assert.equal(checked.inputSha256, expected);
+  assert.equal(checked.sourceSessionId, f.id);
+  assert.equal(checked.sessionId, id);
+  assert.equal(checked.cwd, destination);
+  assert.ok(checked.files > 0 && checked.bytes > 0);
+  await assert.rejects(fs.stat(destination));await f.noStages();
+  // Even a semantically valid change between review and publication refuses.
+  const changed = JSON.parse(bytes);changed.exportedAt = new Date().toISOString() + '-changed';
+  await fs.writeFile(input, JSON.stringify(changed));
+  const refused = f.run(['prepare', ...options]);
+  assert.notEqual(refused.status, 0);assert.match(refused.stderr, /snapshot_sha256_mismatch/);
+  await assert.rejects(fs.stat(destination));await f.noStages();
+  await fs.writeFile(input, bytes);
+  const result = f.run(['prepare', ...options]);assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {...checked, phase: 'prepared'});
+  assert.equal(JSON.parse(await fs.readFile(path.join(destination, '.harness/claude-launch.json'), 'utf8')).sessionId, id);
+  const duplicate = f.run(['prepare', ...options]);assert.notEqual(duplicate.status, 0);
+  assert.match(duplicate.stderr, /destination_must_be_new/);
+}));
+
+test('actual entry: inspection validates paths, content, native history and new identity before publication', async () => fixture(async f => {
+  const destination = path.join(f.root, 'never-published'), id = randomUUID(), bundle = f.get();
+  async function refuses(value, extra = [], pattern) {
+    const input = await f.save(value), options = ['--input', input, '--directory', destination, '--session-id', id, '--sha256', digest(await fs.readFile(input))];
+    const result = f.run(['inspect', ...options, ...extra]);assert.notEqual(result.status, 0);
+    if (pattern) assert.match(result.stderr, pattern);
+    await assert.rejects(fs.stat(destination));await f.noStages();
+  }
+  await refuses({...bundle, files: bundle.files.map((e, i) => i === 0 ? {...e, path:'../outside'} : e)});
+  await refuses({...bundle, files: bundle.files.map((e, i) => i === 0 ? {...e, sha256:'0'.repeat(64)} : e)});
+  await refuses({...bundle, files:[entry('session','session.jsonl',`${JSON.stringify({sessionId:f.id,type:'system'})}\n`)]});
+  await refuses(bundle, ['--sha256', '0'.repeat(64)], /unknown_or_duplicate_session_option/);
+  const input=await f.save(bundle), base=['--input',input,'--directory',destination,'--sha256',digest(await fs.readFile(input))];
+  assert.notEqual(f.run(['inspect',...base]).status,0,'explicit fresh UUID required');
+  assert.notEqual(f.run(['inspect',...base,'--session-id',f.id]).status,0,'source UUID never reused');
+  await fs.chmod(input,0o644);
+  assert.match(f.run(['inspect',...base,'--session-id',id]).stderr,/snapshot_private_storage_required/);
+  await fs.chmod(input,0o600);await fs.chmod(f.root,0o755);
+  try {assert.match(f.run(['inspect',...base,'--session-id',id]).stderr,/snapshot_private_storage_required/);}
+  finally {await fs.chmod(f.root,0o700);}
+  await fs.mkdir(destination,{mode:0o700});
+  assert.match(f.run(['inspect',...base,'--session-id',id]).stderr,/destination_must_be_new/);
+  assert.deepEqual(await fs.readdir(destination),[]);
+}));
+
 test('actual entry: malicious paths/hash/base64/duplicates/JSONL rejected before publication', async () => fixture(async f => {
   const bundle = f.get();
   const cases = [

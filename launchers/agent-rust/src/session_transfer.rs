@@ -109,6 +109,9 @@ fn root(path: &Path) -> Result<(PathBuf, File)> {
     Ok((path, fd))
 }
 fn read(root: &File, path: &str, limit: usize) -> Result<Vec<u8>> {
+    read_snapshot(root, path, limit, false)
+}
+fn read_snapshot(root: &File, path: &str, limit: usize, private: bool) -> Result<Vec<u8>> {
     safe(path)?;
     let mut fd = open_at(root, Path::new(path), false)?;
     let before = fd.metadata()?;
@@ -119,6 +122,15 @@ fn read(root: &File, path: &str, limit: usize) -> Result<Vec<u8>> {
             && before.mode() & 0o022 == 0,
         "session_file_not_owned_regular"
     );
+    if private {
+        let parent = root.metadata()?;
+        ensure!(
+            parent.uid() == rustix::process::getuid().as_raw()
+                && parent.mode() & 0o077 == 0
+                && before.mode() & 0o077 == 0,
+            "snapshot_private_storage_required"
+        );
+    }
     ensure!(before.len() <= limit as u64, "session_too_large");
     let mut bytes = Vec::new();
     (&mut fd).take(limit as u64 + 1).read_to_end(&mut bytes)?;
@@ -662,21 +674,44 @@ fn remove_contents(dir: &File) -> Result<()> {
     }
     Ok(())
 }
-fn import(input: &Path, destination: &Path, id: &str, prepare: bool) -> Result<Value> {
+fn import(
+    input: &Path,
+    destination: &Path,
+    id: &str,
+    prepare: bool,
+    inspect: bool,
+    expected_hash: Option<&str>,
+) -> Result<Value> {
     ensure!(
         input.is_absolute() && destination.is_absolute(),
         "absolute_path_required"
     );
     let (_, input_parent) = root(input.parent().context("input_parent_required")?)?;
-    let bytes = read(
+    let bytes = read_snapshot(
         &input_parent,
         input
             .file_name()
             .and_then(|s| s.to_str())
             .context("input_filename_required")?,
         INPUT,
+        expected_hash.is_some(),
     )?;
+    // Bind inspection and publication to the exact uploaded snapshot bytes.
+    // This hash is computed from the same bounded, nofollow descriptor read
+    // that supplies the parser, never from a separate pathname/hash pass.
+    let input_hash = hash(&bytes);
+    if let Some(expected) = expected_hash {
+        ensure!(
+            expected.len() == 64
+                && expected
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+            "invalid_snapshot_sha256"
+        );
+        ensure!(input_hash == expected, "snapshot_sha256_mismatch");
+    }
     let bundle: Bundle = serde_json::from_value(crate::bounded_json::decode(&bytes)?)?;
+    let source_session = bundle.session_id.clone();
     let (parent_path, parent) = root(
         destination
             .parent()
@@ -706,6 +741,17 @@ fn import(input: &Path, destination: &Path, id: &str, prepare: bool) -> Result<V
         ));
     }
     ensure!(!exists(&parent, name)?, "destination_must_be_new");
+    let receipt = json!({
+        "schema":"treer.claude-prepared/v1",
+        "phase":if inspect {"validated"} else {"prepared"},
+        "inputSha256":input_hash,"sourceSessionId":source_session,
+        "sessionId":id,"cwd":cwd,
+        "files":files.len(),"bytes":files.iter().map(|(_,b)|b.len()).sum::<usize>(),
+        "environment":{"CLAUDE_CONFIG_DIR":destination.join(".harness/claude")}
+    });
+    if inspect {
+        return Ok(receipt);
+    }
     let stage_name = format!(".session-import-{}", uuid::Uuid::new_v4());
     fs::mkdirat(&parent, stage_name.as_str(), Mode::from_raw_mode(0o700))?;
     let stage = match open_at(&parent, Path::new(&stage_name), true) {
@@ -762,12 +808,15 @@ fn import(input: &Path, destination: &Path, id: &str, prepare: bool) -> Result<V
     parent
         .sync_all()
         .context("import_published_durability_unknown_do_not_retry")?;
-    Ok(
-        json!({"sessionId":id,"cwd":cwd,"environment":{"CLAUDE_CONFIG_DIR":destination.join(".harness/claude")}}),
-    )
+    Ok(if prepare {
+        receipt
+    } else {
+        json!({"sessionId":id,"cwd":cwd,"environment":{"CLAUDE_CONFIG_DIR":destination.join(".harness/claude")}})
+    })
 }
 pub fn cli(args: Vec<String>) -> Result<()> {
     if args.first().map(String::as_str) == Some("--help") {
+        println!("session inspect --input ABS --directory NEW_ABS --session-id NEW_UUID --sha256 BUNDLE_SHA256\nInspect validates the full prepared target without writing. Prepare also accepts --sha256 to bind publication to inspected bytes. Receipts describe files/paths only, never provider readiness.\n");
         println!("session export --harness claude --config-dir ABS --cwd ABS --session-id UUID\nsession import --input ABS --directory NEW_ABS [--session-id NEW_UUID]\nsession prepare --input ABS --directory NEW_ABS [--session-id NEW_UUID]\nsession launch --directory PREPARED_ABS --session-id NEW_UUID --auth environment\nsession run --directory PREPARED_ABS --session-id NEW_UUID --auth environment\nImport/prepare publish a new isolated directory. Launch needs a fresh private runtime root and explicit environment auth, never copies credentials or modifies the source session. Launch is once-only. Run is the persistent startup form: first bootstrap once, then only the same Agent/private checkpoint resumes. Failed intent without checkpoint is never retried. Normal Create saves this argv; process creation is not provider readiness.");
         return Ok(());
     }
@@ -776,7 +825,9 @@ pub fn cli(args: Vec<String>) -> Result<()> {
     let mut options = BTreeMap::new();
     let allowed = match operation.as_str() {
         "export" => &["--harness", "--config-dir", "--cwd", "--session-id"][..],
-        "import" | "prepare" => &["--input", "--directory", "--session-id"][..],
+        "import" | "prepare" | "inspect" => {
+            &["--input", "--directory", "--session-id", "--sha256"][..]
+        }
         _ => bail!("unknown_session_operation"),
     };
     for pair in args[1..].chunks_exact(2) {
@@ -803,6 +854,10 @@ pub fn cli(args: Vec<String>) -> Result<()> {
             required("--session-id")?,
         )?)?
     } else {
+        if operation == "inspect" {
+            required("--sha256")?;
+            required("--session-id")?;
+        }
         let id = options
             .get("--session-id")
             .cloned()
@@ -811,7 +866,9 @@ pub fn cli(args: Vec<String>) -> Result<()> {
             Path::new(required("--input")?),
             Path::new(required("--directory")?),
             &id,
-            operation == "prepare",
+            operation != "import",
+            operation == "inspect",
+            options.get("--sha256").map(String::as_str),
         )?
     };
     let output = (|| -> Result<()> {
