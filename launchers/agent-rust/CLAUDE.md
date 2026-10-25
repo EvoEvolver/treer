@@ -61,7 +61,44 @@ confirm selection. Refusal preserves the previous known selection. No switch
 interrupts/restarts the provider or replays an input. Required RPC deadlines,
 EOF/frame integrity and Codex discovery/recovery behavior are unchanged.
 
-## Native mid-turn steering (#247)
+## Native goals, first batch (#247)
+
+The native initialization `commands` must explicitly contain `goal` before
+the capability is exposed as `{pause:false,budget:false}`. No version table or
+private Claude history is used. Idle goal set/replace and clear reuse the normal
+durable FIFO input journal with one fixed operation ID and native `/goal ...`
+input. There is no second context prompt. Accepted HTTP input means a local
+request, not successful native mutation: the desired goal is visibly desynced
+until the same current input's native local-command envelope reports the exact
+args and matching `Goal set: ...`/`Goal cleared` output. Both Node-supported
+stdout envelopes are understood. Ordinary model output, turn result, wrong args,
+sidechains and stale events without that current input cannot confirm a goal.
+The native envelope correlates command args/current input, not a per-UUID
+provider consumption acknowledgement.
+
+The actor remains free to pump events and accept queued ordinary prompts during
+goal work. Normal `result` alone settles its ordinary input receipt. A missing
+goal ACK, result without ACK or a response later than30 seconds after local
+dispatch becomes explicit goal uncertainty; it does not poison transport or
+resubmit input. Further goal mutations and generic retry/reconcile refuse while
+that uncertainty is unresolved: this first slice has no supported native goal
+query/disposition API. Ordinary prompts remain live. Restart retains desired
+goal and delivery evidence but marks native state unconfirmed, never reapplies
+saved commands. Existing generic UI recovery buttons return an unsupported
+operation in this slice; they do not silently retry. A previously confirmed
+goal can be replaced with a new explicit idle edit after restart.
+
+Only an exact native `goal_status.condition`, or matching Stop-hook
+`prompt_text` with explicit no-output/no-errors/non-prevented completion, can
+complete a synced active goal. Goal completion does not settle a turn/receipt or
+interrupt Claude. Token/time usage are unavailable. Budget/pause/agent-exit
+requests and busy goal mutation/clear explicitly refuse before sending. To clear
+a working goal, the operator must first choose the ordinary explicit interrupt
+and wait for actual turn completion; the goal API never interrupts implicitly.
+Session transfer and extra settings remain separate batches. No shared UI,
+public assets, installer, provider pins or Codex goal protocol changes.
+
+## Native mid-turn steering contract
 
 Working `delivery:steer` uses the same native stream-json user-input protocol as
 Node, with a unique UUID, the existing session and exact expected active turn.
@@ -179,7 +216,7 @@ Remaining Claude parity batches, ordered by user impact:
 | --- | --- | --- |
 | Images | Implemented after steering; enabled only with usable private attachment storage | Production native delivery; Windows attachment storage remains unsupported |
 | Background tasks | Native events, retention/clear and POSIX bounded output supported | Windows confined output; active-task checkpoint/restore remains unsupported |
-| Goals/budget | Claude goal capability null | Native budget controls, usage accounting and explicit goal recovery |
+| Goals/budget | Native-discovered idle set/replace/clear, local-command ACK and exact-condition completion; pause/budget false | Busy edits/clear, budget enforcement/usage accounting and explicit goal recovery |
 | Session transfer | Capability null; migration imports are a separate operator contract | Supported export/import adapter with same-session/state checks |
 | Settings beyond model | Model catalog/ACK switching supported; effort unsupported | Discover effort/control support from provider, never a hardcoded version table |
 

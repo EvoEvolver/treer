@@ -12,7 +12,7 @@ import {createRequire} from 'node:module';
 import {hermeticEnv,localFetch as fetch} from '../../agent/tests/hermetic.mjs';
 import {fakePrivateState} from '../../agent/tests/fake-private-state.mjs';
 const binary=process.env.RUST_SPIKE_BIN;assert.ok(binary);
-async function until(read,accept){const end=Date.now()+10000;while(Date.now()<end){try{const v=await read();if(accept(v))return v;}catch{}await new Promise(r=>setTimeout(r,20));}throw Error('Claude fixture deadline');}
+async function until(read,accept,waitMs=10000){const end=Date.now()+waitMs;while(Date.now()<end){try{const v=await read();if(accept(v))return v;}catch{}await new Promise(r=>setTimeout(r,20));}throw Error('Claude fixture deadline');}
 async function fixture(t,extra={},setup=async()=>({})){
   const root=await realpath(await mkdtemp(join(tmpdir(),'rust231-'))),cwd=join(root,'cwd'),state=join(root,'private'),port=join(root,'port');
   await mkdir(cwd,{mode:0o700});await mkdir(state,{mode:0o700});
@@ -34,6 +34,80 @@ async function fixture(t,extra={},setup=async()=>({})){
 }
 async function stop(child){const exit=once(child,'exit');child.kill('SIGTERM');assert.equal((await exit)[0],0);}
 const inputCalls=async f=>(await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').map(JSON.parse);
+const goalCall=(f,body,method='PUT')=>{const bytes=JSON.stringify(body);return fetch(f.base+'/api/goal',{method,body:bytes,headers:{'content-type':'application/json','content-length':Buffer.byteLength(bytes)}});};
+test('Claude native goals discover explicitly, ACK before sync, preserve FIFO and never interrupt',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_GOALS:'1',CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_GOAL_ACK_DELAY:'300'});
+  const initial=await f.snapshot();assert.deepEqual(initial.harness.capabilities.goal,{pause:false,budget:false});
+  for(const input of [{objective:'work',tokenBudget:100},{status:'paused'},{objective:'clear'},{objective:'work',roundBudget:null}])assert.equal((await goalCall(f,input)).status,400);
+  const objective='Finish the exact native condition';
+  assert.equal((await goalCall(f,{objective,operationId:'goal-one'})).status,200);
+  assert.equal((await f.snapshot()).goal.syncStatus,'desynced','local write alone is not native goal ACK');
+  assert.equal((await goalCall(f,{clear:true},'DELETE')).status,400,'busy clear must not interrupt');
+  const follow=await f.post({prompt:'ordinary follow-up',mode:'queue'});assert.equal(follow.status,200,JSON.stringify({body:await follow.text(),state:await f.snapshot(),logs:f.logs()}));
+  let state=await until(f.snapshot,s=>s.goal?.syncStatus==='synced');assert.equal(state.goal.objective,objective);assert.equal(state.goal.status,'active');
+  state=await until(f.snapshot,s=>s.thread.status==='idle'&&s.thread.turns.length===2);
+  assert.equal(state.goalDelivery.status,'sent');
+  assert.deepEqual((await inputCalls(f)).map(c=>c.text),['/goal '+objective,'ordinary follow-up']);
+  assert.equal((await goalCall(f,{objective,operationId:'goal-one'})).status,200,'same operation does not replay');
+  assert.equal((await goalCall(f,{clear:true,operationId:'goal-clear'},'DELETE')).status,200);
+  state=await until(f.snapshot,s=>s.goal===null&&s.thread.status==='idle'&&s.thread.turns.length===3);
+  assert.equal(state.goalDelivery.status,'sent');assert.equal((await inputCalls(f)).length,3);
+  const controls=(await readFile(join(f.root,'calls.controls'),'utf8')).trim().split('\n').map(JSON.parse);assert.equal(controls.some(c=>c.request.subtype==='interrupt'),false);
+});
+test('Claude goal missing ACK is unknown, next prompt runs once, restart never reapplies goal',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_GOALS:'1',CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_GOAL_NO_ACK:'1'});
+  await goalCall(f,{objective:'unacknowledged objective',operationId:'unknown-goal'});
+  let state=await until(f.snapshot,s=>s.thread.status==='idle'&&s.goalDelivery?.status==='failed');assert.equal(state.goal.syncStatus,'desynced');assert.equal(state.goal.nativeObjective,null);assert.match(state.goalDelivery.error,/unknown/);
+  assert.equal((await goalCall(f,{objective:'another objective'})).status,400,'unknown command cannot be silently retried or overlapped');
+  assert.equal((await f.post({prompt:'next prompt',mode:'queue'})).status,200);
+  state=await until(f.snapshot,s=>s.thread.status==='idle'&&s.thread.turns.length===2);assert.equal(state.runtime.state,'idle');
+  const thread=state.thread.id;await stop(f.child);const resumed=await f.launch();state=await resumed.snapshot();
+  assert.equal(state.thread.id,thread);assert.equal(state.goalDelivery.status,'failed');assert.deepEqual((await inputCalls(f)).map(c=>c.text),['/goal unacknowledged objective','next prompt']);
+});
+for(const hook of [false,true])test('Claude exact native goal completion and saved-goal restart provenance remain separate '+(hook?'hook':'attachment'),async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_GOALS:'1',CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_GOAL_COMPLETION:'1',...(hook?{CLAUDE_FIXTURE_GOAL_HOOK:'1'}:{})});
+  await goalCall(f,{objective:'exact objective'});
+  let state=await until(f.snapshot,s=>s.goal?.syncStatus==='synced');assert.equal(state.goal.status,'active','unrelated goal completion cannot finish current goal');
+  state=await until(f.snapshot,s=>s.goal?.status==='done'&&s.thread.status==='idle');
+  const id=state.goal.id,thread=state.thread.id;await stop(f.child);const resumed=await f.launch();state=await resumed.snapshot();
+  assert.equal(state.thread.id,thread);assert.equal(state.goal.id,id);assert.equal(state.goal.syncStatus,'desynced');assert.match(state.goal.syncError,/unconfirmed/);assert.equal((await inputCalls(f)).length,1);
+  const noGoal=await fixture(t,{CLAUDE_FIXTURE_GOALS:'1',CLAUDE_FIXTURE_NO_GOAL:'1'});assert.equal((await noGoal.snapshot()).harness.capabilities.goal,null);assert.equal((await goalCall(noGoal,{objective:'not supported'})).status,400);
+});
+test('Claude real thirty-second goal ACK deadline ignores late ACK and preserves following prompt exactly once',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_GOALS:'1',CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_GOAL_ACK_DELAY:'31000'});
+  await goalCall(f,{objective:'slow goal'});await f.post({prompt:'after slow goal',mode:'queue'});
+  let state=await until(f.snapshot,s=>s.goalDelivery?.status==='failed',35000);
+  assert.match(state.goalDelivery.error,/unknown/);assert.equal(state.goal.nativeObjective,null);assert.equal(state.queue.length,1);assert.equal(state.runtime.state,'working');
+  state=await until(f.snapshot,s=>s.thread.status==='idle'&&s.thread.turns.length===2);
+  assert.equal(state.goalDelivery.status,'failed');assert.equal(state.goal.syncStatus,'desynced','expired ACK cannot confirm selection');
+  assert.deepEqual((await inputCalls(f)).map(c=>c.text),['/goal slow goal','after slow goal']);assert.equal(state.runtime.state,'idle');
+});
+test('Claude restart during native goal command preserves uncertain receipt and never replays input',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_GOALS:'1',CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_GOAL_ACK_DELAY:'3000'});
+  await goalCall(f,{objective:'pending across restart'});
+  const before=await until(f.snapshot,s=>s.thread.status==='running'&&s.goalDelivery?.status==='pending');
+  await stop(f.child);const resumed=await f.launch();const after=await resumed.snapshot();
+  assert.equal(after.thread.id,before.thread.id);assert.equal(after.runtime.state,'blocked');assert.equal(after.goal.syncStatus,'desynced');assert.equal(after.goalDelivery.status,'failed');
+  assert.equal((await inputCalls(f)).length,1,'neither goal nor original input is replayed');
+});
+test('Claude goal uses existing shared accessible editor without unsupported budget or pause controls',{skip:!process.env.CLAUDE_GOALS_BROWSER},async t=>{
+  const {chromium,expect}=createRequire(resolve(process.env.NODE_LAUNCHER_ROOT||'../agent','package.json'))('@playwright/test');
+  const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
+  const f=await fixture(t,{CLAUDE_FIXTURE_GOALS:'1',CLAUDE_FIXTURE_MODELS:'1',TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'goals-fixture'},async({state})=>({env:{TREER_AGENT_PRIVATE_STATE_DIR:state}}));
+  const browser=await chromium.launch({env:hermeticEnv({HOME:process.env.HOME})});t.after(()=>browser.close());
+  for(const width of [1280,390]){
+    const page=await browser.newPage({viewport:{width,height:850},extraHTTPHeaders:{'x-treer-interface-source':'proxy-ui','x-treer-agent-id':'ag_contract','x-treer-interface-instance':'goals-fixture'}});await page.goto(f.base+'/?lang=en');
+    await page.getByRole('button',{name:'Composer actions',exact:true}).click();await page.getByRole('menuitem',{name:'Set goal',exact:true}).click();
+    await expect(page.locator('#goal-budget')).toHaveCount(0);await expect(page.locator('#goal-round-budget')).toHaveCount(0);
+    await page.locator('#goal-objective').fill('Browser goal '+width);await page.getByRole('button',{name:'Save goal',exact:true}).click();
+    await until(f.snapshot,s=>s.goal?.syncStatus==='synced'&&s.thread.status==='idle');
+    await page.getByRole('toolbar',{name:'Run status'}).getByRole('button',{name:/^Goal/}).click();
+    await expect(page.locator('.goal-text')).toHaveText('Browser goal '+width);await expect(page.getByRole('button',{name:'Pause goal',exact:true})).toHaveCount(0);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+    await page.getByRole('button',{name:'Clear goal',exact:true}).click();await page.getByRole('button',{name:'Confirm clear goal',exact:true}).click();
+    await until(f.snapshot,s=>s.goal===null&&s.thread.status==='idle');await page.close();
+  }
+});
 test('Claude native tasks outlive turn completion, confined output and record-only clear preserve FIFO and restart',async t=>{
   const f=await fixture(t,{CLAUDE_FIXTURE_TASKS:'1',CLAUDE_FIXTURE_STEER:'1',CLAUDE_FIXTURE_TASK_ASYNC:'task-complete-ready'},async({root,cwd})=>{
     await writeFile(join(cwd,'task.output'),'x'.repeat(70000)+'own output tail');

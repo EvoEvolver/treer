@@ -4,6 +4,7 @@ use treer_agent_rust_spike::bounded_json;
 #[cfg(unix)] mod files;
 #[cfg(windows)] #[path="windows_files.rs"] mod files;
 mod goals;
+mod claude_goal;
 #[cfg(unix)] mod disk_history;
 #[cfg(windows)] #[path="windows_disk_history.rs"] mod disk_history;
 mod provider_stream;

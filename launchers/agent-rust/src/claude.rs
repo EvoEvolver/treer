@@ -22,6 +22,7 @@ pub struct Adapter {
     input_model_revision: u64,
     settings_epoch: u64,
     input_settings_epoch: Option<u64>,
+    goals_supported: bool,
 }
 pub enum Request {
     Local(Value),
@@ -180,6 +181,7 @@ impl Adapter {
             input_model_revision: 0,
             settings_epoch: 0,
             input_settings_epoch: None,
+            goals_supported: false,
         })
     }
     pub fn forget_control(&mut self, id: u64) { self.model_controls.remove(&id); }
@@ -209,6 +211,7 @@ impl Adapter {
         json!({"method":"thread/model/updated","params":{"threadId":self.session,"model":model,"modelOptions":self.models,"modelRevision":self.model_revision}})
     }
     fn catalog(&mut self, response: &Value) -> Result<()> {
+        self.goals_supported = crate::claude_goal::supported(response);
         self.models.clear();self.aliases.clear();
         if let Some(models)=response.get("models") {
             let models=models.as_array().filter(|m|m.len()<=128).ok_or_else(||anyhow::anyhow!("claude_model_catalog_invalid"))?;
@@ -233,6 +236,7 @@ impl Adapter {
                 Request::Wire(json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"initialize"}}))
             },
             "model/list" => Request::Local(json!({"data":self.models})),
+            "thread/goal/get" => Request::Local(json!({"goal":null,"supported":self.goals_supported,"confirmed":false})),
             "model/set" => {
                 let model=Self::model_name(&params["model"]).ok_or_else(||anyhow::anyhow!("claude_model_invalid"))?;
                 // An attempt, including an unacknowledged one, invalidates old
@@ -455,6 +459,18 @@ impl Adapter {
             bail!("claude_session_mismatch");
         }
         let mut out = vec![];
+        if self.goals_supported {
+            if let Some(turn)=&self.active {
+                if let Some(mut ack)=crate::claude_goal::acknowledgement(&event,&self.user) {
+                    ack["threadId"]=json!(self.session);ack["turnId"]=json!(turn);
+                    out.push(json!({"method":"thread/claude-goal/ack","params":ack}));
+                }
+            }
+            for mut completion in crate::claude_goal::completions(&event) {
+                completion["threadId"]=json!(self.session);
+                out.push(json!({"method":"thread/claude-goal/completion","params":completion}));
+            }
+        }
         if event["type"]=="assistant" && self.input_settings_epoch==Some(self.settings_epoch) && self.model_revision<=self.input_model_revision {
             if let Some(model)=Self::model_name(&event["message"]["model"]).filter(|m|*m!="<synthetic>") {
                 out.push(self.observe_model(model));

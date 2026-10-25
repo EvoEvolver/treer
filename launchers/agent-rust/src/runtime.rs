@@ -124,6 +124,8 @@ struct Runtime {
     // checkpoint caller, including provider events and notification acks.
     checkpoint: (VecDeque<Record>, Goals),
     goals_supported: bool,
+    claude_goal_wait: Option<(String, std::time::Instant)>,
+    claude_goal_ack: Option<Value>,
     attachments: Option<Arc<tokio::sync::Mutex<Attachments>>>,
     changed: watch::Sender<Arc<Value>>,
 }
@@ -214,6 +216,8 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
         goals: Goals::default(),
         checkpoint: (VecDeque::new(), Goals::default()),
         goals_supported: false,
+        claude_goal_wait: None,
+        claude_goal_ack: None,
         attachments: config.attachments.clone(),
         changed,
     };
@@ -296,6 +300,7 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
                     None => { let _ = rt.stop_for_transport_error(); },
                 },
                 _ = tick.tick() => {
+                    if rt.claude { let _ = rt.check_claude_goal(); }
                     if !rt.history_failed && rt.goals.edits.iter().any(|e| !e.sent && e.error.is_null()) && rt.flush_goals().await.is_err() {
                         eprintln!("Rust spike: goal edit retained for reconciliation");
                     }
@@ -694,8 +699,18 @@ impl Runtime {
         if let Ok(result) = self.provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
             .await
         {
-            self.goals_supported = result.get("goal").is_some();
-            if !result["goal"].is_null() {
+            self.goals_supported = if self.claude {result["supported"] == true} else {result.get("goal").is_some()};
+            if self.claude {
+                // A saved local goal is not native resume authority. Never
+                // reapply a command whose outcome may already have effects.
+                if self.goals.goal.is_object() {
+                    self.goals.goal["syncStatus"]=json!("desynced");
+                    self.goals.goal["syncError"]=json!("Native goal state unconfirmed after restart; no command replayed");
+                }
+                for edit in &mut self.goals.edits {
+                    if edit.applying && !edit.applied {edit.error=json!("claude_goal_ack_unknown_after_restart");}
+                }
+            } else if !result["goal"].is_null() {
                 self.goals.goal = goals::map(&result["goal"], &self.goals.goal);
             } else if self.goals.goal["status"] == "active" || self.goals.goal["status"] == "paused"
             {
@@ -757,7 +772,10 @@ impl Runtime {
         let mut snapshot = json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"],"cleanup":{"providerExit":self.provider_exit,"processGroup":if self.provider_exit == "not_requested" {"not_requested"} else {"termination_requested_unverified"},"detachedDescendants":"not_guaranteed"}},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":null,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}});
         snapshot["thread"] = thread;
         if self.claude {
-            snapshot["harness"]=json!({"id":"claude","name":"Claude","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":true,"goal":null,"sessionTransfer":null}});
+            snapshot["harness"]=json!({"id":"claude","name":"Claude","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":true,"goal":if self.goals_supported {json!({"pause":false,"budget":false})} else {Value::Null},"sessionTransfer":null}});
+            if let Some(edit)=self.goals.edits.last() {
+                snapshot["goalDelivery"]=json!({"id":edit.id,"status":if !edit.error.is_null() {"failed"} else if edit.applied {"sent"} else {"pending"},"error":edit.error,"promptId":edit.prompt_id});
+            }
             snapshot["backgroundTasks"]=self.terminal_tasks.clone();
         }
         let start=(self.history_start+self.turns.dropped).min(self.history_total);
@@ -1007,6 +1025,7 @@ impl Runtime {
             },
             "goal" => self.goal_edit(body).await,
             "goal_reconcile" | "goal_retry" => {
+                if self.claude {bail!("claude_goal_native_state_unavailable_no_automatic_retry");}
                 if method == "goal_retry"
                     && !self
                         .goals
@@ -1124,6 +1143,7 @@ impl Runtime {
         } else {
             goals::validate(&body)?
         };
+        if self.claude { return self.claude_goal_edit(body, input).await; }
         if input["roundBudget"].as_u64().is_some() {
             bail!("goal_round_budget_not_yet_supported");
         }
@@ -1169,6 +1189,7 @@ impl Runtime {
         Ok(())
     }
     async fn flush_goal(&mut self, i: usize) -> Result<()> {
+        if self.claude { return self.flush_claude_goal(i).await; }
         let edit = self.goals.edits[i].clone();
         let clear = edit.input["status"] == "cleared"
             || [json!("blocked"), json!("stale"), json!("done")].contains(&edit.input["status"]);
@@ -1290,6 +1311,99 @@ impl Runtime {
         self.goals.edits[i].error = Value::Null;
         self.persist()?;
         self.publish();
+        Ok(())
+    }
+    async fn claude_goal_edit(&mut self, body: Value, input: Value) -> Result<Value> {
+        if body.get("tokenBudget").is_some() || body.get("roundBudget").is_some()
+            || input.get("status").is_some_and(|s| s!="cleared")
+            || input.get("reason").is_some() || input.get("requiredAction").is_some() {
+            bail!("claude_goal_budget_pause_exit_unsupported");
+        }
+        if input["status"]!="cleared" && !input["objective"].as_str().is_some_and(|s| s!="clear" && s.len()<=65_000) {
+            bail!("claude_goal_objective_invalid");
+        }
+        let id=body["operationId"].as_str().map(str::to_owned).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
+        if let Some(edit)=self.goals.edits.iter().find(|e|e.id==id) {
+            if edit.input!=input {bail!("goal_edit_id conflict");}
+            return Ok(json!({"accepted":true,"duplicate":true}));
+        }
+        if self.dispatch_blocked || self.thread["activeTurnId"].is_string() || self.records.iter().any(|r|r.submission["state"]=="queued" || r.submission["state"]=="running") {
+            bail!("claude_goal_requires_idle_no_interrupt");
+        }
+        if self.goals.edits.iter().any(|e|!e.applied) {bail!("claude_goal_ack_unconfirmed_no_retry");}
+        self.goals.add(&id,input)?;
+        if let Some(objective)=self.goals.edits.last().and_then(|edit|edit.input["objective"].as_str()) {
+            self.goals.goal=goals::map(&json!({"objective":objective,"status":"active"}),&self.goals.goal);
+        }
+        if self.goals.goal.is_object() {
+            self.goals.goal["syncStatus"]=json!("desynced");
+            self.goals.goal["nativeObjective"]=Value::Null;
+            self.goals.goal["syncError"]=json!("Waiting for native goal acknowledgement");
+        }
+        self.persist()?;
+        self.flush_goals().await?;
+        self.publish();
+        Ok(json!({"accepted":true,"nativeAcknowledgement":"pending"}))
+    }
+    async fn flush_claude_goal(&mut self, i: usize) -> Result<()> {
+        let edit=self.goals.edits[i].clone();
+        if edit.applying {return Ok(());}
+        let args=if edit.input["status"]=="cleared" {"clear"} else {edit.input["objective"].as_str().ok_or_else(||anyhow!("claude_goal_objective_invalid"))?};
+        // The normal input journal is the sole dispatch/turn authority. Fixed
+        // operation identity also covers a crash between enqueue and edit save.
+        self.goals.edits[i].applying=true;
+        self.goals.edits[i].mode=Some("queue".into());
+        self.persist()?;
+        let result=self.submit(json!({"operation_id":format!("claude-goal/{}",edit.id),"text":format!("/goal {args}"),"delivery":"queue","notify":{"on":[]}})).await?;
+        self.goals.edits[i].prompt_id=result["submission"]["id"].clone();
+        self.persist()?;
+        self.check_claude_goal()?;
+        Ok(())
+    }
+    fn check_claude_goal(&mut self) -> Result<()> {
+        let Some(i)=self.goals.edits.iter().position(|e|e.applying && !e.applied && e.error.is_null()) else {self.claude_goal_wait=None;self.claude_goal_ack=None;return Ok(());};
+        let id=self.goals.edits[i].id.clone();
+        let record=self.records.iter().find(|r|r.operation==format!("claude-goal/{id}"));
+        if record.is_some_and(|r|r.submission["state"]=="queued") {return Ok(());}
+        let (_,started)=self.claude_goal_wait.get_or_insert_with(||(id,std::time::Instant::now()));
+        let expired=started.elapsed()>=Duration::from_secs(30);
+        if !expired {self.accept_claude_goal_ack()?;}
+        if self.goals.edits[i].applied {return Ok(());}
+        let terminal=self.records.iter().find(|r|r.operation==format!("claude-goal/{}",self.goals.edits[i].id)).is_none_or(|r|r.submission["state"]!="running");
+        if terminal || expired {
+            self.claude_goal_ack=None;
+            self.goals.edits[i].error=json!("claude_goal_ack_unknown_no_retry");
+            if self.goals.goal.is_object() {self.goals.goal["syncStatus"]=json!("desynced");self.goals.goal["syncError"]=json!("Native goal command outcome unknown; input not replayed");}
+            self.persist()?;self.publish();
+        }
+        Ok(())
+    }
+    fn accept_claude_goal_ack(&mut self) -> Result<()> {
+        let Some(p)=self.claude_goal_ack.clone() else {return Ok(());};
+        if self.history_failed || self.state_failed || self.rpc.failed() {self.claude_goal_ack=None;return Ok(());}
+        let Some(i)=self.goals.edits.iter().position(|edit| {
+            !edit.applied && edit.error.is_null() && self.records.iter().any(|record|
+                record.operation==format!("claude-goal/{}",edit.id)
+                && record.text==format!("/goal {}",p["args"].as_str().unwrap_or(""))
+                && record.submission["turn_id"].is_string() && record.submission["turn_id"]==p["turnId"]
+                && record.submission["error"].is_null()
+                && matches!(record.submission["state"].as_str(),Some("running"|"done")))
+        }) else {return Ok(());};
+        // A correlated local turn ID is published only AFTER successful input
+        // write/flush. An ACK pumped during that await is merely a candidate.
+        if p["args"]=="clear" {self.goals.goal=Value::Null;}
+        else {
+            self.goals.goal=goals::map(&p["goal"],&self.goals.goal);
+            self.goals.goal["syncStatus"]=json!("synced");
+            self.goals.goal["nativeObjective"]=p["args"].clone();
+            if p["completion"]["condition"]==p["args"] && p["completion"]["status"].is_string() {
+                self.goals.goal["status"]=p["completion"]["status"].clone();
+            }
+        }
+        let edit=&mut self.goals.edits[i];
+        edit.applied=true;edit.sent=true;edit.goal=self.goals.goal.clone();
+        self.claude_goal_wait=None;self.claude_goal_ack=None;
+        self.persist()?;
         Ok(())
     }
     fn submissions(&self) -> Vec<Value> {
@@ -1689,6 +1803,20 @@ impl Runtime {
             return Ok(());
         }
         match method {
+            "thread/claude-goal/ack" if self.claude => {
+                self.claude_goal_ack=Some(p.clone());
+                self.check_claude_goal()?;
+            }
+            "thread/claude-goal/completion" if self.claude => {
+                if self.goals.goal["status"]=="active" && self.goals.goal["syncStatus"]=="synced" && p["condition"]==self.goals.goal["nativeObjective"] {
+                    self.goals.goal["status"]=p["status"].clone();
+                    self.persist()?;
+                } else if let Some(ack)=&mut self.claude_goal_ack {
+                    // Preserve wire order if both ACK and its completion arrive
+                    // while the actor is still waiting for input write/flush.
+                    if p["condition"]==ack["args"] {ack["completion"]=p.clone();}
+                }
+            }
             "thread/tasks/updated" if self.claude => {
                 // Auxiliary metadata cannot complete a turn or poison its transport.
                 if crate::tasks::update(&mut self.terminal_tasks, &p["event"]).is_ok() {

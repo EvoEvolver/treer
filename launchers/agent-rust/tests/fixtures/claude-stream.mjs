@@ -13,6 +13,12 @@ const finish=()=>{active=false;emit({type:'result',subtype:'success',is_error:fa
 createInterface({input:process.stdin}).on('line',async line=>{
   const event=JSON.parse(line);
   if(event.type==='control_request'){
+    if(process.env.CLAUDE_FIXTURE_GOALS){
+      appendFileSync(process.env.CLAUDE_FIXTURE_LOG+'.controls',JSON.stringify(event)+'\n');
+      if(event.request.subtype==='initialize'){
+        emit({type:'control_response',response:{subtype:'success',request_id:event.request_id,response:{commands:process.env.CLAUDE_FIXTURE_NO_GOAL?[]:[{name:'goal'}]}}});return;
+      }
+    }
     if(process.env.CLAUDE_FIXTURE_MODELS){
       appendFileSync(process.env.CLAUDE_FIXTURE_LOG+'.controls',JSON.stringify(event)+'\n');
       const reply=(subtype,response={})=>emit({type:'control_response',response:{subtype,request_id:event.request_id,response,error:subtype==='error'?'synthetic model refused':undefined}});
@@ -51,6 +57,21 @@ createInterface({input:process.stdin}).on('line',async line=>{
   appendFileSync(process.env.CLAUDE_FIXTURE_LOG,JSON.stringify({type:active?'steered':'accepted',resume:args.includes('--resume'),session,...(process.env.CLAUDE_FIXTURE_MODELS||process.env.CLAUDE_FIXTURE_STEER?{model,text,uuid:event.uuid}:{}),...(process.env.CLAUDE_FIXTURE_IMAGES?{images}:{})})+'\n');
   if(active){emit({type:'user',uuid:event.uuid,message:event.message});return;}
   active=true;
+  if(process.env.CLAUDE_FIXTURE_GOALS&&text.startsWith('/goal ')){
+    const args=text.slice(6), id='goal-'+event.uuid;
+    const ack=()=>{
+      if(!process.env.CLAUDE_FIXTURE_GOAL_NO_ACK)emit({type:'assistant',uuid:id,message:{model:'<synthetic>',id,content:[{type:'text',text:args==='clear'?'Goal cleared':`Goal set: ${args}`}]},local_command_source:'<local-command-stdout>native</local-command-stdout>',local_command_run:{command:'goal',args}});
+      if(process.env.CLAUDE_FIXTURE_GOAL_COMPLETION){
+        const completion=condition=>process.env.CLAUDE_FIXTURE_GOAL_HOOK?{type:'system',subtype:'stop_hook_summary',hook_infos:[{prompt_text:condition}],has_output:false,prevented_continuation:false,hook_errors:[]}:{type:'attachment',attachment:{type:'goal_status',condition,status:'met'}};
+        emit(completion('unrelated condition'));
+        setTimeout(()=>emit(completion(args)),120);
+      }
+      if(process.env.CLAUDE_FIXTURE_GOAL_ACK_GATE){
+        const done=()=>{if(!existsSync(process.env.CLAUDE_FIXTURE_GOAL_ACK_GATE)){timer=setTimeout(done,20);return;}finish();};timer=setTimeout(done,20);
+      } else timer=setTimeout(finish,200);
+    };
+    timer=setTimeout(ack,Number(process.env.CLAUDE_FIXTURE_GOAL_ACK_DELAY||0));return;
+  }
   if(process.env.CLAUDE_FIXTURE_TASKS){
     if(text==='finish task')emit({type:'system',subtype:'task_notification',task_id:'running-shell',status:'completed',summary:'finished with exit code 0'});
     else {
