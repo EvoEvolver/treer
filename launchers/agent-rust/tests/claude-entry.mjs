@@ -33,6 +33,65 @@ async function fixture(t,extra={},setup=async()=>({})){
   return {...await launch(initial.env,initial.args),launch,state,root,logs:()=>logs};
 }
 async function stop(child){const exit=once(child,'exit');child.kill('SIGTERM');assert.equal((await exit)[0],0);}
+const inputCalls=async f=>(await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').map(JSON.parse);
+test('Claude shared UI sends steer to actual Rust entry on desktop and mobile', {skip:!process.env.CLAUDE_STEER_BROWSER},async t=>{
+  const {chromium,expect}=createRequire(resolve(process.env.NODE_LAUNCHER_ROOT||'../agent','package.json'))('@playwright/test');
+  const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
+  const f=await fixture(t,{CLAUDE_FIXTURE_STEER:'1',CLAUDE_FIXTURE_HOLD:'finish-ready',TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'steer-fixture'},async({state})=>({env:{TREER_AGENT_PRIVATE_STATE_DIR:state}}));
+  await f.post({prompt:'initial UI turn'});await until(f.snapshot,s=>s.thread.activeTurnId);
+  const browser=await chromium.launch({env:hermeticEnv({HOME:process.env.HOME})});t.after(()=>browser.close());
+  for(const width of [1280,390]){
+    const page=await browser.newPage({viewport:{width,height:850},extraHTTPHeaders:{'x-treer-interface-source':'proxy-ui','x-treer-agent-id':'ag_contract','x-treer-interface-instance':'steer-fixture'}});
+    await page.goto(f.base+'/?lang=en');
+    const box=page.getByRole('textbox',{name:/Message/});await box.fill('UI steer '+width);
+    const reply=page.waitForResponse(r=>r.url().endsWith('/api/prompt')&&r.request().method()==='POST');
+    await page.getByRole('button',{name:'Steer current run',exact:true}).click();
+    const response=await reply;assert.equal(response.status(),200);assert.equal((await response.json()).submission.disposition,'steered');
+    await expect(box).toHaveValue('');
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+    await page.close();
+  }
+  assert.deepEqual((await inputCalls(f)).map(c=>c.text),['initial UI turn','UI steer 1280','UI steer 390']);
+});
+test('Claude working steering retains same turn, repeated text occurrences and queued FIFO exactly once',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_STEER:'1',CLAUDE_FIXTURE_HOLD:'finish-ready',CLAUDE_FIXTURE_MODELS:'1'});
+  const initial=await f.snapshot();assert.equal(initial.harness.capabilities.steer,true);
+  await f.post({prompt:'initial turn'});
+  const active=await until(f.snapshot,s=>s.thread.activeTurnId&&s.thread.turns.some(t=>t.items.some(i=>i.kind==='commandExecution')));
+  const turn=active.thread.activeTurnId,session=active.thread.id;
+  await f.post({prompt:'queued ordinary input',mode:'queue'});
+  for(let i=0;i<2;i++){
+    const response=await f.post({prompt:'same steer text',mode:'steer'});assert.equal(response.status,200);
+    assert.equal((await response.json()).submission.disposition,'steered');
+  }
+  let state=await until(f.snapshot,s=>s.thread.turns[0].items.filter(i=>i.kind==='userMessage'&&i.text==='same steer text').length===2);
+  assert.equal(state.thread.activeTurnId,turn);assert.equal(state.thread.id,session);assert.equal(state.queue.length,1);
+  assert.deepEqual((await inputCalls(f)).map(c=>[c.type,c.text]),[['accepted','initial turn'],['steered','same steer text'],['steered','same steer text']]);
+  await writeFile(join(f.root,'cwd/finish-ready'),'release own synthetic turn');
+  state=await until(f.snapshot,s=>s.thread.turns.length===2&&s.thread.status==='idle'&&s.queue.length===0);
+  assert.ok(state.thread.turns.every(t=>t.status==='completed'));assert.equal(state.thread.id,session);
+  assert.equal(state.thread.turns[0].id,turn);
+  const items=state.thread.turns[0].items;
+  assert.equal(items.filter(i=>i.kind==='userMessage').length,3);
+  assert.ok(items.findIndex(i=>i.kind==='commandExecution')<items.findIndex(i=>i.text==='same steer text'));
+  const calls=await inputCalls(f);assert.deepEqual(calls.map(c=>c.text),['initial turn','same steer text','same steer text','queued ordinary input']);
+  assert.equal(new Set(calls.map(c=>c.uuid)).size,4);assert.ok(calls.every(c=>c.session===session));
+  assert.ok(!(await modelCalls(f)).some(c=>c.request.subtype==='interrupt'));
+  await stop(f.child);const resumed=await f.launch();state=await resumed.snapshot();
+  assert.equal(state.thread.id,session);assert.equal(state.thread.turns[0].items.filter(i=>i.kind==='userMessage').length,3);
+  assert.equal((await inputCalls(f)).length,4,'restart never replays any input');
+});
+test('Claude idle steering is a normal prompt and concurrent ordinary inputs are sent once',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_STEER:'1'});
+  const response=await f.post({prompt:'idle steer',mode:'steer'});assert.equal(response.status,200);
+  assert.equal((await response.json()).submission.disposition,'sent');
+  const responses=await Promise.all(['next A','next B'].map(prompt=>f.post({prompt,mode:'queue'})));
+  assert.ok(responses.every(r=>r.status===200));
+  const state=await until(f.snapshot,s=>s.thread.turns.length===3&&s.thread.status==='idle');
+  const calls=await inputCalls(f);assert.deepEqual(calls.map(c=>c.type),['accepted','accepted','accepted']);
+  assert.deepEqual(calls.map(c=>c.text),['idle steer','next A','next B']);
+  assert.ok(state.thread.turns.every(t=>t.status==='completed'));
+});
 const settings=(f,body)=>fetch(f.base+'/api/settings',{method:'POST',body:JSON.stringify(body)});
 const modelCalls=async f=>(await readFile(join(f.root,'calls.controls'),'utf8')).trim().split('\n').map(JSON.parse);
 test('Claude model catalog aliases and acknowledged switching preserve session and reject mixed effort atomically',async t=>{
@@ -201,7 +260,7 @@ test('same text in a final-only different assistant message retains both identit
   assert.equal((await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').length,1);
 });
 test('actual Claude entry queues two turns across early idle and retains tools after result/restart',async t=>{
-  const f=await fixture(t);let state=await f.snapshot();assert.equal(state.harness.id,'claude');assert.equal(state.harness.capabilities.steer,false);
+  const f=await fixture(t);let state=await f.snapshot();assert.equal(state.harness.id,'claude');assert.equal(state.harness.capabilities.steer,true);
   assert.equal((await f.post({prompt:'first'})).status,200);
   await until(f.snapshot,s=>s.thread.activeTurnId);
   assert.equal((await f.post({prompt:'second',mode:'queue'})).status,200);

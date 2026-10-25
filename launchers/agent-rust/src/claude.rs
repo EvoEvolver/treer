@@ -26,6 +26,8 @@ pub struct Adapter {
 pub enum Request {
     Local(Value),
     Wire(Value),
+    Input { wire: Value, dispatched: Value },
+    Steer { wire: Value, turn: String, item: Value, after: Option<String> },
 }
 #[cfg(any(unix, test))]
 pub fn import_history(
@@ -238,8 +240,15 @@ impl Adapter {
                     json!({"thread":{"id":self.session,"name":"Claude","status":{"type":"idle"},"turns":[]},"model":self.current_model,"modelOptions":self.models,"modelRevision":self.model_revision,"reasoningEffort":null}),
                 )
             }
-            "turn/start" => {
-                if self.active.is_some() {
+            "turn/start" | "turn/steer" => {
+                let steering = method == "turn/steer";
+                if params.get("threadId").is_some_and(|id| id != &self.session) || steering && params["threadId"] != self.session {
+                    bail!("claude_session_mismatch");
+                }
+                if steering && (self.active.is_none() || params["expectedTurnId"].as_str() != self.active.as_deref()) {
+                    bail!("claude_steer_turn_mismatch");
+                }
+                if !steering && self.active.is_some() {
                     bail!("claude_concurrent_turn");
                 }
                 let inputs = params["input"]
@@ -253,20 +262,29 @@ impl Adapter {
                     .filter_map(|i| i["text"].as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
-                let turn = uuid::Uuid::new_v4().to_string();
-                self.active = Some(turn);
-                self.input_model_revision=self.model_revision;
-                self.input_settings_epoch=Some(self.settings_epoch);
-                self.items.clear();
-                self.order.clear();
-                self.blocks.clear();
-                self.interrupted = false;
-                self.announced = false;
-                self.user = text.clone();
+                let user_id = if steering {
+                    uuid::Uuid::new_v4().to_string()
+                } else {
+                    let turn = uuid::Uuid::new_v4().to_string();
+                    let id = format!("user-{turn}");
+                    self.active = Some(turn);
+                    self.input_model_revision=self.model_revision;
+                    self.input_settings_epoch=Some(self.settings_epoch);
+                    self.items.clear();
+                    self.order.clear();
+                    self.blocks.clear();
+                    self.interrupted = false;
+                    self.announced = false;
+                    self.user = text.clone();
+                    id
+                };
                 // Correlated local dispatch result is emitted only after stdin write completes.
-                Request::Wire(
-                    json!({"type":"user","session_id":self.session,"message":{"role":"user","content":text},"parent_tool_use_id":null}),
-                )
+                let wire=json!({"type":"user","uuid":user_id,"session_id":self.session,"message":{"role":"user","content":[{"type":"text","text":text}]},"parent_tool_use_id":null});
+                if steering {
+                    Request::Steer {wire,turn:self.active.clone().unwrap(),item:json!({"id":user_id,"type":"userMessage","text":text}),after:self.order.last().cloned()}
+                } else {
+                    Request::Input {wire,dispatched:self.dispatched()}
+                }
             }
             "turn/interrupt" => {
                 let turn = self
@@ -281,8 +299,25 @@ impl Adapter {
             _ => bail!("claude_method_unsupported"),
         })
     }
+    pub fn steered(&mut self, turn: &str, item: Value, after: Option<&str>) -> Result<Value> {
+        // A result received before successful write/flush cannot acknowledge
+        // this input. It may already have been sent: refuse as UNKNOWN rather
+        // than reusing the completed turn, retargeting or retrying the input.
+        if self.active.as_deref()!=Some(turn) {bail!("claude_steer_outcome_unknown");}
+        let id=item["id"].as_str().ok_or_else(||anyhow::anyhow!("claude_item_identity"))?.to_owned();
+        self.retain(id.clone(),item)?;
+        self.order.retain(|entry|entry!=&id);
+        let position=match after {
+            Some(anchor)=>self.order.iter().position(|entry|entry==anchor).map(|i|i+1).ok_or_else(||anyhow::anyhow!("claude_steer_anchor_missing"))?,
+            None=>0,
+        };
+        self.order.insert(position,id);
+        Ok(self.dispatched())
+    }
     pub fn dispatched(&self) -> Value {
-        json!({"turn":{"id":self.active,"status":"inProgress","items":[{"id":format!("user-{}",self.active.as_deref().unwrap_or("")),"type":"userMessage","text":self.user}]}})
+        let mut items=vec![json!({"id":format!("user-{}",self.active.as_deref().unwrap_or("")),"type":"userMessage","text":self.user})];
+        items.extend(self.order.iter().filter_map(|id|self.items.get(id)).cloned());
+        json!({"turn":{"id":self.active,"status":"inProgress","items":items}})
     }
     fn item_event(&self, item: Value) -> Value {
         json!({"method":"item/completed","params":{"threadId":self.session,"turnId":self.active,"item":item}})
@@ -694,6 +729,38 @@ mod tests {
             &json!({"input":[{"type":"text","text":"local user"}]}),
         )
         .unwrap();
+    }
+    #[test]
+    fn steering_is_exact_turn_input_not_interrupt_or_new_turn() {
+        let mut a=adapter();start(&mut a);
+        let turn=a.active.clone().unwrap();
+        a.consume(json!({"type":"assistant","message":{"id":"before","content":[{"type":"text","text":"before steer"}]}})).unwrap();
+        for id in [2,3] {
+            let request=a.request(id,"turn/steer",&json!({"threadId":"synthetic-session","expectedTurnId":turn,"input":[{"type":"text","text":"same steer"}]})).unwrap();
+            let Request::Steer {wire,turn:expected,item,after}=request else {panic!("expected native steer")};
+            let dispatched=a.steered(&expected,item,after.as_deref()).unwrap();
+            assert_eq!(wire["type"],"user");assert!(wire["uuid"].is_string());
+            assert_eq!(wire["message"]["content"][0]["text"],"same steer");
+            assert_eq!(dispatched["turn"]["id"],turn);
+        }
+        assert!(a.request(4,"turn/steer",&json!({"threadId":"wrong","expectedTurnId":turn,"input":[]})).is_err());
+        assert!(a.request(5,"turn/steer",&json!({"threadId":"synthetic-session","expectedTurnId":"wrong","input":[]})).is_err());
+        let final_events=a.consume(json!({"type":"result","result":"done"})).unwrap();
+        let items=final_events.last().unwrap()["params"]["turn"]["items"].as_array().unwrap();
+        assert_eq!(items.iter().map(|i|i["text"].as_str().unwrap()).collect::<Vec<_>>(),["local user","before steer","same steer","same steer","done"]);
+        assert_ne!(items[2]["id"],items[3]["id"]);
+        assert!(a.request(6,"turn/steer",&json!({"threadId":"synthetic-session","expectedTurnId":turn,"input":[]})).is_err());
+    }
+    #[test]
+    fn result_during_steer_write_is_unknown_not_old_turn_completion() {
+        let mut a=adapter();start(&mut a);
+        let turn=a.active.clone().unwrap();
+        let Request::Steer {turn:expected,item,after,..}=a.request(2,"turn/steer",&json!({"threadId":"synthetic-session","expectedTurnId":turn,"input":[{"type":"text","text":"not acknowledged"}]})).unwrap() else {panic!()};
+        let completed=a.consume(json!({"type":"result","result":"old turn result"})).unwrap();
+        let items=completed.last().unwrap()["params"]["turn"]["items"].as_array().unwrap();
+        assert!(!items.iter().any(|i|i["text"]=="not acknowledged"));
+        assert_eq!(a.steered(&expected,item,after.as_deref()).unwrap_err().to_string(),"claude_steer_outcome_unknown");
+        assert!(a.active.is_none());
     }
     #[test]
     fn idle_is_not_a_result_and_cannot_release_a_second_turn() {

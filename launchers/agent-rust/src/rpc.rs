@@ -293,12 +293,15 @@ impl Rpc {
             let request=adapter.lock().unwrap().request(id,method,&params)?;
             return match request {
                 crate::claude::Request::Local(result)=>Ok(result),
+                crate::claude::Request::Input {wire,dispatched}=>{
+                    self.write(wire).await?;
+                    Ok(dispatched)
+                },
+                crate::claude::Request::Steer {wire,turn,item,after}=>{
+                    self.write(wire).await?;
+                    adapter.lock().unwrap().steered(&turn,item,after.as_deref())
+                },
                 crate::claude::Request::Wire(wire)=>{
-                    if method=="turn/start"{
-                        let dispatched=adapter.lock().unwrap().dispatched();
-                        self.write(wire).await?;
-                        Ok(dispatched)
-                    }else{
                         let(tx,rx)=oneshot::channel();self.pending.lock().unwrap().insert(id,tx);
                         if matches!(policy,ResponsePolicy::Settings) {
                             // Match Node control's response-only deadline. Never
@@ -312,7 +315,6 @@ impl Rpc {
                         let result=async{self.write(wire).await?;rx.await.map_err(|_|anyhow!("Claude disconnected"))?};
                         let result=match timeout(Duration::from_secs(60),result).await{Ok(r)=>r,Err(_)=>{self.fail("claude_control_timeout");Err(anyhow!("claude_control_timeout"))}};
                         result
-                    }
                 }
             };
         }
@@ -422,6 +424,36 @@ mod tests {
         assert!(!rpc.failed());
         assert!(rpc.pending.lock().unwrap().is_empty());
         child.kill().await.unwrap();
+    }
+    #[cfg(all(unix, feature="fixture-harness"))]
+    #[tokio::test]
+    async fn claude_result_while_steer_write_waits_cannot_acknowledge_old_turn() {
+        let node=std::env::var("TREER_TEST_NODE").expect("explicit native Node fixture path");
+        let root=std::env::temp_dir().join(format!("steer-race-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&root).unwrap();
+        let gate=root.join("finish");
+        let script="const fs=require('fs'),r=require('readline').createInterface({input:process.stdin});let count=0;r.on('line',l=>{const q=JSON.parse(l);if(q.type==='user'&&++count===1){const timer=setInterval(()=>{if(fs.existsSync(process.argv[1])){clearInterval(timer);console.log(JSON.stringify({type:'result',is_error:false,result:'A final'}));}},5);}});";
+        let (rpc,mut child,mut events)=Rpc::spawn_claude(&node,&["-e".into(),script.into(),gate.to_string_lossy().into()],&root,false,"session".into()).unwrap();
+        let initial=rpc.request_selected("turn/start",json!({"threadId":"session","input":[{"type":"text","text":"A"}]}),None).await.unwrap();
+        let turn=initial["turn"]["id"].clone();
+        let writer=rpc.input.lock().await;
+        let clone=rpc.clone();
+        let steering=async move {clone.request_selected("turn/steer",json!({"threadId":"session","expectedTurnId":turn,"input":[{"type":"text","text":"B steer"}]}),None).await};
+        tokio::pin!(steering);
+        // Poll through request admission into the held writer before allowing
+        // the real producer's terminal event to run; no scheduler guess.
+        tokio::select! {biased; result=&mut steering=>panic!("write was not held: {result:?}"), _=tokio::task::yield_now()=>{}}
+        std::fs::write(&gate,b"finish owned turn").unwrap();
+        let completed=loop {
+            let event=timeout(Duration::from_secs(3),events.recv()).await.unwrap().unwrap();
+            if event["method"]=="turn/completed" {break event;}
+        };
+        assert!(!completed["params"]["turn"]["items"].as_array().unwrap().iter().any(|i|i["text"]=="B steer"));
+        drop(writer);
+        assert_eq!(steering.await.unwrap_err().to_string(),"claude_steer_outcome_unknown");
+        assert!(!rpc.failed(),"uncertain input is not a forged transport failure");
+        assert!(rpc.pending.lock().unwrap().is_empty());
+        child.kill().await.unwrap();
+        std::fs::remove_file(gate).unwrap();std::fs::remove_dir(root).unwrap();
     }
     #[cfg(all(unix, feature="fixture-harness"))]
     #[tokio::test]

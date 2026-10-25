@@ -41,8 +41,11 @@ createInterface({input:process.stdin}).on('line',async line=>{
     if(event.request.subtype==='interrupt'){clearTimeout(timer);finish();}
     return;
   }
-  if(event.type!=='user'||active)process.exit(71);
-  active=true;appendFileSync(process.env.CLAUDE_FIXTURE_LOG,JSON.stringify({type:'accepted',resume:args.includes('--resume'),session,...(process.env.CLAUDE_FIXTURE_MODELS?{model,text:event.message.content}:{})})+'\n');
+  if(event.type!=='user'||active&&!process.env.CLAUDE_FIXTURE_STEER)process.exit(71);
+  const text=typeof event.message.content==='string'?event.message.content:event.message.content.filter(b=>b.type==='text').map(b=>b.text).join('\n');
+  appendFileSync(process.env.CLAUDE_FIXTURE_LOG,JSON.stringify({type:active?'steered':'accepted',resume:args.includes('--resume'),session,...(process.env.CLAUDE_FIXTURE_MODELS||process.env.CLAUDE_FIXTURE_STEER?{model,text,uuid:event.uuid}:{})})+'\n');
+  if(active){emit({type:'user',uuid:event.uuid,message:event.message});return;}
+  active=true;
   while(process.env.CLAUDE_FIXTURE_INPUT_GATE&&!existsSync(process.env.CLAUDE_FIXTURE_INPUT_GATE))await new Promise(r=>setTimeout(r,20));
   emit({type:'system',subtype:'init',...(process.env.CLAUDE_FIXTURE_MODELS?{model}:{})});
   const id='message-'+Date.now();

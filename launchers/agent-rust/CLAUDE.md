@@ -61,6 +61,28 @@ confirm selection. Refusal preserves the previous known selection. No switch
 interrupts/restarts the provider or replays an input. Required RPC deadlines,
 EOF/frame integrity and Codex discovery/recovery behavior are unchanged.
 
+## Native mid-turn steering (#247)
+
+Working `delivery:steer` uses the same native stream-json user-input protocol as
+Node, with a unique UUID, the existing session and exact expected active turn.
+There is no interrupt, provider restart, synthetic result or automatic resend.
+The normal durable queue records intent before writing; `disposition:steered`
+is admission, not completion. Ordinary queued prompts remain FIFO and wait for
+the turn's real `result`. Idle steering follows the ordinary new-prompt path.
+
+Acceptance is local successful stdin write/flush, matching Node's contract;
+Claude exposes no per-input steer ACK. Only after that write does the adapter
+retain the user item at its captured display anchor in the same active turn.
+If a result arrives while the write is waiting, the old terminal turn excludes
+that unacknowledged input. A successful write afterward still has unknown
+consumption: the new receipt stays uncertain/fenced, never settles from the old
+result and is never retried or retargeted to a new turn. Existing explicit
+unknown-outcome recovery remains separate. Write deadlines/errors stay fatal.
+Repeated equal text keeps distinct UUIDs and receipts. Native user echoes do
+not introduce duplicates; final summaries and restart retain all local users
+and intervening assistant/tool items. Settings keep their acknowledged-control
+serialization and model-attempt provenance; steering does not reset the turn.
+
 The existing notification batching, receipt pruning/pressure, operation-ID
 dedup, durable-before-ACK and retry paths are shared. The Claude journal has an
 explicit harness tag and atomically stores the bounded mapped transcript with
@@ -111,12 +133,24 @@ by this source change.
 
 The adapter advertises text prompts, queued notifications, transcript observation
 and abort, plus native catalog discovery and acknowledged model switching.
-Images, busy steering, background tasks, goals/budgets, reasoning-effort
+Busy steering is supported as described above. Images, background tasks, goals/budgets, reasoning-effort
 changes and session transfer are currently unsupported. Older Claude history
 cannot be paged through a supported provider API here. These are concrete target
 admission checks, not a claim of complete Node parity. File-change input is
 rendered as a bounded replacement diff; native structured-patch display parity
 is not claimed.
+
+Remaining Claude parity batches, ordered by user impact:
+
+| Batch | Current Rust boundary | Separate implementation needed |
+| --- | --- | --- |
+| Images | Capability false; image input refuses | Reuse private attachment admission, then native image blocks and transcript retention |
+| Background tasks | Live capability false; imported terminal metadata is passive only | Native task event lifecycle, bounded retention and task-output route |
+| Goals/budget | Claude goal capability null | Native budget controls, usage accounting and explicit goal recovery |
+| Session transfer | Capability null; migration imports are a separate operator contract | Supported export/import adapter with same-session/state checks |
+| Settings beyond model | Model catalog/ACK switching supported; effort unsupported | Discover effort/control support from provider, never a hardcoded version table |
+
+These batches do not share this steering delivery or require a second UI.
 
 Focused checks use `tests/claude-entry.mjs` with the synthetic producer
 `tests/fixtures/claude-stream.mjs`: two queued turns across early idle, terminal

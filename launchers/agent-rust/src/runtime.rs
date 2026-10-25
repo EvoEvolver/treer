@@ -757,7 +757,7 @@ impl Runtime {
         let mut snapshot = json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"],"cleanup":{"providerExit":self.provider_exit,"processGroup":if self.provider_exit == "not_requested" {"not_requested"} else {"termination_requested_unverified"},"detachedDescendants":"not_guaranteed"}},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":null,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}});
         snapshot["thread"] = thread;
         if self.claude {
-            snapshot["harness"]=json!({"id":"claude","name":"Claude","capabilities":{"images":false,"steer":false,"backgroundTasks":false,"goal":null,"sessionTransfer":null}});
+            snapshot["harness"]=json!({"id":"claude","name":"Claude","capabilities":{"images":false,"steer":true,"backgroundTasks":false,"goal":null,"sessionTransfer":null}});
             snapshot["backgroundTasks"]=self.terminal_tasks.clone();
             snapshot["attachmentsAvailable"]=json!(false);
             snapshot["attachmentStorageStatus"]=json!("unsupported");
@@ -1313,7 +1313,6 @@ impl Runtime {
         let ids = body.get("attachment_ids").cloned().unwrap_or(json!([]));
         let has_images = ids.as_array().is_some_and(|ids| !ids.is_empty());
         if self.claude && has_images {bail!("claude_images_unsupported");}
-        if self.claude && body["delivery"]=="steer" && self.thread["activeTurnId"].is_string() {bail!("claude_steer_unsupported");}
         if text.is_empty() && !has_images {
             bail!("text or images required");
         }
