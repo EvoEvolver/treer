@@ -2329,6 +2329,17 @@ are sanitized. The reservation and remote provider dispatch are not a single
 transaction: a crash or ambiguous provider response can cause a duplicate on a
 later retry. In-flight reservations can be retried after 60 seconds.
 
+Proxy sender failures log only a fixed `category` (`transport`, `timeout`,
+`http_status`, `response_read`, `response_too_large`, `response_invalid`, or
+`provider_rejected`) and `upstream_status` when response headers were received.
+The App API still returns `email_delivery_failed`; upstream messages, response
+bodies, addresses and credentials are not included in diagnostics. The sender
+uses the fixed [Cloudflare API route](https://developers.cloudflare.com/email-service/get-started/send-emails/),
+refuses redirects, retains its 10-second
+deadline and bounds successful response bodies to 64 KiB. A category is not proof
+of non-delivery or authorization to retry an uncertain send. Old failures cannot
+be classified retroactively; do not resend solely to obtain a diagnostic.
+
 Deploy [email-endpoint](../apps/email-endpoint/README.md) as a workspace Managed
 App, initially in `outbox` mode. `proxy` mode falls back to local outbox only on
 `email_not_configured`; Policy/recipient failures remain visible retry failures.

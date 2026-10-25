@@ -239,6 +239,39 @@ struct CloudflareEmailSender {
     from: Arc<str>,
 }
 
+// Deliberately contains no upstream error, URL, response text or mail content.
+#[derive(Debug, Clone, Copy)]
+struct EmailSendFailure {
+    category: &'static str,
+    upstream_status: Option<u16>,
+}
+
+impl std::fmt::Display for EmailSendFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "email provider failure: {} (HTTP {:?})",
+            self.category, self.upstream_status
+        )
+    }
+}
+impl std::error::Error for EmailSendFailure {}
+
+impl EmailSendFailure {
+    fn request(error: reqwest::Error, status: Option<u16>) -> Self {
+        Self {
+            category: if error.is_timeout() {
+                "timeout"
+            } else if status.is_some() {
+                "response_read"
+            } else {
+                "transport"
+            },
+            upstream_status: status,
+        }
+    }
+}
+
 pub(crate) struct PendingPasswordReset {
     pub token_id: String,
     pub recipient: String,
@@ -517,6 +550,12 @@ const fn default_audit_limit() -> u16 {
 }
 
 impl CloudflareEmailSender {
+    fn client_builder() -> reqwest::ClientBuilder {
+        reqwest::Client::builder()
+            .timeout(StdDuration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+    }
+
     fn new(config: CloudflareEmailConfig) -> anyhow::Result<Self> {
         if config.account_id.trim().is_empty() {
             anyhow::bail!("Cloudflare account ID must not be empty");
@@ -536,14 +575,13 @@ impl CloudflareEmailSender {
         endpoint
             .path_segments_mut()
             .map_err(|_| anyhow::anyhow!("Cloudflare API base URL cannot be a base"))?
+            .pop_if_empty()
             .push(&config.account_id)
             .push("email")
             .push("sending")
             .push("send");
         Ok(Self {
-            client: reqwest::Client::builder()
-                .timeout(StdDuration::from_secs(10))
-                .build()?,
+            client: Self::client_builder().build()?,
             endpoint,
             api_token: config.api_token.into(),
             from: config.from.into(),
@@ -556,8 +594,8 @@ impl CloudflareEmailSender {
         subject: &str,
         html: String,
         text: String,
-    ) -> anyhow::Result<()> {
-        let response = self
+    ) -> Result<(), EmailSendFailure> {
+        let mut response = self
             .client
             .post(self.endpoint.clone())
             .bearer_auth(self.api_token.as_ref())
@@ -569,16 +607,34 @@ impl CloudflareEmailSender {
                 "text": text,
             }))
             .send()
-            .await?;
-        let status = response.status();
-        let body = response.json::<CloudflareEmailResponse>().await?;
-        if !status.is_success() || !body.success {
-            let message = body
-                .errors
-                .first()
-                .map(|error| error.message.as_str())
-                .unwrap_or("unknown Cloudflare email error");
-            anyhow::bail!("Cloudflare email API returned {status}: {message}");
+            .await
+            .map_err(|error| EmailSendFailure::request(error, None))?;
+        let status = Some(response.status().as_u16());
+        let failure = |category| EmailSendFailure {
+            category,
+            upstream_status: status,
+        };
+        // An HTTP refusal is known even when its body is HTML, malformed or
+        // never finishes. Do not parse or retain the provider's error message.
+        if !response.status().is_success() {
+            return Err(failure("http_status"));
+        }
+        const RESPONSE_LIMIT: usize = 64 * 1024;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| EmailSendFailure::request(error, status))?
+        {
+            if chunk.len() > RESPONSE_LIMIT - bytes.len() {
+                return Err(failure("response_too_large"));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let body: CloudflareEmailResponse =
+            serde_json::from_slice(&bytes).map_err(|_| failure("response_invalid"))?;
+        if !body.success {
+            return Err(failure("provider_rejected"));
         }
         Ok(())
     }
@@ -594,6 +650,7 @@ impl CloudflareEmailSender {
         );
         self.send(recipient, "Reset your Treer password", html, text)
             .await
+            .map_err(Into::into)
     }
 
     async fn send_welcome(
@@ -611,20 +668,23 @@ impl CloudflareEmailSender {
         let html = format!(
             "<h1>Welcome to Treer</h1><p>Hi {preferred_name}, your account is ready.</p><p><a href=\"{app_url}\">Open Treer</a></p>"
         );
-        self.send(recipient, "Welcome to Treer", html, text).await
+        self.send(recipient, "Welcome to Treer", html, text)
+            .await
+            .map_err(Into::into)
     }
 }
 
 #[derive(Debug, Deserialize)]
 struct CloudflareEmailResponse {
     success: bool,
-    #[serde(default)]
-    errors: Vec<CloudflareEmailError>,
+    #[serde(default, rename = "errors")]
+    _errors: Vec<CloudflareEmailError>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CloudflareEmailError {
-    message: String,
+    #[serde(rename = "message")]
+    _message: String,
 }
 
 impl AuthStore {
@@ -910,6 +970,9 @@ impl IntoResponse for AuthFailure {
     }
 }
 
+#[cfg(test)]
+#[path = "auth/email_sender_tests.rs"]
+mod email_sender_tests;
 #[cfg(test)]
 #[path = "auth/tests.rs"]
 mod tests;

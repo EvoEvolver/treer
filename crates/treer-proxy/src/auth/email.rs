@@ -123,16 +123,24 @@ impl AuthStore {
         sqlx::query("INSERT INTO app_email_attempts(attempt_id,workspace_id,app_id,recipient_hash,status) VALUES($1,$2,$3,$4,'sending')")
             .bind(&attempt).bind(workspace).bind(app).bind(&hash).execute(&mut *tx).await.map_err(email_storage)?;
         tx.commit().await.map_err(email_storage)?;
-        // Generate HTML exclusively from escaped plain text. Provider errors never enter logs/API.
-        let success = sender
+        // Generate HTML exclusively from escaped plain text. Provider contents
+        // never enter logs/API; only the fixed sender classification is logged.
+        let delivery = sender
             .send(
                 &to,
                 &request.subject,
                 format!("<pre>{}</pre>", escape_html(&request.text)),
                 request.text.clone(),
             )
-            .await
-            .is_ok();
+            .await;
+        if let Err(failure) = &delivery {
+            tracing::warn!(
+                category = failure.category,
+                upstream_status = failure.upstream_status,
+                "App email provider delivery failed"
+            );
+        }
+        let success = delivery.is_ok();
         let status = if success { "sent" } else { "failed" };
         let mut tx = self.pool.begin().await.map_err(email_storage)?;
         sqlx::query("UPDATE app_email_sends SET status=$1,updated_at=now() WHERE email_id=$2")
