@@ -9,6 +9,7 @@ import {fileURLToPath} from 'node:url';
 import http from 'node:http';
 import assert from 'node:assert/strict';
 
+import {runSameMachinePolicyRecovery} from './docker-core-e2e/same-machine-policy-recovery.mjs';
 import {scenario, runColdPolicyRecovery} from './docker-core-e2e/cold-policy-recovery.mjs';
 
 const selectedScenario = scenario(process.env.TREER_E2E_SCENARIO);
@@ -186,11 +187,15 @@ try {
       assert((await cli(side,'--skill')).includes('Exchange durable Messages'));
     });
   });
-  if (selectedScenario === 'cold-policy-recovery-226') {
+  if (['cold-policy-recovery-226', 'same-machine-policy-recovery-226'].includes(selectedScenario)) {
     const server = (await snapshot()).servers.find(s => s.name === 'docker-a').server_id;
-    const receipt = await runColdPolicyRecovery({api, cli, command, docker, names, snapshot, wait, check, sleep, workspace: ws,
+    const runRecovery = selectedScenario === 'same-machine-policy-recovery-226' ? runSameMachinePolicyRecovery : runColdPolicyRecovery;
+    const receipt = await runRecovery({api, cli, command, docker, names, snapshot, wait, check, sleep, workspace: ws,
       fingerprint: async () => JSON.parse(await docker('exec', '-e', 'TREER_SYNTHETIC_RECOVERY_226=1',
         names('machine-a'), 'python3', '/fixtures/recovery_fingerprint.py', ws, server)),
+      observeSameMachine: async receipt => {
+        fs.writeFileSync(path.join(dir, 'same-machine226.json'), JSON.stringify(receipt));
+      },
       observePolicy: async observation => {
         policyObservations.push(observation);
         fs.writeFileSync(path.join(dir, 'policy226.json'), JSON.stringify(policyObservations));
@@ -204,7 +209,7 @@ try {
         }
       },
     });
-    fs.writeFileSync(path.join(dir, 'recovery226.json'), JSON.stringify(receipt, null, 2));
+    fs.writeFileSync(path.join(dir, selectedScenario === 'same-machine-policy-recovery-226' ? 'same-machine226.json' : 'recovery226.json'), JSON.stringify(receipt, null, 2));
   } else {
   for (const [side,port] of [['a',8200],['b',8300]]) await check(`Agent identity/startup ${side}`,async()=>{
     const agent=await cli(side,'agent','admin','create','--machine','docker-'+side,'--kind','command','--name','worker-'+side,'--','python3','/fixtures/worker.py',side,String(port));

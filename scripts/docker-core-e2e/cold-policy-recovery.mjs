@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 
 export function scenario(value = 'full') {
-  assert(['full', 'cold-policy-recovery-226'].includes(value), 'unknown local e2e scenario');
+  assert(['full', 'cold-policy-recovery-226', 'same-machine-policy-recovery-226'].includes(value), 'unknown local e2e scenario');
   return value;
 }
 export function restoreReport(stdout, workspace, server, workload) {

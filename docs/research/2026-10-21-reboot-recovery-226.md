@@ -148,39 +148,43 @@ service-manager boot behavior and enrolled-machine recovery remain unproven.
 Previously accepted mock-HTTP, private Host and delivered hot-update evidence
 remains separate. No live enrolled resource was restarted or re-enrolled.
 
-### Queued next isolated leaves (2026-10-25)
+### Same-machine Policy cold-start entry (2026-10-25)
 
-Issue #226 is high priority and open, queued behind #236/#240/#241 delivery.
-No #226 execution is currently in progress. Docker availability and the remote-
-provider acceptance above are resolved; neither is a pending resource request.
-Core2 owns the next fixture delta, Core reviews startup/restore authorization,
-and Release owns the single isolated execution after source handoff. #111/#222
-retain their separate updater/distributor acceptance and evidence.
+Issue #226 is high priority and this isolated leaf is in progress. Core2 owns
+`scripts/docker-core-e2e/same-machine-policy-recovery.mjs` and harness wiring;
+Core owns any production startup/authorization change; Release executes one
+fresh isolated job. #111/#222 keep their separate updater/distributor evidence.
+The accepted remote-provider run is not repeated by this entry:
 
-The smallest next Linux entry is a new same-machine variant of
-`scripts/docker-core-e2e/cold-policy-recovery.mjs`, invoked by the existing
-`scripts/docker-core-e2e.mjs` harness. This variant is **not implemented or
-runnable yet**; do not pass an invented scenario value to the current parser.
-Reuse the new isolated PG/NATS/Proxy and machine A from the accepted recipe,
-install both the real Policy App and a declared inert workload on A, configure
-fail-closed/zero-stale Policy, then cold-stop/start only A and restart the owned
-Proxies to discard their compiled cache. Do not repeat the remote-provider leaf
-as a substitute. Inspect the existing authenticated startup-validation path
-before introducing any production change; do not prestart the Policy process
-outside the normal Host/Controller startup path to manufacture success.
+```sh
+revision=$(git rev-parse HEAD)
+docker build --build-arg TREER_BUILD_COMMIT="$revision" -t "treer-recovery226:$revision" .
+TREER_E2E_IMAGE="treer-recovery226:$revision" \
+  TREER_E2E_SCENARIO=same-machine-policy-recovery-226 node scripts/docker-core-e2e.mjs
+```
 
-Required bounded observations are startup declaration reconciliation, actual
-provider process creation/readiness relative to runtime.restore authorization,
-the first explicit restore result, and a separately invoked restore after actual
-provider readiness if the first was refused. Accept only unchanged enrollment
-hashes and workload IDs, no new key, one retained new Host identity across an
-explicit retry, fresh real Policy revision, restored declared workload, and
-stopped/unpaused owned resources. A refused first restore must remain typed
-`policy_provider_unavailable`; provider unready must never authorize workload
-restore via fail-open or a special privilege. Record a bounded ordering/status
-receipt without credentials or raw provider/config/error bodies. If the provider
-cannot become ready through ordinary startup, preserve that concrete failure and
-its ordering evidence; do not silently start it through an alternate path.
+Both the real default Policy App and declared inert workload run on the new
+machine A. The fixture sets fail-closed/zero-stale Policy, cold-stops A, restarts
+only owned Proxies to discard cached Policy, then starts A with no Host. Its
+first explicit restore uses the normal Host/Controller startup-validation path;
+no provider process is started by a fixture command. First success is valid only
+with an actual matching workload report. If first restore returns the typed
+Policy-unavailable refusal, only a separately invoked second restore is allowed,
+after observed real provider HTTP readiness and bounded failure-cache expiry.
+Arbitrary errors, an unready provider or altered identity fail closed without
+another restore. There is no automatic restore retry loop.
+
+Accept only unchanged enrollment hashes/workload IDs, one retained new Host
+identity, actual fresh Policy revision and restored workload. The bounded
+`same-machine226.json` records fixed monotonic event stages and first-result
+category; it contains no error bodies or credentials. Events establish observation
+order, not an independently sampled exact provider process-birth timestamp. All
+owned containers must be stopped/unpaused by the existing harness finalizer.
+A failure to reach provider health through ordinary startup is evidence of the
+remaining ordering problem; do not manufacture success with alternate prestart.
+Source controls cover first success, refused-then-success, wrong denial,
+registration/Host changes and unavailable health. Actual Docker acceptance is
+reported separately after execution, not inferred from those controls.
 
 macOS boot is a distinct later entry requiring a newly allocated disposable
 macOS VM/account with its own enrollment, Host and real Policy App. Bind the
