@@ -5,6 +5,11 @@ on macOS/Linux. It does not resume, stop, inspect, or modify a running runtime.
 The installed dispatcher forwards `treer-agent session ...` to its hash-bound
 native executable, without launching a provider or falling back to Node.
 An older installed native image must be updated before using this command.
+The dispatcher also sets an invalid runtime harness and uses the pinned regular
+executable as the runtime cwd: an older image that ignores `session` argv must
+refuse its ordinary startup rather than accidentally launch a current session.
+The new CLI uses only its explicit transfer arguments, ignoring those runtime
+selectors. This guard does not assert that an old image implements transfer.
 
 ```sh
 treer-agent session export --harness claude \

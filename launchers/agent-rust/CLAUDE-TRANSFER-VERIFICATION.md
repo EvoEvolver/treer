@@ -34,6 +34,11 @@ Contract and remaining live-transfer work: [CLAUDE-TRANSFER.md](CLAUDE-TRANSFER.
   image forwards `session export`, with no provider bindings or provider launch.
   A changed executable hash refuses without Node fallback. This is an isolated
   dispatcher test, not a default installation or shipping artifact.
+  Its defensive runtime-only cwd/harness is also run through the ordinary main
+  path (no `session` argv), which refuses before runtime/provider initialization.
+  This closes an author-found old-image pairing hazard: old images ignore argv,
+  so blindly forwarding `session` under inherited session selectors was unsafe.
+  No historical image is relabelled as implementing the new command.
 - Strict macOS default all-target Clippy `-D warnings`: PASS, log
   `/Users/dooms/.cache/claude247-transfer-clippy.log`.
   Windows GNU default binary cross-Clippy: PASS, log

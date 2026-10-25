@@ -15,7 +15,12 @@ if (args[0] === "update") {
   // Offline transfer runs in the bound native image, before any runtime or
   // provider initialization. It needs no provider and never falls back to Node.
   const binding = nativeRuntime(root, []);
-  const child = spawnProvider(binding.executable.path, args, { env, stdio: "inherit" });
+  // Also fail closed if an installer pairs this dispatcher with an older
+  // image that ignores argv: a regular executable is never a runtime cwd,
+  // and this harness name cannot select Codex/Claude. The new offline CLI
+  // takes its cwd/session exclusively from explicit arguments.
+  const offlineEnv = { ...env, AGENT_UI_CWD: binding.executable.path, AGENT_UI_HARNESS: "offline-session" };
+  const child = spawnProvider(binding.executable.path, args, { env: offlineEnv, stdio: "inherit" });
   child.on("error", () => { process.exitCode = 1; });
   child.on("exit", (code, signal) => { process.exitCode = code ?? (signal ? 1 : 0); });
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => stopProcessTree(child));

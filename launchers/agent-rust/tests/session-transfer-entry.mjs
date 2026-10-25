@@ -176,6 +176,11 @@ test('actual installed-dispatcher entry: session goes to verified native image w
   const result = spawnSync(process.execPath, [path.join(scripts, 'treer-agent.mjs'), 'session', ...f.exportArgs], { env: f.env, encoding: 'utf8', timeout: 30_000, maxBuffer: 2 * 1024 * 1024 });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).sessionId, f.id);
+  // Exercise the ordinary (pre-offline CLI) main path with the dispatcher's
+  // fail-closed environment: it must refuse before runtime/provider startup.
+  const runtimeFallback = spawnSync(image, [], { env: { ...f.env, AGENT_UI_CWD: image, AGENT_UI_HARNESS: 'offline-session' }, encoding: 'utf8', timeout: 5000 });
+  assert.notEqual(runtimeFallback.status, 0); assert.equal(runtimeFallback.error, undefined);
+  assert.match(runtimeFallback.stderr, /workspace_file_root_unavailable/);
   // A changed image must refuse, never take the explicit Node launcher path.
   await fs.appendFile(image, 'changed');
   const changed = spawnSync(process.execPath, [path.join(scripts, 'treer-agent.mjs'), 'session', '--help'], { env: f.env, encoding: 'utf8', timeout: 30_000 });
