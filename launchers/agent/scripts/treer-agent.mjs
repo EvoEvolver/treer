@@ -11,7 +11,16 @@ if (args[0] === "update") {
   const { update } = await import("./update.mjs");
   try { console.log(JSON.stringify(await update(args.slice(1), root), null, 2)); }
   catch (error) { console.error(JSON.stringify({ error: { code: "launcher_update_failed", message: error.message } })); process.exitCode = 1; }
+} else if (args[0] === "session") {
+  // Offline transfer runs in the bound native image, before any runtime or
+  // provider initialization. It needs no provider and never falls back to Node.
+  const binding = nativeRuntime(root, []);
+  const child = spawnProvider(binding.executable.path, args, { env, stdio: "inherit" });
+  child.on("error", () => { process.exitCode = 1; });
+  child.on("exit", (code, signal) => { process.exitCode = code ?? (signal ? 1 : 0); });
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => stopProcessTree(child));
 } else if (args.length === 1 && ["--help", "-h", "help"].includes(args[0])) {
+  console.log("       treer-agent session --help  (offline Claude export/import; macOS/Linux)");
   console.log("Usage: treer-agent [--harness codex|claude|acp] [--session-id ID|--thread-id ID] [--cwd ABS] [--name NAME] [--runtime rust|node]\n       treer-agent update [--controller ABS] [--treer ABS]\n       treer-agent update --bundle ABS --sha256 MANIFEST_SHA256 [--treer ABS] [--root ABS]\n       treer-agent update --help\nCodex/Claude default to Rust; ACP explicitly uses Node. Update changes only the default for future starts; running Agents/Host/Controller are not restarted.");
 } else {
 const mapping = { "--session-id": "AGENT_UI_SESSION_ID", "--thread-id": "AGENT_UI_SESSION_ID", "--cwd": "AGENT_UI_CWD", "--name": "AGENT_UI_NAME" };

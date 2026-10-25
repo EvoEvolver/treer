@@ -22,6 +22,8 @@ mod runtime;
 #[cfg(unix)] mod store;
 #[cfg(windows)] #[path="windows_store.rs"] mod store;
 mod transcript;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod session_transfer;
 
 use anyhow::{bail, Result};
 use axum::{
@@ -75,6 +77,12 @@ fn env(name: &str) -> Option<String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("session") {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        return session_transfer::cli(std::env::args().skip(2).collect());
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        bail!("offline_session_transfer_unsupported_platform");
+    }
     #[cfg(all(windows, feature = "fixture-harness"))]
     if std::env::args().nth(1).as_deref() == Some("--fixture-create-private-state") {
         let root = PathBuf::from(env("TREER_RUST_SPIKE_STATE_DIR")

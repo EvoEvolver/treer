@@ -1,5 +1,10 @@
 # Claude stream adapter (#231)
 
+[Offline Claude transfer](CLAUDE-TRANSFER.md) documents the explicit native
+`session export/import` leaf and isolated atomic destination. Live
+`sessionTransfer` remains null; offline transfer never resumes or modifies the
+current runtime.
+
 This isolated source successor adds a Claude `stream-json` backend selected by
 `AGENT_UI_HARNESS=claude`. It does not change any running Agent, saved startup,
 shared runtime pointer or existing Codex artifact. Security's current Node
@@ -96,12 +101,11 @@ never silently reapplies the saved UI selection. Model timeout also invalidates
 effort provenance. No interrupt, provider restart, goal/task replay or mutation
 of native configuration files occurs.
 
-Session transfer remains `null`/unsupported. Node's transfer is a separate bounded
-native-file bundle protocol: allowlisted JSONL/subagents/memory/project files,
-validated hashes and metadata, fresh UUID and empty dedicated import destination.
-Claude stream-json resume does not provide those export/import guarantees. Rust
-has no equivalent file selection, rewrite/import or authenticated routes yet;
-this batch does not substitute resume for transfer or expose an empty capability.
+Live session transfer remains `null`/unsupported. The separate
+[offline native command](CLAUDE-TRANSFER.md) now implements the allowlisted file
+bundle, hash/metadata validation and fresh isolated identity, without touching
+the running session. Authenticated live export/import coordination remains a
+concrete gap. Claude stream-json resume alone does not implement transfer.
 Other native flag settings are not advertised by this API. Goal budgets/pause
 retain the explicitly documented first-batch limits.
 
@@ -247,8 +251,9 @@ by this source change.
 
 The adapter advertises text prompts, queued notifications, transcript observation
 and abort, plus native catalog discovery and acknowledged model switching.
-Busy steering, private-store image input and task events/output are supported as described here. Goals/budgets, reasoning-effort
-changes and session transfer are currently unsupported. Older Claude history
+Busy steering, private-store image input, task events/output, native idle goals
+and acknowledged effort changes are supported as described here. Goal budgets
+and live session transfer remain unsupported. Older Claude history
 cannot be paged through a supported provider API here. These are concrete target
 admission checks, not a claim of complete Node parity. File-change input is
 rendered as a bounded replacement diff; native structured-patch display parity
@@ -261,8 +266,8 @@ Remaining Claude parity batches, ordered by user impact:
 | Images | Implemented after steering; enabled only with usable private attachment storage | Production native delivery; Windows attachment storage remains unsupported |
 | Background tasks | Native events, retention/clear and POSIX bounded output supported | Windows confined output; active-task checkpoint/restore remains unsupported |
 | Goals/budget | Native-discovered idle set/replace/clear, local-command ACK and exact-condition completion; pause/budget false | Busy edits/clear, budget enforcement/usage accounting and explicit goal recovery |
-| Session transfer | Capability null; migration imports are a separate operator contract | Supported export/import adapter with same-session/state checks |
-| Settings beyond model | Model catalog/ACK switching supported; effort unsupported | Discover effort/control support from provider, never a hardcoded version table |
+| Session transfer | Offline allowlisted native export/import into new isolated destination; live capability null | Authenticated live snapshot/idle custody and explicit new-session launch contract; Windows private-file backend |
+| Settings beyond model | Model and discovered effort with exact control ACK supported | Other settings require actual native catalog/control support, never a hardcoded version table |
 
 These batches do not share this steering delivery or require a second UI.
 
