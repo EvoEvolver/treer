@@ -1,4 +1,5 @@
-//! Offline allowlisted Claude snapshots. Never reads runtime state or credentials.
+//! Allowlisted Claude snapshots and explicitly prepared startup. No credentials
+//! are read; persistent startup reads only its own leased runtime checkpoint.
 use anyhow::{bail, ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rustix::fs::{self, AtFlags, Mode, OFlags};
@@ -372,9 +373,11 @@ pub struct Launch {
     pub config: PathBuf,
     pub id: String,
     pub history: Value,
+    persistent: bool,
+    native_hash: String,
     root: File,
 }
-pub fn launch(args: &[String]) -> Result<Launch> {
+pub fn launch(args: &[String], persistent: bool) -> Result<Launch> {
     ensure!(
         args.len() == 6,
         "launch_requires_directory_session_and_auth"
@@ -410,6 +413,12 @@ pub fn launch(args: &[String]) -> Result<Launch> {
             .get("--directory")
             .context("launch_directory_required")?,
     ))?;
+    if persistent && std::env::var_os("TREER_AGENT_ID").is_some_and(|v| !v.is_empty()) {
+        ensure!(
+            std::fs::canonicalize(std::env::current_dir()?)? == cwd,
+            "prepared_startup_requires_matching_process_cwd"
+        );
+    }
     let plan = crate::bounded_json::decode(&read(&dir, ".harness/claude-launch.json", 4096)?)?;
     ensure!(
         plan["schema"] == "treer.claude-launch/v1"
@@ -417,33 +426,40 @@ pub fn launch(args: &[String]) -> Result<Launch> {
             && plan["sessionId"] == id,
         "launch_binding_mismatch"
     );
-    let path = format!(
-        ".harness/claude/projects/{}/{id}.jsonl",
-        project_key(cwd.to_str().context("non_utf8_destination")?)
-    );
-    let bytes = read(&dir, &path, BYTES)?;
-    ensure!(
-        plan["nativeSha256"] == hash(&bytes),
-        "launch_native_hash_mismatch"
-    );
-    let history = native_history(&bytes, &id)?;
+    let native_hash = plan["nativeSha256"]
+        .as_str()
+        .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .context("launch_hash_required")?
+        .to_owned();
+    let history = if persistent {
+        Value::Null
+    } else {
+        read_launch_history(&dir, &cwd, &id, &native_hash)?
+    };
     Ok(Launch {
         config: cwd.join(".harness/claude"),
         cwd,
         id,
         history,
+        persistent,
+        native_hash,
         root: dir,
     })
 }
-pub fn claim_launch(launch: &Launch, private: &Path) -> Result<()> {
-    // The ordinary lease is already held. Never bootstrap an existing runtime,
-    // including one whose journal is absent but other durable state remains.
-    for entry in std::fs::read_dir(private)? {
-        ensure!(
-            entry?.file_name() == ".rust-launcher.lock",
-            "launch_requires_fresh_private_root"
-        );
-    }
+fn read_launch_history(dir: &File, cwd: &Path, id: &str, digest: &str) -> Result<Value> {
+    let path = format!(
+        ".harness/claude/projects/{}/{id}.jsonl",
+        project_key(cwd.to_str().context("non_utf8_destination")?)
+    );
+    let bytes = read(dir, &path, BYTES)?;
+    ensure!(digest == hash(&bytes), "launch_native_hash_mismatch");
+    native_history(&bytes, id)
+}
+pub fn claim_launch(launch: &mut Launch, private: &Path, agent: &str) -> Result<()> {
+    // Caller holds the ordinary private single-writer lease. A persisted
+    // startup may resume only its own completed checkpoint, never recreate it
+    // from the imported file (which legitimately grows after first launch).
+    let private = std::fs::canonicalize(private)?;
     let (_, current) = root(&launch.cwd)?;
     let a = current.metadata()?;
     let b = launch.root.metadata()?;
@@ -451,6 +467,41 @@ pub fn claim_launch(launch: &Launch, private: &Path) -> Result<()> {
         a.dev() == b.dev() && a.ino() == b.ino(),
         "launch_directory_changed"
     );
+    if launch.persistent {
+        if let Some(saved) = crate::store::Store::open(&private, &launch.cwd)?.load()? {
+            let intent = crate::bounded_json::decode(&read(
+                &launch.root,
+                ".harness/launch-intent.json",
+                4096,
+            )?)?;
+            let metadata = std::fs::metadata(&private)?;
+            ensure!(
+                intent["schema"] == "treer.claude-launch-intent/v1"
+                    && intent["sessionId"] == launch.id
+                    && intent["nativeSha256"] == launch.native_hash
+                    && intent["privateRoot"] == private.to_string_lossy().as_ref()
+                    && intent["privateDevice"] == metadata.dev()
+                    && intent["privateInode"] == metadata.ino()
+                    && intent["agentId"] == agent
+                    && saved["harness"] == "claude"
+                    && saved["threadId"] == launch.id,
+                "prepared_startup_checkpoint_binding_mismatch"
+            );
+            return Ok(());
+        }
+        // Presence of an intent without a checkpoint is an earlier failed or
+        // ambiguous attempt. Exclusive claim below refuses; no automatic retry.
+        launch.history =
+            read_launch_history(&launch.root, &launch.cwd, &launch.id, &launch.native_hash)?;
+    }
+    // The ordinary lease is already held. Never bootstrap an existing runtime,
+    // including one whose journal is absent but other durable state remains.
+    for entry in std::fs::read_dir(&private)? {
+        ensure!(
+            entry?.file_name() == ".rust-launcher.lock",
+            "launch_requires_fresh_private_root"
+        );
+    }
     let native = format!(
         ".harness/claude/projects/{}/{}.jsonl",
         project_key(launch.cwd.to_str().context("non_utf8_destination")?),
@@ -460,11 +511,12 @@ pub fn claim_launch(launch: &Launch, private: &Path) -> Result<()> {
         hash(&read(&launch.root, &native, BYTES)?) == launch.history["nativeSha256"],
         "launch_native_changed"
     );
+    let metadata = std::fs::metadata(&private)?;
     write_private(
         &launch.root,
         ".harness/launch-intent.json",
         &serde_json::to_vec(
-            &json!({"schema":"treer.claude-launch-intent/v1","sessionId":launch.id,"nativeSha256":launch.history["nativeSha256"],"automaticRetry":false}),
+            &json!({"schema":"treer.claude-launch-intent/v1","sessionId":launch.id,"nativeSha256":launch.history["nativeSha256"],"automaticRetry":false,"privateRoot":private,"privateDevice":metadata.dev(),"privateInode":metadata.ino(),"agentId":agent}),
         )?,
     )?;
     launch.root.sync_all()?;
@@ -716,7 +768,7 @@ fn import(input: &Path, destination: &Path, id: &str, prepare: bool) -> Result<V
 }
 pub fn cli(args: Vec<String>) -> Result<()> {
     if args.first().map(String::as_str) == Some("--help") {
-        println!("session export --harness claude --config-dir ABS --cwd ABS --session-id UUID\nsession import --input ABS --directory NEW_ABS [--session-id NEW_UUID]\nsession prepare --input ABS --directory NEW_ABS [--session-id NEW_UUID]\nsession launch --directory PREPARED_ABS --session-id NEW_UUID --auth environment\nImport/prepare publish a new isolated directory. Launch needs a fresh private runtime root and explicit environment auth, never copies credentials or modifies the source session. Launch is once-only; failed intent is retained, never automatically retried.");
+        println!("session export --harness claude --config-dir ABS --cwd ABS --session-id UUID\nsession import --input ABS --directory NEW_ABS [--session-id NEW_UUID]\nsession prepare --input ABS --directory NEW_ABS [--session-id NEW_UUID]\nsession launch --directory PREPARED_ABS --session-id NEW_UUID --auth environment\nsession run --directory PREPARED_ABS --session-id NEW_UUID --auth environment\nImport/prepare publish a new isolated directory. Launch needs a fresh private runtime root and explicit environment auth, never copies credentials or modifies the source session. Launch is once-only. Run is the persistent startup form: first bootstrap once, then only the same Agent/private checkpoint resumes. Failed intent without checkpoint is never retried. Normal Create saves this argv; process creation is not provider readiness.");
         return Ok(());
     }
     let operation = args.first().context("session_operation_required")?;

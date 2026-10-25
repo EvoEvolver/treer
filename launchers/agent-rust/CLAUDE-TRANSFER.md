@@ -207,17 +207,79 @@ After a successful first launch, normal process recovery uses the ordinary
 entry with the returned cwd, isolated `CLAUDE_CONFIG_DIR`, `AGENT_UI_SESSION_ID`
 and the **same private root**. That path loads the real checkpoint and does not
 rerun prepare/launch. The once-only command is not a reusable Host startup
-recipe; updating a newly created Agent's persistent startup remains an explicit
-owner/operator action. Tests exercise this ordinary restart without resending
-the first prompt. These commands do not change any existing startup.
+recipe. Tests exercise this ordinary restart without resending the first prompt.
+These commands do not change any existing startup.
+
+## Normal persistent creation of an already prepared target
+
+`session run` is the reusable startup form of the same native entry, not another
+launcher or supervisor:
+
+```sh
+treer-agent session run --directory /absolute/prepared-project \
+  --session-id NEW_UUID --auth environment
+```
+
+The first run uses the same verified plan/native bytes, fresh private root,
+exclusive launch intent, real initialize and checkpoint-before-AIS publication
+as `launch`. The intent additionally binds the private root path/device/inode
+and Agent ID. Later invocations of **the identical argv** can only load that
+same Agent's real checkpoint with the exact Claude session ID. They never import
+the native file again: it can legitimately grow as the new session works.
+Copied/replaced private directories, mismatched sessions/harnesses, unsafe or
+invalid checkpoints, and missing intent refuse before spawning a provider.
+An intent without a checkpoint cannot bootstrap again. There is no automatic
+retry, delete/recreate, cleanup of a reservation or conversion to a new UUID.
+Ordinary resumed uncertainty remains fenced with its AIS recovery controls
+reachable; an existing unknown receipt is not a reason to kill that provider
+or treat the receipt as successful. The installed dispatcher uses the pinned
+Claude/native binding and public directory and ignores inherited port files.
+
+Use the **existing** normal Create API/command to persist that exact command,
+for example, after explicitly reviewing the prepared target on that machine:
+
+```sh
+treer agent admin create --machine MACHINE_ID --kind command --name NEW_NAME \
+  --cwd prepared-project -- /absolute/installed/treer-agent session run \
+  --directory /absolute/machine-root/prepared-project \
+  --session-id NEW_UUID --auth environment
+```
+
+`--cwd` is machine-root-relative and must select the same physical directory as
+`--directory`. The command path is a trusted absolute installed entry on that
+machine, not an executable supplied by the exported bundle. Normal placement,
+permissions, name reservation, private-root injection and startup persistence
+remain Controller-owned. No self-startup mutation or restart call is needed.
+The Console's explicit prepared-target creation option uses this same request,
+with one confirmation and the existing creation-reservation error handling.
+It is a prepared-target flow, **not** an export/import wizard or a claim that
+the source's `sessionTransfer` capability is available.
+
+The selected machine must already have a trusted supported authentication
+environment for its Host/workloads. Existing Host inheritance can carry
+`ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN`, but Create does not deliver a
+per-target secret. No token is accepted in the creation form, command, profile,
+bundle or plan. Missing environment auth refuses; there is no credential-copy or
+HOME fallback. This is a precondition, not a remote-account validation claim.
+
+Create success means identity/process creation and saved startup, **not** AIS
+or provider readiness. The current Core API reserves identity and persists the
+enabled startup before Host spawn; it has no create-plus-AIS transaction.
+Initialization failure leaves the normal failed/reserved Agent for inspection,
+while the launcher publishes no partial bootstrap checkpoint or AIS endpoint.
+Unknown create results retain the existing reservation-recovery UI; never
+submit again automatically. No claim is made that failure removes every Agent
+record. A per-target secret custody API and a ready-gated creation transaction
+would require separate Core product changes; they are not emulated here.
 
 ## Remaining live-transfer contract
 
 `capabilities.sessionTransfer` remains **null**. The offline command is usable,
 and managed snapshot plus prepare/explicit launch now form an independently
-usable POSIX loop. Shared UI/Agent creation/persistent-startup orchestration and
-full historical rich rendering are not implemented, so the live capability is
-not advertised. Ordinary resume alone still cannot bootstrap an arbitrary old
+usable POSIX loop. Prepared targets can now use normal persistent creation;
+the shared end-to-end snapshot/import/prepare wizard, per-target authentication
+delivery, ready-gated creation and full historical rich rendering remain absent,
+so the live capability is not advertised. Ordinary resume alone still cannot bootstrap an arbitrary old
 session without a supported checkpoint; only the explicit validated new-target
 launch path admits native-read display history. Windows transfer is explicitly
 unsupported; its native private-file/DACL backend is not replaced by POSIX mode

@@ -79,8 +79,8 @@ fn env(name: &str) -> Option<String> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let launch = if std::env::args().nth(1).as_deref()==Some("session") && std::env::args().nth(2).as_deref()==Some("launch") {
-        Some(session_transfer::launch(&std::env::args().skip(3).collect::<Vec<_>>())?)
+    let mut launch = if std::env::args().nth(1).as_deref()==Some("session") && matches!(std::env::args().nth(2).as_deref(),Some("launch"|"run")) {
+        Some(session_transfer::launch(&std::env::args().skip(3).collect::<Vec<_>>(),std::env::args().nth(2).as_deref()==Some("run"))?)
     } else {None};
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     if let Some(launch)=&launch {
@@ -153,14 +153,14 @@ async fn main() -> Result<()> {
     }
     let _state_lease = store::Lease::acquire(&private_root, &cwd, &agent)?;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    if let Some(launch)=&launch {
+    if let Some(launch)=&mut launch {
         if let Some(path)=env("AGENT_UI_PORT_FILE") {
             match std::fs::symlink_metadata(path) {
                 Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},
                 _=>bail!("explicit_launch_port_destination_unavailable"),
             }
         }
-        session_transfer::claim_launch(launch,&private_root)?;
+        session_transfer::claim_launch(launch,&private_root,&agent)?;
     }
     if std::env::args().nth(1).as_deref() == Some("--restore-node-backup") {
         node_import::restore(&private_root, &cwd, &agent)?;
@@ -216,7 +216,7 @@ async fn main() -> Result<()> {
         claude:harness=="claude",
         native_bootstrap: {
             #[cfg(any(target_os = "macos", target_os = "linux"))]
-            {launch.as_ref().map(|l|l.history.clone())}
+            {launch.as_ref().filter(|l|l.history.is_object()).map(|l|l.history.clone())}
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             {None}
         },
@@ -237,7 +237,7 @@ async fn main() -> Result<()> {
         capture_stderr: env("RUST_SPIKE_CAPTURE_STDERR").as_deref() == Some("1"),
     })?;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    if launch.is_some() {
+    if launch.as_ref().is_some_and(|l|l.history.is_object()) {
         // No interface registration/port publication before successful startup.
         let mut state=handle.state.clone();
         let started=tokio::time::timeout(std::time::Duration::from_secs(100),async {

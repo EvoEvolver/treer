@@ -17,7 +17,7 @@ async function source(t){
   const controller=await fakePrivateState('ag_launch_fixture');const children=[];
   t.after(async()=>{for(const child of children){if(child.exitCode===null&&child.signalCode===null){const done=once(child,'exit');child.kill('SIGTERM');await done;}}await controller.close();await rm(root,{recursive:true,force:true});});
   function environment(privateRoot,port,calls){return clean({HOME:root,AGENT_UI_CWD:cwd,AGENT_UI_HARNESS:'claude',CLAUDE_CONFIG_DIR:home,AGENT_UI_PUBLIC_DIR:resolve('../agent/public'),AGENT_UI_PORT:'0',AGENT_UI_PORT_FILE:port,TREER_AGENT_ID:'ag_launch_fixture',TREER_AGENT_PRIVATE_STATE_DIR:privateRoot,TREER_AGENT_SERVER_URL:controller.url,TREER_WORKLOAD_CREDENTIAL:'fixture-only',AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'launch-fixture',RUST_SPIKE_REGISTER:'0',CLAUDE_BIN:process.execPath,RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-launch.mjs')]),LAUNCH_CALLS:calls,ANTHROPIC_API_KEY:'synthetic-launch-token'});}
-  async function start(args,env,entry=binary){const child=spawn(entry,args,{env,stdio:['ignore','pipe','pipe']});children.push(child);let log='';child.stdout.on('data',b=>log+=b);child.stderr.on('data',b=>log+=b);return {child,log:()=>log};}
+  async function start(args,env,entry=binary,options={}){const i=args.indexOf('--directory');const child=spawn(entry,args,{env,...(args.includes('run')&&i>=0?{cwd:args[i+1]}:{}),...options,stdio:['ignore','pipe','pipe']});children.push(child);let log='';child.stdout.on('data',b=>log+=b);child.stderr.on('data',b=>log+=b);return {child,log:()=>log};}
   async function running(args,env,entry=binary){const p=await start(args,env,entry);const base=await until(async()=>`http://127.0.0.1:${Number(await readFile(env.AGENT_UI_PORT_FILE,'utf8'))}`,v=>!v.endsWith('NaN')).catch(error=>{throw Error(error.message+p.log());});const state=()=>fetch(base+'/api/state').then(r=>r.json());await until(state,s=>s.ready);return {...p,base,state};}
   const privateRoot=join(root,'source-private');await mkdir(privateRoot,{mode:0o700});const calls=join(root,'source-calls');
   const live=await running([],environment(privateRoot,join(root,'source-port'),calls));
@@ -68,4 +68,82 @@ test('installed session dispatcher requires Claude binding and launches the same
   manifest.tools.claude={...executable,version:'synthetic-not-shipping'};await writeFile(path,JSON.stringify(manifest),{mode:0o600});
   const bin=join(f.root,'synthetic-bin'),registered=join(f.root,'registered');await mkdir(bin,{mode:0o700});const cli=join(bin,'treer');await writeFile(cli,`#!${process.execPath}\nimport {writeFileSync} from 'node:fs'; if(process.argv[2]!=='interface'||process.argv[3]!=='register')process.exit(81);writeFileSync(process.env.LAUNCH_REGISTER_LOG,JSON.stringify(process.argv.slice(2)));`,{mode:0o700});
   const live=await f.running([entry,...p.args],{...p.env,PATH:bin+':'+p.env.PATH,LAUNCH_REGISTER_LOG:registered},process.execPath);assert.equal((await live.state()).thread.id,p.imported.sessionId);assert.equal((await live.state()).harness.capabilities.sessionTransfer,null);await until(()=>readFile(registered,'utf8'),v=>JSON.parse(v).includes('--instance-id'));await f.checkSource();
+});
+
+test('persistent prepared startup reuses exact argv/checkpoint after native growth, with no duplicate launch/input',async t=>{
+  const f=await source(t),p=await f.target('persistent'),args=[...p.args];args[1]='run';
+  const first=await f.running(args,p.env);assert.equal((await first.state()).thread.id,p.imported.sessionId);
+  const intentPath=join(p.destination,'.harness/launch-intent.json'),intent=await readFile(intentPath,'utf8');
+  const held=await f.start(args,{...p.env,AGENT_UI_PORT_FILE:join(f.root,'concurrent-port')});await once(held.child,'exit');assert.notEqual(held.child.exitCode,0,held.log());
+  assert.equal((await fetch(first.base+'/api/prompt',{method:'POST',body:JSON.stringify({prompt:'persistent continuation exactly once',mode:'queue'})})).status,200);
+  await until(first.state,s=>s.thread.status==='idle'&&s.thread.turns.some(t=>t.items.some(i=>i.text==='persistent continuation exactly once')));
+  const records=JSON.parse(await readFile(join(p.stateRoot,'rust-spike.json'),'utf8')).records;
+  let done=once(first.child,'exit');first.child.kill('SIGTERM');await done;
+  // Same persisted startup args; fresh observation file belongs to this test invocation.
+  const second=await f.running(args,{...p.env,AGENT_UI_PORT_FILE:join(f.root,'persistent-second-port')});
+  assert.equal((await second.state()).thread.id,p.imported.sessionId);
+  assert.deepEqual(JSON.parse(await readFile(join(p.stateRoot,'rust-spike.json'),'utf8')).records,records);
+  done=once(second.child,'exit');second.child.kill('SIGTERM');await done;
+  const third=await f.running(args,{...p.env,AGENT_UI_PORT_FILE:join(f.root,'persistent-third-port')});assert.equal((await third.state()).thread.id,p.imported.sessionId);
+  assert.equal(await readFile(intentPath,'utf8'),intent);
+  const calls=(await readFile(p.env.LAUNCH_CALLS,'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(calls.filter(e=>e.spawn).length,3);assert.ok(calls.filter(e=>e.spawn).every(e=>e.resume&&e.session===p.imported.sessionId&&e.home===p.imported.environment.CLAUDE_CONFIG_DIR));
+  assert.deepEqual(calls.filter(e=>e.text).map(e=>e.text),['persistent continuation exactly once']);await f.checkSource();
+});
+test('persistent failed initialization cannot bootstrap again or publish interface/checkpoint',async t=>{
+  const f=await source(t),p=await f.target('persistent-refused'),args=[...p.args];args[1]='run';
+  const first=await f.start(args,{...p.env,LAUNCH_REFUSE_INIT:'1'});await once(first.child,'exit');assert.notEqual(first.child.exitCode,0);
+  await assert.rejects(stat(p.env.AGENT_UI_PORT_FILE));await assert.rejects(stat(join(p.stateRoot,'rust-spike.json')));
+  const before=await readFile(p.env.LAUNCH_CALLS,'utf8'),intent=await readFile(join(p.destination,'.harness/launch-intent.json'),'utf8');
+  const retry=await f.start(args,p.env);await once(retry.child,'exit');assert.notEqual(retry.child.exitCode,0,retry.log());
+  assert.equal(await readFile(p.env.LAUNCH_CALLS,'utf8'),before);assert.equal(await readFile(join(p.destination,'.harness/launch-intent.json'),'utf8'),intent);
+  await assert.rejects(stat(p.env.AGENT_UI_PORT_FILE));await assert.rejects(stat(join(p.stateRoot,'rust-spike.json')));await f.checkSource();
+});
+test('persistent startup refuses copied root, wrong session and deleted checkpoint before any new provider',async t=>{
+  const f=await source(t),p=await f.target('persistent-binding'),args=[...p.args];args[1]='run';
+  const misplaced=await f.start(args,p.env,binary,{cwd:f.root});await once(misplaced.child,'exit');assert.notEqual(misplaced.child.exitCode,0);assert.match(misplaced.log(),/matching_process_cwd/);await assert.rejects(stat(p.env.LAUNCH_CALLS));await assert.rejects(stat(join(p.destination,'.harness/launch-intent.json')));
+  const first=await f.running(args,p.env);const done=once(first.child,'exit');first.child.kill('SIGTERM');await done;
+  const before=await readFile(p.env.LAUNCH_CALLS,'utf8'),checkpoint=join(p.stateRoot,'rust-spike.json');
+  const copied=join(f.root,'copied-private');await mkdir(copied,{mode:0o700});await copyFile(checkpoint,join(copied,'rust-spike.json'));
+  async function refuses(argv,env){const p=await f.start(argv,env);await once(p.child,'exit');assert.notEqual(p.child.exitCode,0,p.log());assert.equal(await readFile(env.LAUNCH_CALLS,'utf8'),before);await assert.rejects(stat(env.AGENT_UI_PORT_FILE));}
+  await refuses(args,{...p.env,TREER_AGENT_PRIVATE_STATE_DIR:copied,AGENT_UI_PORT_FILE:join(f.root,'copied-port')});
+  const wrong=[...args];wrong[5]='00000000-0000-4000-8000-000000000001';await refuses(wrong,{...p.env,AGENT_UI_PORT_FILE:join(f.root,'wrong-port')});
+  await rm(checkpoint);await refuses(args,{...p.env,AGENT_UI_PORT_FILE:join(f.root,'deleted-port')});await f.checkSource();
+});
+test('persistent installed dispatcher registers only initialized target and ignores inherited port observation',async t=>{
+  const f=await source(t),p=await f.target('persistent-entry'),bundle=join(f.root,'persistent-bundle'),scripts=join(bundle,'scripts'),publicDir=join(bundle,'public');
+  await mkdir(scripts,{recursive:true,mode:0o700});await mkdir(publicDir,{mode:0o700});
+  for(const name of ['treer-agent.mjs','native-runtime.mjs','process.mjs'])await copyFile(resolve('../agent/scripts',name),join(scripts,name));
+  const image=join(bundle,'native');await copyFile(binary,image);await chmod(image,0o700);
+  const bind=async path=>{const bytes=await readFile(path);return {path,bytes:bytes.length,sha256:sha(bytes)};};
+  const executable=await bind(image),assets=[];for(const name of ['index.html','boot.js','ui.js','ui.css']){const path=join(publicDir,name);await writeFile(path,'synthetic',{mode:0o600});assets.push(await bind(path));}
+  await writeFile(join(bundle,'native-runtime.json'),JSON.stringify({schema:'treer.native-launcher/v1',platform:process.platform,arch:process.arch,source_commit:'1'.repeat(40),executable,public_dir:publicDir,assets,tools:{treer:{...executable,version:'synthetic'},claude:{...executable,version:'synthetic'}}}),{mode:0o600});
+  const bin=join(f.root,'persistent-bin'),registered=join(f.root,'persistent-registration');await mkdir(bin,{mode:0o700});
+  await writeFile(join(bin,'treer'),`#!${process.execPath}\nimport {appendFileSync} from 'node:fs'; if(process.argv[2]!=='interface'||process.argv[3]!=='register')process.exit(81);appendFileSync(process.env.LAUNCH_REGISTER_LOG,JSON.stringify(process.argv.slice(2))+'\\n',{mode:0o600});`,{mode:0o700});
+  const entry=join(scripts,'treer-agent.mjs'),args=[entry,...p.args];args[2]='run';
+  const env={...p.env,PATH:bin+':'+p.env.PATH,LAUNCH_REGISTER_LOG:registered};await writeFile(env.AGENT_UI_PORT_FILE,'parent-owned-observation',{mode:0o600});
+  const q=await f.target('persistent-entry-refused'),refusedArgs=[entry,...q.args];refusedArgs[2]='run';const refusedRegistration=join(f.root,'refused-registration');
+  const refused=await f.start(refusedArgs,{...q.env,PATH:env.PATH,LAUNCH_REGISTER_LOG:refusedRegistration,LAUNCH_REFUSE_INIT:'1'},process.execPath);
+  await once(refused.child,'exit');assert.notEqual(refused.child.exitCode,0,refused.log());await assert.rejects(stat(refusedRegistration));await assert.rejects(stat(join(q.stateRoot,'rust-spike.json')));
+  async function started(){const owned=await f.start(args,env,process.execPath);const events=await until(()=>readFile(registered,'utf8'),s=>s.trim().split('\n').length===count+1);count++;const argv=JSON.parse(events.trim().split('\n').at(-1)),port=argv[argv.indexOf('--port')+1];const state=await until(()=>fetch(`http://127.0.0.1:${port}/api/state`).then(r=>r.json()),s=>s.ready);assert.equal(state.thread.id,p.imported.sessionId);assert.equal(state.harness.capabilities.sessionTransfer,null);return owned;}
+  let count=0;const first=await started();let done=once(first.child,'exit');first.child.kill('SIGTERM');await done;
+  const second=await started();done=once(second.child,'exit');second.child.kill('SIGTERM');await done;
+  assert.equal(await readFile(env.AGENT_UI_PORT_FILE,'utf8'),'parent-owned-observation');
+  const calls=(await readFile(env.LAUNCH_CALLS,'utf8')).trim().split('\n').map(JSON.parse);assert.equal(calls.filter(e=>e.spawn).length,2);assert.equal(calls.filter(e=>e.text).length,0);await f.checkSource();
+});
+test('persistent checkpoint recovery keeps uncertain receipt fenced and AIS reachable without replay',async t=>{
+  const f=await source(t),p=await f.target('persistent-unknown'),args=[...p.args];args[1]='run';
+  const first=await f.running(args,p.env);
+  assert.equal((await fetch(first.base+'/api/prompt',{method:'POST',body:JSON.stringify({prompt:'owned uncertain-state control',mode:'queue'})})).status,200);
+  await until(first.state,s=>s.thread.status==='idle'&&s.thread.turns.some(t=>t.items.some(i=>i.text==='owned uncertain-state control')));
+  const done=once(first.child,'exit');first.child.kill('SIGTERM');await done;
+  // Task-owned checkpoint only: emulate a persisted ambiguous dispatch, never
+  // write a real session or manufacture fresh provider terminal authority.
+  const path=join(p.stateRoot,'rust-spike.json'),saved=JSON.parse(await readFile(path,'utf8'));
+  saved.records[0].submission.state='failed';saved.records[0].submission.error='dispatch outcome uncertain; synthetic persisted-state control';saved.dispatchBlocked=true;
+  await writeFile(path,JSON.stringify(saved),{mode:0o600});
+  const recovered=await f.running(args,{...p.env,AGENT_UI_PORT_FILE:join(f.root,'unknown-recovered-port')});
+  const state=await recovered.state();assert.equal(state.runtime.state,'blocked');assert.equal(recovered.child.exitCode,null);
+  const retained=JSON.parse(await readFile(path,'utf8'));assert.equal(retained.records[0].submission.id,saved.records[0].submission.id);assert.match(retained.records[0].submission.error,/dispatch outcome uncertain/);
+  const calls=(await readFile(p.env.LAUNCH_CALLS,'utf8')).trim().split('\n').map(JSON.parse);assert.deepEqual(calls.filter(e=>e.text).map(e=>e.text),['owned uncertain-state control']);await f.checkSource();
 });
