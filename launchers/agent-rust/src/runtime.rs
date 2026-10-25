@@ -718,7 +718,7 @@ impl Runtime {
             state["harness"]=json!("claude");state["claudeTurns"]=json!(&*self.turns);
             state["claudeHistoryStart"]=json!(self.history_start+self.turns.dropped);
             state["claudeHistoryTotal"]=json!(self.history_total);
-            state["claudeTerminalTasks"]=self.terminal_tasks.clone();
+            state["claudeTerminalTasks"]=crate::tasks::finished(&self.terminal_tasks);
         }
         if let Err(error) = self.store.save(&state) {
             eprintln!("Rust spike: checkpoint_failure=1");
@@ -757,7 +757,7 @@ impl Runtime {
         let mut snapshot = json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"],"cleanup":{"providerExit":self.provider_exit,"processGroup":if self.provider_exit == "not_requested" {"not_requested"} else {"termination_requested_unverified"},"detachedDescendants":"not_guaranteed"}},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":null,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}});
         snapshot["thread"] = thread;
         if self.claude {
-            snapshot["harness"]=json!({"id":"claude","name":"Claude","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":null,"sessionTransfer":null}});
+            snapshot["harness"]=json!({"id":"claude","name":"Claude","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":true,"goal":null,"sessionTransfer":null}});
             snapshot["backgroundTasks"]=self.terminal_tasks.clone();
         }
         let start=(self.history_start+self.turns.dropped).min(self.history_total);
@@ -915,6 +915,12 @@ impl Runtime {
             bail!("private_state_write_failed");
         }
         match method {
+            "tasks/clear-finished" if self.claude => {
+                let removed = crate::tasks::clear(&mut self.terminal_tasks);
+                self.persist()?;
+                self.publish();
+                Ok(json!({"removed":removed}))
+            }
             "recovery" => {
                 if self.state_failed { bail!("recovery_storage_unavailable"); }
                 match body["action"].as_str() {
@@ -1683,6 +1689,12 @@ impl Runtime {
             return Ok(());
         }
         match method {
+            "thread/tasks/updated" if self.claude => {
+                // Auxiliary metadata cannot complete a turn or poison its transport.
+                if crate::tasks::update(&mut self.terminal_tasks, &p["event"]).is_ok() {
+                    self.persist()?;
+                } else { eprintln!("Rust launcher: claude_task_metadata_refused"); }
+            }
             "thread/model/updated" if self.claude => {
                 if p["modelRevision"].as_u64().is_some_and(|r|r>self.model_revision) {
                     self.model_revision=p["modelRevision"].as_u64().unwrap();

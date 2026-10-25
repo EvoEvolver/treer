@@ -15,6 +15,8 @@ mod model;
 mod rpc;
 mod claude;
 mod soul_terminal;
+mod tasks;
+mod task_output;
 mod runtime;
 #[cfg(unix)] mod store;
 #[cfg(windows)] #[path="windows_store.rs"] mod store;
@@ -61,6 +63,7 @@ struct App {
     instance: String,
     public: PathBuf,
     files: files::Files,
+    task_output: task_output::Output,
     attachments: Option<Arc<tokio::sync::Mutex<attachments::Attachments>>>,
     image_slots: Arc<tokio::sync::Semaphore>,
     history_slot: Arc<tokio::sync::Semaphore>,
@@ -98,6 +101,7 @@ async fn main() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("workspace_file_root_unavailable"))?;
     let files = files::Files::new(cwd.clone())
         .map_err(|_| anyhow::anyhow!("workspace_file_root_unavailable"))?;
+    let task_output = task_output::Output::new(&cwd)?;
     let agent = env("TREER_AGENT_ID").unwrap_or_default();
     let harness=env("AGENT_UI_HARNESS").unwrap_or("codex".into());
     if !matches!(harness.as_str(),"codex"|"claude") {bail!("unsupported harness");}
@@ -216,6 +220,7 @@ async fn main() -> Result<()> {
         instance: instance.clone(),
         public,
         files,
+        task_output,
         attachments,
         image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         history_slot: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -420,6 +425,18 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
         }).into_response();
     }
     let snapshot: Arc<Value> = app.runtime.state.borrow().clone();
+    if method == "GET" && path.starts_with("/api/tasks/") {
+        let Some(segment)=path.strip_prefix("/api/tasks/").and_then(|s|s.strip_suffix("/output")) else {return failure(StatusCode::NOT_FOUND,"Task output route not found");};
+        let id=percent_encoding::percent_decode_str(segment).decode_utf8().ok().filter(|s|!s.is_empty() && s.len()<=1024 && !s.chars().any(char::is_control));
+        let Some(id)=id else {return failure(StatusCode::BAD_REQUEST,"invalid_task_id");};
+        let Some(task)=snapshot["backgroundTasks"].as_array().and_then(|tasks|tasks.iter().find(|t|t["id"]==id.as_ref())).cloned() else {return failure(StatusCode::NOT_FOUND,"Task not found");};
+        let url=reqwest::Url::parse(&format!("http://localhost/?{}",request.uri().query().unwrap_or(""))).unwrap();
+        let query=url.query_pairs().collect::<std::collections::HashMap<_,_>>();
+        return match app.task_output.read(task,snapshot["thread"]["id"].as_str().unwrap_or("").into(),query.get("tail").map(|s|s.as_ref())).await {
+            Ok(value)=>json_response(StatusCode::OK,value),
+            Err(error)=>json_response(StatusCode::BAD_REQUEST,json!({"error":error.to_string()})),
+        };
+    }
     if method == "GET" || method == "HEAD" {
         let data = match path.as_str() {
             "/v1/manifest" => {
@@ -508,6 +525,12 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
         }
     };
     match path.as_str() {
+        "/api/tasks/clear-finished" => {
+            match app.runtime.call("tasks/clear-finished",body).await {
+                Ok(value)=>{let mut state=limited(&app.runtime.state.borrow(),50);state["removed"]=value["removed"].clone();json_response(StatusCode::OK,state)},
+                Err(_)=>failure(StatusCode::BAD_REQUEST,"Task records could not be cleared"),
+            }
+        }
         "/api/recovery" => call(&app, "recovery", body, StatusCode::ACCEPTED).await,
         "/api/goal" if method == "PUT" || method == "DELETE" => {
             let limit = history_limit(&body);

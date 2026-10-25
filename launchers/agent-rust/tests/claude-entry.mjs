@@ -3,7 +3,7 @@ import test from 'node:test';
 import {spawn,execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {once} from 'node:events';
-import {mkdtemp,mkdir,readFile,realpath,rm,writeFile} from 'node:fs/promises';
+import {mkdtemp,mkdir,readFile,realpath,rm,writeFile,symlink,link} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {access} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -34,6 +34,57 @@ async function fixture(t,extra={},setup=async()=>({})){
 }
 async function stop(child){const exit=once(child,'exit');child.kill('SIGTERM');assert.equal((await exit)[0],0);}
 const inputCalls=async f=>(await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').map(JSON.parse);
+test('Claude native tasks outlive turn completion, confined output and record-only clear preserve FIFO and restart',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_TASKS:'1',CLAUDE_FIXTURE_STEER:'1',CLAUDE_FIXTURE_TASK_ASYNC:'task-complete-ready'},async({root,cwd})=>{
+    await writeFile(join(cwd,'task.output'),'x'.repeat(70000)+'own output tail');
+    await writeFile(join(root,'outside'),'outside never exposed');
+    await symlink(join(root,'outside'),join(cwd,'link.output'));await link(join(root,'outside'),join(cwd,'hard.output'));
+    return {};
+  });
+  assert.equal((await f.snapshot()).harness.capabilities.backgroundTasks,true);
+  await f.post({prompt:'start native tasks'});
+  let state=await until(f.snapshot,s=>s.thread.status==='idle'&&s.thread.turns.length===1&&s.backgroundTasks.length===5);
+  assert.equal(state.backgroundTasks.find(t=>t.id==='running-shell').status,'running','result never completes a task');
+  assert.equal(state.backgroundTasks.find(t=>t.id==='running-shell').description,'Updated native shell');
+  const output=await fetch(f.base+'/api/tasks/running-shell/output?tail=999999');assert.equal(output.status,200);
+  const body=await output.json();assert.equal(body.content.length,65536);assert.equal(body.truncated,true);assert.ok(body.content.endsWith('own output tail'));
+  for(const id of ['outside','symlink','hardlink']){const r=await fetch(f.base+`/api/tasks/${id}/output`);assert.equal(r.status,400);assert.equal(JSON.stringify(await r.json()).includes('outside never exposed'),false);}
+  assert.equal((await fetch(f.base+'/api/tasks/not-registered/output')).status,404);
+  assert.equal((await fetch(f.base+'/api/tasks/output')).status,404);
+  assert.equal((await fetch(f.base+'/api/tasks/running-shell/output?tail=0')).status,400);
+  assert.equal((await fetch(f.base+'/api/tasks/running-shell/output',{headers:{origin:'https://foreign.invalid'}})).status,403);
+  const clear=()=>fetch(f.base+'/api/tasks/clear-finished',{method:'POST',body:'{}'});
+  let cleared=await (await clear()).json();assert.equal(cleared.removed,1);assert.equal(cleared.backgroundTasks.length,4);
+  assert.equal((await readFile(join(f.root,'cwd/task.output'),'utf8')).length,70015,'clearing records never touches output');
+  await writeFile(join(f.root,'cwd/task-complete-ready'),'allow own native task notification');
+  state=await until(f.snapshot,s=>s.backgroundTasks.find(t=>t.id==='running-shell')?.status==='completed');
+  assert.equal(state.thread.status,'idle');assert.equal(state.thread.turns.length,1);assert.equal((await inputCalls(f)).length,1,'idle task event never manufactures input or a turn');
+  for(let i=0;i<2;i++)assert.equal((await f.post({prompt:'finish task',mode:'queue'})).status,200);
+  state=await until(f.snapshot,s=>s.thread.turns.length===3&&s.thread.status==='idle');
+  assert.equal(state.backgroundTasks.find(t=>t.id==='running-shell').status,'completed');
+  assert.deepEqual((await inputCalls(f)).map(c=>c.text),['start native tasks','finish task','finish task']);
+  const thread=state.thread.id;await stop(f.child);const resumed=await f.launch();state=await resumed.snapshot();
+  assert.equal(state.thread.id,thread);assert.deepEqual(state.backgroundTasks.map(t=>[t.id,t.status]),[['running-shell','completed']]);
+  assert.equal((await inputCalls(f)).length,3,'restart does not replay tasks or input');
+});
+test('Claude native tasks use shared accessible panel and bounded output on desktop and mobile', {skip:!process.env.CLAUDE_TASKS_BROWSER},async t=>{
+  const {chromium,expect}=createRequire(resolve(process.env.NODE_LAUNCHER_ROOT||'../agent','package.json'))('@playwright/test');
+  const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
+  const f=await fixture(t,{CLAUDE_FIXTURE_TASKS:'1',CLAUDE_FIXTURE_STEER:'1',TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'tasks-fixture'},async({cwd,state})=>{await writeFile(join(cwd,'task.output'),'own browser task output');return {env:{TREER_AGENT_PRIVATE_STATE_DIR:state}};});
+  await f.post({prompt:'start native tasks'});await until(f.snapshot,s=>s.backgroundTasks.length===5);
+  const browser=await chromium.launch({env:hermeticEnv({HOME:process.env.HOME})});t.after(()=>browser.close());
+  for(const width of [1280,390]){
+    const page=await browser.newPage({viewport:{width,height:850},extraHTTPHeaders:{'x-treer-interface-source':'proxy-ui','x-treer-agent-id':'ag_contract','x-treer-interface-instance':'tasks-fixture'}});await page.goto(f.base+'/?lang=en');
+    if(width===390){await page.getByRole('button',{name:'Menu',exact:true}).click();await page.getByRole('menuitem',{name:/Tasks/}).click();}
+    else await page.locator('.actions > button[aria-controls=tasks]').click();
+    await expect(page.locator('#tasks')).toBeVisible();
+    const task=page.locator('#tasks details').filter({hasText:'Updated native shell'});
+    await task.locator('summary').focus();await page.keyboard.press('Enter');
+    await expect(task.locator('.task-output')).toHaveText('own browser task output');
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+    await page.getByRole('button',{name:'Close background tasks',exact:true}).click();await expect(page.locator('#tasks')).toBeHidden();await page.close();
+  }
+});
 test('Claude validated images reach native input, steering and queued FIFO without embedding bytes in history',async t=>{
   const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
   const f=await fixture(t,{CLAUDE_FIXTURE_STEER:'1',CLAUDE_FIXTURE_IMAGES:'1',CLAUDE_FIXTURE_HOLD:'finish-ready',TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,AGENT_UI_MESSAGE_WATCH:'0'},async({state})=>({env:{TREER_AGENT_PRIVATE_STATE_DIR:state}}));
@@ -277,7 +328,7 @@ test('receiptless Soul Claude retains 21 terminal records through new turn, rest
     await writeFile(seed,JSON.stringify({version:1,harness:'claude',agent:'ag_contract',cwd,threadId:thread,queueSha256:null,snapshot:{ready:true,harness:{id:'claude'},runtime:{state:'idle',error:null},thread:{id:thread,status:'idle',activeTurnId:null,turns:[]},queue:[],backgroundTasks:tasks,goal:null,goalDelivery:null}}),{mode:0o600});
     return {env:{TREER_AGENT_PRIVATE_STATE_DIR:state,AGENT_UI_SESSION_ID:thread,RUST_CLAUDE_IMPORT_SNAPSHOT:seed},args:['--import-claude-state']};
   });
-  const check=state=>{assert.equal(state.thread.id,thread);assert.deepEqual(state.backgroundTasks,tasks);assert.equal(state.harness.capabilities.backgroundTasks,false);};
+  const check=state=>{assert.equal(state.thread.id,thread);assert.deepEqual(state.backgroundTasks,tasks);assert.equal(state.harness.capabilities.backgroundTasks,true);};
   check(await f.snapshot());await assert.rejects(access(join(f.root,'calls')),'import must not submit terminal tasks');
   const source=join(f.root,'cwd/.treer/agents/ag_contract');
   await assert.rejects(access(join(source,'queue.json')));

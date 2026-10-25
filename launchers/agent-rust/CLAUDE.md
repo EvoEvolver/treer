@@ -96,6 +96,39 @@ block is at most1MiB, tool input128KiB, and a turn at most2048 items/4MiB before
 the common50-turn/16MiB transcript admission. Backpressure remains lossless.
 The existing128MiB on-disk journal/history policy is unchanged.
 
+## Background tasks (#247)
+
+Native `system` subtypes `task_started`, `task_updated`, `task_notification`
+and `background_tasks_changed` populate the shared TasksPanel. Fields and status
+aliases follow the Node adapter, including patch updates, task kinds, timestamps
+and exit-code summaries. Task metadata is independent of turn lifecycle: a turn
+result does not complete its running tasks; a task notification never settles a
+receipt, clears a fence, dispatches input or replays work.
+
+Records have a100-record/1MiB total admission bound. Running records are never
+pruned. Finished records retain the newest20 for24 hours when task events arrive;
+oversize/malformed batches are ignored atomically with a categorical diagnostic,
+not treated as provider death. Clear finished removes metadata only, leaving
+running records, output files and processes untouched. Terminal metadata uses
+the existing validated `claudeTerminalTasks` checkpoint. Running observations
+are process-local, as in Node: restart does not claim to reacquire tasks or
+invent their outcome. No active task execution/checkpoint restoration API is
+advertised by this support.
+
+`GET /api/tasks/<registered ID>/output?tail=65536` reads at most64KiB from the
+task's registered output file. POSIX reads walk startup-pinned workspace or
+temporary-directory capabilities with `O_NOFOLLOW|O_NONBLOCK` on every component;
+temporary paths must be inside the exact cwd-derived project/session `tasks`
+directory. Only an owned regular file with one link is read, from the same
+descriptor that passed validation. Unknown task IDs, parent traversal, symlinks,
+hardlinks, special files and other sessions/projects refuse. A shell task
+without an explicit output path may use the fixed native `/tmp/claude-UID/PROJECT/SESSION/tasks/ID.output`
+location for a safe alphanumeric/underscore/hyphen task ID. Two output readers
+maximum bound file work; clearing records never reads or deletes output. The
+existing interface/origin guard protects both task routes. Windows reports task
+events but explicitly refuses task output reads until its confined reader is
+implemented; no POSIX filesystem guarantees are claimed there.
+
 ## Existing Node Claude session import
 
 `--import-node-state` is rejected for Claude. The distinct one-time
@@ -133,7 +166,7 @@ by this source change.
 
 The adapter advertises text prompts, queued notifications, transcript observation
 and abort, plus native catalog discovery and acknowledged model switching.
-Busy steering and private-store image input are supported as described here. Background tasks, goals/budgets, reasoning-effort
+Busy steering, private-store image input and task events/output are supported as described here. Goals/budgets, reasoning-effort
 changes and session transfer are currently unsupported. Older Claude history
 cannot be paged through a supported provider API here. These are concrete target
 admission checks, not a claim of complete Node parity. File-change input is
@@ -145,7 +178,7 @@ Remaining Claude parity batches, ordered by user impact:
 | Batch | Current Rust boundary | Separate implementation needed |
 | --- | --- | --- |
 | Images | Implemented after steering; enabled only with usable private attachment storage | Production native delivery; Windows attachment storage remains unsupported |
-| Background tasks | Live capability false; imported terminal metadata is passive only | Native task event lifecycle, bounded retention and task-output route |
+| Background tasks | Native events, retention/clear and POSIX bounded output supported | Windows confined output; active-task checkpoint/restore remains unsupported |
 | Goals/budget | Claude goal capability null | Native budget controls, usage accounting and explicit goal recovery |
 | Session transfer | Capability null; migration imports are a separate operator contract | Supported export/import adapter with same-session/state checks |
 | Settings beyond model | Model catalog/ACK switching supported; effort unsupported | Discover effort/control support from provider, never a hardcoded version table |

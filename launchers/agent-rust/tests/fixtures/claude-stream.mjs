@@ -51,6 +51,26 @@ createInterface({input:process.stdin}).on('line',async line=>{
   appendFileSync(process.env.CLAUDE_FIXTURE_LOG,JSON.stringify({type:active?'steered':'accepted',resume:args.includes('--resume'),session,...(process.env.CLAUDE_FIXTURE_MODELS||process.env.CLAUDE_FIXTURE_STEER?{model,text,uuid:event.uuid}:{}),...(process.env.CLAUDE_FIXTURE_IMAGES?{images}:{})})+'\n');
   if(active){emit({type:'user',uuid:event.uuid,message:event.message});return;}
   active=true;
+  if(process.env.CLAUDE_FIXTURE_TASKS){
+    if(text==='finish task')emit({type:'system',subtype:'task_notification',task_id:'running-shell',status:'completed',summary:'finished with exit code 0'});
+    else {
+      emit({type:'system',subtype:'task_started',task_id:'running-shell',task_type:'local_bash',description:'Native running shell',status:'running',output_file:process.cwd()+'/task.output'});
+      emit({type:'system',subtype:'task_updated',task_id:'running-shell',patch:{description:'Updated native shell',summary:'still working'}});
+      emit({type:'system',subtype:'background_tasks_changed',tasks:[
+        {task_id:'finished-agent',task_type:'local_agent',description:'Native finished agent',status:'success',output_file:process.cwd()+'/task.output'},
+        {task_id:'outside',description:'Outside',status:'running',output_file:process.cwd()+'/../outside'},
+        {task_id:'symlink',status:'running',output_file:process.cwd()+'/link.output'},
+        {task_id:'hardlink',status:'running',output_file:process.cwd()+'/hard.output'},
+      ]});
+      emit({type:'system',subtype:'background_tasks_changed',tasks:Array.from({length:101},(_,i)=>({task_id:'refused-'+i,status:'running'}))});
+      if(process.env.CLAUDE_FIXTURE_TASK_ASYNC){
+        const notify=()=>{
+          if(!existsSync(process.env.CLAUDE_FIXTURE_TASK_ASYNC)){setTimeout(notify,20);return;}
+          emit({type:'system',subtype:'task_notification',task_id:'running-shell',status:'completed',summary:'async task exit code 0'});
+        };setTimeout(notify,20);
+      }
+    }
+  }
   while(process.env.CLAUDE_FIXTURE_INPUT_GATE&&!existsSync(process.env.CLAUDE_FIXTURE_INPUT_GATE))await new Promise(r=>setTimeout(r,20));
   emit({type:'system',subtype:'init',...(process.env.CLAUDE_FIXTURE_MODELS?{model}:{})});
   const id='message-'+Date.now();

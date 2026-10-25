@@ -644,6 +644,9 @@ impl Adapter {
             }
             // system idle may precede result: never dispatch another turn here.
             Some("system") => {
+                if matches!(event["subtype"].as_str(), Some("background_tasks_changed"|"task_started"|"task_updated"|"task_notification")) {
+                    out.push(json!({"method":"thread/tasks/updated","params":{"threadId":self.session,"event":event}}));
+                }
                 if event["subtype"]=="init" && ((self.input_settings_epoch.is_none() && self.settings_epoch==0) || (self.input_settings_epoch==Some(self.settings_epoch) && self.model_revision<=self.input_model_revision)) {
                     if let Some(model)=Self::model_name(&event["model"]) {out.push(self.observe_model(model));}
                 }
