@@ -757,10 +757,8 @@ impl Runtime {
         let mut snapshot = json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"],"cleanup":{"providerExit":self.provider_exit,"processGroup":if self.provider_exit == "not_requested" {"not_requested"} else {"termination_requested_unverified"},"detachedDescendants":"not_guaranteed"}},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":null,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}});
         snapshot["thread"] = thread;
         if self.claude {
-            snapshot["harness"]=json!({"id":"claude","name":"Claude","capabilities":{"images":false,"steer":true,"backgroundTasks":false,"goal":null,"sessionTransfer":null}});
+            snapshot["harness"]=json!({"id":"claude","name":"Claude","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":null,"sessionTransfer":null}});
             snapshot["backgroundTasks"]=self.terminal_tasks.clone();
-            snapshot["attachmentsAvailable"]=json!(false);
-            snapshot["attachmentStorageStatus"]=json!("unsupported");
         }
         let start=(self.history_start+self.turns.dropped).min(self.history_total);
         snapshot["thread"]["hasOlderItems"]=json!(start>0);
@@ -1312,7 +1310,6 @@ impl Runtime {
         let text = supplied_text.trim();
         let ids = body.get("attachment_ids").cloned().unwrap_or(json!([]));
         let has_images = ids.as_array().is_some_and(|ids| !ids.is_empty());
-        if self.claude && has_images {bail!("claude_images_unsupported");}
         if text.is_empty() && !has_images {
             bail!("text or images required");
         }
@@ -1442,12 +1439,18 @@ impl Runtime {
                 .attachments
                 .as_ref()
                 .ok_or_else(|| anyhow!("attachments_unavailable"))?;
-            for (_, path) in store
-                .lock()
-                .await
-                .resolve(&ids, self.thread["id"].as_str().unwrap_or(""))?
-            {
-                input.push(json!({"type":"localImage","path":path}));
+            let store=store.lock().await;
+            let session=self.thread["id"].as_str().unwrap_or("");
+            for (metadata, path) in store.resolve(&ids, session)? {
+                if self.claude {
+                    use base64::Engine;
+                    // The private store revalidates no-follow ownership, MIME,
+                    // length and digest before these bytes reach the provider.
+                    let (_,bytes)=store.read(metadata["id"].as_str().ok_or_else(||anyhow!("attachment_invalid_ids"))?,session)?;
+                    input.push(json!({"type":"image","source":{"type":"base64","media_type":metadata["mime"],"data":base64::engine::general_purpose::STANDARD.encode(bytes)}}));
+                } else {
+                    input.push(json!({"type":"localImage","path":path}));
+                }
             }
         }
         // Capture display order before the cooperative RPC can consume newer

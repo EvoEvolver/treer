@@ -1157,6 +1157,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "chrono",
  "futures-util",
  "hyper",

@@ -90,7 +90,7 @@ receipts. A different harness refuses that journal. Restart never replays an
 accepted user or tool result: an unfinished running receipt becomes uncertain
 and fences dispatch, while its observed tool output remains visible.
 
-Frames are at most2MiB, with a60-second absolute deadline after the first bytes;
+Nonimage frames are admitted at most2MiB, with a60-second absolute deadline after the first bytes;
 JSON depth/node/duplicate-key checks use the bounded decoder. A streamed text
 block is at most1MiB, tool input128KiB, and a turn at most2048 items/4MiB before
 the common50-turn/16MiB transcript admission. Backpressure remains lossless.
@@ -133,7 +133,7 @@ by this source change.
 
 The adapter advertises text prompts, queued notifications, transcript observation
 and abort, plus native catalog discovery and acknowledged model switching.
-Busy steering is supported as described above. Images, background tasks, goals/budgets, reasoning-effort
+Busy steering and private-store image input are supported as described here. Background tasks, goals/budgets, reasoning-effort
 changes and session transfer are currently unsupported. Older Claude history
 cannot be paged through a supported provider API here. These are concrete target
 admission checks, not a claim of complete Node parity. File-change input is
@@ -144,13 +144,41 @@ Remaining Claude parity batches, ordered by user impact:
 
 | Batch | Current Rust boundary | Separate implementation needed |
 | --- | --- | --- |
-| Images | Capability false; image input refuses | Reuse private attachment admission, then native image blocks and transcript retention |
+| Images | Implemented after steering; enabled only with usable private attachment storage | Production native delivery; Windows attachment storage remains unsupported |
 | Background tasks | Live capability false; imported terminal metadata is passive only | Native task event lifecycle, bounded retention and task-output route |
 | Goals/budget | Claude goal capability null | Native budget controls, usage accounting and explicit goal recovery |
 | Session transfer | Capability null; migration imports are a separate operator contract | Supported export/import adapter with same-session/state checks |
 | Settings beyond model | Model catalog/ACK switching supported; effort unsupported | Discover effort/control support from provider, never a hardcoded version table |
 
 These batches do not share this steering delivery or require a second UI.
+
+## Private image inputs (#247, separate batch)
+
+Claude reuses the same authenticated private attachment API and shared UI as
+Codex. The capability is true only when that private store actually opened;
+Windows and unmanaged entries without storage continue to report unavailable.
+PNG/JPEG/WebP/GIF framing/dimensions, 10MiB per file, eight images and 24MiB per
+prompt, Controller quota reservations, session binding, ownership/private mode,
+nofollow/single-link files and exact SHA/length checks remain unchanged.
+No caller-supplied file path or image URL is passed to Claude.
+
+At dispatch, verified bytes become native base64 image blocks alongside text.
+Only adapter-validated Claude image input gets the 32MiB encoded-payload plus
+128KiB envelope write allowance; ordinary RPC/text stays at128KiB and the fatal
+five-second write/flush deadline remains. Image-only input, working steering
+and queued FIFO follow the same durable intent/unknown/no-replay contract.
+Receipts and transcript keep only attachment ID/MIME/size metadata; retained
+images remain available through the existing attachment route after restart.
+
+Claude may echo image blocks. Its raw frame buffer now has a34MiB hard cap and
+the existing60-second deadline. Only a user frame with validated base64 image
+blocks (same format/MIME, eight/24MiB limits) may exceed2MiB; image payloads are
+discarded after validation and the remaining frame must still fit2MiB. Echoes
+never acknowledge input, create receipts or settle turns. Other large frames,
+malformed JSON, duplicate keys and depth/node excess still refuse. Every frame
+can buffer up to34MiB before classification; this is a wire byte cap, not a
+process memory cap. The raw bytes, decoded JSON, single-image decode and compact
+serialization may coexist. No provider history is read or reconstructed.
 
 Focused checks use `tests/claude-entry.mjs` with the synthetic producer
 `tests/fixtures/claude-stream.mjs`: two queued turns across early idle, terminal

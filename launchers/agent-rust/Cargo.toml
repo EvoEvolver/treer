@@ -12,6 +12,7 @@ fixture-harness = []
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 axum = { version = "0.8", features = ["ws"] }
 chrono = "0.4"
 futures-util = "0.3"

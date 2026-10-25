@@ -1,6 +1,7 @@
 // Synthetic producer, no provider installation/home/config or network access.
 import { createInterface } from 'node:readline';
 import { appendFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 const args=process.argv.slice(2), session=args.at(-1);
 if(process.env.CLAUDE_FIXTURE_SPAWN_LOG)appendFileSync(process.env.CLAUDE_FIXTURE_SPAWN_LOG,'spawned\n');
 const emit=event=>process.stdout.write(JSON.stringify({session_id:session,...event})+'\n');
@@ -43,7 +44,11 @@ createInterface({input:process.stdin}).on('line',async line=>{
   }
   if(event.type!=='user'||active&&!process.env.CLAUDE_FIXTURE_STEER)process.exit(71);
   const text=typeof event.message.content==='string'?event.message.content:event.message.content.filter(b=>b.type==='text').map(b=>b.text).join('\n');
-  appendFileSync(process.env.CLAUDE_FIXTURE_LOG,JSON.stringify({type:active?'steered':'accepted',resume:args.includes('--resume'),session,...(process.env.CLAUDE_FIXTURE_MODELS||process.env.CLAUDE_FIXTURE_STEER?{model,text,uuid:event.uuid}:{})})+'\n');
+  const images=Array.isArray(event.message.content)?event.message.content.filter(b=>b.type==='image').map(b=>{
+    if(b.source.type!=='base64')process.exit(72);
+    const bytes=Buffer.from(b.source.data,'base64');return {mime:b.source.media_type,bytes:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')};
+  }):[];
+  appendFileSync(process.env.CLAUDE_FIXTURE_LOG,JSON.stringify({type:active?'steered':'accepted',resume:args.includes('--resume'),session,...(process.env.CLAUDE_FIXTURE_MODELS||process.env.CLAUDE_FIXTURE_STEER?{model,text,uuid:event.uuid}:{}),...(process.env.CLAUDE_FIXTURE_IMAGES?{images}:{})})+'\n');
   if(active){emit({type:'user',uuid:event.uuid,message:event.message});return;}
   active=true;
   while(process.env.CLAUDE_FIXTURE_INPUT_GATE&&!existsSync(process.env.CLAUDE_FIXTURE_INPUT_GATE))await new Promise(r=>setTimeout(r,20));

@@ -24,7 +24,7 @@ async function fixture(t,extra={},setup=async()=>({})){
     env.RUST_SPIKE_REGISTER='0';
     const child=spawn(binary,args,{cwd,env,stdio:['ignore','pipe','pipe']});children.push(child);
     child.stderr.on('data',b=>logs+=b);child.stdout.on('data',b=>logs+=b);
-    const base=await until(async()=>`http://127.0.0.1:${Number(await readFile(port,'utf8'))}`,v=>!v.endsWith('NaN'));
+    let base;try{base=await until(async()=>`http://127.0.0.1:${Number(await readFile(port,'utf8'))}`,v=>!v.endsWith('NaN'));}catch(error){throw Error(error.message+' '+logs);}
     const snapshot=()=>fetch(base+'/api/state').then(r=>r.json());
     try{await until(snapshot,s=>s.ready);}catch(error){throw Error(error.message+' '+logs);}
     return {child,base,snapshot,post:body=>fetch(base+'/api/prompt',{method:'POST',body:JSON.stringify(body)})};
@@ -34,6 +34,54 @@ async function fixture(t,extra={},setup=async()=>({})){
 }
 async function stop(child){const exit=once(child,'exit');child.kill('SIGTERM');assert.equal((await exit)[0],0);}
 const inputCalls=async f=>(await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').map(JSON.parse);
+test('Claude validated images reach native input, steering and queued FIFO without embedding bytes in history',async t=>{
+  const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
+  const f=await fixture(t,{CLAUDE_FIXTURE_STEER:'1',CLAUDE_FIXTURE_IMAGES:'1',CLAUDE_FIXTURE_HOLD:'finish-ready',TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,AGENT_UI_MESSAGE_WATCH:'0'},async({state})=>({env:{TREER_AGENT_PRIVATE_STATE_DIR:state}}));
+  const gif=Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==','base64');
+  // Valid GIF comments put this well over the ordinary 128KiB RPC frame cap.
+  const image=Buffer.concat([gif.subarray(0,-1),Buffer.from([0x21,0xfe]),...Array(8192).fill(Buffer.concat([Buffer.from([255]),Buffer.alloc(255,65)])),Buffer.from([0,0x3b])]);
+  const upload=async bytes=>fetch(f.base+'/api/attachments',{method:'POST',body:bytes});
+  assert.equal((await upload(Buffer.from('not an image'))).status,400);
+  const attachments=[];for(let i=0;i<3;i++){const r=await upload(image);assert.equal(r.status,201);attachments.push((await r.json()).attachment);}
+  assert.equal((await f.snapshot()).harness.capabilities.images,true);
+  assert.equal((await f.post({attachment_ids:['img_00000000000000000000000000000000'],prompt:'missing'})).status,400);
+  assert.equal((await f.post({attachment_ids:[attachments[0].id,attachments[0].id],prompt:'duplicate'})).status,400);
+  assert.equal((await f.post({attachment_ids:[attachments[0].id],prompt:''})).status,200);
+  const working=await until(f.snapshot,s=>s.thread.activeTurnId);const turn=working.thread.activeTurnId;
+  const steer=await f.post({attachment_ids:[attachments[1].id],prompt:'look at this',mode:'steer'});assert.equal(steer.status,200);assert.equal((await steer.json()).submission.disposition,'steered');
+  await f.post({attachment_ids:[attachments[2].id],prompt:'',mode:'queue'});
+  let state=await until(f.snapshot,s=>s.thread.turns[0].items.filter(i=>i.kind==='userMessage').length===2);
+  assert.equal(state.thread.activeTurnId,turn);assert.equal(state.queue.length,1);
+  await writeFile(join(f.root,'cwd/finish-ready'),'release own image turn');
+  state=await until(f.snapshot,s=>s.thread.turns.length===2&&s.thread.status==='idle');
+  const expected={mime:'image/gif',bytes:image.length,sha256:createHash('sha256').update(image).digest('hex')};
+  assert.deepEqual((await inputCalls(f)).map(c=>c.images),[[expected],[expected],[expected]]);
+  const users=state.thread.turns.flatMap(t=>t.items.filter(i=>i.kind==='userMessage'));
+  assert.deepEqual(users.flatMap(i=>i.attachments),attachments);
+  assert.equal(JSON.stringify(state).includes(image.toString('base64')),false);
+  await stop(f.child);const resumed=await f.launch({TREER_AGENT_PRIVATE_STATE_DIR:f.state});state=await resumed.snapshot();
+  assert.deepEqual(state.thread.turns.flatMap(t=>t.items.filter(i=>i.kind==='userMessage')).flatMap(i=>i.attachments),attachments);
+  const response=await fetch(resumed.base+'/api/attachments/'+attachments[0].id);assert.equal(response.status,200);assert.deepEqual(Buffer.from(await response.arrayBuffer()),image);
+  assert.equal((await inputCalls(f)).length,3,'restart does not replay image inputs');
+});
+test('Claude shared UI uploads and sends native image-only input and image steer', {skip:!process.env.CLAUDE_IMAGES_BROWSER},async t=>{
+  const {chromium,expect}=createRequire(resolve(process.env.NODE_LAUNCHER_ROOT||'../agent','package.json'))('@playwright/test');
+  const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
+  const f=await fixture(t,{CLAUDE_FIXTURE_STEER:'1',CLAUDE_FIXTURE_IMAGES:'1',CLAUDE_FIXTURE_HOLD:'finish-ready',TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'image-fixture'},async({state})=>({env:{TREER_AGENT_PRIVATE_STATE_DIR:state}}));
+  const browser=await chromium.launch({env:hermeticEnv({HOME:process.env.HOME})});t.after(()=>browser.close());
+  const image=Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==','base64');
+  for(const width of [1280,390]){
+    const page=await browser.newPage({viewport:{width,height:850},extraHTTPHeaders:{'x-treer-interface-source':'proxy-ui','x-treer-agent-id':'ag_contract','x-treer-interface-instance':'image-fixture'}});
+    await page.goto(f.base+'/?lang=en');
+    const uploaded=page.waitForResponse(r=>r.url().endsWith('/api/attachments')&&r.request().method()==='POST');
+    await page.locator('input[type=file]').setInputFiles({name:'own.gif',mimeType:'image/gif',buffer:image});assert.equal((await uploaded).status(),201);
+    const response=page.waitForResponse(r=>r.url().endsWith('/api/prompt')&&r.request().method()==='POST');
+    await page.locator('#send').click();assert.equal((await response).status(),200);
+    await expect(page.getByRole('textbox',{name:/Message/})).toHaveValue('');
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);await page.close();
+  }
+  const calls=await inputCalls(f);assert.deepEqual(calls.map(c=>c.type),['accepted','steered']);assert.ok(calls.every(c=>c.images.length===1));
+});
 test('Claude shared UI sends steer to actual Rust entry on desktop and mobile', {skip:!process.env.CLAUDE_STEER_BROWSER},async t=>{
   const {chromium,expect}=createRequire(resolve(process.env.NODE_LAUNCHER_ROOT||'../agent','package.json'))('@playwright/test');
   const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());

@@ -29,6 +29,18 @@ pub enum Request {
     Input { wire: Value, dispatched: Value },
     Steer { wire: Value, turn: String, item: Value, after: Option<String> },
 }
+const IMAGE_BYTES: usize = 24*1024*1024;
+const IMAGE_BASE64_BYTES: usize = 32*1024*1024;
+fn image_source(source: &Value) -> Result<usize> {
+    use base64::Engine;
+    let data=source["data"].as_str().ok_or_else(||anyhow::anyhow!("claude_image_input_invalid"))?;
+    if source["type"]!="base64" || data.is_empty() || data.len()>crate::image_format::FILE_LIMIT.div_ceil(3)*4 {bail!("claude_image_input_invalid");}
+    let bytes=base64::engine::general_purpose::STANDARD.decode(data).map_err(|_|anyhow::anyhow!("claude_image_input_invalid"))?;
+    #[cfg(any(unix,test))]
+    {if crate::image_format::format(&bytes)?.0!=source["media_type"] {bail!("claude_image_input_invalid");} Ok(bytes.len())}
+    #[cfg(all(windows,not(test)))]
+    {let _=bytes;bail!("claude_images_unsupported");}
+}
 #[cfg(any(unix, test))]
 pub fn import_history(
     state: &mut Value,
@@ -254,8 +266,19 @@ impl Adapter {
                 let inputs = params["input"]
                     .as_array()
                     .ok_or_else(|| anyhow::anyhow!("claude_input"))?;
-                if inputs.iter().any(|i| i["type"] != "text") {
-                    bail!("claude_image_input_not_implemented");
+                let mut content=Vec::new();let mut image_count=0;let mut image_bytes=0;
+                for input in inputs {
+                    match input["type"].as_str() {
+                        Some("text")=>{let text=input["text"].as_str().ok_or_else(||anyhow::anyhow!("claude_input_invalid"))?;content.push(json!({"type":"text","text":text}));},
+                        Some("image")=>{
+                            let source=&input["source"];
+                            image_count+=1;image_bytes+=image_source(source)?;
+                            if image_count>crate::image_format::COUNT_LIMIT || image_bytes>IMAGE_BYTES {bail!("claude_image_input_invalid");}
+                            let data=source["data"].as_str().unwrap();
+                            content.push(json!({"type":"image","source":{"type":"base64","media_type":source["media_type"],"data":data}}));
+                        },
+                        _=>bail!("claude_input_invalid"),
+                    }
                 }
                 let text = inputs
                     .iter()
@@ -279,7 +302,7 @@ impl Adapter {
                     id
                 };
                 // Correlated local dispatch result is emitted only after stdin write completes.
-                let wire=json!({"type":"user","uuid":user_id,"session_id":self.session,"message":{"role":"user","content":[{"type":"text","text":text}]},"parent_tool_use_id":null});
+                let wire=json!({"type":"user","uuid":user_id,"session_id":self.session,"message":{"role":"user","content":content},"parent_tool_use_id":null});
                 if steering {
                     Request::Steer {wire,turn:self.active.clone().unwrap(),item:json!({"id":user_id,"type":"userMessage","text":text}),after:self.order.last().cloned()}
                 } else {
@@ -702,16 +725,30 @@ pub async fn line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<
             .position(|b| *b == b'\n')
             .map(|i| i + 1)
             .unwrap_or(chunk.len());
-        if bytes.len() + end > 2 * 1024 * 1024 {
+        if bytes.len() + end > IMAGE_BASE64_BYTES+2*1024*1024 {
             bail!("claude_frame_limit");
         }
         bytes.extend_from_slice(&chunk[..end]);
         reader.consume(end);
         if bytes.last() == Some(&b'\n') {
-            return Ok(Some(
-                crate::bounded_json::decode(&bytes)
-                    .map_err(|_| anyhow::anyhow!("claude_invalid_frame"))?,
-            ));
+            let mut frame=crate::bounded_json::decode(&bytes).map_err(|_| anyhow::anyhow!("claude_invalid_frame"))?;
+            if bytes.len()>2*1024*1024 {
+                // Claude can echo the submitted image blocks. Validate then
+                // discard only those payloads; user echo never settles input.
+                // Nonimage data retains the original two-MiB admission cap.
+                if frame["type"]!="user" {bail!("claude_frame_limit");}
+                let content=frame["message"]["content"].as_array_mut().ok_or_else(||anyhow::anyhow!("claude_frame_limit"))?;
+                let mut count=0;let mut total=0;
+                for block in content {
+                    if block["type"]=="image" {
+                        count+=1;total+=image_source(&block["source"])?;
+                        if count>crate::image_format::COUNT_LIMIT || total>IMAGE_BYTES {bail!("claude_frame_limit");}
+                        block["source"]["data"]=json!("");
+                    }
+                }
+                if count==0 || serde_json::to_vec(&frame)?.len()>2*1024*1024 {bail!("claude_frame_limit");}
+            }
+            return Ok(Some(frame));
         }
     }
 }
@@ -729,6 +766,37 @@ mod tests {
             &json!({"input":[{"type":"text","text":"local user"}]}),
         )
         .unwrap();
+    }
+    #[test]
+    fn image_inputs_require_bounded_valid_native_image_bytes() {
+        use base64::Engine;
+        let data="R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+        let source=json!({"type":"base64","media_type":"image/gif","data":data});
+        assert!(image_source(&source).is_ok());
+        for invalid in [json!({"type":"url","media_type":"image/gif","data":data}),json!({"type":"base64","media_type":"image/png","data":data}),json!({"type":"base64","media_type":"image/gif","data":"!!!!"}),json!({"type":"base64","media_type":"image/gif","data":base64::engine::general_purpose::STANDARD.encode(b"not an image")})] {assert!(image_source(&invalid).is_err());}
+        let mut a=adapter();let blocks=vec![json!({"type":"image","source":source});9];
+        assert!(a.request(1,"turn/start",&json!({"input":blocks})).is_err());
+        assert!(a.active.is_none(),"invalid images refuse before starting input");
+        assert!(a.request(2,"turn/start",&json!({"input":[{"type":"localImage","path":"/not/admitted"}]})).is_err());
+    }
+    #[tokio::test]
+    async fn large_user_image_echo_is_bounded_validated_and_never_becomes_turn_authority() {
+        use base64::Engine;
+        let mut image=base64::engine::general_purpose::STANDARD.decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==").unwrap();image.pop();image.extend([0x21,0xfe]);
+        for _ in 0..8192 {image.push(255);image.extend([65;255]);}image.extend([0,0x3b]);
+        let source=json!({"type":"base64","media_type":"image/gif","data":base64::engine::general_purpose::STANDARD.encode(image)});
+        let frame=json!({"type":"user","message":{"content":[{"type":"image","source":source}]}});
+        let mut bytes=serde_json::to_vec(&frame).unwrap();assert!(bytes.len()>2*1024*1024);bytes.extend(b"\n{\"type\":\"result\",\"result\":\"done\"}\n");
+        let mut reader=tokio::io::BufReader::new(bytes.as_slice());let echo=line(&mut reader).await.unwrap().unwrap();
+        assert_eq!(echo["message"]["content"][0]["source"]["data"],"");
+        let mut a=adapter();start(&mut a);let events=a.consume(echo).unwrap();
+        assert!(!events.iter().any(|e|e["method"]=="turn/completed"));assert!(a.active.is_some());
+        assert_eq!(a.dispatched()["turn"]["items"].as_array().unwrap().len(),1,"echo adds no input receipt or item");
+        let result=line(&mut reader).await.unwrap().unwrap();assert_eq!(result["type"],"result");
+        let oversized=json!({"type":"assistant","message":{"content":"x".repeat(2*1024*1024)}}).to_string()+"\n";
+        assert!(line(&mut tokio::io::BufReader::new(oversized.as_bytes())).await.is_err());
+        let mut fake=frame;fake["message"]["content"][0]["source"]["media_type"]=json!("image/png");
+        let malformed=fake.to_string()+"\n";assert!(line(&mut tokio::io::BufReader::new(malformed.as_bytes())).await.is_err());
     }
     #[test]
     fn steering_is_exact_turn_input_not_interrupt_or_new_turn() {

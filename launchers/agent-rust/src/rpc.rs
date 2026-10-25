@@ -239,9 +239,18 @@ impl Rpc {
     }
 
     pub async fn write(&self, message: Value) -> Result<()> {
+        self.write_bounded(message,128*1024).await
+    }
+    async fn write_claude_input(&self, message: Value) -> Result<()> {
+        let images=message["message"]["content"].as_array().is_some_and(|items|items.iter().any(|i|i["type"]=="image"));
+        // 24MiB decoded attachment quota expands to 32MiB base64. This
+        // allowance applies only to adapter-validated Claude user input.
+        self.write_bounded(message,if images {32*1024*1024+128*1024} else {128*1024}).await
+    }
+    async fn write_bounded(&self, message: Value, limit: usize) -> Result<()> {
         if self.claude.is_some()&&message["method"]=="initialized"{return Ok(());}
         let mut bytes = serde_json::to_vec(&message)?;
-        if bytes.len() > 128 * 1024 {
+        if bytes.len() > limit {
             bail!("RPC input too large");
         }
         bytes.push(b'\n');
@@ -294,11 +303,11 @@ impl Rpc {
             return match request {
                 crate::claude::Request::Local(result)=>Ok(result),
                 crate::claude::Request::Input {wire,dispatched}=>{
-                    self.write(wire).await?;
+                    self.write_claude_input(wire).await?;
                     Ok(dispatched)
                 },
                 crate::claude::Request::Steer {wire,turn,item,after}=>{
-                    self.write(wire).await?;
+                    self.write_claude_input(wire).await?;
                     adapter.lock().unwrap().steered(&turn,item,after.as_deref())
                 },
                 crate::claude::Request::Wire(wire)=>{
