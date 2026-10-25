@@ -1289,6 +1289,12 @@ substitute for the matching official Controller smoke.
 
 ## Checks
 
+Installer/dispatcher unit tests copy the control executable and UI asset closure
+into their own private temporary tree before creating a native binding. They do
+not depend on CI toolcache or checkout ancestor permissions, change shared input
+permissions, or relax the production binding verifier. The control image is not
+a shipping Rust runtime or a real provider acceptance test.
+
 ```bash
 npm --prefix launchers/agent ci
 npm --prefix launchers/agent run check
