@@ -244,10 +244,36 @@ user output arrives. Snapshot/manual idle proof refuses while this buffer is
 active. Missing origin, foreign session, unsolicited output and interleaved init
 remain protocol failures. Restart preserves only the completed display record,
 never an executable task continuation or pending notification.
-Interrupt refuses before writing while a task invocation is buffered. An
+Interrupt and steer refuse before writing while a task invocation is buffered. An
 interrupt requested earlier captures an invocation epoch: a task init before its
 ACK makes that success explicitly unknown, even if task output already finished.
 It cannot mark the waiting user input interrupted.
+
+### Native scheduled invocations
+
+Claude 2.1.306 CronCreate one-shot invocations were observed to emit an explicit
+same-session `command_lifecycle` started, an init without user UUIDs, ordinary
+assistant/stream output, a result without origin or user UUIDs, then completed
+with the SAME command UUID. This previously stopped the reader as
+`claude_unowned_stream`, including when no user receipt was unresolved.
+
+Local input UUIDs are registered before write so their lifecycle events cannot
+be mistaken for autonomous commands. A previously unseen UUID command/start can
+open one separate invocation scope. Output requires its init and stays bounded
+and unpublished until both its no-input result and matching command/completed
+arrive. At most1024 autonomous command IDs are retained per process for duplicate
+rejection. Queue-only lifecycle metadata grants no output or receipt authority.
+Older producers without lifecycle events retain the existing input/task paths.
+
+The completed record is display-only (`native-scheduled-command`), with no user
+item/receipt or selected-model change. It does not complete/interrupt a user
+input already queued inside Claude. Global interrupt and steer refuse before
+write during this scope; an earlier interrupt ACK crossing its start is unknown.
+Foreign sessions, missing init, claimed input UUIDs, unknown result origins,
+overlapping starts and mismatched/premature completion remain fenced. Restart
+retains only completed display records and never replays scheduled work. This
+is native output interoperability, not a scheduler management or Cron recovery
+capability.
 
 ## Existing Node Claude session import
 

@@ -1,7 +1,7 @@
 //! Claude stream-json bridge. Session identity is never inferred from private files.
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub struct Adapter {
     session: String,
@@ -31,6 +31,10 @@ pub struct Adapter {
     goals_supported: bool,
     task_runs: BTreeMap<String, bool>,
     task_followup: Option<Box<Adapter>>,
+    input_commands: BTreeSet<String>,
+    native_commands: BTreeSet<String>,
+    native_command: Option<String>,
+    scheduled_result: Option<Value>,
 }
 pub enum Request {
     Local(Value),
@@ -172,6 +176,8 @@ impl Adapter {
             | "claude_item_identity" | "claude_item_limit"
             | "claude_model_catalog_invalid"
             | "claude_terminal_conflict" | "claude_turn_limit"
+            | "claude_command_identity" | "claude_command_session" | "claude_command_interleaving"
+            | "claude_command_limit" | "claude_command_state" | "claude_command_incomplete"
             | "claude_unexpected_permission_request" | "claude_invocation_limit") => code,
             _ => "claude_protocol_refused",
         };
@@ -181,7 +187,7 @@ impl Adapter {
     // Current process state only. This says nothing about historical effects
     // and must never be used as terminal receipt/history authority.
     pub fn idle_for_disposition(&self) -> bool {
-        self.active.is_none() && self.pending_interrupts.is_empty() && self.task_followup.is_none()
+        self.active.is_none() && self.pending_interrupts.is_empty() && self.task_followup.is_none() && self.native_command.is_none()
     }
     pub fn new(session: String) -> Result<Self> {
         if session.is_empty()
@@ -220,6 +226,10 @@ impl Adapter {
             goals_supported: false,
             task_runs: BTreeMap::new(),
             task_followup: None,
+            input_commands: BTreeSet::new(),
+            native_commands: BTreeSet::new(),
+            native_command: None,
+            scheduled_result: None,
         })
     }
     pub fn forget_control(&mut self, id: u64) { self.model_controls.remove(&id); self.effort_controls.remove(&id); }
@@ -345,6 +355,9 @@ impl Adapter {
             }
             "turn/start" | "turn/steer" => {
                 let steering = method == "turn/steer";
+                if steering && (self.task_followup.is_some() || self.native_command.is_some()) {
+                    bail!("claude_steer_native_invocation_busy");
+                }
                 if params.get("threadId").is_some_and(|id| id != &self.session) || steering && params["threadId"] != self.session {
                     bail!("claude_session_mismatch");
                 }
@@ -393,6 +406,10 @@ impl Adapter {
                     id
                 };
                 // Correlated local dispatch result is emitted only after stdin write completes.
+                // Register before releasing the adapter lock for write: a
+                // producer command/start may race that write's return.
+                if self.input_commands.len()>=1024 {bail!("claude_command_limit");}
+                self.input_commands.insert(user_id.clone());
                 let wire=json!({"type":"user","uuid":user_id,"session_id":self.session,"message":{"role":"user","content":content},"parent_tool_use_id":null});
                 if steering {
                     Request::Steer {wire,turn:self.active.clone().unwrap(),item:json!({"id":user_id,"type":"userMessage","text":text}),after:self.order.last().cloned()}
@@ -401,7 +418,7 @@ impl Adapter {
                 }
             }
             "turn/interrupt" => {
-                if self.task_followup.is_some() {bail!("claude_interrupt_task_invocation_busy");}
+                if self.task_followup.is_some() || self.native_command.is_some() {bail!("claude_interrupt_task_invocation_busy");}
                 let turn = self
                     .active
                     .clone()
@@ -546,14 +563,50 @@ impl Adapter {
         {
             bail!("claude_session_mismatch");
         }
+        // Claude's scheduler emits a command/start -> init -> output/result ->
+        // matching command/completed sequence, with NO user UUID or result
+        // origin. Only this explicit wire scope can admit such output. Never
+        // borrow the waiting user input's turn or receipt for it.
+        if event["type"]=="command_lifecycle" {
+            let id=event["command_uuid"].as_str().filter(|s|!s.is_empty()&&s.len()<=512)
+                .ok_or_else(||anyhow::anyhow!("claude_command_identity"))?;
+            if event["session_id"]!=self.session {bail!("claude_command_session");}
+            if event["state"]=="queued" {return Ok(vec![]);}
+            if self.input_commands.contains(id) {
+                if self.native_command.is_some() {bail!("claude_command_interleaving");}
+                if event["state"]=="completed" {self.input_commands.remove(id);}
+                else if event["state"]!="started" {bail!("claude_command_state");}
+                return Ok(vec![]);
+            }
+            if event["state"]=="started" {
+                if uuid::Uuid::parse_str(id).is_err() || self.native_command.is_some() || self.task_followup.is_some()
+                    || self.native_commands.contains(id) {bail!("claude_command_interleaving");}
+                if self.native_commands.len()>=1024 {bail!("claude_command_limit");}
+                self.native_commands.insert(id.into());
+                self.native_command=Some(id.into());
+                self.invocation_epoch=self.invocation_epoch.checked_add(1).ok_or_else(||anyhow::anyhow!("claude_invocation_limit"))?;
+            } else if event["state"]=="completed" && self.native_command.as_deref()==Some(id) {
+                if self.task_followup.is_some() {bail!("claude_command_incomplete");}
+                self.native_command=None;
+                if let Some(turn)=self.scheduled_result.take() {
+                    return Ok(vec![json!({"method":"thread/claude-scheduled-output","params":{"threadId":self.session,"turn":turn}})]);
+                }
+            } else if event["state"]=="completed" && self.native_command.is_none() {
+                // A normal result retires local IDs even on older producers
+                // without lifecycle events. A later completion has no authority.
+                return Ok(vec![]);
+            } else {bail!("claude_command_state");}
+            return Ok(vec![]);
+        }
         // Native task completion can start its own model invocation AFTER the
         // submitted input's result. Its result has task origin, not an input
         // UUID. Keep all of that invocation separate, even if a new local
         // input has already been written and is waiting in Claude's queue.
         let task_init=event["type"]=="system" && event["subtype"]=="init"
             && event.get("user_message_uuids").is_none()
-            && self.task_runs.values().any(|consumed| !consumed);
+            && (self.task_runs.values().any(|consumed| !consumed)||self.native_command.is_some());
         if task_init && self.task_followup.is_none() {
+            if self.scheduled_result.is_some() {bail!("claude_command_incomplete");}
             if event["session_id"]!=self.session {bail!("claude_task_session_missing");}
             let mut followup=Self::new(self.session.clone())?;
             self.invocation_epoch=self.invocation_epoch.checked_add(1).ok_or_else(||anyhow::anyhow!("claude_invocation_limit"))?;
@@ -564,10 +617,11 @@ impl Adapter {
         if self.task_followup.is_some() && matches!(event["type"].as_str(),Some("stream_event"|"assistant"|"user"|"result")) {
             let final_result=event["type"]=="result";
             let run=event["origin"]["runId"].as_str().unwrap_or("").to_owned();
-            if final_result && (event["session_id"]!=self.session || event["origin"]["kind"]!="task-notification"
-                || event["origin"]["producer"]!="session-task"
-                || self.task_runs.get(&run)!=Some(&false)
-                || event.get("user_message_uuids").is_some()) {
+            let scheduled=event.get("origin").is_none() && self.native_command.is_some();
+            if final_result && (event["session_id"]!=self.session
+                || (!scheduled && (event["origin"]["kind"]!="task-notification"
+                    || event["origin"]["producer"]!="session-task" || self.task_runs.get(&run)!=Some(&false)))
+                || event.get("user_message_uuids").is_some() || event.get("user_message_uuid").is_some()) {
                 bail!("claude_task_result_origin");
             }
             // Origin admission belongs to this outer adapter. The inner
@@ -578,12 +632,17 @@ impl Adapter {
             // Partial content is bounded by the ordinary per-turn adapter
             // limits. Publish only a complete origin-validated display turn.
             if final_result {
-                self.task_runs.insert(run.clone(),true);
+                if !scheduled {self.task_runs.insert(run.clone(),true);}
                 self.task_followup=None;
                 let mut turn=messages.into_iter().find(|m|m["method"]=="turn/completed")
                     .ok_or_else(||anyhow::anyhow!("claude_task_result_missing"))?["params"]["turn"].clone();
                 turn["items"].as_array_mut().unwrap().retain(|i|i["type"]!="userMessage");
                 turn["projectionOnly"]=json!(true);
+                if scheduled {
+                    turn["nativeCommandId"]=json!(self.native_command);
+                    self.scheduled_result=Some(turn);
+                    return Ok(vec![]);
+                }
                 turn["taskRunId"]=json!(run);
                 return Ok(vec![json!({"method":"thread/claude-task-output","params":{"threadId":self.session,"turn":turn}})]);
             }
@@ -591,6 +650,10 @@ impl Adapter {
         }
         if self.task_followup.is_some() && event["type"]=="system" && event["subtype"]=="init" {
             bail!("claude_task_input_interleaving");
+        }
+        if self.native_command.is_some() && (matches!(event["type"].as_str(),Some("stream_event"|"assistant"|"user"|"result"))
+            || event["type"]=="system" && event["subtype"]=="init") {
+            bail!("claude_command_incomplete");
         }
         if event["type"]=="result" && event["origin"]["kind"]=="task-notification" {
             bail!("claude_unowned_task_result");
@@ -780,6 +843,7 @@ impl Adapter {
                     .active
                     .take()
                     .ok_or_else(|| anyhow::anyhow!("claude_unowned_result"))?;
+                self.input_commands.clear();
                 let status = if self.interrupted {
                     "interrupted"
                 } else if event["is_error"] == true {
@@ -828,6 +892,46 @@ impl Adapter {
 #[cfg(test)]
 mod task_followup_tests {
     use super::*;
+    #[test]
+    fn scheduled_invocation_epoch_protects_interrupt_and_waiting_input() {
+        let mut a=Adapter::new("session".into()).unwrap();
+        let Request::Input {wire,..}=a.request(1,"turn/start",&json!({"input":[{"type":"text","text":"B"}]})).unwrap() else {panic!()};
+        let input=wire["uuid"].clone();
+        a.request(2,"turn/interrupt",&json!({})).unwrap();
+        let id="91d7ab21-8b8e-40ce-913b-4eb60e7e6fa2";
+        let start=json!({"type":"command_lifecycle","session_id":"session","command_uuid":id,"state":"started"});
+        a.consume(start.clone()).unwrap();assert!(!a.idle_for_disposition());
+        assert!(a.request(3,"turn/interrupt",&json!({})).is_err());
+        assert!(a.request(4,"turn/steer",&json!({"threadId":"session","expectedTurnId":a.active,"input":[{"type":"text","text":"not Cron input"}]})).is_err());
+        a.consume(json!({"type":"system","subtype":"init","session_id":"session"})).unwrap();
+        a.consume(json!({"type":"result","session_id":"session","result":"cron"})).unwrap();
+        assert!(!a.idle_for_disposition());
+        let output=a.consume(json!({"type":"command_lifecycle","session_id":"session","command_uuid":id,"state":"completed"})).unwrap();
+        assert_eq!(output[0]["method"],"thread/claude-scheduled-output");
+        let ack=a.consume(json!({"type":"control_response","response":{"subtype":"success","request_id":"2","response":{}}})).unwrap();
+        assert_eq!(ack[0]["error"]["code"],"claude_interrupt_outcome_unknown");assert!(!a.interrupted);
+        // The local input's started/init/result remain ordinary, not Cron.
+        a.consume(json!({"type":"command_lifecycle","session_id":"session","command_uuid":input,"state":"started"})).unwrap();
+        a.consume(json!({"type":"system","subtype":"init","session_id":"session","user_message_uuids":[input]})).unwrap();
+        let result=a.consume(json!({"type":"result","session_id":"session","user_message_uuids":[input]})).unwrap();
+        assert_eq!(result.last().unwrap()["params"]["turn"]["status"],"completed");
+        assert!(a.consume(start).is_err(),"duplicate command must not arm another invocation");
+    }
+    #[test]
+    fn scheduled_scope_requires_exact_session_init_and_completion() {
+        for fault in ["session","init","completion","origin","input"] {
+            let mut a=Adapter::new("session".into()).unwrap();
+            let start=json!({"type":"command_lifecycle","session_id":if fault=="session"{"other"}else{"session"},"command_uuid":"91d7ab21-8b8e-40ce-913b-4eb60e7e6fa2","state":"started"});
+            if fault=="session" {assert!(a.consume(start).is_err());continue;}
+            a.consume(start).unwrap();
+            if fault=="init" {assert!(a.consume(json!({"type":"stream_event"})).is_err());continue;}
+            a.consume(json!({"type":"system","subtype":"init","session_id":"session"})).unwrap();
+            if fault=="completion" {assert!(a.consume(json!({"type":"command_lifecycle","session_id":"session","command_uuid":"91d7ab21-8b8e-40ce-913b-4eb60e7e6fa2","state":"completed"})).is_err());continue;}
+            let mut result=json!({"type":"result","session_id":"session"});
+            if fault=="origin" {result["origin"]=json!({"kind":"unknown"});}else{result["user_message_uuid"]=json!("waiting-input");}
+            assert!(a.consume(result).is_err());
+        }
+    }
     #[test]
     fn refusal_diagnostics_never_publish_error_context_or_native_content() {
         let a = Adapter::new("private-session".into()).unwrap();

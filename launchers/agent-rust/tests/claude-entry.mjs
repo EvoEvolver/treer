@@ -34,6 +34,49 @@ async function fixture(t,extra={},setup=async()=>({})){
 }
 async function stop(child){const exit=once(child,'exit');child.kill('SIGTERM');assert.equal((await exit)[0],0);}
 const inputCalls=async f=>(await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').map(JSON.parse);
+test('Claude scheduled command output preserves queued receipt and next prompt exactly once',async t=>{
+ const f=await fixture(t,{RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-scheduled.mjs')])});
+ await f.post({prompt:'own setup',mode:'queue'});
+ await until(f.snapshot,s=>s.thread.turns.length===1&&s.thread.status==='idle');
+ await writeFile(join(f.root,'cwd/start-scheduled'),'go');
+ await until(()=>access(join(f.root,'calls.scheduled')).then(()=>true),Boolean);
+ await f.post({prompt:'next ordinary input',mode:'queue'});
+ const before=await until(f.snapshot,s=>s.thread.activeTurnId&&s.queue.length===0);
+ await writeFile(join(f.root,'cwd/finish-scheduled'),'go');
+ await until(()=>access(join(f.root,'calls.result')).then(()=>true),Boolean);
+ assert.equal((await (await fetch(f.base+'/v1/queue')).json()).submissions[1].state,'running');
+ assert.equal((await f.snapshot()).thread.turns.some(t=>t.historySource==='native-scheduled-command'),false,'result alone does not publish scheduled output');
+ await writeFile(join(f.root,'cwd/complete-command'),'go');
+ let s=await until(f.snapshot,s=>s.thread.turns.some(t=>t.historySource==='native-scheduled-command'));
+ assert.equal(s.thread.activeTurnId,before.thread.activeTurnId);
+ assert.equal(s.thread.model,'claude-current');
+ assert.equal((await (await fetch(f.base+'/v1/queue')).json()).submissions[1].state,'running');
+ const output=s.thread.turns.find(t=>t.historySource==='native-scheduled-command');
+ assert.equal(output.projectionOnly,true);assert.equal(output.nativeCommandId,'91d7ab21-8b8e-40ce-913b-4eb60e7e6fa2');
+ await writeFile(join(f.root,'cwd/finish-input'),'go');
+ s=await until(f.snapshot,s=>s.thread.turns.length===3&&s.thread.status==='idle');
+ assert.equal(s.runtime.provider.transport,'open');assert.equal(s.runtime.state,'idle');
+ assert.equal((await inputCalls(f)).length,2);
+ assert.ok((await (await fetch(f.base+'/v1/queue')).json()).submissions.every(r=>r.state==='done'&&r.error===null));
+ await stop(f.child);s=await (await f.launch()).snapshot();
+ assert.equal(s.thread.turns.filter(t=>t.historySource==='native-scheduled-command').length,1);
+ assert.equal((await inputCalls(f)).length,2);
+});
+for(const fault of ['NO_COMMAND','BORROWED_INPUT','WRONG_COMMAND'])test('Claude scheduled command refuses '+fault+' without completing waiting input',async t=>{
+ const f=await fixture(t,{RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-scheduled.mjs')]),['CLAUDE_FIXTURE_'+fault]:'1'});
+ await f.post({prompt:'setup',mode:'queue'});await until(f.snapshot,s=>s.thread.turns.length===1&&s.thread.status==='idle');
+ await writeFile(join(f.root,'cwd/start-scheduled'),'go');await until(()=>access(join(f.root,'calls.scheduled')).then(()=>true),Boolean);
+ if(fault!=='NO_COMMAND'){
+  await f.post({prompt:'must not borrow scheduled result',mode:'queue'});await until(f.snapshot,s=>!!s.thread.activeTurnId);
+  await writeFile(join(f.root,'cwd/finish-scheduled'),'go');await writeFile(join(f.root,'cwd/complete-command'),'go');
+ }
+ const s=await until(f.snapshot,s=>s.runtime.state==='blocked');
+ assert.equal(s.runtime.provider.transport,'claude_protocol_refused');
+ assert.equal(s.thread.turns.some(t=>t.historySource==='native-scheduled-command'),false);
+ const q=(await (await fetch(f.base+'/v1/queue')).json()).submissions;
+ assert.equal(q[0].state,'done');if(q[1])assert.notEqual(q[1].state,'done');
+ assert.equal((await inputCalls(f)).length,fault==='NO_COMMAND'?1:2);
+});
 test('Claude task-origin followup never blocks, completes queued input or changes its model',async t=>{
   const f=await fixture(t,{RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-task-followup.mjs')])});
   await f.post({prompt:'original input',mode:'queue'});

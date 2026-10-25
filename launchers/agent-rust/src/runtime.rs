@@ -1884,13 +1884,18 @@ impl Runtime {
                     if p["condition"]==ack["args"] {ack["completion"]=p.clone();}
                 }
             }
-            "thread/claude-task-output" if self.claude => {
+            "thread/claude-task-output" | "thread/claude-scheduled-output" if self.claude => {
                 // Independent native task output is display-only. Never run
                 // user-receipt settlement or change the active input/fence.
                 let mut turn=model::final_turn(&p["turn"])?;
                 turn["projectionOnly"]=json!(true);
-                turn["historySource"]=json!("native-task-notification");
-                turn["taskRunId"]=p["turn"]["taskRunId"].clone();
+                if method=="thread/claude-scheduled-output" {
+                    turn["historySource"]=json!("native-scheduled-command");
+                    turn["nativeCommandId"]=p["turn"]["nativeCommandId"].clone();
+                } else {
+                    turn["historySource"]=json!("native-task-notification");
+                    turn["taskRunId"]=p["turn"]["taskRunId"].clone();
+                }
                 self.upsert_turn(turn)?;
                 self.persist()?;
             }
