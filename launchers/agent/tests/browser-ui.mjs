@@ -482,7 +482,12 @@ try {
   await expect(filesPanel).toBeHidden();
   await expect(nestedLink).toBeFocused();
   await page.getByRole("link", { name: "Absolute readme", exact: true }).click();
-  await expect(filesPanel.locator(".preview pre")).toContainText("Small tools, thoughtful interfaces.");
+  await expect(filesPanel.locator(".file-markdown")).toContainText("Small tools, thoughtful interfaces.");
+  await expect(filesPanel.locator(".file-markdown").getByRole("heading", { name: "Workspace", exact: true })).toBeVisible();
+  await filesPanel.getByRole("button", { name: "Source", exact: true }).click();
+  await expect(filesPanel.locator(".preview pre")).toHaveText("# Workspace\nSmall tools, thoughtful interfaces.\n");
+  await filesPanel.getByRole("button", { name: "Rendered", exact: true }).click();
+  await expect(filesPanel.locator(".file-markdown")).toContainText("Small tools, thoughtful interfaces.");
   await page.getByRole("link", { name: "Local file URL", exact: true }).click();
   await expect(filesPanel.locator(".preview pre")).toHaveText("literal percent and hash filename\n");
   for (const [name, path, status] of [["Missing file", "missing.txt", 404], ["Outside file", "../escape.txt", 403]]) {
