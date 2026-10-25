@@ -19,6 +19,11 @@ async function boundedExport(path: string, threadId: string) {
   try {
     const response = await fetch(proxyUrl(path), { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId }), signal: controller.signal, redirect: 'error', cache: 'no-store' })
     if (!response.ok || !response.body) throw Error('session_copy_export_refused')
+    const declared = response.headers.get('content-length')
+    if (declared !== null && (!/^[0-9]+$/.test(declared) || !Number.isSafeInteger(Number(declared)) || Number(declared) > 16 * 1024 * 1024)) {
+      await response.body.cancel().catch(() => {})
+      throw Error('session_copy_too_large')
+    }
     const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let size = 0
     try {
       for (;;) {
@@ -42,7 +47,7 @@ export async function exportAndUpload(scope: CopyScope, active: () => boolean = 
   const sourceSessionId = before.thread?.id
   if (!active()) throw Error('session_copy_scope_changed')
   if (before.agentId !== undefined && before.agentId !== scope.source) throw Error('session_copy_identity')
-  if (typeof sourceSessionId !== 'string' || !sourceSessionId || before.ready !== true || before.harness?.id !== 'claude' || before.runtime?.state !== 'idle') throw Error('session_copy_source_not_idle')
+  if (typeof sourceSessionId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(sourceSessionId) || before.ready !== true || before.harness?.id !== 'claude' || before.runtime?.state !== 'idle') throw Error('session_copy_source_not_idle')
   const bytes = await boundedExport(`${base}/api/session/export`, sourceSessionId)
   const bundle = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
   if (bundle.schema !== 'treer.agent-session/v1' || bundle.harness !== 'claude' || bundle.runtimeSnapshot?.threadId !== sourceSessionId || bundle.runtimeSnapshot?.agentId !== scope.source || typeof bundle.runtimeSnapshot?.interfaceInstance !== 'string' || bundle.runtimeSnapshot?.interfaceInstance !== beforeStatus.interface_instance_id) throw Error('session_copy_identity')

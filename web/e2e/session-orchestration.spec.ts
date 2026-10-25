@@ -138,3 +138,11 @@ test('Chinese dark mobile copy controls are labelled and Escape returns focus', 
   await page.screenshot({ path: info.outputPath('copy-390-zh-dark.png') })
   await page.keyboard.press('Escape'); await expect(page.getByRole('dialog')).not.toBeVisible(); await expect(add).toBeFocused()
 })
+
+test('oversized declared export is refused before upload', async ({ page }) => {
+  const fx = await fixture(page)
+  await page.route('**/interface/ui/api/session/export', route => route.fulfill({ contentType: 'application/json', headers: { 'content-length': String(16 * 1024 * 1024 + 1) }, body: '{}' }))
+  const dialog = await open(page)
+  await expect(dialog.getByRole('alert')).toContainText('Flow stopped.')
+  expect(fx.counts.upload).toBe(0); expect(fx.counts.inspect).toBe(0); expect(fx.counts.prepare).toBe(0); expect(fx.counts.create).toBe(0)
+})
