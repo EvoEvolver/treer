@@ -30,6 +30,37 @@ interrupted only after its matching successful control response; refusal leaves
 the provider's normal result authoritative. A late response cannot mark a newer
 turn interrupted.
 
+## Model discovery and switching (#243)
+
+Initialization consumes the provider's `models` catalog (at most128 entries),
+using `value`/`id` aliases and `resolvedModel`, deduplicated by resolved model.
+There is no built-in model/version catalog. With no catalog, the list stays
+empty until a real `system/init` or current-input assistant model report arrives.
+The provider's default alias establishes the initial selection when available;
+restart queries the newly initialized provider rather than restoring a saved UI
+selection as authority. Reasoning-effort changes remain unsupported, including
+mixed requests: unsupported effort refuses before any model control is sent.
+
+`/api/settings` sends a correlated native `set_model` control in the same
+session. The actor serializes settings and prompt commands while pumping its
+bounded provider event queue; completion/tool events continue, but the next
+prompt cannot dispatch during the switch. Only the waiting request's successful
+ACK commits the selected model. Wrong IDs, error replies, parsed-but-expired
+ACKs and canceled waits never commit. A single adapter revision orders published
+reports and committed ACKs. Each input also captures the model-attempt epoch:
+model output from a turn begun before a switch attempt cannot undo a later ACK
+or resolve an unacknowledged switch, even if its result already arrived.
+
+The model ACK response deadline matches Node's15 seconds and begins only after
+the normal fatal five-second stdin write/flush. No-ACK outcome is explicitly
+unknown (`thread.model:null`, `modelSelectionStatus:"unknown"`; localized UI
+label), not accepted or unchanged. The transport stays open and queued prompts
+remain live; they run under the provider's actual current selection with no
+model override or implicit retry. A subsequent input's real model report can
+confirm selection. Refusal preserves the previous known selection. No switch
+interrupts/restarts the provider or replays an input. Required RPC deadlines,
+EOF/frame integrity and Codex discovery/recovery behavior are unchanged.
+
 The existing notification batching, receipt pruning/pressure, operation-ID
 dedup, durable-before-ACK and retry paths are shared. The Claude journal has an
 explicit harness tag and atomically stores the bounded mapped transcript with
@@ -79,7 +110,8 @@ by this source change.
 ## Honest capability differences and remaining delivery
 
 The adapter advertises text prompts, queued notifications, transcript observation
-and abort. Images, busy steering, background tasks, goals/budgets, model/effort
+and abort, plus native catalog discovery and acknowledged model switching.
+Images, busy steering, background tasks, goals/budgets, reasoning-effort
 changes and session transfer are currently unsupported. Older Claude history
 cannot be paged through a supported provider API here. These are concrete target
 admission checks, not a claim of complete Node parity. File-change input is

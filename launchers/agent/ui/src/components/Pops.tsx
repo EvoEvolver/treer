@@ -110,7 +110,7 @@ export function ModelPop({ onClose }: { onClose: () => void }) {
       <div className="field"><label htmlFor="model-select">{t("model.model")}</label>
         <select id="model-select" value={thread?.model ?? ""} disabled={busy || models.length === 0} onChange={(event) => void actions.settings({ model: event.target.value })}>
           {/* A harness may sit on its own default, which is not one of the choices. */}
-          {!models.some((option) => option.model === thread?.model) && <option value="">{t("model.default")}</option>}
+          {!models.some((option) => option.model === thread?.model) && <option value="">{t(thread?.modelSelectionStatus === "unknown" ? "model.unknown" : "model.default")}</option>}
           {models.map((option) => <option key={option.id} value={option.model}>{option.displayName || option.model}</option>)}
         </select>
       </div>

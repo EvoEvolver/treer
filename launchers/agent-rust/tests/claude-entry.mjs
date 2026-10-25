@@ -8,6 +8,7 @@ import {createHash} from 'node:crypto';
 import {access} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
+import {createRequire} from 'node:module';
 import {hermeticEnv,localFetch as fetch} from '../../agent/tests/hermetic.mjs';
 import {fakePrivateState} from '../../agent/tests/fake-private-state.mjs';
 const binary=process.env.RUST_SPIKE_BIN;assert.ok(binary);
@@ -32,6 +33,131 @@ async function fixture(t,extra={},setup=async()=>({})){
   return {...await launch(initial.env,initial.args),launch,state,root,logs:()=>logs};
 }
 async function stop(child){const exit=once(child,'exit');child.kill('SIGTERM');assert.equal((await exit)[0],0);}
+const settings=(f,body)=>fetch(f.base+'/api/settings',{method:'POST',body:JSON.stringify(body)});
+const modelCalls=async f=>(await readFile(join(f.root,'calls.controls'),'utf8')).trim().split('\n').map(JSON.parse);
+test('Claude model catalog aliases and acknowledged switching preserve session and reject mixed effort atomically',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1'});
+  let state=await f.snapshot();const thread=state.thread.id;
+  assert.equal(state.thread.model,'claude-sonnet-test');
+  assert.deepEqual(state.modelOptions.map(m=>[m.id,m.model]),[['sonnet','claude-sonnet-test'],['opus','claude-opus-test'],['legacy','claude-legacy-test']]);
+  assert.ok(state.modelOptions.every(m=>m.supportedReasoningEfforts.length===0));
+  assert.equal((await settings(f,{model:'opus',reasoningEffort:'high'})).status,400);
+  assert.equal((await modelCalls(f)).length,1,'unsupported effort cannot partially change model');
+  assert.equal((await settings(f,{model:'opus'})).status,200);
+  state=await f.snapshot();assert.equal(state.thread.model,'claude-opus-test');assert.equal(state.thread.id,thread);
+  assert.equal((await settings(f,{model:'invalid'})).status,400);
+  assert.equal((await f.snapshot()).thread.model,'claude-opus-test');
+  assert.equal((await f.post({prompt:'after model rejection'})).status,200);
+  state=await until(f.snapshot,s=>s.thread.turns.length===1&&s.thread.status==='idle');
+  assert.equal(state.thread.turns[0].status,'completed');assert.equal(state.thread.model,'claude-opus-test');
+  await stop(f.child);const resumed=await f.launch();state=await resumed.snapshot();
+  assert.equal(state.thread.id,thread);assert.equal(state.thread.model,'claude-sonnet-test','restart reports new provider initialization rather than stale saved UI selection');
+});
+test('Claude missing model catalog learns only actual reported model without a version table',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_NO_MODELS:'1'});
+  assert.deepEqual((await f.snapshot()).modelOptions,[]);assert.equal((await f.snapshot()).thread.model,null);
+  await f.post({prompt:'discover actual model'});
+  const state=await until(f.snapshot,s=>s.thread.status==='idle'&&s.thread.turns.length===1);
+  assert.equal(state.thread.model,'claude-sonnet-test');assert.deepEqual(state.modelOptions.map(m=>m.model),['claude-sonnet-test']);
+});
+test('Claude slow model ACK pumps active completion and serializes concurrent prompt exactly once',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_MODEL_DELAY:'1200',CLAUDE_FIXTURE_MODEL_BURST:'1',CLAUDE_FIXTURE_WRONG_MODEL_ACK:'1'});
+  await f.post({prompt:'first existing turn'});
+  await until(f.snapshot,s=>s.thread.activeTurnId&&s.thread.turns.some(t=>t.items.some(i=>i.kind==='commandExecution')));
+  const changing=settings(f,{model:'opus'});
+  await until(async()=>modelCalls(f),calls=>calls.some(c=>c.request.subtype==='set_model'));
+  const queued=f.post({prompt:'during switch',mode:'queue'});
+  await new Promise(r=>setTimeout(r,450));
+  let state=await f.snapshot();assert.equal(state.thread.model,'claude-sonnet-test','wrong ID and pending ACK must not change selected model');
+  assert.equal(state.thread.turns[0].status,'completed','completion must be pumped before ACK');
+  assert.equal((await changing).status,200);assert.equal((await queued).status,200);
+  state=await until(f.snapshot,s=>s.thread.turns.length===2&&s.thread.status==='idle');
+  assert.equal(state.thread.model,'claude-opus-test');
+  const calls=(await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.deepEqual(calls.map(c=>c.text),['first existing turn','during switch']);
+  assert.deepEqual(calls.map(c=>c.model),['claude-sonnet-test','claude-opus-test']);
+  assert.ok(state.thread.turns.every(t=>t.status==='completed'));
+  assert.equal((await modelCalls(f)).filter(c=>c.request.subtype==='initialize').length,1);
+  assert.ok(!(await modelCalls(f)).some(c=>c.request.subtype==='interrupt'));
+});
+test('Claude model ACK is not undone by old active turn model output arriving later',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_OLD_MODEL_AFTER_ACK:'1',CLAUDE_FIXTURE_HOLD:'finish-ready'});
+  await f.post({prompt:'old turn'});
+  await until(f.snapshot,s=>s.thread.activeTurnId&&s.thread.turns.some(t=>t.items.some(i=>i.kind==='commandExecution')));
+  assert.equal((await settings(f,{model:'opus'})).status,200);
+  let state=await until(f.snapshot,s=>s.thread.turns[0].items.some(i=>i.text==='old turn tail'));
+  assert.equal(state.thread.model,'claude-opus-test');assert.equal(state.thread.status,'running');
+  await f.post({prompt:'new turn',mode:'queue'});await writeFile(join(f.root,'cwd/finish-ready'),'release own turn');
+  state=await until(f.snapshot,s=>s.thread.turns.length===2&&s.thread.status==='idle');
+  assert.equal(state.thread.model,'claude-opus-test');
+  const calls=(await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.deepEqual(calls.map(c=>c.model),['claude-sonnet-test','claude-opus-test']);
+});
+test('Claude model response timeout remains unknown without killing provider or losing queued prompt; late ACK cannot overwrite newer setting',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_MODEL_DELAY:'18000',CLAUDE_FIXTURE_MODEL_DELAY_ONCE:'1',CLAUDE_FIXTURE_INPUT_GATE:'input-ready'});
+  const changing=settings(f,{model:'opus'});
+  await until(async()=>modelCalls(f),calls=>calls.some(c=>c.request.subtype==='set_model'));
+  const queued=f.post({prompt:'after unknown switch',mode:'queue'});
+  const response=await changing;assert.equal(response.status,400);assert.equal((await response.json()).error.code,'operation_refused');
+  const unknown=await f.snapshot();assert.equal(unknown.thread.model,null);assert.equal(unknown.thread.modelSelectionStatus,'unknown');
+  assert.equal((await queued).status,200);
+  await writeFile(join(f.root,'cwd/input-ready'),'release own synthetic input');
+  let state=await until(f.snapshot,s=>s.thread.turns.length===1&&s.thread.status==='idle');
+  assert.equal(state.thread.model,'claude-opus-test','fresh provider init can resolve unknown outcome');
+  assert.equal((await settings(f,{model:'legacy'})).status,200);
+  await new Promise(r=>setTimeout(r,3500));
+  state=await f.snapshot();assert.equal(state.ready,true);assert.equal(state.thread.status,'idle');assert.equal(state.thread.model,'claude-legacy-test');assert.equal(state.runtime.provider.transport,'open');
+  assert.equal(state.thread.turns[0].status,'completed');
+  assert.equal((await modelCalls(f)).filter(c=>c.request.subtype==='set_model').length,2,'one explicit newer setting, never retry mutation');
+  assert.equal((await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').length,1);
+  assert.equal(f.child.exitCode,null);
+});
+test('Claude busy model timeout cannot be confirmed by old input reports; next queued input may report its actual model',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_MODEL_DELAY:'18000',CLAUDE_FIXTURE_OLD_MODEL_AFTER_TIMEOUT:'1',CLAUDE_FIXTURE_HOLD:'finish-ready'});
+  await f.post({prompt:'old running turn'});
+  await until(f.snapshot,s=>s.thread.activeTurnId&&s.thread.turns.some(t=>t.items.some(i=>i.kind==='commandExecution')));
+  const changing=settings(f,{model:'opus'});
+  await until(async()=>modelCalls(f),calls=>calls.some(c=>c.request.subtype==='set_model'));
+  const queued=f.post({prompt:'new input after ambiguity',mode:'queue'});
+  assert.equal((await changing).status,400);assert.equal((await queued).status,200);
+  let state=await until(f.snapshot,s=>s.thread.turns[0].items.some(i=>i.text==='old timeout tail'));
+  assert.equal(state.thread.model,null);assert.equal(state.thread.modelSelectionStatus,'unknown');assert.equal(state.thread.status,'running');
+  assert.equal(state.queue.length,1);
+  await writeFile(join(f.root,'cwd/finish-ready'),'release own result');
+  state=await until(f.snapshot,s=>s.thread.turns.length===2&&s.thread.status==='idle');
+  assert.equal(state.thread.model,'claude-opus-test');
+  assert.deepEqual((await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').map(JSON.parse).map(c=>c.text),['old running turn','new input after ambiguity']);
+});
+test('Claude model browser uses actual Rust assets and shows ACK selection or localized unknown', {skip:!process.env.CLAUDE_MODEL_BROWSER},async t=>{
+  const {chromium,expect}=createRequire(resolve('../agent/package.json'))('@playwright/test');
+  const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
+  const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_MODEL_DELAY:'1200',CLAUDE_FIXTURE_TIMEOUT_MODEL:'timeout-choice',TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'model-fixture'},async({state})=>({env:{TREER_AGENT_PRIVATE_STATE_DIR:state}}));
+  const browser=await chromium.launch({env:hermeticEnv({HOME:process.env.HOME})});t.after(()=>browser.close());
+  const shots=process.env.CLAUDE_MODEL_SHOTS; if(shots)await mkdir(shots,{recursive:true});
+  const pages=[];
+  for(const [lang,theme,width] of [['en','light',1280],['zh','dark',390],['en','dark',390],['zh','light',1280]]){
+    const page=await browser.newPage({viewport:{width,height:850},extraHTTPHeaders:{'x-treer-interface-source':'proxy-ui','x-treer-agent-id':'ag_contract','x-treer-interface-instance':'model-fixture'}});pages.push({page,lang,theme,width});
+    await page.goto(f.base+`/?lang=${lang}&theme=${theme}`);
+    await page.locator('.model').click();await expect(page.locator('#model-select')).toHaveValue('claude-sonnet-test');
+    await page.locator('#model-select').focus();await expect(page.locator('#model-select')).toBeFocused();
+  }
+  const first=pages[0].page;
+  const ack=first.waitForResponse(r=>r.url().endsWith('/api/settings'));
+  await first.locator('#model-select').selectOption('claude-opus-test');
+  assert.equal((await f.snapshot()).thread.model,'claude-sonnet-test');
+  await expect(first.locator('#model-select')).toBeDisabled();
+  assert.equal((await ack).status(),200);
+  for(const {page} of pages)await expect(page.locator('#model-select')).toHaveValue('claude-opus-test');
+  assert.equal((await settings(f,{model:'timeout-choice'})).status,400);
+  for(const {page,lang,theme,width} of pages){
+    await expect(page.locator('#model-select option:checked')).toHaveText(lang==='zh'?'模型未知':'Model unknown');
+    await expect(page.locator('.model')).toContainText(lang==='zh'?'模型未知':'Model unknown');
+    await expect(page.locator('#model-select')).toBeEnabled();
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+    if(shots)await page.screenshot({path:join(shots,`${lang}-${theme}-${width}-unknown.png`)});
+  }
+  assert.equal(f.child.exitCode,null);assert.equal((await f.snapshot()).runtime.provider.transport,'open');
+});
 test('receiptless Soul Claude retains 21 terminal records through new turn, restart and exact Node rollback without replay',async t=>{
   const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
   const thread='synthetic-soul-existing-session';

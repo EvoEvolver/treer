@@ -159,6 +159,7 @@ export const en = {
   "model.model": "Model",
   "model.effort": "Reasoning effort",
   "model.default": "Default",
+  "model.unknown": "Model unknown",
   "model.chip": "Model {{model}}, effort {{effort}}",
   "header.files": "Files",
   "header.filesAria": "Browse files",

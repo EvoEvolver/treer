@@ -35,7 +35,7 @@ export function Dock() {
   const thread = snapshot?.thread;
   const models = snapshot?.modelOptions ?? [];
   const effort = thread?.reasoningEffort ?? "";
-  const modelName = models.find((option) => option.model === thread?.model)?.displayName || thread?.model || t("model.default");
+  const modelName = thread?.modelSelectionStatus === "unknown" ? t("model.unknown") : models.find((option) => option.model === thread?.model)?.displayName || thread?.model || t("model.default");
 
   useLayoutEffect(() => {
     const element = area.current;

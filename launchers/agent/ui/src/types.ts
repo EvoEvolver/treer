@@ -47,6 +47,7 @@ export interface ThreadState {
   title: string;
   cwd: string;
   model: string | null;
+  modelSelectionStatus?: "confirmed" | "unknown";
   reasoningEffort: ReasoningEffort | null;
   status: "idle" | "running" | "error";
   activeTurnId: string | null;

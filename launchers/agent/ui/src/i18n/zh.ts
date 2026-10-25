@@ -159,6 +159,7 @@ export const zh: Partial<Record<MessageKey, string>> = {
   "model.model": "模型",
   "model.effort": "思考强度",
   "model.default": "默认",
+  "model.unknown": "模型未知",
   "model.chip": "模型 {{model}},强度 {{effort}}",
   "header.files": "文件",
   "header.filesAria": "浏览文件",

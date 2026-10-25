@@ -70,13 +70,14 @@ type Reply = oneshot::Sender<Result<Value>>;
 type Pending = Arc<std::sync::Mutex<HashMap<u64, Reply>>>;
 // Outer actor deadlines and shutdown can drop a request future. Cleanup must
 // not depend on polling that future again, or a late reply can retain state.
-struct PendingRequest { id: u64, pending: Pending, selections: Selections }
+struct PendingRequest { id: u64, pending: Pending, selections: Selections, claude: Option<Arc<std::sync::Mutex<crate::claude::Adapter>>> }
 #[derive(Clone, Copy)]
-enum ResponsePolicy { Required, Discovery, Observation }
+enum ResponsePolicy { Required, Discovery, Observation, Settings }
 impl Drop for PendingRequest {
     fn drop(&mut self) {
         self.pending.lock().unwrap().remove(&self.id);
         self.selections.lock().unwrap().remove(&self.id);
+        if let Some(adapter)=&self.claude {adapter.lock().unwrap().forget_control(self.id);}
     }
 }
 fn reviewed_provider_version(result: &Value) -> bool {
@@ -274,9 +275,19 @@ impl Rpc {
         if method != "model/list" { bail!("unsupported_optional_rpc"); }
         self.request_history(method,params,None,ResponsePolicy::Discovery).await
     }
+    pub async fn request_claude_model(&self, params: Value) -> Result<Value> {
+        let adapter=self.claude.as_ref().ok_or_else(||anyhow!("claude_model_control_unavailable"))?;
+        let result=self.request_history("model/set",params,None,ResponsePolicy::Settings).await?;
+        // No await between successful response/deadline arbitration and commit.
+        // A parsed but expired ACK may produce a candidate, never model state.
+        adapter.lock().unwrap().commit_model(&result)
+    }
+    pub fn claude_model_revision(&self) -> u64 {
+        self.claude.as_ref().map(|a|a.lock().unwrap().model_revision()).unwrap_or(0)
+    }
     async fn request_history(&self, method: &str, params: Value, selection: Option<crate::provider_stream::Selection>, policy: ResponsePolicy) -> Result<Value> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        let _pending = PendingRequest { id, pending: self.pending.clone(), selections: self.selections.clone() };
+        let _pending = PendingRequest { id, pending: self.pending.clone(), selections: self.selections.clone(), claude:self.claude.clone() };
         if let Some(adapter)=&self.claude{
             if selection.is_some(){bail!("claude_older_history_unavailable");}
             let request=adapter.lock().unwrap().request(id,method,&params)?;
@@ -289,6 +300,15 @@ impl Rpc {
                         Ok(dispatched)
                     }else{
                         let(tx,rx)=oneshot::channel();self.pending.lock().unwrap().insert(id,tx);
+                        if matches!(policy,ResponsePolicy::Settings) {
+                            // Match Node control's response-only deadline. Never
+                            // cancel a partial write or poison prompt transport
+                            // just because set_model acknowledgement is absent.
+                            self.write(wire).await?;
+                            return timeout(Duration::from_secs(15),rx).await
+                                .map_err(|_|anyhow!("claude_model_response_timeout"))?
+                                .map_err(|_|anyhow!("Claude disconnected"))?;
+                        }
                         let result=async{self.write(wire).await?;rx.await.map_err(|_|anyhow!("Claude disconnected"))?};
                         let result=match timeout(Duration::from_secs(60),result).await{Ok(r)=>r,Err(_)=>{self.fail("claude_control_timeout");Err(anyhow!("claude_control_timeout"))}};
                         result
@@ -314,6 +334,7 @@ impl Rpc {
                 ResponsePolicy::Discovery => (5, "provider_optional_rpc_timeout"),
                 ResponsePolicy::Observation => (60, "provider_observation_timeout"),
                 ResponsePolicy::Required => unreachable!(),
+                ResponsePolicy::Settings => unreachable!(),
             };
             return timeout(Duration::from_secs(seconds), rx).await
                 .map_err(|_| {
@@ -401,6 +422,21 @@ mod tests {
         assert!(!rpc.failed());
         assert!(rpc.pending.lock().unwrap().is_empty());
         child.kill().await.unwrap();
+    }
+    #[cfg(all(unix, feature="fixture-harness"))]
+    #[tokio::test]
+    async fn claude_model_stalled_write_is_fatal_and_cleans_control() {
+        let node=std::env::var("TREER_TEST_NODE").expect("explicit native Node fixture path");
+        let (rpc,mut child,_)=Rpc::spawn_claude(&node,&["-e".into(),"process.stdin.pause();setInterval(()=>{},1000)".into()],&std::env::temp_dir(),false,"session".into()).unwrap();
+        let writer=rpc.input.lock().await;
+        let error=rpc.request_claude_model(json!({"model":"native-model"})).await.unwrap_err();
+        assert_eq!(error.to_string(),"provider_write_timeout");assert_eq!(rpc.diagnostics()["transport"],"stdin_write_timeout");
+        assert!(rpc.pending.lock().unwrap().is_empty());
+        // Exact expired control cannot commit even if its reply later parses.
+        let adapter=rpc.claude.as_ref().unwrap();
+        let late=adapter.lock().unwrap().consume(json!({"type":"control_response","response":{"subtype":"success","request_id":"1","response":{}}})).unwrap();
+        assert_eq!(late.last().unwrap()["result"],json!({}));assert_eq!(rpc.claude_model_revision(),0);
+        drop(writer);child.kill().await.unwrap();
     }
     #[cfg(all(unix, feature="fixture-harness"))]
     #[tokio::test]

@@ -14,6 +14,14 @@ pub struct Adapter {
     interrupted: bool,
     pending_interrupts: BTreeMap<u64, String>,
     announced: bool,
+    models: Vec<Value>,
+    aliases: BTreeMap<String, String>,
+    current_model: Option<String>,
+    model_controls: BTreeMap<u64, String>,
+    model_revision: u64,
+    input_model_revision: u64,
+    settings_epoch: u64,
+    input_settings_epoch: Option<u64>,
 }
 pub enum Request {
     Local(Value),
@@ -150,14 +158,75 @@ impl Adapter {
             interrupted: false,
             pending_interrupts: BTreeMap::new(),
             announced: false,
+            models: vec![],
+            aliases: BTreeMap::new(),
+            current_model: None,
+            model_controls: BTreeMap::new(),
+            model_revision: 0,
+            input_model_revision: 0,
+            settings_epoch: 0,
+            input_settings_epoch: None,
         })
+    }
+    pub fn forget_control(&mut self, id: u64) { self.model_controls.remove(&id); }
+    pub fn model_revision(&self) -> u64 {self.model_revision}
+    // Called only by the waiting RPC future after its exact response wins
+    // against the response deadline. Parsing an ACK alone is not commitment.
+    pub fn commit_model(&mut self, result: &Value) -> Result<Value> {
+        let model=Self::model_name(&result["model"]).ok_or_else(||anyhow::anyhow!("claude_model_ack_invalid"))?;
+        Ok(self.observe_model(model)["params"].clone())
+    }
+    fn model_name(value: &Value) -> Option<&str> {
+        value.as_str().filter(|s| !s.is_empty() && s.len() <= 1024 && !s.chars().any(char::is_control))
+    }
+    fn resolved(&self, model: &str) -> String {
+        self.aliases.get(model).cloned().unwrap_or_else(||model.into())
+    }
+    fn option(alias: &str, model: &str, name: &str, description: &str) -> Value {
+        json!({"id":alias,"model":model,"displayName":name,"description":description,"isDefault":alias=="default","hidden":false,"supportedReasoningEfforts":[],"defaultReasoningEffort":null})
+    }
+    fn observe_model(&mut self, value: &str) -> Value {
+        let model = self.resolved(value);
+        if !self.models.iter().any(|m|m["model"]==model) && self.models.len()<128 {
+            self.models.push(Self::option(&model,&model,&model,"Current model reported by Claude"));
+        }
+        self.current_model=Some(model.clone());
+        self.model_revision+=1;
+        json!({"method":"thread/model/updated","params":{"threadId":self.session,"model":model,"modelOptions":self.models,"modelRevision":self.model_revision}})
+    }
+    fn catalog(&mut self, response: &Value) -> Result<()> {
+        self.models.clear();self.aliases.clear();
+        if let Some(models)=response.get("models") {
+            let models=models.as_array().filter(|m|m.len()<=128).ok_or_else(||anyhow::anyhow!("claude_model_catalog_invalid"))?;
+            for info in models {
+                let Some(alias)=Self::model_name(&info["value"]).or_else(||Self::model_name(&info["id"])) else {continue;};
+                let model=Self::model_name(&info["resolvedModel"]).unwrap_or(alias);
+                self.aliases.insert(alias.into(),model.into());
+                let option=Self::option(alias,model,Self::model_name(&info["displayName"]).unwrap_or(model),info["description"].as_str().filter(|s|s.len()<=4096).unwrap_or(""));
+                if let Some(prior)=self.models.iter_mut().find(|m|m["model"]==model) {
+                    if prior["isDefault"]==true {*prior=option;}
+                } else {self.models.push(option);}
+            }
+        }
+        if self.current_model.is_none() {self.current_model=self.aliases.get("default").cloned();}
+        if let Some(model)=self.current_model.clone() {self.observe_model(&model);}
+        Ok(())
     }
     pub fn request(&mut self, id: u64, method: &str, params: &Value) -> Result<Request> {
         Ok(match method {
-            "initialize" => Request::Wire(
-                json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"initialize"}}),
-            ),
-            "model/list" => Request::Local(json!({"data":[]})),
+            "initialize" => {
+                self.model_controls.insert(id,String::new());
+                Request::Wire(json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"initialize"}}))
+            },
+            "model/list" => Request::Local(json!({"data":self.models})),
+            "model/set" => {
+                let model=Self::model_name(&params["model"]).ok_or_else(||anyhow::anyhow!("claude_model_invalid"))?;
+                // An attempt, including an unacknowledged one, invalidates old
+                // input model reports as evidence of the future selection.
+                self.settings_epoch+=1;
+                self.model_controls.insert(id,model.into());
+                Request::Wire(json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"set_model","model":model}}))
+            },
             "thread/start" | "thread/resume" => {
                 if params["threadId"]
                     .as_str()
@@ -166,7 +235,7 @@ impl Adapter {
                     bail!("claude_session_mismatch");
                 }
                 Request::Local(
-                    json!({"thread":{"id":self.session,"name":"Claude","status":{"type":"idle"},"turns":[]},"model":null,"reasoningEffort":null}),
+                    json!({"thread":{"id":self.session,"name":"Claude","status":{"type":"idle"},"turns":[]},"model":self.current_model,"modelOptions":self.models,"modelRevision":self.model_revision,"reasoningEffort":null}),
                 )
             }
             "turn/start" => {
@@ -186,6 +255,8 @@ impl Adapter {
                     .join("\n");
                 let turn = uuid::Uuid::new_v4().to_string();
                 self.active = Some(turn);
+                self.input_model_revision=self.model_revision;
+                self.input_settings_epoch=Some(self.settings_epoch);
                 self.items.clear();
                 self.order.clear();
                 self.blocks.clear();
@@ -326,6 +397,11 @@ impl Adapter {
             bail!("claude_session_mismatch");
         }
         let mut out = vec![];
+        if event["type"]=="assistant" && self.input_settings_epoch==Some(self.settings_epoch) && self.model_revision<=self.input_model_revision {
+            if let Some(model)=Self::model_name(&event["message"]["model"]).filter(|m|*m!="<synthetic>") {
+                out.push(self.observe_model(model));
+            }
+        }
         if self.active.is_some() && !self.announced {
             self.announced = true;
             out.push(json!({"method":"turn/started","params":{"threadId":self.session,"turn":self.dispatched()["turn"]}}));
@@ -345,10 +421,18 @@ impl Adapter {
                         self.interrupted = true;
                     }
                 }
+                let control=self.model_controls.remove(&id);
+                let mut result=r["response"].clone();
+                if r["subtype"]=="success" {
+                    if let Some(model)=control {
+                        if model.is_empty() {self.catalog(&result)?;}
+                        else {result=json!({"model":self.resolved(&model)});}
+                    }
+                }
                 out.push(if r["subtype"] == "error" {
                     json!({"id":id,"error":{"code":"claude_control_refused"}})
                 } else {
-                    json!({"id":id,"result":r["response"]})
+                    json!({"id":id,"result":result})
                 });
             }
             Some("stream_event") => {
@@ -501,11 +585,59 @@ impl Adapter {
                 self.blocks.clear();
             }
             // system idle may precede result: never dispatch another turn here.
-            Some("system") => {}
+            Some("system") => {
+                if event["subtype"]=="init" && ((self.input_settings_epoch.is_none() && self.settings_epoch==0) || (self.input_settings_epoch==Some(self.settings_epoch) && self.model_revision<=self.input_model_revision)) {
+                    if let Some(model)=Self::model_name(&event["model"]) {out.push(self.observe_model(model));}
+                }
+            }
             Some("control_request") => bail!("claude_unexpected_permission_request"),
             _ => {}
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+    fn ack(adapter: &mut Adapter, id: u64, response: Value) -> Vec<Value> {
+        adapter.consume(json!({"type":"control_response","response":{"subtype":"success","request_id":id.to_string(),"response":response}})).unwrap()
+    }
+    #[test]
+    fn model_catalog_and_control_scope_do_not_promote_late_old_turn_or_expired_ack() {
+        let mut a=Adapter::new("session".into()).unwrap();
+        a.request(1,"initialize",&json!({})).unwrap();
+        ack(&mut a,1,json!({"models":[{"value":"default","resolvedModel":"sonnet-version"},{"value":"sonnet","resolvedModel":"sonnet-version"},{"value":"opus","resolvedModel":"opus-version"}]}));
+        assert_eq!(a.models.len(),2);assert_eq!(a.models[0]["id"],"sonnet");
+        a.request(2,"turn/start",&json!({"input":[{"type":"text","text":"A"}]})).unwrap();
+        a.request(3,"model/set",&json!({"model":"opus"})).unwrap();
+        let result=ack(&mut a,3,json!({}));assert_eq!(result.last().unwrap()["result"]["model"],"opus-version");
+        a.commit_model(&result.last().unwrap()["result"]).unwrap();
+        let late=a.consume(json!({"type":"assistant","message":{"id":"old-A","model":"sonnet-version","content":[{"type":"text","text":"old model output"}]}})).unwrap();
+        assert!(!late.iter().any(|e|e["method"]=="thread/model/updated"));
+        assert_eq!(a.current_model.as_deref(),Some("opus-version"));
+        a.request(4,"model/set",&json!({"model":"expired"})).unwrap();a.forget_control(4);
+        ack(&mut a,4,json!({}));assert_eq!(a.current_model.as_deref(),Some("opus-version"));
+        // An ACK parsed in the drop/forget gap still cannot commit a choice:
+        // the timed-out RPC future never consumes this candidate result.
+        a.request(6,"model/set",&json!({"model":"gap"})).unwrap();
+        let candidate=ack(&mut a,6,json!({}));assert_eq!(candidate.last().unwrap()["result"]["model"],"gap");
+        a.forget_control(6);assert_eq!(a.current_model.as_deref(),Some("opus-version"));
+        a.consume(json!({"type":"result","subtype":"success","is_error":false})).unwrap();
+        let stale=a.consume(json!({"type":"system","subtype":"init","model":"old-after-timeout"})).unwrap();
+        assert!(!stale.iter().any(|e|e["method"]=="thread/model/updated"));
+        assert_eq!(a.current_model.as_deref(),Some("opus-version"));
+        a.request(5,"turn/start",&json!({"input":[{"type":"text","text":"B"}]})).unwrap();
+        let fresh=a.consume(json!({"type":"system","subtype":"init","model":"reported-actual"})).unwrap();
+        assert!(fresh.iter().any(|e|e["params"]["model"]=="reported-actual"));
+        assert_eq!(a.current_model.as_deref(),Some("reported-actual"));
+    }
+    #[test]
+    fn malformed_catalog_refuses_boundedly_and_invalid_model_never_emits_control() {
+        let mut a=Adapter::new("session".into()).unwrap();
+        assert!(a.request(2,"model/set",&json!({"model":"bad\nmodel"})).is_err());
+        a.request(1,"initialize",&json!({})).unwrap();
+        assert!(a.consume(json!({"type":"control_response","response":{"subtype":"success","request_id":"1","response":{"models":{}}}})).is_err());
     }
 }
 

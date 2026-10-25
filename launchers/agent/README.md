@@ -600,6 +600,14 @@ the next init confirms it. Older CLIs without a catalog fall back to unversioned
 `default`, `sonnet`, `opus`, and `haiku` aliases plus the reported current model;
 there is no hardcoded model-version list. Hovering the picker shows the actual ID.
 
+The Rust backend now uses the same native catalog, alias resolution and
+acknowledged `set_model` protocol; see [Rust Claude model controls](../agent-rust/CLAUDE.md#model-discovery-and-switching-243).
+It does not read private Claude history or invent missing catalog entries.
+An unacknowledged switch leaves its outcome unknown: the picker shows
+**Model unknown / 模型未知** until a fresh current-input model report confirms
+selection. Pending prompts remain live without replay or an implicit retry of
+the model change. Rust reasoning-effort changes remain unsupported.
+
 **Model and effort changes were tested with Claude Code 2.1.296 in disposable
 sessions.** `set_model` works during a foreground Bash command without interrupting
 it or restarting Claude. The next inference request, including the continuation
