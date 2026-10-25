@@ -20,6 +20,7 @@ mod messages;
 mod receipts;
 mod message_retry;
 mod recovery;
+mod session_snapshot;
 
 pub struct Request {
     pub method: String,
@@ -89,6 +90,8 @@ struct Record {
 }
 struct Runtime {
     claude:bool,
+    snapshot_source: Option<(PathBuf, PathBuf)>,
+    snapshot_read_slot: Arc<tokio::sync::Semaphore>,
     terminal_tasks: Value,
     rpc: Rpc,
     events: mpsc::Receiver<Value>,
@@ -146,6 +149,7 @@ impl Drop for AbortTask {
 #[derive(Clone)]
 pub struct Config {
     pub claude:bool,
+    pub claude_config_dir: Option<PathBuf>,
     pub cwd: PathBuf,
     pub private_root: PathBuf,
     pub codex: String,
@@ -185,6 +189,8 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
     ));
     let mut rt = Runtime {
         claude:config.claude,
+        snapshot_source: config.claude_config_dir.clone().map(|root| (root,config.cwd.clone())),
+        snapshot_read_slot: Arc::new(tokio::sync::Semaphore::new(1)),
         rpc,
         events,
         rpc_completed_turns: HashSet::new(),
@@ -946,6 +952,7 @@ impl Runtime {
             bail!("private_state_write_failed");
         }
         match method {
+            "session/export" => self.session_snapshot(body).await,
             "tasks/clear-finished" if self.claude => {
                 let removed = crate::tasks::clear(&mut self.terminal_tasks);
                 self.persist()?;

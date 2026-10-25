@@ -96,13 +96,52 @@ directory. Such a launch is separate from transfer and is not executed here.
 Same-UID processes remain one trust domain; descriptors and private modes do
 not sandbox a malicious process under the same account.
 
+## Managed idle snapshot (separate leaf)
+
+On macOS/Linux, `POST /api/session/export` accepts exactly
+`{"threadId":"CURRENT_UUID"}`. It returns the same allowlisted bundle accepted
+by the offline importer, with descriptive `runtimeSnapshot` metadata. No path,
+config, cwd or destination selector is accepted. Source cwd and explicit absolute
+`CLAUDE_CONFIG_DIR` are captured at runtime startup; absent explicit config refuses
+without searching HOME. Responses use `Cache-Control: no-store`.
+
+Use the existing authenticated Controller/Proxy UI tunnel. In addition to the
+ordinary AIS guard, export requires managed Agent identity and exact current
+Agent/interface-instance provenance, with `controller-api` or `proxy-ui` source.
+Unmarked direct loopback calls are refused. These public headers are routing
+provenance, not cryptographic authentication: a same-account local process can
+forge them. The existing Controller/Proxy auth boundary is unchanged; no new
+semantic CLI command, credential or general filesystem API is introduced.
+
+The actor serializes the export against prompt/settings commands. It requires
+the exact current idle thread and initialized adapter with no active input or
+pending interrupt; transport/recovery/storage fences, queued/uncertain receipts,
+pending acknowledgements/notifications, any goal and running background tasks
+refuse. Provider events continue through the normal event pump during filesystem
+work; any observed event invalidates that export, without rolling back the event,
+killing the provider or replaying input. A concurrent prompt waits and is handled
+normally once the read window ends. One HTTP export is admitted at a time, with
+a 4KiB request/2s body bound and 30s read-window deadline. In-progress event
+handling retains its existing fatal write deadline. A timed-out blocking file
+worker retains its exclusive reader permit until it actually exits, preventing
+accumulation of detached reads. All offline path/size/hash checks remain active.
+
+This is **local current-adapter idle custody**, not a provider flush/checkpoint,
+global native-session lock, atomic multi-file snapshot, signed handoff or proof
+that no other same-UID writer exists. It does not include Launcher private state,
+receipts, queue, goals, task authority or credentials. The original session and
+files remain in place. No import or new runtime starts through this endpoint.
+
 ## Remaining live-transfer contract
 
 `capabilities.sessionTransfer` remains **null**. The offline command is usable,
-but this batch does not advertise a live export endpoint, coordinate with an
-active provider, import runtime receipts/queue/goals/task claims, or integrate a
-shared UI transfer action. Those require a separately implemented authenticated
-snapshot/idle-custody boundary and an explicit new-session launch contract.
-Resume alone does not meet that boundary. Windows transfer is explicitly
+and managed snapshot is separately usable, but neither is a complete new-runtime
+transfer workflow or shared UI action. A new Rust Claude runtime currently
+requires a supported private history checkpoint to resume an existing session;
+the offline importer intentionally does not fabricate that checkpoint. The next
+leaf must implement explicit fresh private checkpoint/bootstrap and new-session
+launch wiring, including independent supported authentication of the isolated
+config, without importing old receipt/queue/task execution authority. Passing
+the returned UUID to resume alone does not implement that contract. Windows transfer is explicitly
 unsupported; its native private-file/DACL backend is not replaced by POSIX mode
 checks. No real Claude private files or credentials are used by the tests.

@@ -70,6 +70,7 @@ struct App {
     attachments: Option<Arc<tokio::sync::Mutex<attachments::Attachments>>>,
     image_slots: Arc<tokio::sync::Semaphore>,
     history_slot: Arc<tokio::sync::Semaphore>,
+    snapshot_slot: Arc<tokio::sync::Semaphore>,
 }
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|s| !s.is_empty())
@@ -190,6 +191,7 @@ async fn main() -> Result<()> {
     };
     let handle = runtime::spawn(runtime::Config {
         claude:harness=="claude",
+        claude_config_dir: if harness=="claude" {env("CLAUDE_CONFIG_DIR").map(PathBuf::from)} else {None},
         cwd,
         private_root,
         codex: if harness=="claude" {
@@ -233,6 +235,7 @@ async fn main() -> Result<()> {
         attachments,
         image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         history_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+        snapshot_slot: Arc::new(tokio::sync::Semaphore::new(1)),
     };
     let files_idle = app.files.idle;
     let router = Router::new().fallback(any(route)).with_state(app);
@@ -379,6 +382,36 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
     let path = request.uri().path().trim_end_matches('/').to_string();
     let path = if path.is_empty() { "/".into() } else { path };
     let method = request.method().to_string();
+    if path == "/api/session/export" {
+        // Snapshot contents are more sensitive than ordinary status. Unmarked
+        // direct loopback requests (even with no browser Origin) do not qualify.
+        if app.agent.is_empty() || !matches!(header(request.headers(),"x-treer-interface-source"),Some("controller-api"|"proxy-ui")) {
+            return failure(StatusCode::FORBIDDEN,"controller_provenance_required");
+        }
+        if method != "POST" { return failure(StatusCode::METHOD_NOT_ALLOWED,"snapshot_requires_post"); }
+        if request.uri().query().is_some() {return failure(StatusCode::BAD_REQUEST,"snapshot_selectors_forbidden");}
+        let Ok(_slot)=app.snapshot_slot.clone().try_acquire_owned() else {return failure(StatusCode::TOO_MANY_REQUESTS,"snapshot_busy");};
+        let bytes=match tokio::time::timeout(std::time::Duration::from_secs(2),to_bytes(request.into_body(),4096)).await {
+            Ok(Ok(bytes))=>bytes,
+            _=>return failure(StatusCode::BAD_REQUEST,"invalid_snapshot_request"),
+        };
+        let body=match bounded_json::decode(&bytes) {Ok(body)=>body,_=>return failure(StatusCode::BAD_REQUEST,"invalid_snapshot_request")};
+        if !body.as_object().is_some_and(|o|o.len()==1 && o.get("threadId").is_some_and(Value::is_string)) {
+            return failure(StatusCode::BAD_REQUEST,"snapshot_exact_thread_required");
+        }
+        return match app.runtime.call("session/export",body).await {
+            Ok(mut value)=>{
+                value["runtimeSnapshot"]["agentId"]=json!(app.agent);
+                value["runtimeSnapshot"]["interfaceInstance"]=json!(app.instance);
+                json_response(StatusCode::OK,value)
+            },
+            Err(error)=>{
+                let reason=error.to_string();
+                let code=if matches!(reason.as_str(),"snapshot_thread_unavailable"|"snapshot_requires_idle_without_obligations"|"snapshot_explicit_config_required"|"snapshot_platform_unsupported"|"snapshot_provider_changed"|"snapshot_transport_unavailable"|"snapshot_deadline"|"snapshot_storage_changed"|"snapshot_reader_busy") {reason.as_str()}else{"snapshot_source_refused"};
+                failure(StatusCode::CONFLICT,code)
+            },
+        };
+    }
     if path == "/api/attachments" || path.starts_with("/api/attachments/") {
         return attachment_route(&app, request, &path, &method).await;
     }

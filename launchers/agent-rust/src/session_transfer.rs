@@ -313,6 +313,23 @@ fn export(home: &Path, cwd: &Path, id: &str) -> Result<Bundle> {
         files,
     })
 }
+// The actor supplies all selectors; HTTP clients cannot choose source paths.
+pub(crate) fn managed_snapshot(home: &Path, cwd: &Path, id: &str) -> Result<Value> {
+    #[cfg(feature = "fixture-harness")]
+    if let Some(gate) = std::env::var_os("RUST_SESSION_SNAPSHOT_GATE") {
+        let gate = PathBuf::from(gate);
+        std::fs::write(gate.with_extension("entered"), b"entered")?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !gate.exists() {
+            ensure!(
+                std::time::Instant::now() < deadline,
+                "snapshot_fixture_gate_timeout"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    serde_json::to_value(export(home, cwd, id)?).map_err(Into::into)
+}
 fn decoded(bundle: Bundle, id: &str, cwd: &str) -> Result<Vec<(String, Vec<u8>)>> {
     ensure!(
         bundle.schema == "treer.agent-session/v1" && bundle.harness == "claude",

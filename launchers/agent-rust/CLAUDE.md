@@ -1,7 +1,7 @@
 # Claude stream adapter (#231)
 
 [Offline Claude transfer](CLAUDE-TRANSFER.md) documents the explicit native
-`session export/import` leaf and isolated atomic destination. Live
+`session export/import` leaf, managed idle snapshot endpoint and isolated atomic destination. Live
 `sessionTransfer` remains null; offline transfer never resumes or modifies the
 current runtime.
 
