@@ -24,6 +24,11 @@
     "positionals": 1,
     "variadic": false
   },
+  "agent admin local-inventory": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": true
+  },
   "agent admin profile create": {
     "flags": {
       "--cwd": "value",

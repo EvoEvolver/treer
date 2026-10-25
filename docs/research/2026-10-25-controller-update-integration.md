@@ -161,3 +161,31 @@ base. Review only the composed shared hooks and source bindings; retain the
 already reviewed implementation and exact `40197073704` result as prior-source
 evidence. Do not relabel that hosted run as executing the integration candidate,
 restart CI/acceptance to reconstruct it, or activate an ordinary installation.
+
+## Automatic CI follow-up: test image and CLI contract
+
+Main `a5d6162b` automatic CI `40203031672` passed formatting and workspace
+compilation, then failed in Agent Server tests. The updater fixtures digest the
+running test executable (including synthetic socket-peer Host fixtures) through
+the production image reader. Its 128 MiB bound also counts Linux debug sections;
+an oversized test executable is not a valid fixture for that reader. The test
+profile now strips only Agent Server debug information while retaining symbols
+and the normal unoptimized test behavior. Development/release profiles, image
+limits, image authentication and runtime code remain unchanged. This is not a
+larger-image exemption or an ignored test.
+
+The same CI run also found a stale `apps/cli-contract.json`. Regenerate it with
+the real parser's `TREER_UPDATE_CLI_CONTRACT=1` test, then verify again without
+that variable. This updates the snapshot only; it does not change CLI parsing.
+Focused unit validation belongs to this follow-up source. The previous hosted
+native/browser/PG result still belongs to `ad23f3bf`; no actual stack is rerun
+for this test-build/snapshot correction.
+
+Author validation on macOS: all 22 top-level tests named by the failing CI panic
+summary pass individually, including the parent that invokes the ignored
+ownership helper. The resulting test executable is 68,346,080 bytes. The CLI
+contract test passes again without its generation variable; its sole snapshot
+addition is the already implemented `agent admin local-inventory` command.
+Formatting, documentation and diff checks pass. This does not claim a Linux
+rerun, a completed workspace/PG suite or Clippy for the failed CI run; those
+original results and the production image bound remain unchanged.

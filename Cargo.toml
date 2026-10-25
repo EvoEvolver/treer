@@ -70,3 +70,9 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.serde_json]
 opt-level = 3
+
+# Updater unit fixtures authenticate/copy their own executable under the same
+# 128 MiB limit as production images. Linux DWARF must not inflate that fixture;
+# retain symbols/backtraces and leave development/release profiles unchanged.
+[profile.test.package.treer-agent-server]
+strip = "debuginfo"
