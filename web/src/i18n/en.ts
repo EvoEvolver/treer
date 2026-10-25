@@ -1,6 +1,15 @@
 // English is the source dictionary. zh.ts must define every key (checked by the type system).
 // Keys are namespaced by screen. Values may contain {name} placeholders filled by t(key, { name }).
 export const en = {
+  "sessionCopy.ownerPublication": "Owner project: {project}. Publication intent: {intent}. Two locations are published; a partial result must be inspected, never retried automatically.",
+  "sessionCopy.auth": "Target authentication",
+  "sessionCopy.authEnvironment": "Isolated config · environment authentication",
+  "sessionCopy.authOwner": "Owner default Claude configuration",
+  "sessionCopy.ownerWarning": "Uses the target owner's existing Claude login, hooks and settings. This mode is not isolated. CLAUDE_CONFIG_DIR must be unset in the launcher environment. No credentials are read or copied by this flow.",
+  "sessionCopy.environmentWarning": "Trusted environment authentication must already be configured for the isolated target.",
+  "sessionCopy.confirmOwner": "Prepare this new target and its exclusive owner project directory. I accept the owner's existing hooks/settings and confirm CLAUDE_CONFIG_DIR is unset. Partial publication is unknown and must not be retried.",
+  "prepared.ownerAck": "I confirm this target was prepared on the selected machine with owner-default authentication and the launcher entry is trusted. It uses the owner's hooks/settings without isolation; CLAUDE_CONFIG_DIR must be unset. No credentials will be entered here.",
+
   "controller_update.identity_release_sha": "Release commit",
   "controller_update.identity_artifact_source_sha": "Artifact source commit",
   "controller_update.identity_controller_sha256": "Controller SHA-256",
@@ -60,7 +69,7 @@ export const en = {
   "sessionCopy.stagingAck": "I prepared this existing staging directory as owner-only (0700). I agree to retain the sensitive session snapshot there until I remove it manually.",
   "sessionCopy.invalid": "Choose a source and provide a trusted absolute entry, a new relative target directory, and an existing private relative staging directory. Parent segments and absolute relative-path fields are not accepted.",
   "sessionCopy.title": "Copy an idle Claude session",
-  "sessionCopy.description": "Select a source in this workspace. Use an existing private staging directory on the selected target machine. Environment authentication must already be configured; no credentials are transferred. The source stays unchanged.",
+  "sessionCopy.description": "Select a source in this workspace. Use an existing private staging directory on the selected target machine. Choose target authentication explicitly; no credentials are transferred. The source stays unchanged.",
   "sessionCopy.source": "Source Agent",
   "sessionCopy.staging": "Private staging directory (relative to machine root)",
   "sessionCopy.preview": "Snapshot, upload and inspect once",
@@ -78,7 +87,7 @@ export const en = {
   "sessionCopy.ready": "New session is ready.",
   "sessionCopy.notReady": "Agent created, but readiness was not verified. Inspect its interface; no launch was retried.",
   "prepared.mode": "Prepared Claude target",
-  "prepared.description": "Use an already prepared isolated target, or copy an idle session below. Select a trusted installed launcher entry. The new working directory is relative to the machine root and must match the prepared physical directory.",
+  "prepared.description": "Use an already prepared target, or copy an idle session below. Select a trusted installed launcher entry. The new working directory is relative to the machine root and must match the prepared physical directory.",
   "prepared.entry": "Trusted launcher entry (absolute path)",
   "prepared.directory": "Prepared directory (absolute path)",
   "prepared.session": "Prepared plan session UUID",

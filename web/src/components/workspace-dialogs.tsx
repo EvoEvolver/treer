@@ -76,7 +76,7 @@ export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, c
   const createOpener = useRef<HTMLElement | null>(null)
   const sessionCopy = useSessionCopy()
   const preparedMachine = onlineMachines.find(machine => machine.server_id === agentServerId)
-  sessionCopy.currentKey.current = createAgentOpen && agentProfileId === 'prepared-claude' && preparedMachine ? copyScopeKey({ workspace: workspace?.workspace_id ?? '', source: sessionCopy.source, machine: preparedMachine, cwd: agentCwd, entry: preparedClaude.entry, staging: sessionCopy.staging }) : ''
+  sessionCopy.currentKey.current = createAgentOpen && agentProfileId === 'prepared-claude' && preparedMachine ? copyScopeKey({ workspace: workspace?.workspace_id ?? '', source: sessionCopy.source, machine: preparedMachine, cwd: agentCwd, entry: preparedClaude.entry, staging: sessionCopy.staging, auth: preparedClaude.auth }) : ''
   const preparedKey = preparedClaudeBinding(agentServerId, preparedMachine?.root ?? '', agentCwd, preparedClaude)
   const preparedArgs = preparedMachine && preparedClaudeArgs(agentServerId, preparedMachine.root, agentCwd, preparedClaude)
   return <>
@@ -125,10 +125,12 @@ export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, c
           {agentProfileId === "prepared-claude" && <fieldset className="min-w-0 space-y-3" disabled={creatingAgent || preparedAttempted}>
             <p className="text-sm">{t("prepared.description")}</p>
             <Field label={t("prepared.entry")}><Input className="max-md:min-h-11" aria-label={t("prepared.entry")} value={preparedClaude.entry} onChange={e => setPreparedClaude(v => ({ ...v, entry: e.target.value, acknowledgedFor: '' }))} required /></Field>
-            <SessionCopyWizard flow={sessionCopy} workspace={workspace?.workspace_id ?? ''} machine={preparedMachine} agents={snapshot?.agents ?? []} cwd={agentCwd} entry={preparedClaude.entry} onPrepared={plan => setPreparedClaude(v => ({ ...v, directory: plan.directory, sessionId: plan.sessionId, acknowledgedFor: '' }))} />
+            <Field label={t('sessionCopy.auth')}><Select value={preparedClaude.auth ?? 'environment'} disabled={sessionCopy.latch.current || preparedAttempted} onValueChange={auth => setPreparedClaude(v => ({ ...v, auth: auth === 'owner-default' ? 'owner-default' : 'environment', acknowledgedFor: '' }))}><SelectTrigger className="max-md:min-h-11" aria-label={t('sessionCopy.auth')}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="environment">{t('sessionCopy.authEnvironment')}</SelectItem><SelectItem value="owner-default">{t('sessionCopy.authOwner')}</SelectItem></SelectContent></Select></Field>
+            <p className="text-xs text-muted-foreground">{t(preparedClaude.auth === 'owner-default' ? 'sessionCopy.ownerWarning' : 'sessionCopy.environmentWarning')}</p>
+            <SessionCopyWizard flow={sessionCopy} workspace={workspace?.workspace_id ?? ''} machine={preparedMachine} agents={snapshot?.agents ?? []} cwd={agentCwd} entry={preparedClaude.entry} auth={preparedClaude.auth ?? 'environment'} onPrepared={plan => setPreparedClaude(v => ({ ...v, directory: plan.directory, sessionId: plan.sessionId, auth: plan.scope.auth, acknowledgedFor: '' }))} />
             <Field label={t("prepared.directory")}><Input className="max-md:min-h-11" aria-label={t("prepared.directory")} value={preparedClaude.directory} onChange={e => setPreparedClaude(v => ({ ...v, directory: e.target.value, acknowledgedFor: '' }))} required /></Field>
             <Field label={t("prepared.session")}><Input className="max-md:min-h-11" aria-label={t("prepared.session")} value={preparedClaude.sessionId} onChange={e => setPreparedClaude(v => ({ ...v, sessionId: e.target.value, acknowledgedFor: '' }))} required /></Field>
-            <label className="flex min-h-11 items-start gap-3 text-sm"><input type="checkbox" className="mt-1 size-5 shrink-0" checked={preparedClaude.acknowledgedFor === preparedKey} onChange={e => setPreparedClaude(v => ({ ...v, acknowledgedFor: e.target.checked ? preparedKey : '' }))} />{t("prepared.ack")}</label>
+            <label className="flex min-h-11 items-start gap-3 text-sm"><input type="checkbox" className="mt-1 size-5 shrink-0" checked={preparedClaude.acknowledgedFor === preparedKey} onChange={e => setPreparedClaude(v => ({ ...v, acknowledgedFor: e.target.checked ? preparedKey : '' }))} />{t(preparedClaude.auth === 'owner-default' ? "prepared.ownerAck" : "prepared.ack")}</label>
             {!preparedArgs && <p role="status" className="break-words text-sm">{t("prepared.invalid")}</p>}
           </fieldset>}
           {agentProfileId === "prepared-claude" && preparedAttempted && <p role="status" className="text-sm">{t("prepared.attempted")}</p>}

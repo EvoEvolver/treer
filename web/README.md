@@ -1249,3 +1249,29 @@ the native job has already completed. This recovery never prepares or confirms
 again. The `refresh discovery reconciles` closed browser control keeps discovery
 stale and makes the detail result fresh with capability off; it fails on the
 previous client and succeeds without any POST on the corrected client.
+
+
+### Target authentication for Claude session transfer
+
+The existing prepared-target Create flow explicitly selects `environment` (the
+unchanged default) or `owner-default`. The latter uses the target owner's normal
+Claude configuration, login, hooks and settings without isolation; the launcher
+environment must leave `CLAUDE_CONFIG_DIR` unset. The Console neither reads nor
+copies credentials. Source export remains the existing authenticated idle export.
+
+Authentication is bound into staging/prepare acknowledgements, the scope key and
+the final Create acknowledgement. The selector locks when the single snapshot
+flow starts. Owner-default inspect/prepare add fixed `--auth owner-default`;
+Create uses the same mode in its normal `session run` argv. Its receipt must
+explicitly identify that mode, contain an empty environment, and bind normalized
+absolute owner-project and publication-intent paths to the target cwd/session.
+Both paths and file/byte counts must stay identical from inspect to prepare;
+owner-default allows the additional marker (1026 files). The UI shows these two
+publication locations. Partial/unknown results keep the existing no-retry latch
+and normal reservation recovery; Create success alone still does not mean ready.
+
+Focused `playwright.session-copy.config.ts` controls cover both auth modes,
+mode-bound acknowledgement refusal, desktop/390px, Chinese dark keyboard/Escape,
+receipt mode/environment/project/intent mismatches and unknown prepare. These are
+closed synthetic API controls, not real-provider authentication or live Create.
+Native validation and one combined Core review remain owned by Launcher/Core.

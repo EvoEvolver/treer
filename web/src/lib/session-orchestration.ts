@@ -1,12 +1,14 @@
+import type { TransferAuth } from './prepared-claude'
 import { api, proxyUrl, type Agent, type Machine } from './api'
 
-export interface CopyScope { workspace: string; source: string; machine: Machine; entry: string; cwd: string; staging: string }
+export interface CopyScope { auth?: TransferAuth; workspace: string; source: string; machine: Machine; entry: string; cwd: string; staging: string }
 export interface CopyPlan { scope: CopyScope; sha256: string; input: string; sessionId: string; sourceSessionId: string; directory: string; receipt?: PreparedReceipt }
-export interface PreparedReceipt { schema: string; phase: string; inputSha256: string; sourceSessionId: string; sessionId: string; cwd: string; files: number; bytes: number; environment: { CLAUDE_CONFIG_DIR: string } }
+export interface PreparedReceipt { schema: string; phase: string; inputSha256: string; sourceSessionId: string; sessionId: string; cwd: string; files: number; bytes: number; auth?: TransferAuth; ownerProject?: string; publicationIntent?: string; environment: { CLAUDE_CONFIG_DIR?: string } }
 const relative = (v: string) => v.length > 0 && v.length <= 4096 && !/[\\\x00-\x1f\x7f]/.test(v) && v.split('/').every(s => s && s !== '.' && s !== '..')
 const absolute = (v: string) => v.startsWith('/') && relative(v.slice(1))
-export function copyScopeKey(s: CopyScope) { return JSON.stringify([s.workspace, s.source, s.machine.server_id, s.machine.root, s.entry, s.cwd, s.staging]) }
+export function copyScopeKey(s: CopyScope) { return JSON.stringify([s.workspace, s.source, s.machine.server_id, s.machine.root, s.entry, s.cwd, s.staging, s.auth ?? 'environment']) }
 export function validateCopyScope(s: CopyScope) {
+  if (s.auth !== undefined && s.auth !== 'environment' && s.auth !== 'owner-default') throw Error('session_copy_invalid')
   if (!s.workspace || !s.source || !s.machine.server_id || !(s.machine.root === '/' || absolute(s.machine.root)) || !absolute(s.entry) || !relative(s.cwd) || !relative(s.staging)) throw Error('session_copy_invalid')
 }
 const rootPath = (s: CopyScope, path: string) => `${s.machine.root.replace(/\/$/, '')}/${path}`
@@ -67,11 +69,17 @@ export async function exportAndUpload(scope: CopyScope, active: () => boolean = 
 }
 export async function inspectOrPrepare(plan: CopyPlan, phase: 'validated' | 'prepared'): Promise<PreparedReceipt> {
   const action = phase === 'validated' ? 'inspect' : 'prepare'
-  const args = ['session', action, '--input', plan.input, '--directory', plan.directory, '--session-id', plan.sessionId, '--sha256', plan.sha256]
+  const args = ['session', action, '--input', plan.input, '--directory', plan.directory, '--session-id', plan.sessionId, '--sha256', plan.sha256, ...(plan.scope.auth === 'owner-default' ? ['--auth', 'owner-default'] : [])]
   const response = await api<any>(`${machineBase(plan.scope)}/exec`, { method: 'POST', body: JSON.stringify({ cwd: plan.scope.staging, command: plan.scope.entry, args, timeout_ms: 30_000 }) })
   if (response.server_id !== plan.scope.machine.server_id || response.cwd !== plan.scope.staging || response.command !== plan.scope.entry || JSON.stringify(response.args) !== JSON.stringify(args) || response.exit_code !== 0 || response.timed_out !== false || response.truncated !== false || typeof response.stdout !== 'string' || response.stdout.length > 65536) throw Error('session_copy_execution')
   const receipt = JSON.parse(response.stdout) as PreparedReceipt
-  if (receipt.schema !== 'treer.claude-prepared/v1' || receipt.phase !== phase || receipt.inputSha256 !== plan.sha256 || receipt.sourceSessionId !== plan.sourceSessionId || receipt.sessionId !== plan.sessionId || receipt.cwd !== plan.directory || !Number.isSafeInteger(receipt.files) || receipt.files < 1 || receipt.files > 1025 || !Number.isSafeInteger(receipt.bytes) || receipt.bytes < 1 || Object.keys(receipt.environment ?? {}).join(',') !== 'CLAUDE_CONFIG_DIR' || receipt.environment?.CLAUDE_CONFIG_DIR !== `${plan.directory}/.harness/claude`) throw Error('session_copy_receipt')
+  if (receipt.schema !== 'treer.claude-prepared/v1' || receipt.phase !== phase || receipt.inputSha256 !== plan.sha256 || receipt.sourceSessionId !== plan.sourceSessionId || receipt.sessionId !== plan.sessionId || receipt.cwd !== plan.directory || !Number.isSafeInteger(receipt.files) || receipt.files < 1 || receipt.files > (plan.scope.auth === 'owner-default' ? 1026 : 1025) || !Number.isSafeInteger(receipt.bytes) || receipt.bytes < 1) throw Error('session_copy_receipt')
+  const ownerDefault = plan.scope.auth === 'owner-default'
+  if (!receipt.environment || typeof receipt.environment !== 'object' || Array.isArray(receipt.environment)) throw Error('session_copy_receipt')
+  if (ownerDefault) {
+    if (receipt.auth !== 'owner-default' || Object.keys(receipt.environment).length !== 0 || typeof receipt.ownerProject !== 'string' || !absolute(receipt.ownerProject) || typeof receipt.publicationIntent !== 'string' || !absolute(receipt.publicationIntent) || !receipt.ownerProject.endsWith(`/.claude/projects/${plan.directory.replace(/[^a-zA-Z0-9]/g, '-')}`) || receipt.publicationIntent !== `${plan.directory.slice(0, plan.directory.lastIndexOf('/'))}/.claude-transfer-${plan.sessionId}.json`) throw Error('session_copy_receipt')
+    if (phase === 'prepared' && (receipt.ownerProject !== plan.receipt?.ownerProject || receipt.publicationIntent !== plan.receipt?.publicationIntent)) throw Error('session_copy_receipt')
+  } else if ((receipt.auth !== undefined && receipt.auth !== 'environment') || Object.keys(receipt.environment).join(',') !== 'CLAUDE_CONFIG_DIR' || receipt.environment.CLAUDE_CONFIG_DIR !== `${plan.directory}/.harness/claude`) throw Error('session_copy_receipt')
   if (phase === 'prepared' && (!plan.receipt || plan.receipt.phase !== 'validated' || receipt.files !== plan.receipt.files || receipt.bytes !== plan.receipt.bytes)) throw Error('session_copy_receipt')
   return receipt
 }

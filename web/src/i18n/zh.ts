@@ -2,6 +2,15 @@ import type { Messages } from "./en"
 
 // 简体中文。键必须与 en.ts 完全一致(缺键会导致类型检查失败)。术语沿用 launcher 的中英对照。
 export const zh: Messages = {
+  "sessionCopy.ownerPublication": "Owner 项目：{project}。发布意图：{intent}。涉及两处发布；部分完成时须检查，不得自动重试。",
+  "sessionCopy.auth": "目标认证方式",
+  "sessionCopy.authEnvironment": "隔离配置 · 环境认证",
+  "sessionCopy.authOwner": "Owner 默认 Claude 配置",
+  "sessionCopy.ownerWarning": "使用目标 owner 已有的 Claude 登录、hooks 和 settings，此模式不隔离。启动器环境必须未设置 CLAUDE_CONFIG_DIR。本流程不会读取或复制凭据。",
+  "sessionCopy.environmentWarning": "须已为隔离目标配置可信的环境认证。",
+  "sessionCopy.confirmOwner": "准备新目标和专属的 owner 项目目录。我接受 owner 现有 hooks/settings，并确认未设置 CLAUDE_CONFIG_DIR。部分发布属于未知结果，不得重试。",
+  "prepared.ownerAck": "我确认此目标已在所选机器以 owner-default 认证准备，启动器入口可信。它沿用 owner 的 hooks/settings，不提供隔离；必须未设置 CLAUDE_CONFIG_DIR。此处不会输入凭据。",
+
   "controller_update.identity_release_sha": "发布提交",
   "controller_update.identity_artifact_source_sha": "构件源码提交",
   "controller_update.identity_controller_sha256": "Controller SHA-256",
@@ -61,7 +70,7 @@ export const zh: Messages = {
   "sessionCopy.stagingAck": "我已将现有暂存目录设为仅当前用户可访问（0700），并同意在手动删除前将敏感会话快照保留于此。",
   "sessionCopy.invalid": "请选择源会话，并填写可信的绝对入口、新目标相对目录和已有的私有暂存相对目录。不接受父目录跳转或在相对路径字段填写绝对路径。",
   "sessionCopy.title": "复制空闲的 Claude 会话",
-  "sessionCopy.description": "选择当前工作区的源会话，并指定目标机器上已存在的私有暂存目录。须预先配置环境认证；不会传输凭据，源会话保持不变。",
+  "sessionCopy.description": "选择当前工作区的源会话，并指定目标机器上已存在的私有暂存目录。请明确选择目标认证方式；不会传输凭据，源会话保持不变。",
   "sessionCopy.source": "源 Agent",
   "sessionCopy.staging": "私有暂存目录（相对机器根目录）",
   "sessionCopy.preview": "单次快照、上传并检查",
@@ -79,7 +88,7 @@ export const zh: Messages = {
   "sessionCopy.ready": "新会话已就绪。",
   "sessionCopy.notReady": "Agent 已创建，但未验证就绪。请查看其界面；未重试启动。",
   "prepared.mode": "已准备的 Claude 目标",
-  "prepared.description": "使用已准备的隔离目标，或在下方复制空闲会话。请选择可信的已安装 launcher 入口。新工作目录相对机器根目录，并须与已准备的物理目录一致。",
+  "prepared.description": "使用已准备的目标，或在下方复制空闲会话。请选择可信的已安装 launcher 入口。新工作目录相对机器根目录，并须与已准备的物理目录一致。",
   "prepared.entry": "可信 launcher 入口（绝对路径）",
   "prepared.directory": "已准备目录（绝对路径）",
   "prepared.session": "准备计划中的会话 UUID",

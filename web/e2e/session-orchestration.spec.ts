@@ -1,11 +1,12 @@
 import { test, expect, type Page } from '@playwright/test'
+import { preparedClaudeArgs, preparedClaudeBinding } from '../src/lib/prepared-claude'
 import { createHash } from 'node:crypto'
 const root = '/fixture/root'
 const sourceId = 'ag-source'
 const sourceSession = '22334455-6677-4899-aabb-ccddeeff0011'
 const machine = { server_id: 'srv-prepared', name: 'Fixture machine', root, status: 'online', capabilities: ['machine.exec.v1'], controller_build: { version: 'fixture', git_commit: 'a'.repeat(40) }, host_build: { version: 'fixture', git_commit: 'b'.repeat(40) } }
 const source = { agent_id: sourceId, server_id: machine.server_id, workspace_id: 'ws-prepared', name: 'Source Claude', kind: 'command', status: 'running' }
-async function fixture(page: Page, failure: '' | 'upload' | 'prepare' | 'receipt' | 'instance' = '') {
+async function fixture(page: Page, failure: '' | 'upload' | 'prepare' | 'receipt' | 'instance' | 'owner-env' | 'owner-intent' | 'owner-mismatch' | 'owner-auth' | 'owner-project' = '') {
   let loggedIn = false, created = false, session = '', sourceStatusReads = 0
   const counts = { export: 0, upload: 0, inspect: 0, prepare: 0, create: 0 }
   let payload: any
@@ -44,11 +45,13 @@ async function fixture(page: Page, failure: '' | 'upload' | 'prepare' | 'receipt
       expect(v.command).toBe('/opt/trusted/treer-agent'); expect(v.cwd).toBe('private-stage')
       expect(v.args.slice(0, 3)).toEqual(['session', phase, '--input'])
       expect(v.args[3]).toMatch(/^\/fixture\/root\/private-stage\/treer-session-[a-f0-9-]+\.json$/)
-      expect(v.args).toHaveLength(10)
+      const owner = v.args[11] === 'owner-default'
+      expect(v.args).toHaveLength(owner ? 12 : 10)
+      if (owner) expect(v.args.slice(10)).toEqual(['--auth', 'owner-default'])
       expect(JSON.stringify(v)).not.toContain('synthetic')
       session = v.args[7]
       if (phase === 'prepare' && failure === 'prepare') return json({ error: { code: 'unknown', message: 'synthetic unknown' } }, 503)
-      return json({ server_id: machine.server_id, cwd: v.cwd, command: v.command, args: v.args, exit_code: 0, timed_out: false, truncated: false, stdout: JSON.stringify({ schema: 'treer.claude-prepared/v1', phase: phase === 'inspect' ? 'validated' : 'prepared', inputSha256: failure === 'receipt' ? '0'.repeat(64) : v.args[9], sourceSessionId: sourceSession, sessionId: session, cwd: v.args[5], files: 3, bytes: 200, environment: { CLAUDE_CONFIG_DIR: `${v.args[5]}/.harness/claude` } }), stderr: '' })
+      return json({ server_id: machine.server_id, cwd: v.cwd, command: v.command, args: v.args, exit_code: 0, timed_out: false, truncated: false, stdout: JSON.stringify({ schema: 'treer.claude-prepared/v1', phase: phase === 'inspect' ? 'validated' : 'prepared', inputSha256: failure === 'receipt' ? '0'.repeat(64) : v.args[9], sourceSessionId: sourceSession, sessionId: session, cwd: v.args[5], files: owner ? 1026 : 3, bytes: 200, ...(owner ? { auth: failure === 'owner-auth' ? 'environment' : 'owner-default', ownerProject: failure === 'owner-project' ? '/other/project' : `/home/fixture/.claude/projects/${v.args[5].replace(/[^a-zA-Z0-9]/g, '-')}`, publicationIntent: failure === 'owner-intent' || failure === 'owner-mismatch' && phase === 'prepare' ? '/other/intent.json' : `${root}/.claude-transfer-${session}.json`, environment: failure === 'owner-env' ? { CLAUDE_CONFIG_DIR: '/wrong' } : {} } : { environment: { CLAUDE_CONFIG_DIR: `${v.args[5]}/.harness/claude` } }) }), stderr: '' })
     }
     if (path === '/api/workspaces/ws-prepared/agents' && route.request().method() === 'POST') { counts.create++; payload = route.request().postDataJSON(); created = true; return json({ ...source, agent_id: 'ag-copy', name: 'Copy' }) }
     if (path === '/api/workspaces/ws-prepared/agents/ag-copy') return json({ ...source, agent_id: 'ag-copy', interface: { instance_id: 'copy-instance' } })
@@ -59,7 +62,7 @@ async function fixture(page: Page, failure: '' | 'upload' | 'prepare' | 'receipt
   })
   return { counts, payload: () => payload }
 }
-async function open(page: Page) {
+async function open(page: Page, owner = false) {
   await page.goto('/orgs/org-prepared/workspaces/ws-prepared')
   await page.getByLabel('Email', { exact: true }).fill('owner@example.test')
   await page.getByLabel('Password', { exact: true }).fill('synthetic-password')
@@ -70,6 +73,10 @@ async function open(page: Page) {
   await page.getByRole('option', { name: 'Prepared Claude target', exact: true }).click()
   await dialog.getByLabel('Working directory', { exact: true }).fill('new-copy')
   await dialog.getByLabel('Trusted launcher entry (absolute path)').fill('/opt/trusted/treer-agent')
+  if (owner) {
+    await dialog.getByRole('combobox', { name: 'Target authentication', exact: true }).click()
+    await page.getByRole('option', { name: 'Owner default Claude configuration', exact: true }).click()
+  }
   await dialog.getByRole('combobox', { name: 'Source Agent', exact: true }).click()
   await page.getByRole('option', { name: /Source Claude/ }).click()
   await dialog.getByLabel('Private staging directory (relative to machine root)').fill('private-stage')
@@ -132,6 +139,9 @@ test('Chinese dark mobile copy controls are labelled and Escape returns focus', 
   await page.getByRole('combobox', { name: '启动', exact: true }).click()
   await page.getByRole('option', { name: '已准备的 Claude 目标', exact: true }).click()
   await expect(page.getByRole('combobox', { name: '源 Agent', exact: true })).toBeVisible()
+  await page.getByRole('combobox', { name: '目标认证方式', exact: true }).click()
+  await page.getByRole('option', { name: 'Owner 默认 Claude 配置', exact: true }).click()
+  await expect(page.getByText(/使用目标 owner 已有的 Claude 登录/)).toBeVisible()
   const ack = page.getByRole('checkbox', { name: /我已将现有暂存目录/ })
   await ack.focus(); await page.keyboard.press('Space'); await expect(ack).toBeChecked()
   await expect(page.locator('html')).toHaveJSProperty('scrollWidth', 390)
@@ -145,4 +155,45 @@ test('oversized declared export is refused before upload', async ({ page }) => {
   const dialog = await open(page)
   await expect(dialog.getByRole('alert')).toContainText('Flow stopped.')
   expect(fx.counts.upload).toBe(0); expect(fx.counts.inspect).toBe(0); expect(fx.counts.prepare).toBe(0); expect(fx.counts.create).toBe(0)
+})
+
+for (const width of [1280, 390]) test(`owner-default target auth binds inspect prepare and normal Create ${width}`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 900 })
+  const fx = await fixture(page); const dialog = await open(page, true)
+  await expect(dialog.getByText('Native validation passed. Review this plan before preparing.', { exact: true })).toBeVisible()
+  await expect(dialog.getByRole('combobox', { name: 'Target authentication' })).toBeDisabled()
+  await expect(dialog.getByText(/Uses the target owner's existing Claude login/)).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Prepare target once' })).toBeDisabled()
+  await dialog.getByRole('checkbox', { name: /Prepare this new target and its exclusive owner project/ }).check()
+  await dialog.getByRole('button', { name: 'Prepare target once' }).click()
+  await expect(dialog.getByText(/Target prepared. Confirm the normal Create/)).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Create agent', exact: true })).toBeDisabled()
+  await dialog.getByRole('checkbox', { name: /I confirm this target was prepared.*owner-default/ }).check()
+  await expect(page.locator('html')).toHaveJSProperty('scrollWidth', width)
+  await page.screenshot({ path: info.outputPath(`owner-default-${width}.png`) })
+  await dialog.getByRole('button', { name: 'Create agent', exact: true }).click()
+  await expect(page.getByText(/New session is ready\./)).toBeVisible()
+  expect(fx.payload().args.slice(-2)).toEqual(['--auth', 'owner-default'])
+  expect(fx.counts).toEqual({ export: 1, upload: 1, inspect: 1, prepare: 1, create: 1 })
+})
+for (const failure of ['owner-env', 'owner-intent', 'owner-mismatch', 'owner-auth', 'owner-project', 'prepare'] as const) test(`owner-default refuses ${failure} receipt or unknown without retry`, async ({ page }) => {
+  const fx = await fixture(page, failure); const dialog = await open(page, true)
+  if (failure === 'owner-mismatch' || failure === 'prepare') {
+    await dialog.getByRole('checkbox', { name: /Prepare this new target and its exclusive owner project/ }).check()
+    await dialog.getByRole('button', { name: 'Prepare target once' }).click()
+  }
+  await expect(dialog.getByRole('alert')).toContainText('Flow stopped.')
+  await expect(dialog.getByRole('button', { name: 'Snapshot, upload and inspect once' })).toBeDisabled()
+  expect(fx.counts.create).toBe(0)
+  expect(fx.counts.prepare).toBe(failure === 'owner-mismatch' || failure === 'prepare' ? 1 : 0)
+})
+
+test('owner-default mode cannot reuse environment Create acknowledgement', () => {
+  const v = { entry: '/opt/treer-agent', directory: `${root}/new-copy`, sessionId: sourceSession, acknowledgedFor: '' }
+  v.acknowledgedFor = preparedClaudeBinding(machine.server_id, root, 'new-copy', v)
+  expect(preparedClaudeArgs(machine.server_id, root, 'new-copy', v)?.slice(-2)).toEqual(['--auth', 'environment'])
+  const changed = { ...v, auth: 'owner-default' as const }
+  expect(preparedClaudeArgs(machine.server_id, root, 'new-copy', changed)).toBeNull()
+  changed.acknowledgedFor = preparedClaudeBinding(machine.server_id, root, 'new-copy', changed)
+  expect(preparedClaudeArgs(machine.server_id, root, 'new-copy', changed)?.slice(-2)).toEqual(['--auth', 'owner-default'])
 })

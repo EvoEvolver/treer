@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Field } from '@/components/control-plane-ui'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import type { TransferAuth } from '@/lib/prepared-claude'
 import type { Agent, Machine } from '@/lib/api'
 import { copyScopeKey, validateCopyScope, exportAndUpload, inspectOrPrepare, type CopyPlan, type CopyScope } from '@/lib/session-orchestration'
 
@@ -21,10 +22,10 @@ export function useSessionCopy() {
   return { source, setSource, staging, setStaging, stage, setStage, plan, setPlan, latch, prepareLatch, currentKey, busy: stage === 'reading' || stage === 'preparing' }
 }
 type CopyState = ReturnType<typeof useSessionCopy>
-export function SessionCopyWizard({ flow, workspace, machine, agents, cwd, entry, onPrepared }: { flow: CopyState; workspace: string; machine?: Machine; agents: Agent[]; cwd: string; entry: string; onPrepared: (plan: CopyPlan) => void }) {
+export function SessionCopyWizard({ flow, workspace, machine, agents, cwd, entry, auth, onPrepared }: { flow: CopyState; workspace: string; machine?: Machine; agents: Agent[]; cwd: string; entry: string; auth: TransferAuth; onPrepared: (plan: CopyPlan) => void }) {
   const [confirmed, setConfirmed] = useState('')
   const [stagingAck, setStagingAck] = useState('')
-  const scope: CopyScope | undefined = machine && { workspace, source: flow.source, machine, cwd, entry, staging: flow.staging }
+  const scope: CopyScope | undefined = machine && { workspace, source: flow.source, machine, cwd, entry, staging: flow.staging, auth }
   const key = scope ? copyScopeKey(scope) : ''
   let validScope = false
   try { if (scope) { validateCopyScope(scope); validScope = true } } catch { /* Inline input guidance, no request. */ }
@@ -60,8 +61,8 @@ export function SessionCopyWizard({ flow, workspace, machine, agents, cwd, entry
       <Button type="button" variant="outline" className="max-md:min-h-11" disabled={!validScope || stagingAck !== key || !scope || !flow.source || !flow.staging || !entry || !cwd} onClick={() => void preview()}>{t('sessionCopy.preview')}</Button>
     </fieldset>
     {!validScope && <p className="text-xs text-muted-foreground">{t('sessionCopy.invalid')}</p>}
-    {flow.plan && <div className="space-y-1 break-all text-xs"><p>{t('sessionCopy.plan', { session: flow.plan.sessionId, directory: flow.plan.directory })}</p><p>SHA-256: {flow.plan.sha256}</p><p>{t('sessionCopy.retained', { path: flow.plan.input })}</p></div>}
-    {flow.stage === 'validated' && same && <><label className="flex min-h-11 gap-3 text-sm"><input className="mt-1 size-5 shrink-0" type="checkbox" checked={confirmed === key} onChange={e => setConfirmed(e.target.checked ? key : '')} />{t('sessionCopy.confirm')}</label><Button type="button" className="max-md:min-h-11" disabled={confirmed !== key} onClick={() => void prepare()}>{t('sessionCopy.prepare')}</Button></>}
+    {flow.plan && <div className="space-y-1 break-all text-xs"><p>{t('sessionCopy.plan', { session: flow.plan.sessionId, directory: flow.plan.directory })}</p><p>SHA-256: {flow.plan.sha256}</p>{flow.plan.receipt?.auth === 'owner-default' && <p>{t('sessionCopy.ownerPublication', { project: flow.plan.receipt.ownerProject ?? '', intent: flow.plan.receipt.publicationIntent ?? '' })}</p>}<p>{t('sessionCopy.retained', { path: flow.plan.input })}</p></div>}
+    {flow.stage === 'validated' && same && <><label className="flex min-h-11 gap-3 text-sm"><input className="mt-1 size-5 shrink-0" type="checkbox" checked={confirmed === key} onChange={e => setConfirmed(e.target.checked ? key : '')} />{t(auth === 'owner-default' ? 'sessionCopy.confirmOwner' : 'sessionCopy.confirm')}</label><Button type="button" className="max-md:min-h-11" disabled={confirmed !== key} onClick={() => void prepare()}>{t('sessionCopy.prepare')}</Button></>}
     {flow.stage !== 'idle' && <p role={flow.stage === 'unknown' ? 'alert' : 'status'} className="break-words text-sm">{t(`sessionCopy.${flow.stage}`)}</p>}
     {flow.plan && !same && <p role="alert" className="text-sm">{t('sessionCopy.changed')}</p>}
   </section>
