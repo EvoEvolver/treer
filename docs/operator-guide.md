@@ -481,6 +481,18 @@ use `treer --workspace WORKSPACE_ID …` when several workspaces are installed.
 Multiple matches require an explicit `--url` as well. Explicit Agent credentials
 never fall back to an installed operator credential.
 
+To distinguish a Proxy projection miss from a missing local process identity,
+use `treer --workspace WORKSPACE_ID agent admin local-inventory AGENT_ID [AGENT_ID]`
+in that machine's existing operator terminal. This read-only diagnostic queries
+the Controller's operator-authenticated local registry directly, without Proxy
+target resolution. It accepts at most two exact `ag_` IDs and prints only each
+ID's local presence, server, status, run generation and PID; absence is reported
+as `local_agent_absent`. It does not inspect startup commands, logs or provider
+history. A missing local entry does not establish why it disappeared. Managed
+Agent/App credentials are refused without operator fallback. Do not copy an
+operator credential into a managed Agent environment to run this command.
+The selected Controller must include this command; older versions reject it.
+
 An environment-bound Agent/operator identity cannot be switched by flags:
 explicit `--workspace` must match `TREER_WORKSPACE_ID`, and explicit `--url`
 must match its bound `TREER_AGENT_SERVER_URL`. A conflict fails before sending

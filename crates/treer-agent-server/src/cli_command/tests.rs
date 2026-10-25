@@ -1,5 +1,71 @@
 use super::*;
 
+#[tokio::test]
+async fn local_inventory_uses_operator_route_and_projects_only_requested_ids() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let app = axum::Router::new().route("/api/local/agents", axum::routing::get(move |headers: axum::http::HeaderMap| {
+        let seen = seen.clone();
+        async move {
+            assert_eq!(headers[OPERATOR_CREDENTIAL_HEADER], "fixture-operator");
+            assert!(!headers.contains_key(AGENT_ID_HEADER));
+            assert!(!headers.contains_key(WORKLOAD_CREDENTIAL_HEADER));
+            seen.fetch_add(1, Ordering::SeqCst);
+            axum::Json(json!({"agents":[
+                {"agent_id":"ag_relay","server_id":"server-local","status":"exited","run_generation":7,"pid":42,"args":["private-value"]},
+                {"agent_id":"ag_unrequested","status":"idle","private":"do-not-output"}
+            ]}))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut client = ApiClient {
+        http: reqwest::Client::builder().no_proxy().build().unwrap(),
+        base: Url::parse(&format!("http://{address}/")).unwrap(),
+        source_agent_id: None,
+        workload_credential: None,
+        operator_credential: Some("fixture-operator".into()),
+    };
+    let ids = vec!["ag_relay".into(), "ag_missing".into()];
+    let result = agents::local_agent_inventory(&client, &ids).await.unwrap();
+    assert_eq!(
+        result,
+        json!({"source":"local_controller_registry","agents":[
+            {"agent_id":"ag_relay","local_present":true,"server_id":"server-local","status":"exited","run_generation":7,"pid":42},
+            {"agent_id":"ag_missing","local_present":false,"code":"local_agent_absent"}
+        ]})
+    );
+    client.source_agent_id = Some("ag_managed".into());
+    assert!(agents::local_agent_inventory(&client, &ids)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("operator_required"));
+    client.source_agent_id = None;
+    client.workload_credential = Some("fixture-workload".into());
+    assert!(agents::local_agent_inventory(&client, &ids).await.is_err());
+    client.workload_credential = None;
+    for ids in [
+        vec!["/relay".into()],
+        vec!["ag_a".into(), "ag_b".into(), "ag_c".into()],
+    ] {
+        assert!(agents::local_agent_inventory(&client, &ids).await.is_err());
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        Args::try_parse_from(["treer", "agent", "admin", "local-inventory", "ag_a", "ag_b"])
+            .is_ok()
+    );
+    assert!(Args::try_parse_from(["treer", "agent", "admin", "local-inventory"]).is_err());
+    server.abort();
+    let _ = server.await;
+}
+
 #[test]
 fn prompt_delivery_and_queue_commands_parse() {
     for flags in [

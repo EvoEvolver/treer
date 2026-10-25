@@ -141,6 +141,7 @@ pub(super) async fn run_agent_admin_command(
     command: AgentAdminCommand,
 ) -> anyhow::Result<Value> {
     match command {
+        AgentAdminCommand::LocalInventory { ids } => local_agent_inventory(client, &ids).await,
         AgentAdminCommand::Startup { command } => match command {
             AgentAdminStartupCommand::Set {
                 target,
@@ -201,6 +202,51 @@ pub(super) async fn run_agent_admin_command(
         AgentAdminCommand::Delete { target } => delete_agent(client, &target).await,
         AgentAdminCommand::Profile { command } => run_profile_command(client, command).await,
     }
+}
+
+pub(super) async fn local_agent_inventory(
+    client: &ApiClient,
+    ids: &[String],
+) -> anyhow::Result<Value> {
+    // Never discover operator credentials or fall back from a managed identity.
+    anyhow::ensure!(
+        client.source_agent_id.is_none()
+            && client.workload_credential.is_none()
+            && client
+                .operator_credential
+                .as_ref()
+                .is_some_and(|s| !s.is_empty()),
+        "local_inventory_operator_required"
+    );
+    anyhow::ensure!(
+        (1..=2).contains(&ids.len())
+            && ids.iter().all(|id| id.starts_with("ag_")
+                && id.len() > 3
+                && id.len() <= 128
+                && id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')),
+        "local_inventory_requires_exact_agent_ids"
+    );
+    // This existing endpoint authenticates the operator and reads the live
+    // local registry. Do not resolve through the Proxy workload tree.
+    let inventory = client.value(Method::GET, "api/local/agents", None).await?;
+    let agents = inventory["agents"]
+        .as_array()
+        .context("invalid local inventory response")?;
+    let mut selected = Vec::new();
+    for id in ids {
+        let mut matches = agents.iter().filter(|agent| agent["agent_id"] == *id);
+        let agent = matches.next();
+        anyhow::ensure!(matches.next().is_none(), "duplicate local Agent identity");
+        selected.push(match agent {
+            Some(agent) => json!({"agent_id":id,"local_present":true,
+                "server_id":agent["server_id"],"status":agent["status"],
+                "run_generation":agent["run_generation"],"pid":agent["pid"]}),
+            None => json!({"agent_id":id,"local_present":false,"code":"local_agent_absent"}),
+        });
+    }
+    Ok(json!({"source":"local_controller_registry","agents":selected}))
 }
 
 pub(super) async fn lifecycle_agent(

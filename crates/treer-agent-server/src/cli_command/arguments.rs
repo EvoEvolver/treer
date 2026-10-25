@@ -430,6 +430,13 @@ pub(super) enum AgentStartupCommand {
 
 #[derive(Debug, Subcommand)]
 pub(super) enum AgentAdminCommand {
+    #[command(
+        about = "Inspect up to two exact local Agent IDs (local operator only; no Proxy lookup)"
+    )]
+    LocalInventory {
+        #[arg(required = true, num_args = 1..=2, value_name = "AGENT_ID")]
+        ids: Vec<String>,
+    },
     #[command(about = "Read or replace an Agent's saved startup command (Policy controlled)")]
     Startup {
         #[command(subcommand)]
