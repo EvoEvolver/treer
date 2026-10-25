@@ -180,7 +180,14 @@ impl Rpc {
                     Ok(None) => break "stdout_eof",
                 };
                 let messages=if let Some(adapter)=&reader_rpc.claude{
-                    match adapter.lock().unwrap().consume(line){Ok(messages)=>messages,Err(_)=>break "claude_protocol_refused"}
+                    let mut adapter = adapter.lock().unwrap();
+                    match adapter.consume(line) {
+                        Ok(messages) => messages,
+                        Err(error) => {
+                            reader_rpc.diagnostics.lock().unwrap()["protocolFailure"] = adapter.refusal_diagnostic(&error);
+                            break "claude_protocol_refused";
+                        }
+                    }
                 }else{vec![line]};
                 for mut message in messages {
                 // One reader owns response/event ordering for this provider

@@ -156,6 +156,28 @@ pub fn import_history(
     Ok(())
 }
 impl Adapter {
+    // Only fixed adapter codes and counts cross into public diagnostics. Never
+    // include the refused frame, error context, IDs, content or provider text.
+    pub fn refusal_diagnostic(&self, error: &anyhow::Error) -> Value {
+        let message = error.to_string();
+        let code = match message.as_str() {
+            code @ ("claude_session_mismatch" | "claude_task_session_missing"
+            | "claude_task_result_origin" | "claude_task_result_missing"
+            | "claude_task_input_interleaving" | "claude_unowned_task_result"
+            | "claude_task_run_limit" | "claude_control_response_kind" | "claude_control_identity"
+            | "claude_unowned_stream" | "claude_unowned_assistant"
+            | "claude_unowned_result" | "claude_unknown_tool_result"
+            | "claude_tool_id" | "claude_message_id" | "claude_block_identity"
+            | "claude_block_limit" | "claude_tool_input_limit"
+            | "claude_item_identity" | "claude_item_limit"
+            | "claude_model_catalog_invalid"
+            | "claude_terminal_conflict" | "claude_turn_limit"
+            | "claude_unexpected_permission_request" | "claude_invocation_limit") => code,
+            _ => "claude_protocol_refused",
+        };
+        json!({"code":code,"activeInput":self.active.is_some(),
+            "taskFollowup":self.task_followup.is_some(),"taskRuns":self.task_runs.len()})
+    }
     // Current process state only. This says nothing about historical effects
     // and must never be used as terminal receipt/history authority.
     pub fn idle_for_disposition(&self) -> bool {
@@ -806,6 +828,17 @@ impl Adapter {
 #[cfg(test)]
 mod task_followup_tests {
     use super::*;
+    #[test]
+    fn refusal_diagnostics_never_publish_error_context_or_native_content() {
+        let a = Adapter::new("private-session".into()).unwrap();
+        let refusal = a.refusal_diagnostic(&anyhow::anyhow!("claude_unowned_stream"));
+        assert_eq!(refusal["code"], "claude_unowned_stream");
+        for error in ["secret provider body", "claude_unowned_stream: private context", "private-session"] {
+            let diagnostic = a.refusal_diagnostic(&anyhow::anyhow!(error.to_owned()));
+            assert_eq!(diagnostic["code"], "claude_protocol_refused");
+            assert!(!diagnostic.to_string().contains(error));
+        }
+    }
     #[test]
     fn interrupt_cannot_borrow_task_invocation_ack_for_waiting_input() {
         let mut a=Adapter::new("session".into()).unwrap();

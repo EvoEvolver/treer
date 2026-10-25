@@ -80,6 +80,8 @@ for(const fault of ['BAD_TASK_ORIGIN','UNSOLICITED'])test('Claude task-followup 
   }
   const s=await until(f.snapshot,s=>s.runtime.state==='blocked');
   assert.equal(s.runtime.provider.transport,'claude_protocol_refused');
+  assert.equal(s.runtime.provider.protocolFailure.code,fault==='BAD_TASK_ORIGIN'?'claude_task_result_origin':'claude_unowned_stream');
+  assert.deepEqual(Object.keys(s.runtime.provider.protocolFailure).sort(),['activeInput','code','taskFollowup','taskRuns']);
   assert.equal(s.thread.turns.some(t=>t.historySource==='native-task-notification'),false);
   const receipts=await (await fetch(f.base+'/v1/queue')).json();
   assert.equal(receipts.submissions[0].state,'done');

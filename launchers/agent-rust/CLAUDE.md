@@ -217,6 +217,12 @@ implemented; no POSIX filesystem guarantees are claimed there.
 
 ### Native task followup output
 
+Protocol refusal keeps its specific fixed adapter code in
+`runtime.provider.protocolFailure`, along with active-input/followup booleans and
+the bounded run count. It never publishes native frame contents, identifiers or
+arbitrary error text. The transport remains `claude_protocol_refused` and keeps
+the same integrity fence; diagnostics do not settle receipts or authorize retry.
+
 Claude 2.1.306 can emit a terminal task notification after the submitted input's
 `result`, then independently run another model invocation. Its `init` omits
 `user_message_uuids`, and its final `result` has
