@@ -12,7 +12,8 @@ pub struct Adapter {
     order: Vec<String>,
     user: String,
     interrupted: bool,
-    pending_interrupts: BTreeMap<u64, String>,
+    pending_interrupts: BTreeMap<u64, (String, u64)>,
+    invocation_epoch: u64,
     announced: bool,
     models: Vec<Value>,
     aliases: BTreeMap<String, String>,
@@ -179,6 +180,7 @@ impl Adapter {
             user: String::new(),
             interrupted: false,
             pending_interrupts: BTreeMap::new(),
+            invocation_epoch: 0,
             announced: false,
             models: vec![],
             aliases: BTreeMap::new(),
@@ -377,11 +379,12 @@ impl Adapter {
                 }
             }
             "turn/interrupt" => {
+                if self.task_followup.is_some() {bail!("claude_interrupt_task_invocation_busy");}
                 let turn = self
                     .active
                     .clone()
                     .ok_or_else(|| anyhow::anyhow!("claude_no_active_turn"))?;
-                self.pending_interrupts.insert(id, turn);
+                self.pending_interrupts.insert(id, (turn,self.invocation_epoch));
                 Request::Wire(
                     json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"interrupt"}}),
                 )
@@ -531,6 +534,7 @@ impl Adapter {
         if task_init && self.task_followup.is_none() {
             if event["session_id"]!=self.session {bail!("claude_task_session_missing");}
             let mut followup=Self::new(self.session.clone())?;
+            self.invocation_epoch=self.invocation_epoch.checked_add(1).ok_or_else(||anyhow::anyhow!("claude_invocation_limit"))?;
             followup.active=Some(uuid::Uuid::new_v4().to_string());
             self.task_followup=Some(Box::new(followup));
             return Ok(vec![]);
@@ -610,7 +614,10 @@ impl Adapter {
                 if !matches!(r["subtype"].as_str(), Some("success" | "error")) {
                     bail!("claude_control_response_kind");
                 }
-                if let Some(turn) = self.pending_interrupts.remove(&id) {
+                if let Some((turn,epoch)) = self.pending_interrupts.remove(&id) {
+                    if r["subtype"]=="success" && epoch!=self.invocation_epoch {
+                        return Ok(vec![json!({"id":id,"error":{"code":"claude_interrupt_outcome_unknown"}})]);
+                    }
                     if r["subtype"] == "success" && self.active.as_ref() == Some(&turn) {
                         self.interrupted = true;
                     }
@@ -799,6 +806,24 @@ impl Adapter {
 #[cfg(test)]
 mod task_followup_tests {
     use super::*;
+    #[test]
+    fn interrupt_cannot_borrow_task_invocation_ack_for_waiting_input() {
+        let mut a=Adapter::new("session".into()).unwrap();
+        a.active=Some("waiting-B".into());
+        assert!(matches!(a.request(10,"turn/interrupt",&json!({})).unwrap(),Request::Wire(_)));
+        a.consume(json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","run_id":"run","status":"completed"})).unwrap();
+        a.consume(json!({"type":"system","subtype":"init","session_id":"session"})).unwrap();
+        // Refusal is BEFORE producing any native control/write request.
+        assert!(a.request(11,"turn/interrupt",&json!({})).is_err());
+        // Even if the task completes before the interrupt ACK, the epoch must
+        // remember that it crossed an invocation boundary.
+        a.consume(json!({"type":"result","session_id":"session","origin":{"kind":"task-notification","producer":"session-task","runId":"run"}})).unwrap();
+        let ack=a.consume(json!({"type":"control_response","response":{"request_id":"10","subtype":"success","response":{}}})).unwrap();
+        assert_eq!(ack[0]["error"]["code"],"claude_interrupt_outcome_unknown");
+        assert!(!a.interrupted);assert!(a.pending_interrupts.is_empty());
+        let result=a.consume(json!({"type":"result","session_id":"session","result":"B actually completed"})).unwrap();
+        assert_eq!(result.last().unwrap()["params"]["turn"]["status"],"completed");
+    }
     #[test]
     fn unowned_task_result_cannot_complete_current_input() {
         let mut a=Adapter::new("session".into()).unwrap();

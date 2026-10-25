@@ -238,6 +238,10 @@ user output arrives. Snapshot/manual idle proof refuses while this buffer is
 active. Missing origin, foreign session, unsolicited output and interleaved init
 remain protocol failures. Restart preserves only the completed display record,
 never an executable task continuation or pending notification.
+Interrupt refuses before writing while a task invocation is buffered. An
+interrupt requested earlier captures an invocation epoch: a task init before its
+ACK makes that success explicitly unknown, even if task output already finished.
+It cannot mark the waiting user input interrupted.
 
 ## Existing Node Claude session import
 

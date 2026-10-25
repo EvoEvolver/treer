@@ -19,20 +19,24 @@ or a new input ACK. The direct owned child was terminated and awaited afterward.
 The synthetic producer preserves this shape and gates the task result separately
 from the waiting user's result. Old fixture image SHA256
 3c3f95385108f9454dab9808bfc27245848a596c1a18dfba57550b7b98a19ff7
-FAILS the new positive entry (deadline after protocol refusal). Final new image
+FAILS the new positive entry (deadline after protocol refusal). The c614 image
 SHA2568b3d0d49401f44fa6e1d99e1f73f6d4b183ee4ce4e06b97e587a574caad51b80
 passes the focused controls below; fixture image is never a shipping artifact.
 
 ## Final checks
 
-- Two focused task_followup_tests PASS: unowned task result cannot settle local
+- Three focused task_followup_tests PASS: unowned task result cannot settle local
   input; buffered output is not idle proof; duplicate run cannot rearm output.
+  Core's9054 finding adds a deterministic interrupt-request -> task-init ->
+  task-result -> successful interrupt-ACK -> normal B result control. It proves
+  that the ACK becomes unknown, B is completed rather than interrupted, and
+  requesting interrupt during buffered output refuses before producing a write.
 - Four actual native fixture entries PASS,0skip: independently gated task and
   queued-input results (receipt still running after task result), unchanged model,
   exact two input writes, display-only persistence/restart without replay; wrong
   origin refusal; unsolicited-stream refusal; existing task metadata/output/
   clear/FIFO/restart control. Other entry matrices were not repeated.
-- Final-source real Claude2.1.306 isolated native runtime PASS: fresh task-owned
+- c614-source real Claude2.1.306 isolated native runtime PASS: fresh task-owned
   cwd/session/private root, background sleep8/printf, completed exit0, independent
   task followup display, transport open, then another prompt completed exactly
   once. Exactly two user receipts are done; three display turns include one
@@ -43,6 +47,11 @@ passes the focused controls below; fixture image is never a shipping artifact.
   generated session532b2081-7183-435f-a4bf-ed3de9c9a00c is recorded in the evidence
   JSON, rather than inferred from a PID. The real operation used existing owner auth
   normally, without reading/copying credentials.
+- The subsequent interrupt-epoch correction changes only native interrupt
+  admission/ACK attribution and is covered by the new deterministic control;
+  it does not relabel the prior real-provider run as a run of that successor.
+  The positive task-origin native entry was rerun on that successor and PASS;
+  the unchanged negative/output matrix and real operation were not repeated.
 - Strict feature Clippy all-targets, node syntax and diffcheck PASS.
 
 Evidence root:
