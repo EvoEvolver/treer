@@ -245,6 +245,41 @@ These commands do not change any existing startup.
 
 ## Normal persistent creation of an already prepared target
 
+The Console's opt-in source-copy workflow is composed from the existing
+authenticated APIs, not a new launcher service or general packaging framework:
+
+1. Read the selected source's exact interface/session and request its idle
+   snapshot through `/agents/{id}/interface/ui/api/session/export`.
+2. Bound the response to 16MiB, hash the original bytes and upload one uniquely
+   named snapshot to the selected machine's operator-prepared private directory,
+   using ordinary `/machines/{id}/files` with overwrite disabled. No snapshot
+   contents are placed in executable arguments. Larger snapshots remain usable
+   with the explicitly bounded offline CLI; this small-file Console flow refuses
+   them before upload rather than silently truncating.
+3. Run the trusted installed entry with fixed `session inspect` arguments via
+   ordinary `/machines/{id}/exec`. Validate process exit/deadline/truncation and
+   the exact hash/session/path receipt; HTTP success alone is insufficient.
+4. After reviewing that receipt, explicitly confirm `session prepare` for those
+   same bytes and target. The native command performs all validation again and
+   publishes only a complete new directory.
+5. Confirm the existing Prepared Claude Create form, which saves `session run`
+   as ordinary persistent startup. Preserve the normal reservation recovery UI
+   for failed or ambiguous creation. Do not delete/recreate or retry a launch.
+6. Independently observe the new Agent's own interface health and state for the
+   exact new session. Until that observation succeeds, process creation and
+   preparation must not be displayed as provider/interface readiness.
+
+The target machine's provider-supported environment authentication is an explicit
+operator precondition. This flow never accepts, copies or escrows credentials.
+Neither a snapshot nor initialization ACK proves account/network authentication;
+the provider decides that when it performs real operations. Upload, preparation
+and creation are separate observable writes, not a cross-machine transaction.
+Any ambiguous write remains an inspection/recovery case, with no automatic retry
+or cleanup. The uploaded snapshot and complete prepared target are retained.
+Original sessions, private receipts and currently running Agents are unchanged.
+`sessionTransfer` remains null pending complete supported end-to-end acceptance;
+this opt-in Console path does not imply that every installed runtime supports it.
+
 `session run` is the reusable startup form of the same native entry, not another
 launcher or supervisor:
 
@@ -285,8 +320,9 @@ permissions, name reservation, private-root injection and startup persistence
 remain Controller-owned. No self-startup mutation or restart call is needed.
 The Console's explicit prepared-target creation option uses this same request,
 with one confirmation and the existing creation-reservation error handling.
-It is a prepared-target flow, **not** an export/import wizard or a claim that
-the source's `sessionTransfer` capability is available.
+That manual prepared-target option also remains available without the source-copy
+workflow. Neither option implies that the source's `sessionTransfer` capability
+is available.
 
 The selected machine must already have a trusted supported authentication
 environment for its Host/workloads. Existing Host inheritance can carry
@@ -307,12 +343,19 @@ would require separate Core product changes; they are not emulated here.
 
 ## Remaining live-transfer contract
 
-`capabilities.sessionTransfer` remains **null**. The offline command is usable,
-and managed snapshot plus prepare/explicit launch now form an independently
-usable POSIX loop. Prepared targets can now use normal persistent creation;
-the shared end-to-end snapshot/import/prepare wizard, per-target authentication
-delivery, ready-gated creation and full historical rich rendering remain absent,
-so the live capability is not advertised. Ordinary resume alone still cannot bootstrap an arbitrary old
+`capabilities.sessionTransfer` remains **null**. The opt-in POSIX Console workflow
+now joins idle snapshot, hash-validated atomic prepare, normal persistent Create
+and independent readiness observation. Its remaining acceptance gap is a complete
+supported deployment exercise with a real Claude provider using an explicitly
+preconfigured target authentication environment. Synthetic entry and browser
+tests do not establish that real-provider/deployed-flow result. Production package
+preparation or Create success must not be relabelled as that acceptance.
+
+Per-target secret delivery, an atomic ready-gated Create transaction, Windows
+transfer and full rich historical rendering are outside this environment-auth
+workflow's advertised scope. They are not prerequisites to prepare a target with
+the documented limits, and no placeholder capability is added for them.
+Ordinary resume alone still cannot bootstrap an arbitrary old
 session without a supported checkpoint; only the explicit validated new-target
 launch path admits native-read display history. Windows transfer is explicitly
 unsupported; its native private-file/DACL backend is not replaced by POSIX mode
