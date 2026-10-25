@@ -147,3 +147,49 @@ provider. Historical same-machine dependency cycle, physical macOS reboot,
 service-manager boot behavior and enrolled-machine recovery remain unproven.
 Previously accepted mock-HTTP, private Host and delivered hot-update evidence
 remains separate. No live enrolled resource was restarted or re-enrolled.
+
+### Queued next isolated leaves (2026-10-25)
+
+Issue #226 is high priority and open, queued behind #236/#240/#241 delivery.
+No #226 execution is currently in progress. Docker availability and the remote-
+provider acceptance above are resolved; neither is a pending resource request.
+Core2 owns the next fixture delta, Core reviews startup/restore authorization,
+and Release owns the single isolated execution after source handoff. #111/#222
+retain their separate updater/distributor acceptance and evidence.
+
+The smallest next Linux entry is a new same-machine variant of
+`scripts/docker-core-e2e/cold-policy-recovery.mjs`, invoked by the existing
+`scripts/docker-core-e2e.mjs` harness. This variant is **not implemented or
+runnable yet**; do not pass an invented scenario value to the current parser.
+Reuse the new isolated PG/NATS/Proxy and machine A from the accepted recipe,
+install both the real Policy App and a declared inert workload on A, configure
+fail-closed/zero-stale Policy, then cold-stop/start only A and restart the owned
+Proxies to discard their compiled cache. Do not repeat the remote-provider leaf
+as a substitute. Inspect the existing authenticated startup-validation path
+before introducing any production change; do not prestart the Policy process
+outside the normal Host/Controller startup path to manufacture success.
+
+Required bounded observations are startup declaration reconciliation, actual
+provider process creation/readiness relative to runtime.restore authorization,
+the first explicit restore result, and a separately invoked restore after actual
+provider readiness if the first was refused. Accept only unchanged enrollment
+hashes and workload IDs, no new key, one retained new Host identity across an
+explicit retry, fresh real Policy revision, restored declared workload, and
+stopped/unpaused owned resources. A refused first restore must remain typed
+`policy_provider_unavailable`; provider unready must never authorize workload
+restore via fail-open or a special privilege. Record a bounded ordering/status
+receipt without credentials or raw provider/config/error bodies. If the provider
+cannot become ready through ordinary startup, preserve that concrete failure and
+its ordering evidence; do not silently start it through an alternate path.
+
+macOS boot is a distinct later entry requiring a newly allocated disposable
+macOS VM/account with its own enrollment, Host and real Policy App. Bind the
+actual selected installation mode and boot/start mechanism before running it:
+nohup has no boot persistence, so measure missing-Host guidance plus explicit
+restore after VM reboot; a service-manager boot claim requires a separately
+supported mode and its own evidence. Reboot only that disposable VM, never the
+currently enrolled mac_m2 or a team Host. Capture pre/post boot ID, identity
+hashes, process creation identity and provider/readiness/restore outcomes, then
+remove only the task-owned resources. This VM entry is not currently prepared
+or executing and has no active leader allocation request. Linux results do not
+establish macOS boot ordering or explain the historical incident.
