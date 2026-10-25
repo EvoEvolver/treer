@@ -3,7 +3,9 @@ use super::*;
 impl AppState {
     #[cfg(test)]
     pub(crate) fn fixture_update_dispatch_attempts(&self) -> usize {
-        self.inner.controller_update_dispatch_attempts.load(std::sync::atomic::Ordering::SeqCst)
+        self.inner
+            .controller_update_dispatch_attempts
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
     /// Defence in depth against replay on a replacement Controller. A deletion
     /// can race this read, so the Controller's durable denial fence remains the
@@ -57,7 +59,9 @@ impl AppState {
     ) -> Result<Value, ProtocolError> {
         #[cfg(test)]
         if matches!(&command, AgentCommand::ControllerUpdateDispatch { .. }) {
-            self.inner.controller_update_dispatch_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner
+                .controller_update_dispatch_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         let command_id = format!("cmd_{}", Uuid::new_v4().simple());
         if !self.inner.cluster.is_distributed() {
@@ -316,7 +320,10 @@ impl AppState {
             let error = if required == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER {
                 ProtocolError::new("machine_transfer_stale", "Controller connection changed; transfer commands are not replayed, inspect the destination before retrying")
             } else if required == treer_protocol::controller_update::CAPABILITY {
-                ProtocolError::new("controller_update_dispatch_stale", "Controller connection changed; update commands are never replayed")
+                ProtocolError::new(
+                    "controller_update_dispatch_stale",
+                    "Controller connection changed; update commands are never replayed",
+                )
             } else if required == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL
                 || required == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2
             {

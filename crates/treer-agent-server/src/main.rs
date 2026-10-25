@@ -20,9 +20,9 @@ mod service;
 mod startup_store;
 // Test-only envelope used by the Unix journal's foreign-record refusal test.
 // This does not add any Windows updater entry or runtime.
+mod tui;
 #[cfg(test)]
 mod windows_update_envelope;
-mod tui;
 mod workload_proxy;
 
 use std::io::{self, BufRead, IsTerminal, Write};
