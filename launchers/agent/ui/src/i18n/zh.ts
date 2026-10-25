@@ -1,6 +1,10 @@
 import type { MessageKey } from "./en";
 
 export const zh: Partial<Record<MessageKey, string>> = {
+  "composer.actions": "输入选项",
+  "composer.closeActions": "关闭输入选项",
+  "composer.back": "返回输入选项",
+  "composer.unavailable": "暂不可用",
   "images.add": "添加图片",
   "images.attached": "已添加的图片",
   "images.storageInside": "图片上传已禁用：Agent 的工作目录通过非隐藏路径包含 Treer 私有状态目录；请将 Agent 的工作目录设为 Treer 状态目录之外的项目目录。",

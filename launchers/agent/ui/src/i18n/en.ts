@@ -1,5 +1,9 @@
 // English is the source of truth: every key lives here, and other locales may omit keys (they fall back to English).
 export const en = {
+  "composer.actions": "Composer actions",
+  "composer.closeActions": "Close composer actions",
+  "composer.back": "Back to composer actions",
+  "composer.unavailable": "Unavailable",
   "images.add": "Attach images",
   "images.attached": "Attached images",
   "images.storageInside": "Image uploads disabled: The Agent's working directory contains the Treer private state directory on a non-hidden path; set the Agent's cwd to a project folder outside the Treer state directory.",

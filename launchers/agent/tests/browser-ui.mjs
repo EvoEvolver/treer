@@ -163,7 +163,7 @@ try {
       await page.setViewportSize({ width: 390, height: 844 });
       await page.goto(url(`?look=${look}&theme=${theme}`));
       await expect(page.locator(".older .btn")).toBeVisible();
-      for (const selector of [".nav-btn", ".send", ".stopb", "button.model", ".seg", ".older .btn", ".sum"]) {
+      for (const selector of [".nav-btn", ".send", ".stopb", ".composer-actions", ".seg", ".older .btn", ".sum"]) {
         await assertTouchTargets(page, selector, `${look}/${theme} compact`);
       }
       await page.getByRole("textbox", { name: /Message/ }).fill("Touch target draft");
@@ -269,7 +269,8 @@ try {
   await page.goto(url("?look=b"));
   const strip = page.getByRole("toolbar", { name: "Run status" });
   await expect(strip.getByRole("button", { name: /Plan/ })).toContainText("1/3");
-  await strip.getByRole("button", { name: "Set goal" }).click();
+  await page.getByRole("button", { name: "Composer actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Set goal", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Set goal" });
   await expect(dialog).toBeVisible();
   await dialog.getByLabel("Objective").fill("Ship the React UI");
@@ -318,7 +319,7 @@ try {
   const confirm = page.getByRole("region", { name: "Goal" }).getByRole("group", { name: "Confirm clear goal" });
   await expect(confirm).toBeVisible();
   await confirm.getByRole("button", { name: "Confirm clear goal" }).click();
-  await expect(strip.getByRole("button", { name: "Set goal" })).toBeVisible();
+  await expect(strip.getByRole("button", { name: /^Goal/ })).toHaveCount(0);
   await expect(composerBox).toHaveValue("");
   await composerBox.fill("/goal Second objective");
   await composerBox.press("Enter");
@@ -327,13 +328,14 @@ try {
   }, recover);
   await step('model and effort settings', async () => {
   // Model and effort through the settings API.
-  await page.getByRole("button", { name: /^Model/ }).click();
+  await page.getByRole("button", { name: "Composer actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: /Model and effort/ }).click();
   const modelPop = page.getByRole("region", { name: "Model and effort" });
   const settings = page.waitForRequest((request) => request.url().endsWith("/api/settings") && request.method() === "POST");
 
   await modelPop.locator("select").first().selectOption("gpt-b");
   assert.equal(JSON.parse((await settings).postData()).model, "gpt-b");
-  await expect(page.getByRole("button", { name: /^Model GPT B/ })).toBeVisible();
+  await expect(modelPop.locator("select").first()).toHaveValue("gpt-b");
   await page.keyboard.press("Escape");
   await page.screenshot({ path: join(screenshots, "composer-b-light.png") });
 
@@ -646,7 +648,8 @@ try {
   done = await startServer("done", {});
   await page.goto(`${done}/${page_}?look=c`);
   const doneStrip = page.getByRole("toolbar", { name: "Run status" });
-  await doneStrip.getByRole("button", { name: "Set goal" }).click();
+  await page.getByRole("button", { name: "Composer actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Set goal", exact: true }).click();
   await page.getByRole("dialog", { name: "Set goal" }).getByLabel("Objective").fill("Finish the migration");
   await page.getByRole("dialog", { name: "Set goal" }).getByRole("button", { name: "Save goal" }).click();
   await expect(page.locator(".goal-done")).toContainText("Goal complete: Finish the migration");

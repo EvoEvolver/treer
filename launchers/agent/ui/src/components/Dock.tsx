@@ -3,7 +3,7 @@ import { t } from "../i18n";
 import { useStore } from "../state/store";
 import { GoalEditor } from "./GoalEditor";
 import { Icon } from "./Icon";
-import { GoalPop, ModelPop, PlanPop, QueuePop } from "./Pops";
+import { ComposerMenu, GoalPop, ModelPop, PlanPop, QueuePop } from "./Pops";
 import { currentGoal } from "../lib/goal";
 import { latestPlan, Strip, type PopName } from "./Strip";
 import { ImageDrafts, useImageDrafts } from "./ImageDrafts";
@@ -22,6 +22,7 @@ export function Dock() {
   const hold = useRef(false);
   const composer = useRef<HTMLDivElement>(null);
   const [pop, setPop] = useState<PopName | null>(null);
+  const [menuPanel, setMenuPanel] = useState(false);
   const [editor, setEditor] = useState(false);
   const [pendingClear, setPendingClear] = useState<{ prompt: string | null } | null>(null);
   const area = useRef<HTMLTextAreaElement>(null);
@@ -34,7 +35,6 @@ export function Dock() {
   const canSend = Boolean(snapshot?.ready) && !state.submitting && !images.busy && (text.trim().length > 0 || images.images.length > 0);
   const thread = snapshot?.thread;
   const models = snapshot?.modelOptions ?? [];
-  const effort = thread?.reasoningEffort ?? "";
   const modelName = thread?.modelSelectionStatus === "unknown" ? t("model.unknown") : models.find((option) => option.model === thread?.model)?.displayName || thread?.model || t("model.default");
 
   useLayoutEffect(() => {
@@ -75,11 +75,13 @@ export function Dock() {
 
   function closePop(returnFocus = true) {
     setPop(null);
+    setMenuPanel(false);
     setPendingClear(null);
     if (returnFocus) trigger.current?.focus();
   }
   function toggle(next: PopName, element: HTMLElement) {
     trigger.current = element;
+    setMenuPanel(false);
     setPendingClear(null);
     setPop((current) => (current === next ? null : next));
   }
@@ -88,19 +90,31 @@ export function Dock() {
     const onKey = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape" && !document.querySelector("dialog[open]")) closePop(); };
     const onPointer = (event: PointerEvent) => {
       const target = event.target as Element | null;
-      if (!target?.closest(".pop, .strip, .model")) closePop(false);
+      if (!target?.closest(".pop, .strip, .composer-actions")) closePop(false);
     };
     document.addEventListener("keydown", onKey);
     document.addEventListener("pointerdown", onPointer);
     return () => { document.removeEventListener("keydown", onKey); document.removeEventListener("pointerdown", onPointer); };
   }, [pop]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  function closeEditor() {
+    setEditor(false);
+    setMenuPanel(false);
+    requestAnimationFrame(() => trigger.current?.focus());
+  }
+  function backToMenu() {
+    setEditor(false);
+    setPendingClear(null);
+    setPop("actions");
+  }
+  const back = menuPanel ? backToMenu : undefined;
+
   /** `/goal`, `/goal clear` and `/goal <objective>` manage the goal instead of being sent as chat. Returns true when handled. */
   async function goalCommand(prompt: string): Promise<boolean> {
     if (!/^\/goal(?:\s|$)/.test(prompt)) return false;
     if (!snapshot?.harness.capabilities.goal) { dispatch({ type: "error", message: t("goal.noSupport") }); return true; }
     const objective = prompt.slice(5).trim();
-    if (!objective) setEditor(true);
+    if (!objective) { trigger.current = area.current; setMenuPanel(false); setEditor(true); }
     else if (objective === "clear") { setPop("goal"); setPendingClear({ prompt }); }
     else {
       const failure = await actions.putGoal({ objective });
@@ -130,9 +144,14 @@ export function Dock() {
         {(state.error || state.notice) && <p className={state.error ? "feedback error" : "feedback"} role={state.error ? "alert" : "status"}>{state.error ?? state.notice}</p>}
         {pop === "plan" && <PlanPop onClose={() => closePop()} />}
         {pop === "queue" && <QueuePop onClose={() => closePop()} />}
-        {pop === "model" && <ModelPop onClose={() => closePop()} />}
+        {pop === "actions" && <ComposerMenu modelName={modelName} canUpload={Boolean(snapshot?.ready) && snapshot?.attachmentsAvailable !== false && !state.submitting && !images.busy}
+          canGoal={Boolean(snapshot?.harness.capabilities.goal)} canModel={Boolean(thread) && models.length > 0} hasGoal={hasGoal}
+          onClose={() => closePop()} onUpload={() => { closePop(); picker.current?.click(); }}
+          onGoal={() => { setMenuPanel(true); if (hasGoal) setPop("goal"); else { setPop(null); setEditor(true); } }}
+          onModel={() => { setMenuPanel(true); setPop("model"); }} />}
+        {pop === "model" && <ModelPop onBack={back} onClose={() => closePop()} />}
         {pop === "goal" && (
-          <GoalPop confirming={pendingClear !== null} onClose={() => closePop()} onEdit={() => { closePop(false); setEditor(true); }} onAskClear={() => setPendingClear({ prompt: null })}
+          <GoalPop onBack={back} confirming={pendingClear !== null} onClose={() => closePop()} onEdit={() => { setPop(null); setEditor(true); }} onAskClear={() => setPendingClear({ prompt: null })}
             onKeep={() => setPendingClear(null)} onCleared={() => { if (pendingClear?.prompt) setText((current) => (current.trim() === pendingClear.prompt ? "" : current)); closePop(); }} />
         )}
         <div className={`composer${expanded ? " exp" : ""}${dragging ? " image-drop" : ""}`} id="composer" ref={composer} onPointerDown={() => { hold.current = true; }} onClick={release}
@@ -140,7 +159,7 @@ export function Dock() {
           onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
           onDrop={event => { setDragging(false); if (event.dataTransfer.files.length) { event.preventDefault(); if (!state.submitting) void images.add(Array.from(event.dataTransfer.files)); } }}
           onBlur={(event) => { if (!hold.current && !event.currentTarget.contains(event.relatedTarget)) setFocused(false); }}>
-          <Strip pop={pop} onToggle={toggle} onEditGoal={() => setEditor(true)} />
+          <Strip pop={pop} onToggle={toggle} />
           {(images.images.length > 0 || images.busy) && <ImageDrafts images={images.images} busy={images.busy} disabled={state.submitting} fallback={!snapshot?.harness.capabilities.images} onRemove={id => void images.remove(id)} />}
           <div className={expanded ? "box exp" : "box"} id="box">
             <span className="prompt-glyph" aria-hidden="true">❯</span>
@@ -149,10 +168,7 @@ export function Dock() {
               onChange={(event) => setText(event.target.value)} onKeyDown={onKeyDown} onFocus={() => setFocused(true)} />
             <div className="ctl">
               <input ref={picker} type="file" className="sr-only" tabIndex={-1} aria-hidden="true" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={event => { if (!state.submitting) void images.add(Array.from(event.currentTarget.files ?? [])); event.currentTarget.value = ""; }} />
-              <button type="button" className="btn image-add" disabled={!snapshot?.ready || snapshot.attachmentsAvailable === false || state.submitting || images.busy} aria-label={t("images.add")} title={t("images.limits")} onClick={() => picker.current?.click()}>＋</button>
-              {thread && (models.length > 0
-                ? <button type="button" className="model" aria-haspopup="dialog" aria-expanded={pop === "model"} aria-controls="pop-model" aria-label={t("model.chip", { model: modelName, effort: effort || t("model.default") })} onClick={(event) => toggle("model", event.currentTarget)}><span>{modelName}</span>{effort && <small>{effort}</small>}</button>
-                : thread.model && <span className="model static"><span>{thread.model}</span>{effort && <small>{effort}</small>}</span>)}
+              <button type="button" className="btn composer-actions" aria-haspopup="menu" aria-expanded={pop === "actions"} aria-controls="pop-actions" aria-label={t("composer.actions")} title={t("composer.actions")} onClick={event => toggle("actions", event.currentTarget)}><Icon name="plus" /></button>
               {running && canSteer && <button type="button" className="btn queueb" disabled={!canSend} onClick={() => void submit("queue")}>{t("composer.queueShort")}</button>}
               <button type="button" className="send" id="send" aria-label={sendLabel} title={sendLabel} disabled={!canSend} onClick={() => void submit("steer")}>
                 <span className="send-t">{sendShort}</span><Icon name="up" />
@@ -164,7 +180,7 @@ export function Dock() {
           {snapshot?.attachmentsAvailable === false && <p className="hint image-storage-status" role="status">{t(snapshot.attachmentStorageStatus === "windows_requires_administrator" ? "images.storageAdministrator" : snapshot.attachmentStorageStatus === "agent_private_state_inside_cwd" ? "images.storageInside" : snapshot.attachmentStorageStatus === "agent_private_state_inside_vcs_worktree" ? "images.storageVcs" : snapshot.attachmentStorageStatus === "agent_private_state_unsafe" ? "images.storageUnsafe" : "images.storageUnavailable")}</p>}
         </div>
       </div>
-      <GoalEditor open={editor} onClose={() => setEditor(false)} onSaved={() => setEditor(false)} />
+      <GoalEditor open={editor} onBack={back} onClose={closeEditor} onSaved={closeEditor} />
     </div>
   );
 }

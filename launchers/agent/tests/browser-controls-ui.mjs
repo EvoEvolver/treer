@@ -313,7 +313,8 @@ export async function testRuntimeControlsUi(browser, screenshots, pageName = "in
     await page.getByRole("button", { name: "Close background tasks" }).click();
 
     // Goal: editor failure keeps the form, then success; metrics, pause/resume, budget removal.
-    await strip.getByRole("button", { name: "Set goal", exact: true }).click();
+    await page.getByRole("button", { name: "Composer actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Set goal", exact: true }).click();
     const editor = page.locator("dialog.goal-dialog");
     await editor.getByLabel("Objective", { exact: true }).fill(`Ship ${malicious}`);
     await editor.getByLabel("Token budget (optional)").fill("1000");
@@ -386,7 +387,7 @@ export async function testRuntimeControlsUi(browser, screenshots, pageName = "in
     await expect(goalPop.locator(".goal-confirm")).toHaveCount(0);
     await goalPop.getByRole("button", { name: "Clear goal", exact: true }).click();
     await goalPop.getByRole("button", { name: "Confirm clear goal", exact: true }).click();
-    await expect(strip.getByRole("button", { name: "Set goal", exact: true })).toBeVisible();
+    await expect(strip.getByRole("button", { name: /^Goal/ })).toHaveCount(0);
     const promptCount = prompts.length;
     await prompt.fill("/goal finish the release");
     await prompt.press("Enter");
@@ -448,6 +449,16 @@ export async function testRuntimeControlsUi(browser, screenshots, pageName = "in
     setState({ harness: { ...state.harness, capabilities: { steer: false, backgroundTasks: false, goal: null } } });
     await expect(page.getByRole("button", { name: /^Background tasks/ })).toHaveCount(0);
     await expect(strip.getByRole("button", { name: /^Goal|Set goal/ })).toHaveCount(0);
+    await page.getByRole("button", { name: "Composer actions", exact: true }).click();
+    await expect(page.getByRole("menuitem", { name: /Goal.*does not support goals/ })).toBeDisabled();
+    await expect(page.getByRole("menuitem", { name: /Model and effort/ })).toBeDisabled();
+    await page.keyboard.press("Escape");
+    setState({ modelOptions: [{ id: "fixture", model: "fixture-model", displayName: "Fixture model" }], thread: { ...state.thread, model: null, modelSelectionStatus: "unknown" } });
+    await page.getByRole("button", { name: "Composer actions", exact: true }).click();
+    await expect(page.getByRole("menuitem", { name: /Model and effort/ })).toContainText("Model unknown");
+    await page.getByRole("menuitem", { name: /Model and effort/ }).click();
+    await expect(page.locator("#model-select option:checked")).toHaveText("Model unknown");
+    await page.keyboard.press("Escape");
     await prompt.fill("/goal unsupported");
     await prompt.press("Enter");
     await expect(feedback).toContainText("does not support goals");

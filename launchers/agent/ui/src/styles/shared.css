@@ -256,3 +256,11 @@ progress.meter::-moz-progress-bar{background:var(--accent)}
 .image-list figure button{display:grid;place-items:start end;padding:0;border:0;background:transparent;font-size:22px;line-height:24px;isolation:isolate}
 .image-list figure button::before{content:"";position:absolute;inset:0 0 auto auto;width:24px;height:24px;border-radius:5px;border:1px solid var(--line);background:var(--panel);z-index:-1}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}.spin{animation:none}.sk{animation:none}}
+
+/* Composer actions share the existing pop/sheet surface and tokens. */
+.composer-actions{display:grid;place-items:center;flex-shrink:0;min-width:44px;min-height:44px}
+.composer-menu{display:flex;flex-direction:column;padding:4px 0}
+.composer-menu>button{display:flex;align-items:center;gap:10px;min-height:44px;padding:8px 14px;width:100%;text-align:left}
+.composer-menu>button:not(:disabled):hover,.composer-menu>button:focus-visible{background:var(--sunken)}
+.composer-menu span{min-width:0;overflow-wrap:anywhere}.composer-menu small{display:block;color:var(--fg2);font-size:12px}
+.pop-h h3,.dialog-h h2{flex:1;min-width:0}

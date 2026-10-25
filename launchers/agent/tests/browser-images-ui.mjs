@@ -9,10 +9,12 @@ export async function testImagesUi(browser, base, screenshots, entry = "index.ht
     page.on("pageerror", error => errors.push(error.message));
     try {
       await page.goto(`${base}/${entry}?lang=en`);
-      await expect(page.getByRole("button", { name: "Attach images" })).toBeEnabled();
+      await page.getByRole("button", { name: "Composer actions", exact: true }).click();
+      await expect(page.getByRole("menuitem", { name: "Attach images" })).toBeEnabled();
       // No standing limits line under the composer; the rule lives in the button tooltip and the violation error.
       await expect(page.getByText(/Up to 8 PNG, JPEG, WebP or GIF images/)).toHaveCount(0);
-      await expect(page.getByRole("button", { name: "Attach images" })).toHaveAttribute("title", /8 PNG, JPEG, WebP or GIF images; 10 MiB each, 24 MiB total/);
+      await expect(page.getByRole("menuitem", { name: "Attach images" })).toHaveAttribute("title", /8 PNG, JPEG, WebP or GIF images; 10 MiB each, 24 MiB total/);
+      await page.keyboard.press("Escape");
       // Real ClipboardEvent/DataTransfer File input follows the same handler as
       // Cmd/Ctrl+V and mobile paste; no clipboard permissions/provider needed.
       await page.evaluate(async () => {

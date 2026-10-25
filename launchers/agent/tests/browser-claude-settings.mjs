@@ -32,7 +32,8 @@ try {
       let before = await state();
       const firstId = before.thread.id;
       // Model and effort live in the model popover opened from the composer chip.
-      await page.locator(".model").click();
+      await page.getByRole("button", { name: "Composer actions", exact: true }).click();
+      await page.getByRole("menuitem", { name: /Model and effort/ }).click();
       await expect(page.locator("#model-select")).toHaveValue(before.thread.model);
       assert.ok(await page.locator("#model-select option:checked").textContent());
       if (unsupported) await expect(page.locator("#effort-select")).toHaveCount(0);

@@ -4,7 +4,7 @@ import { useStore } from "../state/store";
 import type { HistoryItem, TurnDto } from "../types";
 import { Icon } from "./Icon";
 
-export type PopName = "goal" | "plan" | "queue" | "model";
+export type PopName = "goal" | "plan" | "queue" | "model" | "actions";
 
 export function latestPlan(turns: TurnDto[]): HistoryItem | null {
   for (let t = turns.length - 1; t >= 0; t--) {
@@ -15,7 +15,7 @@ export function latestPlan(turns: TurnDto[]): HistoryItem | null {
 }
 
 /** Goal, plan progress and queue count as one 32px row. One popover at a time; the goal segment turns warning-coloured when it needs attention. */
-export function Strip({ pop, onToggle, onEditGoal }: { pop: PopName | null; onToggle: (name: PopName, trigger: HTMLElement) => void; onEditGoal: () => void }) {
+export function Strip({ pop, onToggle }: { pop: PopName | null; onToggle: (name: PopName, trigger: HTMLElement) => void }) {
   const { state } = useStore();
   const snapshot = state.snapshot;
   if (!snapshot) return null;
@@ -23,13 +23,12 @@ export function Strip({ pop, onToggle, onEditGoal }: { pop: PopName | null; onTo
   const plan = latestPlan(snapshot.thread?.turns ?? []);
   const done = plan?.steps?.filter((step) => step.status === "completed").length ?? 0;
   const queued = snapshot.queue.length;
-  if (!capability && !plan && !queued) return null;
+  if (!(capability && currentGoal(snapshot)) && !plan && !queued) return null;
   const goal = currentGoal(snapshot);
   const attention = needsAttention(snapshot);
   const label = goal ? t(`goal.status.${goalStatus(goal)}` as MessageKey) : "";
   return (
     <div className="strip" role="toolbar" aria-label={t("strip.label")}>
-      {capability && !goal && <button type="button" className="seg goal" onClick={onEditGoal}><Icon name="goal" /><b>{t("goal.set")}</b></button>}
       {capability && goal && (
         <button type="button" className={attention ? "seg goal attn" : "seg goal"} aria-expanded={pop === "goal"} aria-controls="pop-goal" onClick={(event) => onToggle("goal", event.currentTarget)}>
           <Icon name={attention ? "warn" : "goal"} /><b>{t("goal.title")}</b><span className="tx">{attention || goalStatus(goal) !== "active" ? `${label} · ${goal.objective}` : goal.objective}</span>

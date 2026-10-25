@@ -1313,6 +1313,8 @@ npm --prefix launchers/agent run test:windows -- --controller C:\Treer\treer-age
 # No inference, managed Agent mutation, or restart. Chromium is needed once:
 npm --prefix launchers/agent exec -- playwright install chromium
 UI_SCREENSHOTS=/tmp/agent-ui-screenshots npm --prefix launchers/agent run test:browser
+# Focused composer menu, file picker, keyboard/focus, goal controls and attachments:
+node launchers/agent/tests/browser-composer-menu.mjs
 # UI sources live in launchers/agent/ui. After editing them rebuild the committed
 # inventory and assets in public/; check:ui (part of `run check`) fails on any byte difference with a
 # fresh build, on budget overruns and on forbidden code patterns (HTML sinks outside the
@@ -1342,3 +1344,13 @@ CLAUDE_PROBE_BACKGROUND=1 node launchers/agent/tests/probe-claude.mjs
 # and the profile on completion. Does not restart Host/Controller or self.
 npm --prefix launchers/agent run test:live
 ```
+
+### Composer actions
+
+The composer’s single **Composer actions** button opens text entries for image
+upload, Set goal (or the current Goal), and Model and effort. Upload opens the
+existing file picker; Goal and Model open their existing panels with a Back
+action. Current goal status stays in the run-status strip. Unsupported actions
+remain disabled according to the harness capabilities; model changes retain
+their acknowledgement, busy, refusal and unknown-model states. Escape or Close
+returns focus to the entry button. Arrow keys, Home and End navigate menu items.

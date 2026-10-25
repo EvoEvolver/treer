@@ -27,7 +27,8 @@ try {
         await new Promise((done) => setTimeout(done, 100));
       }
       await page.goto(base + "/?theme=light&look=a");
-      await page.getByRole("button", { name: "Set goal", exact: true }).click();
+      await page.getByRole("button", { name: "Composer actions", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Set goal", exact: true }).click();
       await page.getByLabel("Objective", { exact: true }).fill("Reply exactly GOAL_DONE and finish this goal. Do not use any tools except the goal-completion tool if available.");
       await page.getByRole("button", { name: "Save goal", exact: true }).click();
       await expect(page.locator("dialog.goal-dialog")).not.toBeVisible();
@@ -51,7 +52,7 @@ try {
       await goalSegment.click();
       await page.getByRole("button", { name: "Clear goal", exact: true }).click();
       await page.getByRole("button", { name: "Confirm clear goal", exact: true }).click();
-      await expect(page.getByRole("button", { name: "Set goal", exact: true })).toBeVisible({ timeout: 60000 });
+      await expect(goalSegment).toHaveCount(0, { timeout: 60000 });
       state = await fetch(base + "/api/state").then((response) => response.json());
       assert.equal(state.goal.status, "cleared");
       await page.screenshot({ path: join(shots, `${harness}-cleared-mobile.png`) });

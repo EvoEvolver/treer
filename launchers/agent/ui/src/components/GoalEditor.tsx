@@ -5,7 +5,7 @@ import { useStore } from "../state/store";
 import { Icon } from "./Icon";
 
 /** The objective/budget form in a native modal dialog, which supplies the focus trap, Esc and backdrop. */
-export function GoalEditor({ open, onClose, onSaved }: { open: boolean; onClose: () => void; onSaved: () => void }) {
+export function GoalEditor({ open, onClose, onSaved, onBack }: { open: boolean; onClose: () => void; onSaved: () => void; onBack?: () => void }) {
   const { state, actions } = useStore();
   const dialog = useRef<HTMLDialogElement>(null);
   const objective = useRef<HTMLTextAreaElement>(null);
@@ -46,9 +46,9 @@ export function GoalEditor({ open, onClose, onSaved }: { open: boolean; onClose:
   }
 
   return (
-    <dialog ref={dialog} className="goal-dialog" aria-labelledby="goal-editor-title" onClose={onClose} onCancel={onClose}>
+    <dialog ref={dialog} className="goal-dialog" aria-labelledby="goal-editor-title" onClose={() => { if (open) onClose(); }} onCancel={event => { event.preventDefault(); onClose(); }} onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
       <form onSubmit={(event) => void submit(event)}>
-        <header className="dialog-h"><h2 id="goal-editor-title">{goal ? t("goal.editor.editTitle") : t("goal.editor.setTitle")}</h2><button type="button" className="xbtn" aria-label={t("goal.editor.close")} onClick={onClose}><Icon name="close" /></button></header>
+        <header className="dialog-h">{onBack && <button type="button" className="xbtn" aria-label={t("composer.back")} onClick={onBack}><Icon name="back" /></button>}<h2 id="goal-editor-title">{goal ? t("goal.editor.editTitle") : t("goal.editor.setTitle")}</h2><button type="button" className="xbtn" aria-label={t("goal.editor.close")} onClick={onClose}><Icon name="close" /></button></header>
         <div className="field"><label htmlFor="goal-objective">{t("goal.editor.objective")}</label><textarea id="goal-objective" ref={objective} rows={3} required value={text} onChange={(event) => setText(event.target.value)} /></div>
         {budgetSupported && <>
           <div className="field"><label htmlFor="goal-budget">{t("goal.editor.budget")}</label><input id="goal-budget" type="number" min={1} step={1} inputMode="numeric" placeholder={t("goal.unlimited")} aria-describedby="goal-budget-help" value={budget} onChange={(event) => setBudget(event.target.value)} /></div>

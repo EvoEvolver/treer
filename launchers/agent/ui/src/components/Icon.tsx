@@ -1,5 +1,7 @@
 // One inline sprite, drawn by the active look through stroke width, cap, join and size tokens.
 const symbols: Record<string, string> = {
+  plus: "M12 5v14M5 12h14",
+  back: "M19 12H5M11 6l-6 6 6 6",
   folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
   file: "M6 3h8l4 4v14H6zM14 3v4h4",
   download: "M12 4v11M7 10.5l5 5 5-5M5 19.5h14",
