@@ -1257,7 +1257,12 @@ The existing prepared-target Create flow explicitly selects `environment` (the
 unchanged default) or `owner-default`. The latter uses the target owner's normal
 Claude configuration, login, hooks and settings without isolation; the launcher
 environment must leave `CLAUDE_CONFIG_DIR` unset. The Console neither reads nor
-copies credentials. Source export remains the existing authenticated idle export.
+copies credentials. Source export stays authenticated and idle-bound. Owner-default explicitly sends
+`{threadId, auth:"owner-default"}` and requires matching `runtimeSnapshot.auth`;
+the default environment mode keeps the legacy `{threadId}` body. A missing or
+mismatched owner-default snapshot marker refuses upload. Native alone enforces
+that the source launched against the default owner root; the UI does not switch
+roots or read configuration files.
 
 Authentication is bound into staging/prepare acknowledgements, the scope key and
 the final Create acknowledgement. The selector locks when the single snapshot

@@ -6,7 +6,7 @@ const sourceId = 'ag-source'
 const sourceSession = '22334455-6677-4899-aabb-ccddeeff0011'
 const machine = { server_id: 'srv-prepared', name: 'Fixture machine', root, status: 'online', capabilities: ['machine.exec.v1'], controller_build: { version: 'fixture', git_commit: 'a'.repeat(40) }, host_build: { version: 'fixture', git_commit: 'b'.repeat(40) } }
 const source = { agent_id: sourceId, server_id: machine.server_id, workspace_id: 'ws-prepared', name: 'Source Claude', kind: 'command', status: 'running' }
-async function fixture(page: Page, failure: '' | 'upload' | 'prepare' | 'receipt' | 'instance' | 'owner-env' | 'owner-intent' | 'owner-mismatch' | 'owner-auth' | 'owner-project' = '') {
+async function fixture(page: Page, failure: '' | 'upload' | 'prepare' | 'receipt' | 'instance' | 'owner-env' | 'owner-intent' | 'owner-mismatch' | 'owner-auth' | 'owner-project' | 'source-auth-missing' | 'source-auth-mismatch' = '') {
   let loggedIn = false, created = false, session = '', sourceStatusReads = 0
   const counts = { export: 0, upload: 0, inspect: 0, prepare: 0, create: 0 }
   let payload: any
@@ -28,8 +28,10 @@ async function fixture(page: Page, failure: '' | 'upload' | 'prepare' | 'receipt
     if (path.includes(`/agents/${sourceId}/interface/ui/api/state`)) return json({ ready: true, runtime: { state: 'idle' }, harness: { id: 'claude' }, thread: { id: sourceSession } })
     if (path.includes(`/agents/${sourceId}/interface/ui/v1/status`)) { sourceStatusReads++; return json({ agent_id: sourceId, interface_instance_id: failure === 'instance' && sourceStatusReads > 1 ? 'other-instance' : 'source-instance', status: 'idle' }) }
     if (path.endsWith('/api/session/export')) {
-      counts.export++; expect(route.request().postDataJSON()).toEqual({ threadId: sourceSession })
-      return json({ schema: 'treer.agent-session/v1', harness: 'claude', runtimeSnapshot: { threadId: sourceSession, agentId: sourceId, interfaceInstance: 'source-instance' }, files: [{ path: 'history.jsonl', content: 'synthetic' }] })
+      counts.export++; const body = route.request().postDataJSON()
+      const owner = body.auth === 'owner-default'
+      expect(body).toEqual(owner ? { threadId: sourceSession, auth: 'owner-default' } : { threadId: sourceSession })
+      return json({ schema: 'treer.agent-session/v1', harness: 'claude', runtimeSnapshot: { threadId: sourceSession, agentId: sourceId, interfaceInstance: 'source-instance', ...(owner && failure !== 'source-auth-missing' ? { auth: failure === 'source-auth-mismatch' ? 'environment' : 'owner-default' } : {}) }, files: [{ path: 'history.jsonl', content: 'synthetic' }] })
     }
     if (path.endsWith('/machines/srv-prepared/files')) {
       counts.upload++; const v = route.request().postDataJSON()
@@ -196,4 +198,10 @@ test('owner-default mode cannot reuse environment Create acknowledgement', () =>
   expect(preparedClaudeArgs(machine.server_id, root, 'new-copy', changed)).toBeNull()
   changed.acknowledgedFor = preparedClaudeBinding(machine.server_id, root, 'new-copy', changed)
   expect(preparedClaudeArgs(machine.server_id, root, 'new-copy', changed)?.slice(-2)).toEqual(['--auth', 'owner-default'])
+})
+
+for (const failure of ['source-auth-missing', 'source-auth-mismatch'] as const) test(`owner-default source export ${failure} refuses upload`, async ({ page }) => {
+  const fx = await fixture(page, failure); const dialog = await open(page, true)
+  await expect(dialog.getByRole('alert')).toContainText('Flow stopped.')
+  expect(fx.counts).toEqual({ export: 1, upload: 0, inspect: 0, prepare: 0, create: 0 })
 })

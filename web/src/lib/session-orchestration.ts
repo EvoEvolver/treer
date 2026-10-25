@@ -15,11 +15,11 @@ const rootPath = (s: CopyScope, path: string) => `${s.machine.root.replace(/\/$/
 const machineBase = (s: CopyScope) => `/api/workspaces/${encodeURIComponent(s.workspace)}/machines/${encodeURIComponent(s.machine.server_id)}`
 export const interfaceBase = (workspace: string, agent: string) => `/api/workspaces/${encodeURIComponent(workspace)}/agents/${encodeURIComponent(agent)}/interface/ui`
 
-async function boundedExport(path: string, threadId: string) {
+async function boundedExport(path: string, threadId: string, auth: TransferAuth | undefined) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 35_000)
   try {
-    const response = await fetch(proxyUrl(path), { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId }), signal: controller.signal, redirect: 'error', cache: 'no-store' })
+    const response = await fetch(proxyUrl(path), { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId, ...(auth === 'owner-default' ? { auth } : {}) }), signal: controller.signal, redirect: 'error', cache: 'no-store' })
     if (!response.ok || !response.body) throw Error('session_copy_export_refused')
     const declared = response.headers.get('content-length')
     if (declared !== null && (!/^[0-9]+$/.test(declared) || !Number.isSafeInteger(Number(declared)) || Number(declared) > 16 * 1024 * 1024)) {
@@ -50,9 +50,10 @@ export async function exportAndUpload(scope: CopyScope, active: () => boolean = 
   if (!active()) throw Error('session_copy_scope_changed')
   if (before.agentId !== undefined && before.agentId !== scope.source) throw Error('session_copy_identity')
   if (typeof sourceSessionId !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(sourceSessionId) || before.ready !== true || before.harness?.id !== 'claude' || before.runtime?.state !== 'idle') throw Error('session_copy_source_not_idle')
-  const bytes = await boundedExport(`${base}/api/session/export`, sourceSessionId)
+  const bytes = await boundedExport(`${base}/api/session/export`, sourceSessionId, scope.auth)
   const bundle = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
   if (bundle.schema !== 'treer.agent-session/v1' || bundle.harness !== 'claude' || bundle.runtimeSnapshot?.threadId !== sourceSessionId || bundle.runtimeSnapshot?.agentId !== scope.source || typeof bundle.runtimeSnapshot?.interfaceInstance !== 'string' || bundle.runtimeSnapshot?.interfaceInstance !== beforeStatus.interface_instance_id) throw Error('session_copy_identity')
+  if (scope.auth === 'owner-default' ? bundle.runtimeSnapshot.auth !== 'owner-default' : bundle.runtimeSnapshot.auth !== undefined && bundle.runtimeSnapshot.auth !== 'environment') throw Error('session_copy_identity')
   const afterStatus = await api<any>(`${base}/v1/status`)
   if (afterStatus.agent_id !== scope.source || afterStatus.interface_instance_id !== beforeStatus.interface_instance_id) throw Error('session_copy_identity')
   const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))).map(x => x.toString(16).padStart(2, '0')).join('')
