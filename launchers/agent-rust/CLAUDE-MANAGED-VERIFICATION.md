@@ -97,7 +97,7 @@ The existing source UI and public13 launcher assets are not rebuilt by this leaf
 Web owner evidence: seven focused synthetic Chromium controls PASS, desktop390/
 1280 success/unknown, en/light and zh/dark/keyboard; typecheck/build, contrast64,
 docs and diff checks PASS. Screenshots and exact logs live under
-`/Users/dooms/treer-web-claude-prepared-create-247/.treer/reviews/web247-prepared-create/`.
+`/Users/dooms/treer/.treer/reviews/web247-prepared-create/` (shared evidence root).
 Initial label harness failure was corrected and retained by Web. The final
 ignored output-directory-only test config change was syntax/list checked;
 product/assertion bytes match the tested ones. No real Agent was created.
