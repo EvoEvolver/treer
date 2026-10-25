@@ -54,13 +54,13 @@ for (const width of [1280, 390]) for (const fail of [false, true]) test(`prepare
   await dialog.getByLabel('Prepared plan session UUID').fill(uuid)
   const submit = dialog.getByRole('button', { name: 'Create agent', exact: true })
   await expect(submit).toBeDisabled()
-  await dialog.getByRole('checkbox').check()
+  await dialog.getByRole('checkbox', { name: /I confirm this target/ }).check()
   await expect(submit).toBeEnabled()
   // Any target edit invalidates the explicit confirmation.
   await dialog.getByLabel('Prepared plan session UUID').fill('00112233-4455-4677-8899-aabbccddee00')
-  await expect(dialog.getByRole('checkbox')).not.toBeChecked()
+  await expect(dialog.getByRole('checkbox', { name: /I confirm this target/ })).not.toBeChecked()
   await expect(submit).toBeDisabled()
-  await dialog.getByRole('checkbox').check()
+  await dialog.getByRole('checkbox', { name: /I confirm this target/ }).check()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: info.outputPath(`prepared-${width}.png`) })
   await submit.click()
@@ -73,7 +73,7 @@ for (const width of [1280, 390]) for (const fail of [false, true]) test(`prepare
     expect(fx.writes()).toBe(1)
   } else {
     await expect(dialog).not.toBeVisible()
-    await expect(page.getByText('Agent created and startup saved. Provider and interface readiness are not yet verified.', { exact: true })).toBeVisible()
+    await expect(page.getByText('Agent created and startup saved. Provider and interface readiness are not yet verified.', { exact: false })).toBeVisible()
   }
 })
 
@@ -90,7 +90,7 @@ for (const width of [1280, 390]) test(`prepared Chinese dark keyboard ${width}`,
   await dialog.getByLabel('可信 launcher 入口（绝对路径）').fill('/opt/trusted/treer-agent')
   await dialog.getByLabel('已准备目录（绝对路径）').fill(`${root}/new target`)
   await dialog.getByLabel('准备计划中的会话 UUID').fill(uuid)
-  const ack = dialog.getByRole('checkbox')
+  const ack = dialog.getByRole('checkbox', { name: /我确认/ })
   await ack.focus(); await page.keyboard.press('Space')
   await expect(ack).toBeChecked()
   await expect(dialog.getByRole('button', { name: '创建 Agent', exact: true })).toBeEnabled()

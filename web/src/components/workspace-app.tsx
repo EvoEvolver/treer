@@ -1,3 +1,4 @@
+import { observePreparedAgent } from '@/lib/session-orchestration'
 import { preparedClaudeArgs } from "@/lib/prepared-claude"
 import { useAgentEmbedPrewarm } from "@/components/use-agent-embed-prewarm"
 import { useAgentOriginCapability } from "@/components/use-agent-origin-capability"
@@ -92,6 +93,17 @@ function WorkspaceAppContent() {
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null)
   const [preparedCreated, setPreparedCreated] = useState(false)
+  const [preparedObservation, setPreparedObservation] = useState<{ workspace: string; agent: Agent; session: string }>()
+  const [preparedReadiness, setPreparedReadiness] = useState<'observing' | 'ready' | 'notReady'>('observing')
+  useEffect(() => {
+    if (!preparedObservation || preparedObservation.workspace !== workspaceId) return
+    const controller = new AbortController()
+    setPreparedReadiness('observing')
+    void observePreparedAgent(preparedObservation.workspace, preparedObservation.agent, preparedObservation.session, controller.signal).then(ready => {
+      if (!controller.signal.aborted) setPreparedReadiness(ready ? 'ready' : 'notReady')
+    })
+    return () => controller.abort()
+  }, [preparedObservation, workspaceId])
   const [tabNotice, setTabNotice] = useState("")
   const [theme, setTheme] = useState<Theme>(() => readTheme())
   const [mainView, setMainView] = useState<MainView>("overview")
@@ -641,7 +653,7 @@ function WorkspaceAppContent() {
       await refreshSnapshot()
       if (workspaceIdRef.current === creationWorkspaceId) {
         showAgentTerminal(agentId)
-        if (agentProfileId === "prepared-claude") setPreparedCreated(true)
+        if (agentProfileId === "prepared-claude") { setPreparedCreated(true); setPreparedObservation({ workspace: creationWorkspaceId, agent, session: preparedClaude.sessionId }) }
       }
     } catch (reason) { if (workspaceIdRef.current === creationWorkspaceId) {
       const failure = reason instanceof ApiError ? agentCreationFailure(reason.details, creationMachineId) : null
@@ -1087,7 +1099,7 @@ function WorkspaceAppContent() {
       <section className={cn("min-h-0 min-w-0 flex-col", treeWidth.dragging && "pointer-events-none", mobileTerminalIdle ? "hidden md:flex" : "flex")}>
         {focusedId ? <WorkloadFocusBar path={tabLabels.get(focusedId)?.path ?? focusedId} status={tabLabels.get(focusedId)?.agent.status ? statusLabel(tabLabels.get(focusedId)!.agent.status) : undefined} consoleHref={workloadPath(organizationId, workspaceId, focusedId)} onOpenConsole={() => routingRef.current.navigate({ pathname: location.pathname, search: "", hash: location.hash })} /> : <WorkspaceTabBar key={`${user.user_id}:${workspaceId}`} tabs={tabs.tabs} labels={tabLabels} activeId={mainView === "overview" ? OVERVIEW_TAB : mainView === "terminal" ? selectedAgentId : null} limit={tabs.limit} liveCount={tabs.liveCount} mobile={isMobile} onOpen={selectTab} onClose={closeTab} actions={tabActions} onAction={tabAction} onCloseMany={closeTabs} onBrowseTree={browseMobileTree} sidebarCollapsed={treeWidth.collapsed} expandRef={treeWidth.expandRef} onExpandSidebar={treeWidth.toggle} />}
         <p role="status" className="sr-only">{tabNotice}</p>
-        {preparedCreated && <p role="status" className="px-4 py-2 text-sm">{t("prepared.created")}</p>}
+        {preparedCreated && <p role="status" className="px-4 py-2 text-sm">{t("prepared.created")} {t(`sessionCopy.${preparedReadiness}`)}</p>}
         {mainView !== "terminal" && <header className="flex h-12 shrink-0 min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
 
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">

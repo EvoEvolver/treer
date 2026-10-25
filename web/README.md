@@ -1062,3 +1062,32 @@ Focused synthetic UI verification: from `web/`,
 actual Console Create handler with synthetic API responses, fixed argv,
 acknowledgement invalidation, unknown-result refusal, desktop/390, en/zh,
 light/dark and keyboard close. It never launches a real managed Agent/provider.
+
+The prepared Claude Create mode can copy an idle Claude session through its
+normal authenticated interface tunnel. Select the source, a trusted absolute
+launcher entry, a new target working directory, and an existing owner-only
+(0700) staging directory relative to the machine root. Explicitly acknowledge
+that the sensitive snapshot remains there for manual cleanup. No credentials
+are transferred; target environment authentication must already be configured.
+
+The browser bounds the exported bytes to 16 MiB, hashes the original bytes,
+uploads once with a new UUID filename and `overwrite:false`, then invokes fixed
+`session inspect` argv with the file/hash/target/new UUID. Only a matching native
+receipt unlocks explicit `session prepare`, with the same binding. This uses
+existing authenticated file/exec APIs; it does not pass session contents in
+argv, use a shell, or add exec stdin support. The native implementation enforces
+file/directory custody and validates/re-writes the complete allowlisted bundle.
+The browser does not claim to verify physical permissions or provider auth.
+
+A matching prepared receipt fills the existing normal Create confirmation.
+Create is issued once and preserves reservation recovery on unknown outcomes.
+Subsequent interface health/state/status reads can verify the new Agent and
+session are ready; process creation alone is not readiness. Unknown upload,
+validation or preparation outcomes stop the page's flow, even across dialog
+close/reopen; no automatic resend, cleanup or rollback is attempted. Changing
+or closing the target before upload prevents late snapshot responses from
+submitting a stale upload. `sessionTransfer` capability remains null.
+
+Focused Console controls: `node node_modules/@playwright/test/cli.js test
+--config playwright.session-copy.config.ts`. They use synthetic normal login
+and API responses; they do not prove an actual native cross-machine transfer.

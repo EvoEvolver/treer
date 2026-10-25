@@ -1,3 +1,6 @@
+import { useRef } from 'react'
+import { copyScopeKey } from '@/lib/session-orchestration'
+import { SessionCopyWizard, useSessionCopy } from '@/components/session-copy-wizard'
 import { preparedClaudeArgs, preparedClaudeBinding } from "@/lib/prepared-claude"
 import { MachineUploadDialog } from "@/components/machine-upload-dialog"
 import { ProviderCliInstaller } from "@/components/provider-cli-installer"
@@ -70,7 +73,10 @@ export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, c
     setLaunchMachineId, launchAgentName, setLaunchAgentName, renameName, setRenameName, installPlatform,
     setInstallPlatform, inviteUrl, installCommand, connectCommand,
   } = state
+  const createOpener = useRef<HTMLElement | null>(null)
+  const sessionCopy = useSessionCopy()
   const preparedMachine = onlineMachines.find(machine => machine.server_id === agentServerId)
+  sessionCopy.currentKey.current = createAgentOpen && agentProfileId === 'prepared-claude' && preparedMachine ? copyScopeKey({ workspace: workspace?.workspace_id ?? '', source: sessionCopy.source, machine: preparedMachine, cwd: agentCwd, entry: preparedClaude.entry, staging: sessionCopy.staging }) : ''
   const preparedKey = preparedClaudeBinding(agentServerId, preparedMachine?.root ?? '', agentCwd, preparedClaude)
   const preparedArgs = preparedMachine && preparedClaudeArgs(agentServerId, preparedMachine.root, agentCwd, preparedClaude)
   return <>
@@ -86,8 +92,8 @@ export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, c
     <Dialog open={Boolean(deletingProfile)} onOpenChange={(open) => !open && setDeletingProfile(null)}><DialogContent><DialogHeader><DialogTitle>{t("dialogs.delete_launch_profile")}</DialogTitle><DialogDescription>{t("dialogs.delete_profile_confirm", { name: deletingProfile?.name ?? "" })}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeletingProfile(null)}>{t("common.cancel")}</Button><Button variant="destructive" onClick={deleteLaunchProfile}>{t("dialogs.delete_profile")}</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" data-tour="create-agent-dialog">
-        <form onSubmit={createAgent} className="min-w-0 space-y-4">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" data-tour="create-agent-dialog" onOpenAutoFocus={() => { createOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null }} onCloseAutoFocus={event => { if (createOpener.current?.isConnected) { event.preventDefault(); createOpener.current.focus() } }}>
+        <form onSubmit={event => { if (sessionCopy.busy) event.preventDefault(); else void createAgent(event) }} className="min-w-0 space-y-4">
           <DialogHeader>
             <DialogTitle>{t("dialogs.create_agent")}</DialogTitle>
             <DialogDescription>{t("dialogs.start_a_terminal_or_agent")}</DialogDescription>
@@ -119,6 +125,7 @@ export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, c
           {agentProfileId === "prepared-claude" && <fieldset className="min-w-0 space-y-3" disabled={creatingAgent || preparedAttempted}>
             <p className="text-sm">{t("prepared.description")}</p>
             <Field label={t("prepared.entry")}><Input className="max-md:min-h-11" aria-label={t("prepared.entry")} value={preparedClaude.entry} onChange={e => setPreparedClaude(v => ({ ...v, entry: e.target.value, acknowledgedFor: '' }))} required /></Field>
+            <SessionCopyWizard flow={sessionCopy} workspace={workspace?.workspace_id ?? ''} machine={preparedMachine} agents={snapshot?.agents ?? []} cwd={agentCwd} entry={preparedClaude.entry} onPrepared={plan => setPreparedClaude(v => ({ ...v, directory: plan.directory, sessionId: plan.sessionId, acknowledgedFor: '' }))} />
             <Field label={t("prepared.directory")}><Input className="max-md:min-h-11" aria-label={t("prepared.directory")} value={preparedClaude.directory} onChange={e => setPreparedClaude(v => ({ ...v, directory: e.target.value, acknowledgedFor: '' }))} required /></Field>
             <Field label={t("prepared.session")}><Input className="max-md:min-h-11" aria-label={t("prepared.session")} value={preparedClaude.sessionId} onChange={e => setPreparedClaude(v => ({ ...v, sessionId: e.target.value, acknowledgedFor: '' }))} required /></Field>
             <label className="flex min-h-11 items-start gap-3 text-sm"><input type="checkbox" className="mt-1 size-5 shrink-0" checked={preparedClaude.acknowledgedFor === preparedKey} onChange={e => setPreparedClaude(v => ({ ...v, acknowledgedFor: e.target.checked ? preparedKey : '' }))} />{t("prepared.ack")}</label>
@@ -134,7 +141,7 @@ export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, c
           {createAgentOpen && creationCommandMissing && creationFailure?.creation_state === "identity_removed" && creationFailure.command && creationFailure.machine_id === agentServerId && workspace && snapshot?.servers.find(item => item.server_id === agentServerId) && <ProviderCliInstaller key={`${workspace.workspace_id}/${agentServerId}/${creationFailure.agent_id}`} workspaceId={workspace.workspace_id} machine={snapshot.servers.find(item => item.server_id === agentServerId)!} command={creationFailure.command} />}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>{t("common.cancel")}</Button>
-            <Button type="submit" disabled={(agentProfileId === "prepared-claude" && (!preparedArgs || preparedAttempted)) || creatingAgent || Boolean(creationFailure && creationFailure.creation_state !== "identity_removed") || !agentServerId || (agentProfileId === "manual" && !agentCommandLine.trim())}>{creatingAgent ? t("dialogs.starting") : agentProfileId === "terminal" ? t("dialogs.create_terminal") : t("dialogs.create_agent")}</Button>
+            <Button type="submit" disabled={(agentProfileId === "prepared-claude" && (!preparedArgs || preparedAttempted)) || creatingAgent || sessionCopy.busy || Boolean(creationFailure && creationFailure.creation_state !== "identity_removed") || !agentServerId || (agentProfileId === "manual" && !agentCommandLine.trim())}>{creatingAgent ? t("dialogs.starting") : agentProfileId === "terminal" ? t("dialogs.create_terminal") : t("dialogs.create_agent")}</Button>
           </DialogFooter>
         </form>
       </DialogContent>
