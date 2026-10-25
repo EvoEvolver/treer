@@ -2313,6 +2313,11 @@ are admitted. `email.send` is evaluated for the Managed App's runtime Agent
 against its owned `machine.service`; ordinary Agents and human tokens cannot
 use this route. No SMTP configuration is required.
 
+The Cloudflare token needs `Email Sending: Edit`, and the sender domain must be
+onboarded for Email Sending in that same account. These are configuration
+prerequisites, not conclusions that can be inferred from a generic delivery
+failure. Do not expose the token or send another email merely to check them.
+
 Request JSON contains only `to`, `subject` (1–200 bytes, no controls), `text`
 (1–4096 bytes), and `idempotency_key` (1–128 bytes). No caller HTML, From or
 Reply-To is accepted. Success returns `email_id` and `status=sent`. Errors include
