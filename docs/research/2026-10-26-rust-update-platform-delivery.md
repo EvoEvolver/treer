@@ -156,16 +156,27 @@ was not run locally because its cross C compiler is unavailable. The initial
 test-fixture borrow-check error was corrected before the test pass. Two further
 native controls require Windows: held files refuse write/rename and reserve the
 exact physical binding without replacement; corrupt/same-root/hardlinked/weak
-ACL inputs refuse before creating an intent. Native acceptance is pending.
+ACL inputs refuse before creating an intent.
 The single focused entry is `cargo test --locked -p treer-agent-server --bin
 treer-agent-server windows_update_admission_ -- --nocapture`, expecting four
 passed, none failed/ignored, exit zero, and independent task TEMP cleanup. The
 earlier store/intent native runs do not establish this admission result.
 
+Release executed that entry once in run `40284733737`, pinned to source
+`aaa633664038d93863c68f2f341d031fcb32cb49` and wrapper
+`2af1b8448592e7cc122e099a638968ece3d63612`. Windows Server 2022, Rust 1.90
+and fixed NTFS image `20261022.344.1` produced four passed, zero failed/ignored
+and exit zero. Core independently checked the result, platform and four named
+test log entries. The task TEMP had no remaining entries, cleanup was proven,
+and the empty root was removed. The result receipt SHA256 is
+`e1939bfaed6f1673afdcd40ff4c67e0e176ff14cb64ff190843ab3c00e75c0b4`.
+This establishes signed pinned-input admission through one reservation only;
+image replacement, mutation locking, Job ownership and health remain untested.
+
 ## Remaining ordered leaves and waiting boundaries
 
-1. Native NTFS store and single-use intent acceptance are complete. Signed
-   admission is implemented above with native acceptance pending. Next
+1. Native NTFS store, single-use intent and signed pinned-input admission
+   acceptance are complete within their stated scopes. Next
    add phase-specific evidence for actual image
    publication, never a generic setter that could manufacture completion.
 2. Implement Windows verified Controller/CLI image backup and two-rename
