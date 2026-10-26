@@ -1559,8 +1559,23 @@ foreign runtime refuses before consuming the proper selected admission; success
 retains originals, image/state-root pins, lease and claim; bad key or signature
 consumes the attempt and blocks fixed spawn and parent publication while old
 files and the durable claim remain unchanged. They do not execute admitted
-images or start Host processes. Author focused and sole native results are
-recorded on #111; native execution is not yet claimed here.
+images or start Host processes. Author Mac focused two passed (506 filtered),
+strict Server bins/tests Clippy with the existing acceptance feature and strict
+Platform Windows/Linux cross-target Clippy passed, along with fmt/docs/diff.
+One independent source-only review (#111:9673) accepted this in-process scope.
+
+Sole native run `40357815897` accepted exact source
+`50cc44bf826b4c909287141c1019b4397d794472`, wrapper
+`45e7a86a52c124112ebea4c900529a400908db46`: Windows 2022/Rust 1.90,
+fixed NTFS image `20261022.344.1`, all four selector tests passed, zero
+failed/ignored, exit zero (303 filtered). Independent TEMP inventory was empty,
+cleanup proven and empty root removed. Core matched source, command, four names,
+platform and test log to `RESULT.json` SHA-256
+`763618d61a61b28ad42e48a9b3828abe91fcd0730aed9b276e70678e5d5779ef`
+(#111:9678). This is not cross-process authority, startup-state transfer or
+original-owner release permission. No feature, extra binary build, old selector
+or matrix, admitted image spawn, live installation, Host or capability action
+was performed.
 
 ## Remaining ordered leaves and waiting boundaries
 
