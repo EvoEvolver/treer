@@ -272,6 +272,74 @@ pub fn secure_path(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Exclusive, non-inherited handle and private DACL from the first instant.
+/// The caller retains checked physical parent handles for the complete write.
+pub(super) fn create_private_update_file(path: &Path) -> io::Result<std::fs::File> {
+    use windows_sys::Win32::Storage::FileSystem::*;
+    let descriptor = descriptor(false)?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let path = wide(path.as_os_str());
+    unsafe {
+        let handle = CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            &attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(std::fs::File::from_raw_handle(handle))
+    }
+}
+
+/// This record backend is deliberately local NTFS-only. Network/FAT/ReFS are
+/// not admitted merely because an individual file write happened to succeed.
+pub(super) fn require_update_ntfs(path: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::*;
+    use windows_sys::Win32::System::{
+        SystemServices::FILE_PERSISTENT_ACLS, WindowsProgramming::DRIVE_FIXED,
+    };
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let mut filesystem = [0_u16; 32];
+    let mut flags = 0;
+    unsafe {
+        checked(GetVolumeInformationByHandleW(
+            directory.as_raw_handle(),
+            ptr::null_mut(),
+            0,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut flags,
+            filesystem.as_mut_ptr(),
+            filesystem.len() as u32,
+        ))?;
+    }
+    let root = path.components().take(2).collect::<std::path::PathBuf>();
+    if unsafe { GetDriveTypeW(wide(root.as_os_str()).as_ptr()) } != DRIVE_FIXED
+        || filesystem[..5] != [b'N' as u16, b'T' as u16, b'F' as u16, b'S' as u16, 0]
+        || flags & FILE_PERSISTENT_ACLS == 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Windows update store requires local NTFS",
+        ));
+    }
+    Ok(())
+}
+
 /// One discretionary ACE. Mask and principal are read only for the two plain
 /// ACE types whose layout is `{ Header, Mask, SidStart }`; every other type is
 /// recorded by header only and never parsed as that layout.

@@ -17,7 +17,7 @@ rustix = { version = "1.1", features = ["fs", "process", "net", "event"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_SystemInformation", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_SystemInformation", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Storage_FileSystem", "Win32_System_SystemServices", "Win32_System_WindowsProgramming"] }
 
 # Win32 has no safe system-call API. Keep FFI inside the reviewed windows module;
 # the public platform interface and all consumers remain safe Rust.

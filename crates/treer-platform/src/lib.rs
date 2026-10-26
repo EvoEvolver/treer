@@ -33,6 +33,8 @@ pub use environment::{
 #[allow(unsafe_code)]
 mod windows;
 #[cfg(windows)]
+pub mod windows_update_store;
+#[cfg(windows)]
 pub use windows::{
     current_user_sid, process_created_at, terminate_process, transfer_file_identity, LocalLock,
     ProcessTreeGuard,

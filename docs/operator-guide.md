@@ -2397,6 +2397,11 @@ for compatibility and atomic creation decisions.
 
 ### Machine updates with a reviewed Canary artifact set
 
+The [Rust updater platform delivery record](research/2026-10-26-rust-update-platform-delivery.md)
+separates signed five-platform distribution from native update-transaction
+support and acceptance. Windows still refuses the signed CLI activation path;
+ordinary native browser capability remains off on every platform.
+
 For a full-SHA, `canary_passed` machine train including launcher installation and
 an isolated smoke Agent, use the [manual rollout coordinator](../scripts/machine-rollout.md).
 
