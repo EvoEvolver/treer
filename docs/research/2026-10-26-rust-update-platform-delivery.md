@@ -657,6 +657,54 @@ Receipts: `.treer/reviews/core111-windows-child-81277da4/artifact/`
 were never dispatched. No previous acceptance selector is repeated. This accepts
 Child custody only, not executable authentication, Job escape or restart health.
 
+### Implemented leaf: pinned signed-target launch and fixed worker command
+
+The non-test `ReservedInputs` creator now accepts only the selected runtime;
+the caller no longer supplies a mutable Command. It revalidates the retained
+runtime scope, rewinds and hashes the SAME held target Controller file against
+the digest established by signed admission, then uses the pinned target pair's
+fixed `treer-agent-server.exe` path. The platform reopens that name read-only and
+checks physical file identity against the retained pin while all physical
+ancestor/file pins remain held through creation. It does not infer the image
+from a child's reported pathname. The low-level platform spawn is mechanics,
+not signature authority; authentication and argument selection remain in Core.
+
+Core supplies exactly `--controller-update-worker OPERATION_UUID`, with cleared
+environment, pinned target directory as cwd, null standard streams and no shell
+or PATH lookup. No caller argv, executable override or inherited workload
+credentials are accepted by this internal creator. A worker-attempt latch is
+set before image checks/creation and never reset, even on failure. The parent
+file-publication method refuses a reservation after a worker attempt rather than
+letting an uncertain child race a second parent transaction. The previous
+arbitrary-Command custody fixture constructor is now test-only. Normal pins,
+lease, durable claim, selected-runtime checks and unknown-outcome limits remain.
+
+This still does NOT supply a production Windows worker entry, inherited/peer-
+authenticated IPC, Job escape, worker ownership transfer, Controller restart or
+health. Windows currently rejects the private worker switch instead of falling
+through to ordinary Controller startup. Production capability remains OFF.
+The launch target is the signed staged Controller, not an attested running
+old-image worker. Readiness, child-side operation/runtime/Host-epoch proof and
+survival across the Controller-only handoff are subsequent requirements.
+
+New focused entry:
+`cargo test --locked -p treer-agent-server --bin treer-agent-server windows_update_launch_ -- --nocapture`
+
+The two portable controls check whole-image hashing despite an end-of-file
+cursor, modified/empty bytes and failed seek/read refusal. The two Windows
+controls use a closed signing fixture: a copy of the SAME Rust test executable
+as real PE bytes reaches owned Child creation and rejects the unsupported private
+worker switch (deliberately NOT ready), while signed inert bytes fail creation,
+consume the attempt, refuse parent file publication and preserve the installation
+claim without a second spawn or changing installed bytes.
+No production worker or installed Controller is launched. Exactly four passed,
+zero failed/ignored, exit zero plus independent TEMP cleanup are required for
+native acceptance; currently NOT_RUN. Author macOS new portable two-test entry,
+Controller binary/test strict Clippy, Windows GNU platform all-target strict
+Clippy, fmt/docs/diff checks passed. The local Windows Controller C toolchain
+limitation remains, so native compilation/execution is still required. No earlier
+selector/matrix is repeated.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

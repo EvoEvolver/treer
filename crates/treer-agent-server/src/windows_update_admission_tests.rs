@@ -7,6 +7,45 @@ use std::io::Cursor;
 pub(crate) const NEW: &[u8] = b"signed target fixture, never executed";
 pub(crate) const OLD: &[u8] = b"installed fixture, never executed";
 
+#[test]
+fn windows_update_launch_hashes_entire_held_image_not_current_offset() {
+    let bytes = b"whole verified worker image";
+    let mut file = Cursor::new(bytes.to_vec());
+    file.set_position(bytes.len() as u64);
+    require_worker_image(&mut file, &hash(bytes)).unwrap();
+    file.get_mut()[0] ^= 1;
+    assert!(require_worker_image(&mut file, &hash(bytes)).is_err());
+    assert!(require_worker_image(&mut Cursor::new(Vec::<u8>::new()), &hash(b"")).is_err());
+}
+
+#[test]
+fn windows_update_launch_refuses_seek_or_read_error_before_digest_acceptance() {
+    struct RefusedSeek;
+    impl std::io::Read for RefusedSeek {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            panic!("must refuse seek before reading an unbound suffix");
+        }
+    }
+    impl std::io::Seek for RefusedSeek {
+        fn seek(&mut self, _: std::io::SeekFrom) -> std::io::Result<u64> {
+            Err(std::io::Error::other("fixture seek refused"))
+        }
+    }
+    struct RefusedRead;
+    impl std::io::Read for RefusedRead {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("fixture read refused"))
+        }
+    }
+    impl std::io::Seek for RefusedRead {
+        fn seek(&mut self, _: std::io::SeekFrom) -> std::io::Result<u64> {
+            Ok(0)
+        }
+    }
+    assert!(require_worker_image(&mut RefusedSeek, &hash(NEW)).is_err());
+    assert!(require_worker_image(&mut RefusedRead, &hash(NEW)).is_err());
+}
+
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -21,6 +60,10 @@ pub(crate) struct Fixture {
 
 impl Fixture {
     pub(crate) fn new(mutate: impl FnOnce(&mut serde_json::Value)) -> Self {
+        Self::with_target(NEW, mutate)
+    }
+
+    pub(crate) fn with_target(target: &[u8], mutate: impl FnOnce(&mut serde_json::Value)) -> Self {
         let key = SigningKey::from_bytes(&[35; 32]); // synthetic test authority only
         let key_id =
             hash(key.verifying_key().to_public_key_der().unwrap().as_bytes())[..16].to_owned();
@@ -29,10 +72,10 @@ impl Fixture {
             "artifacts":[
                 {"binary":"treer-agent-server","platform":"windows-x86_64",
                  "path":"releases/v0.1.16/windows-x86_64/treer-agent-server",
-                 "size":NEW.len(),"sha256":hash(NEW)},
+                 "size":target.len(),"sha256":hash(target)},
                 {"binary":"treer","platform":"windows-x86_64",
                  "path":"releases/v0.1.16/windows-x86_64/treer",
-                 "size":NEW.len(),"sha256":hash(NEW)}
+                 "size":target.len(),"sha256":hash(target)}
             ]
         });
         mutate(&mut manifest);

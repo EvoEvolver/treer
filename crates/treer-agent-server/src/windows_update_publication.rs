@@ -66,7 +66,11 @@ impl StartupBackedUpInputs {
             _installed,
             _target,
             state,
+            worker_attempted,
         }) = reserved;
+        if worker_attempted {
+            bail!("windows_update_worker_already_attempted");
+        }
         let mut staging = _installed.stage_pair()?;
         let (mut target_c, mut target_l) = _target.files();
         let (mut old_c, mut old_l) = backup.files();

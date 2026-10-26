@@ -5,7 +5,9 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Component, Path};
-use std::process::{Child, Command, ExitStatus};
+#[cfg(test)]
+use std::process::Command;
+use std::process::{Child, ExitStatus};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,7 +157,7 @@ pub(crate) struct ControllerUpdateChild {
 
 #[allow(dead_code)] // Internal primitive; production worker admission is not wired.
 impl ControllerUpdateChild {
-    #[cfg(windows)]
+    #[cfg(all(windows, test))]
     pub(crate) fn spawn_reserved(
         reservation: crate::windows_update_admission::ReservedInputs,
         selected: &ControllerRuntime,
@@ -170,6 +172,27 @@ impl ControllerUpdateChild {
         let child = command
             .spawn()
             .map_err(|_| anyhow::anyhow!("windows_update_child_spawn_failed"))?;
+        Ok(Self {
+            child,
+            runtime,
+            evidence,
+            binding,
+            stop_attempted: false,
+            _reservation: Some(reservation),
+        })
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn spawn_verified_reserved(
+        mut reservation: crate::windows_update_admission::ReservedInputs,
+        selected: &ControllerRuntime,
+    ) -> Result<Self> {
+        let state = reservation.controller_state()?;
+        state.matches_selected(selected, reservation.binding())?;
+        let runtime = state.runtime.clone();
+        let evidence = state.evidence.clone();
+        let binding = reservation.binding().clone();
+        let child = reservation.spawn_worker_process()?;
         Ok(Self {
             child,
             runtime,

@@ -3193,6 +3193,131 @@ async fn windows_update_child_native_reservation_keeps_pins_and_claim_while_chil
 }
 
 #[cfg(windows)]
+fn update_launch_reservation(
+    runtime: &ControllerRuntime,
+    root: &std::path::Path,
+    target_bytes: &[u8],
+) -> crate::windows_update_admission::ReservedInputs {
+    use crate::windows_update_admission::{
+        tests::{Fixture, OLD},
+        AdmittedInputs,
+    };
+    use treer_platform::{windows_update_inputs::PinnedPair, windows_update_store::UpdateStore};
+    let directory = |name: &str| {
+        let path = root.join(name);
+        std::fs::create_dir(&path).unwrap();
+        treer_platform::secure_directory(&path).unwrap();
+        path
+    };
+    let installed = directory("installed");
+    let target = directory("target");
+    let job = directory("job");
+    for (path, bytes) in [(&installed, OLD), (&target, target_bytes)] {
+        for name in ["treer-agent-server.exe", "treer.exe"] {
+            std::fs::write(path.join(name), bytes).unwrap();
+            treer_platform::secure_file(&path.join(name)).unwrap();
+        }
+    }
+    let fixture = Fixture::with_target(target_bytes, |_| {});
+    let state = runtime
+        .windows_update_state_for_operation(Uuid::new_v4(), "ws_fixture", "srv_fixture")
+        .unwrap();
+    AdmittedInputs::prepare_for_controller(
+        PinnedPair::open(&installed)
+            .unwrap()
+            .lock_installation()
+            .unwrap(),
+        PinnedPair::open(&target).unwrap(),
+        &fixture.documents(),
+        &fixture.key.verifying_key(),
+        state,
+    )
+    .unwrap()
+    .reserve(UpdateStore::open(&job).unwrap())
+    .unwrap()
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_launch_native_signed_pe_reaches_owned_child_but_is_not_ready() {
+    let (runtime, root, task) = update_state_fixture().await;
+    // Real PE bytes, signed only by the closed fixture authority. This is the
+    // Rust test executable, NOT an installed worker. Its test harness rejects
+    // the fixed private worker argument, so no normal Controller startup occurs.
+    let bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+    assert!(bytes.len() <= 128 * 1024 * 1024);
+    let reserved = update_launch_reservation(&runtime, &root, &bytes);
+    let binding = reserved.binding().clone();
+    let mut child = reserved.spawn_owned_worker(&runtime).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.poll(&runtime, &binding).unwrap() {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "private worker refusal deadline"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert!(
+        !status.success(),
+        "a test harness is not a ready production worker"
+    );
+    assert_eq!(child.stop(&runtime, &binding).unwrap(), status);
+    assert!(std::fs::rename(root.join("target"), root.join("moved-target")).is_err());
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("target/treer-agent-server.exe"))
+        .is_err());
+    drop(child);
+    assert!(root
+        .join("installed/.treer-controller-update.claim")
+        .exists());
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_launch_native_invalid_pe_consumes_attempt_and_keeps_claim() {
+    let (runtime, root, task) = update_state_fixture().await;
+    let mut reserved =
+        update_launch_reservation(&runtime, &root, crate::windows_update_admission::tests::NEW);
+    assert_eq!(
+        reserved.spawn_worker_process().err().unwrap().to_string(),
+        "windows_update_worker_spawn_unknown"
+    );
+    assert_eq!(
+        reserved.spawn_worker_process().err().unwrap().to_string(),
+        "windows_update_worker_already_attempted"
+    );
+    let backup = root.join("backup");
+    std::fs::create_dir(&backup).unwrap();
+    treer_platform::secure_directory(&backup).unwrap();
+    let backed = reserved
+        .backup(treer_platform::windows_update_backup::BackupDirectory::open(&backup).unwrap())
+        .unwrap()
+        .backup_configured_startup()
+        .unwrap();
+    assert_eq!(
+        backed.publish_pair().err().unwrap().to_string(),
+        "windows_update_worker_already_attempted"
+    );
+    assert!(root
+        .join("installed/.treer-controller-update.claim")
+        .exists());
+    assert_eq!(
+        std::fs::read(root.join("installed/treer-agent-server.exe")).unwrap(),
+        crate::windows_update_admission::tests::OLD
+    );
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
 #[tokio::test]
 async fn windows_update_state_native_admission_uses_pinned_runtime_path_not_private_decoy() {
     use crate::windows_update_admission::{

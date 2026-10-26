@@ -46,6 +46,14 @@ fn digest(reader: &mut dyn Read, expected: Option<&release_update::Artifact>) ->
     Ok(digest)
 }
 
+fn require_worker_image(reader: &mut (impl Read + std::io::Seek), expected: &str) -> Result<()> {
+    reader.seek(std::io::SeekFrom::Start(0))?;
+    if digest(reader, None)? != expected {
+        bail!("windows_update_worker_image_refused");
+    }
+    Ok(())
+}
+
 fn verify_inputs(
     documents: &Documents<'_>,
     key: &VerifyingKey,
@@ -80,6 +88,7 @@ pub struct AdmittedInputs {
     _installed: treer_platform::windows_update_inputs::LockedInstallation,
     _target: treer_platform::windows_update_inputs::PinnedPair,
     state: Option<crate::controller::ControllerUpdateState>,
+    worker_attempted: bool,
 }
 
 #[cfg(windows)]
@@ -184,6 +193,7 @@ impl AdmittedInputs {
             _installed: installed,
             _target: target,
             state: None,
+            worker_attempted: false,
         })
     }
 
@@ -235,9 +245,8 @@ impl ReservedInputs {
             .ok_or_else(|| anyhow::anyhow!("windows_update_child_runtime_missing"))
     }
 
-    /// Internal custody primitive, not an admitted worker execution entry. The
-    /// future coordinator must authenticate the executable and command before
-    /// invoking this; normal caller Policy and capability checks remain above it.
+    /// Test-only creator proving linear custody independently of image launch.
+    #[cfg(test)]
     #[allow(dead_code)] // No production Windows worker/coordinator is wired.
     pub(crate) fn spawn_owned_child(
         self,
@@ -245,6 +254,36 @@ impl ReservedInputs {
         command: &mut std::process::Command,
     ) -> Result<crate::controller::ControllerUpdateChild> {
         crate::controller::ControllerUpdateChild::spawn_reserved(self, selected, command)
+    }
+
+    /// Fixed internal worker creation, not a production coordinator/capability.
+    /// Runtime checks happen in the creator before this mechanical image step.
+    #[allow(dead_code)]
+    pub(crate) fn spawn_owned_worker(
+        self,
+        selected: &crate::controller::ControllerRuntime,
+    ) -> Result<crate::controller::ControllerUpdateChild> {
+        crate::controller::ControllerUpdateChild::spawn_verified_reserved(self, selected)
+    }
+
+    pub(crate) fn spawn_worker_process(&mut self) -> Result<std::process::Child> {
+        if self.0.worker_attempted {
+            bail!("windows_update_worker_already_attempted");
+        }
+        // Even an error after this point consumes this attempt. No re-spawn
+        // after an uncertain CreateProcess result, and no parent publication.
+        self.0.worker_attempted = true;
+        self.controller_state()?.matches(self.binding())?;
+        self.binding().validate()?;
+        let (mut controller, _) = self.0._target.files();
+        require_worker_image(&mut controller, &self.binding().controller_sha256)?;
+        self.0
+            ._target
+            .spawn_pinned_controller(&[
+                "--controller-update-worker".into(),
+                self.binding().operation_id.to_string().into(),
+            ])
+            .map_err(|_| anyhow::anyhow!("windows_update_worker_spawn_unknown"))
     }
 }
 

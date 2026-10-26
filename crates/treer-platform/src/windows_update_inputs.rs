@@ -1,5 +1,6 @@
 //! Read-only, physically pinned input pair for Windows update admission.
-//! No signature, update phase, process control or image publication occurs here.
+//! No signature, update phase or image publication occurs here. Pinned spawning
+//! is mechanics only: the Controller must authenticate bytes and arguments.
 use std::{
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
@@ -8,7 +9,8 @@ use std::{
 
 /// Retains every physical ancestor and read-only file handles without write or
 /// delete sharing. The caller authenticates contents; no path is exposed for
-/// reopening or later execution. This is not an installation mutation lock.
+/// arbitrary reopening. This is not an installation mutation lock. The spawn
+/// primitive retains these same pins while Windows opens the fixed image path.
 pub struct PinnedPair {
     pub(super) root: crate::machine_file::Root,
     pub(super) controller: File,
@@ -17,6 +19,31 @@ pub struct PinnedPair {
 }
 
 impl PinnedPair {
+    /// Mechanical creation from the fixed pinned controller name only. No PATH
+    /// search, inherited environment, shell or exposed Command override. The
+    /// caller authenticates the SAME held bytes and selects restricted argv;
+    /// neither this function nor a successful Child implies worker readiness.
+    pub fn spawn_pinned_controller(
+        &self,
+        args: &[std::ffi::OsString],
+    ) -> io::Result<std::process::Child> {
+        let path = self.path.join("treer-agent-server.exe");
+        let reopened = crate::windows_update_store::open_record(&path, false)?;
+        if crate::transfer_file_identity(&reopened)?
+            != crate::transfer_file_identity(&self.controller)?
+        {
+            return Err(io::Error::other("Windows launch image changed"));
+        }
+        std::process::Command::new(path)
+            .args(args)
+            .current_dir(&self.path)
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    }
+
     /// Existing private fixed-NTFS directories only. Never repairs an ACL or
     /// creates a missing name. Installed and staged pairs use the same names.
     pub fn open(path: &Path) -> io::Result<Self> {
