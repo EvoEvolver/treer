@@ -39,13 +39,27 @@ function emailPath(id:string) {
  if(!/^[a-f0-9]{64}$/.test(id))throw new Error('email_thread_invalid');
  return 'api/email/thread/'+id;
 }
+// Only allowlisted categories reach the UI; never reflect arbitrary server errors.
+export function emailFailure(status:number,code:unknown){
+ if(status===401&&(code==='owner_auth_required'||code==='owner_identity_invalid'))return 'email_login_required';
+ if(status===403&&(code==='current_workspace_member_required'||code==='current_human_owner_required'))return 'email_member_required';
+ if(status===403&&(code==='owner_csrf_rejected'||code==='email_request_host_rejected'||code==='email_request_context_rejected'))return 'email_context_rejected';
+ if(status===403)return 'email_access_unavailable';
+ return 'email_service_unavailable';
+}
+async function emailErrorCode(r:Response){
+ const reader=r.body?.getReader();if(!reader)return undefined;
+ const chunks:Uint8Array[]=[];let size=0;
+ try{for(;;){const p=await reader.read();if(p.done)break;size+=p.value.byteLength;if(size>4096)return undefined;chunks.push(p.value);}const bytes=new Uint8Array(size);let at=0;for(const p of chunks){bytes.set(p,at);at+=p.length;}return JSON.parse(new TextDecoder().decode(bytes))?.error?.code;}catch{return undefined;}finally{void reader.cancel().catch(()=>{});}
+}
 export async function readEmailThread(id:string) {
- const r=await fetch(emailPath(id),{credentials:'same-origin',headers:{Accept:'application/json'}});
- return {status:r.status,ok:r.ok,value:await r.json()};
+ const r=await fetch(emailPath(id),{credentials:'same-origin',cache:'no-store',redirect:'error',signal:AbortSignal.timeout(10000),headers:{Accept:'application/json'}});
+ if(!r.ok)return {status:r.status,ok:false,value:null,failure:emailFailure(r.status,await emailErrorCode(r))};
+ return {status:r.status,ok:true,value:await r.json(),failure:''};
 }
 export async function submitEmailReply(id:string,key:string,body:string) {
- const r=await fetch(emailPath(id),{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Endpoint-Request':'1'},body:JSON.stringify({key,body})});
- if(!r.ok)throw new Error(r.status===403?'reply_unavailable':'email_reply_unavailable');
+ const r=await fetch(emailPath(id),{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Endpoint-Request':'1'},body:JSON.stringify({key,body}),redirect:'error',signal:AbortSignal.timeout(10000)});
+ if(!r.ok)throw new Error(emailFailure(r.status,await emailErrorCode(r)));
 }
 export async function endMemberSession() {
  const r=await fetch('api/email/auth/logout',{method:'POST',credentials:'same-origin',headers:{'X-Endpoint-Request':'1'}});
