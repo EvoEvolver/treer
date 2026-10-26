@@ -1,7 +1,9 @@
-//! Local input loading only. No Windows dispatch/coordinator/capability entry.
+//! Local input loading and internal receiver preparation; no public capability.
 use anyhow::Result;
 
 use super::catalog::Catalog;
+
+pub(crate) mod coordinator;
 
 impl Catalog {
     #[allow(dead_code)] // Admission/coordinator wiring is a separate boundary.

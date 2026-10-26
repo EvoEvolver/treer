@@ -272,6 +272,21 @@ or configuration contents. Failed launch retains the newly saved specification.
   a terminal zero exit do not release sender pins/lease/claim or grant mutation,
   restart, recovery or readiness. Product activation remains disabled.
 
+  The holding receiver uses that same independent trust and signed-input
+  verification. Its coordinator consumes already confirmed installation handles
+  and the selected loaded runtime; it does not authenticate a new caller or
+  replace upstream Policy. Inspect/close frames bind the original whole-offer
+  receipt context and exact monotone sequence, with distinct request/reply roles.
+  Successful inspection is only a point-in-time startup/fence recheck. Explicit
+  close and observed original Child zero exit move the original sender guards
+  back without dropping them, retiring claim or granting mutation. ACK or creator
+  exit alone never permits sender release. Errors/cancellation poison the
+  session before await; no automatic reconnect/replay. Receiver custody ends on
+  session exit, but sender guards remain owned by the live coordinator. Unknown
+  owner destruction retains the existing best-effort teardown limitation, not
+  proof of child exit or continued guard ownership; durable claim still fences
+  another operation. No public capability or production mutation route is added.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

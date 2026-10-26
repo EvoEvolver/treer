@@ -6,7 +6,7 @@ use ed25519_dalek::pkcs8::EncodePublicKey;
 use sha2::Digest;
 use treer_platform::{windows_update_inputs::PinnedPair, windows_update_store::UpdateStore};
 
-fn binary() -> PathBuf {
+pub(super) fn binary() -> PathBuf {
     let path = PathBuf::from(std::env::var_os("TREER_TEST_WORKER_ENTRY_BINARY").unwrap());
     assert!(path.is_absolute() && path.is_file());
     path
@@ -75,7 +75,7 @@ fn reserve(
     )
 }
 
-fn held(root: &Path) {
+pub(super) fn held(root: &Path) {
     assert!(std::fs::OpenOptions::new()
         .write(true)
         .open(root.join("target/treer-agent-server.exe"))

@@ -149,9 +149,97 @@ impl InputReceipt {
     }
 }
 
+/// Bounded read-only custody control on the SAME received-input connection.
+/// Neither inspection nor close ACK permits sender release or an update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CustodyKind {
+    Inspect,
+    Inspected,
+    Close,
+    Closed,
+}
+
+pub const CUSTODY_BYTES: usize = WORKER_BINDING_FRAME_BYTES + 4;
+pub const CUSTODY_MAX_STEPS: u32 = 32;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CustodyFrame {
+    pub context: WorkerBindingFrame,
+    pub sequence: u32,
+}
+impl CustodyFrame {
+    pub fn encode(&self, kind: CustodyKind) -> Option<[u8; CUSTODY_BYTES]> {
+        if self.sequence == 0 || self.sequence > CUSTODY_MAX_STEPS {
+            return None;
+        }
+        let mut bytes = [0; CUSTODY_BYTES];
+        bytes[..WORKER_BINDING_FRAME_BYTES]
+            .copy_from_slice(&self.context.encode(WorkerBindingKind::Request)?);
+        bytes[..8].copy_from_slice(match kind {
+            CustodyKind::Inspect => b"TRWCIN01",
+            CustodyKind::Inspected => b"TRWCIA01",
+            CustodyKind::Close => b"TRWCCL01",
+            CustodyKind::Closed => b"TRWCCA01",
+        });
+        bytes[WORKER_BINDING_FRAME_BYTES..].copy_from_slice(&self.sequence.to_le_bytes());
+        Some(bytes)
+    }
+    pub fn decode(bytes: &[u8], kind: CustodyKind) -> Option<Self> {
+        if bytes.len() != CUSTODY_BYTES {
+            return None;
+        }
+        let mut legacy: [u8; WORKER_BINDING_FRAME_BYTES] =
+            bytes[..WORKER_BINDING_FRAME_BYTES].try_into().ok()?;
+        legacy[..8].copy_from_slice(b"TRWREQ01");
+        let frame = Self {
+            context: WorkerBindingFrame::decode(&legacy, WorkerBindingKind::Request)?,
+            sequence: u32::from_le_bytes(bytes[WORKER_BINDING_FRAME_BYTES..].try_into().ok()?),
+        };
+        (frame.encode(kind)?.as_slice() == bytes).then_some(frame)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn windows_update_coordinator_custody_wire_roles_sequence_and_bounds() {
+        let mut id = [1; 16];
+        id[6] = 0x41;
+        id[8] = 0x81;
+        let mut frame = CustodyFrame {
+            context: WorkerBindingFrame {
+                operation: id,
+                challenge: id,
+                context_sha256: [3; 32],
+            },
+            sequence: 1,
+        };
+        let roles = [
+            CustodyKind::Inspect,
+            CustodyKind::Inspected,
+            CustodyKind::Close,
+            CustodyKind::Closed,
+        ];
+        for role in roles {
+            let bytes = frame.encode(role).unwrap();
+            assert_eq!(CustodyFrame::decode(&bytes, role), Some(frame));
+            for other in roles.into_iter().filter(|other| *other != role) {
+                assert!(CustodyFrame::decode(&bytes, other).is_none());
+            }
+            assert!(InputReceipt::decode(&bytes).is_none());
+            assert!(CustodyFrame::decode(&bytes[..CUSTODY_BYTES - 1], role).is_none());
+            let mut extra = bytes.to_vec();
+            extra.push(0);
+            assert!(CustodyFrame::decode(&extra, role).is_none());
+        }
+        for sequence in [0, CUSTODY_MAX_STEPS + 1] {
+            frame.sequence = sequence;
+            assert!(frame.encode(CustodyKind::Inspect).is_none());
+        }
+        frame.sequence = CUSTODY_MAX_STEPS;
+        assert!(frame.encode(CustodyKind::Close).is_some());
+    }
     #[test]
     fn windows_update_worker_receive_wire_bounds_and_receipt_role() {
         let mut header = *b"TRWIRF01\x01\x00\x00\x00";

@@ -310,9 +310,40 @@ impl ControllerUpdateChild {
     /// after an unknown creation result. No fallback to the legacy ACK worker.
     #[cfg(windows)]
     pub(crate) fn spawn_verified_input_reserved(
+        reservation: crate::windows_update_admission::ReservedInputs,
+        selected: &ControllerRuntime,
+        trust: &crate::windows_update_worker_entry::Trust,
+    ) -> std::result::Result<
+        Self,
+        (
+            anyhow::Error,
+            Box<crate::windows_update_admission::ReservedInputs>,
+        ),
+    > {
+        Self::spawn_input_mode(reservation, selected, trust, false)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn spawn_holding_input_reserved(
+        reservation: crate::windows_update_admission::ReservedInputs,
+        selected: &ControllerRuntime,
+        trust: &crate::windows_update_worker_entry::Trust,
+    ) -> std::result::Result<
+        Self,
+        (
+            anyhow::Error,
+            Box<crate::windows_update_admission::ReservedInputs>,
+        ),
+    > {
+        Self::spawn_input_mode(reservation, selected, trust, true)
+    }
+
+    #[cfg(windows)]
+    fn spawn_input_mode(
         mut reservation: crate::windows_update_admission::ReservedInputs,
         selected: &ControllerRuntime,
         trust: &crate::windows_update_worker_entry::Trust,
+        hold: bool,
     ) -> std::result::Result<
         Self,
         (
@@ -330,7 +361,11 @@ impl ControllerUpdateChild {
             let pipe = treer_platform::windows_update_pipe::CreatedChildPipe::bind(
                 &selector.simple().to_string(),
             )?;
-            let child = reservation.spawn_input_process_for_pipe(selector, trust)?;
+            let child = if hold {
+                reservation.spawn_holding_process_for_pipe(selector, trust)?
+            } else {
+                reservation.spawn_input_process_for_pipe(selector, trust)?
+            };
             Ok((runtime, evidence, binding, pipe, child))
         };
         match spawn() {
@@ -399,6 +434,35 @@ impl ControllerUpdateChild {
             bail!("windows_update_child_scope_refused");
         }
         Ok(())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn verify_receiver_scope(
+        &self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+    ) -> Result<()> {
+        self.matches(selected, binding)
+    }
+
+    /// Exact original exit observation moves custody back to the coordinator;
+    /// it does not retire the durable claim or authorize another worker.
+    #[cfg(windows)]
+    pub(crate) fn retain_after_receiver_exit(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+    ) -> Result<crate::windows_update_admission::ReservedInputs> {
+        self.matches(selected, binding)?;
+        match self.child.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                self.stop_attempted = true;
+                self._reservation
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("windows_update_receiver_custody_missing"))
+            }
+            _ => bail!("windows_update_receiver_exit_unconfirmed"),
+        }
     }
 
     pub(crate) fn poll(
@@ -649,6 +713,38 @@ impl ControllerUpdateChild {
         self.accept_worker_pipe(selected, binding, pipe).await?;
         self.exchange_worker_inputs(selected, binding, documents)
             .await
+    }
+
+    #[cfg(windows)]
+    pub(crate) async fn open_created_custody(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+        documents: &crate::windows_update_admission::Documents<'_>,
+    ) -> Result<
+        crate::windows_update_custody::Channel<tokio::net::windows::named_pipe::NamedPipeServer>,
+    > {
+        self.matches(selected, binding)?;
+        let pipe = self
+            ._bootstrap_pipe
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("windows_update_receiver_already_attempted"))?;
+        self.accept_worker_pipe(selected, binding, pipe).await?;
+        let context = self.begin_handshake(selected, binding)?;
+        let mut stream = self
+            ._worker_pipe
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("windows_update_receiver_pipe_missing"))?;
+        let offer = self
+            ._reservation
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("windows_update_receiver_custody_missing"))?
+            .worker_input_offer(selected, context, documents)?;
+        let context =
+            crate::windows_update_admission::worker_inputs::exchange_retained(&mut stream, offer)
+                .await?;
+        self.matches(selected, binding)?;
+        Ok(crate::windows_update_custody::Channel::new(stream, context))
     }
 
     /// Observe only the retained original Child after a successful binding ACK.

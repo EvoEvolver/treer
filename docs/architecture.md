@@ -164,8 +164,23 @@ failure returns the original reservation with its creation-attempt latch intact.
 The child receives signed inputs, rechecks its retained runtime-derived startup
 snapshot, then explicitly drops its read-only receiver custody and exits. This
 does not acknowledge sender release or set readiness/completion. The legacy
-terminal ACK entry is unchanged. The product coordinator/capability route is
-still unwired; signed private dev-image acceptance does not prove a complete
+terminal ACK entry is unchanged.
+
+The internal Windows coordinator preparation seam composes confirmed-plan
+admission, the selected loaded runtime, normal configured trust, and the original
+installation/target handles. Its separate `--controller-update-hold-inputs`
+entry keeps the independently verified receiver custody while serving ordered
+read-only inspections on the same whole-offer context. The session permits at
+most 32 controls within 30 seconds; each creator exchange has a three-second
+budget. An explicit close reply plus the original Child's observed zero exit is
+required before moving the SAME sender reservation back to the coordinator's
+caller. No guards are dropped as a release permit, claim is not retired, and
+creation attempts are not reset. Errors/cancellation consume the session;
+unknown cannot reconnect or close by replay. While its owner remains alive the
+coordinator retains sender custody; destroying an unknown owner has the existing
+best-effort Child teardown limitation and does not prove child exit. The durable
+claim remains. Public dispatch/installation selection and capability remain
+unwired; signed private dev-image acceptance does not prove a complete
 transaction, independent child Policy, Job survival or runtime rollback.
 
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups

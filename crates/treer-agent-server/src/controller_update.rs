@@ -6,7 +6,7 @@ pub(crate) mod catalog;
 #[cfg(unix)]
 pub(crate) mod unix;
 #[cfg(windows)]
-mod windows;
+pub(crate) mod windows;
 #[cfg(all(unix, feature = "native-update-acceptance"))]
 use crate::self_update::hosted_controller_dispatch as hosted_dispatch;
 

@@ -23,6 +23,8 @@ mod startup_store;
 mod tui;
 #[cfg(any(windows, test))]
 pub mod windows_update_admission;
+#[cfg(any(windows, test))]
+mod windows_update_custody;
 #[cfg(test)]
 mod windows_update_envelope;
 #[cfg(any(windows, test))]
@@ -212,12 +214,16 @@ struct ServerArgs {
 
 fn main() -> Result<()> {
     #[cfg(windows)]
-    if std::env::args_os().nth(1).as_deref()
-        == Some(std::ffi::OsStr::new(windows_update_worker_entry::SWITCH))
+    if matches!(std::env::args_os().nth(1).as_deref(), Some(value)
+        if value == windows_update_worker_entry::SWITCH || value == windows_update_worker_entry::HOLD_SWITCH)
     {
-        // Terminal input receiver before normal configuration/Host/helpers.
+        // Private finite receiver before normal configuration/Host/helpers.
         // Neither a received receipt nor exit zero grants update authority.
-        return windows_update_worker_entry::run(std::env::args_os().skip(2));
+        let hold = std::env::args_os().nth(1).as_deref()
+            == Some(std::ffi::OsStr::new(
+                windows_update_worker_entry::HOLD_SWITCH,
+            ));
+        return windows_update_worker_entry::run(std::env::args_os().skip(2), hold);
     }
     #[cfg(windows)]
     if std::env::args_os().nth(1).as_deref()

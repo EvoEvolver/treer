@@ -339,7 +339,7 @@ impl ReservedInputs {
         &mut self,
         selector: uuid::Uuid,
     ) -> Result<std::process::Child> {
-        self.spawn_worker_process_selected(selector, None)
+        self.spawn_worker_process_selected(selector, None, false)
     }
 
     pub(crate) fn spawn_input_process_for_pipe(
@@ -347,13 +347,22 @@ impl ReservedInputs {
         selector: uuid::Uuid,
         trust: &crate::windows_update_worker_entry::Trust,
     ) -> Result<std::process::Child> {
-        self.spawn_worker_process_selected(selector, Some(trust))
+        self.spawn_worker_process_selected(selector, Some(trust), false)
+    }
+
+    pub(crate) fn spawn_holding_process_for_pipe(
+        &mut self,
+        selector: uuid::Uuid,
+        trust: &crate::windows_update_worker_entry::Trust,
+    ) -> Result<std::process::Child> {
+        self.spawn_worker_process_selected(selector, Some(trust), true)
     }
 
     fn spawn_worker_process_selected(
         &mut self,
         selector: uuid::Uuid,
         trust: Option<&crate::windows_update_worker_entry::Trust>,
+        hold: bool,
     ) -> Result<std::process::Child> {
         if self.0.worker_attempted || self.0.receiver_attempted {
             bail!("windows_update_worker_already_attempted");
@@ -367,7 +376,15 @@ impl ReservedInputs {
         self.controller_state()?.matches(self.binding())?;
         self.binding().validate()?;
         let arguments = if let Some(trust) = trust {
-            trust.arguments(self.binding().operation_id, selector, &self.0.verifying_key)?
+            if hold {
+                trust.holding_arguments(
+                    self.binding().operation_id,
+                    selector,
+                    &self.0.verifying_key,
+                )?
+            } else {
+                trust.arguments(self.binding().operation_id, selector, &self.0.verifying_key)?
+            }
         } else {
             vec![
                 "--controller-update-worker".into(),

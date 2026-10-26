@@ -10,6 +10,8 @@ use ed25519_dalek::{pkcs8::DecodePublicKey, VerifyingKey};
 use uuid::Uuid;
 
 pub(crate) const SWITCH: &str = "--controller-update-receive-inputs";
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) const HOLD_SWITCH: &str = "--controller-update-hold-inputs";
 
 fn refused() -> anyhow::Error {
     anyhow!("windows_update_worker_entry_refused")
@@ -29,6 +31,21 @@ pub(crate) struct Trust {
 
 #[allow(dead_code)] // Internal launch seam; product coordinator/cap remains unwired.
 impl Trust {
+    #[cfg(windows)]
+    pub(crate) fn verification_key(&self) -> &VerifyingKey {
+        &self.key
+    }
+    #[cfg(windows)]
+    pub(crate) fn holding_arguments(
+        &self,
+        operation: Uuid,
+        selector: Uuid,
+        admitted_key: &[u8; 32],
+    ) -> Result<Vec<OsString>> {
+        let mut args = self.arguments(operation, selector, admitted_key)?;
+        args[0] = HOLD_SWITCH.into();
+        Ok(args)
+    }
     /// Same resolver as the normal updater: explicit/local errors never fall
     /// back, only an absent local key on the exact official base uses the bundle.
     pub(crate) fn configured(
@@ -140,7 +157,7 @@ fn arguments(mut args: impl Iterator<Item = OsString>) -> Result<(Uuid, String, 
 }
 
 #[cfg(windows)]
-pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<()> {
+pub(crate) fn run(args: impl Iterator<Item = OsString>, hold: bool) -> Result<()> {
     let (operation, selector, source) = arguments(args)?;
     // Resolve the independently selected local/bundled key BEFORE pipe/offer.
     let key = source.load()?;
@@ -162,6 +179,9 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<()> {
             // this check and explicit drop. Receipt/exit never release sender
             // pins or authorize any publication, restart, recovery or readiness.
             received.inspect_snapshot().map_err(|_| refused())?;
+            if hold {
+                return received.serve_custody().await.map_err(|_| refused());
+            }
             drop(received);
             Ok(())
         })

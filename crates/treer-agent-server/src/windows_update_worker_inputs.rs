@@ -66,6 +66,17 @@ pub(crate) async fn exchange<S>(mut stream: S, offer: InputOffer) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    exchange_retained(&mut stream, offer).await.map(|_| ())
+}
+
+/// Same initial exchange, but retain the transport for read-only custody control.
+pub(crate) async fn exchange_retained<S>(
+    stream: &mut S,
+    offer: InputOffer,
+) -> Result<WorkerBindingFrame>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
     tokio::time::timeout_at(deadline, async {
         let bytes = offer.encode().ok_or_else(refused)?;
@@ -78,7 +89,7 @@ where
         {
             return Err(refused());
         }
-        Ok(())
+        Ok(expected)
     })
     .await
     .map_err(|_| refused())?
@@ -200,10 +211,58 @@ pub(crate) mod native {
         snapshot: Option<Snapshot>,
         runtime_context_sha256: [u8; 32],
         snapshot_invalidated: bool,
+        custody_context: WorkerBindingFrame,
     }
 
     #[allow(dead_code)] // Internal continuation; production coordinator is not wired.
     impl WorkerReceivedInputs {
+        /// Finite preparation session only. Keep all receiver guards while
+        /// serving exact ordered inspections; close is explicit and read-only.
+        pub(crate) async fn serve_custody(mut self) -> Result<()> {
+            use treer_protocol::controller_update_worker_inputs::{
+                CustodyFrame, CustodyKind, CUSTODY_BYTES, CUSTODY_MAX_STEPS,
+            };
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            tokio::time::timeout_at(deadline, async {
+                for sequence in 1..=CUSTODY_MAX_STEPS {
+                    let mut bytes = [0; CUSTODY_BYTES];
+                    self.stream
+                        .read_exact(&mut bytes)
+                        .await
+                        .map_err(|_| refused())?;
+                    let (frame, reply, close) = if let Some(frame) =
+                        CustodyFrame::decode(&bytes, CustodyKind::Inspect)
+                    {
+                        (frame, CustodyKind::Inspected, false)
+                    } else if let Some(frame) = CustodyFrame::decode(&bytes, CustodyKind::Close) {
+                        (frame, CustodyKind::Closed, true)
+                    } else {
+                        return Err(refused());
+                    };
+                    if frame.context != self.custody_context || frame.sequence != sequence {
+                        return Err(refused());
+                    }
+                    self.inspect_snapshot()?;
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(refused());
+                    }
+                    self.stream
+                        .write_all(&frame.encode(reply).ok_or_else(refused)?)
+                        .await
+                        .map_err(|_| refused())?;
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(refused());
+                    }
+                    if close {
+                        return Ok(());
+                    }
+                }
+                Err(refused())
+            })
+            .await
+            .map_err(|_| refused())?
+        }
+
         /// Read-only point-in-time recheck against this custody's original raw
         /// snapshot, never a freeze, CAS, authorization or release permit. Any
         /// observation error permanently poisons this object, even if a later
@@ -340,6 +399,7 @@ pub(crate) mod native {
             if tokio::time::Instant::now() >= deadline || !stream.creator_is_live()? {
                 return Err(refused());
             }
+            let custody_context = receipt(&offer, &bytes).0;
             Ok(WorkerReceivedInputs {
                 stream,
                 lock,
@@ -350,6 +410,7 @@ pub(crate) mod native {
                 snapshot: offer.state.snapshot,
                 runtime_context_sha256: offer.runtime_context_sha256,
                 snapshot_invalidated: false,
+                custody_context,
             })
         })
         .await
