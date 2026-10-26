@@ -42,7 +42,9 @@ use output::*;
 #[path = "controller_update_state.rs"]
 mod update_state;
 #[cfg(windows)]
-pub(crate) use update_state::{ControllerStateEvidence, ControllerUpdateState};
+pub(crate) use update_state::{
+    ControllerStateEvidence, ControllerUpdateChild, ControllerUpdateState,
+};
 
 const OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 const OUTPUT_TRIM_SLACK_BYTES: usize = 64 * 1024;

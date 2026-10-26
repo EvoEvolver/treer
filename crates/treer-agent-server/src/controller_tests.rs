@@ -3006,6 +3006,189 @@ async fn windows_update_state_retains_exact_loaded_store_and_runtime_instance() 
     std::fs::remove_dir_all(other_root).unwrap();
 }
 
+fn update_custody_command() -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .env_clear()
+        .args([
+            "--exact",
+            "controller::tests::update_custody_fixture_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
+#[test]
+#[ignore = "owned helper, only invoked by the custody parent controls"]
+fn update_custody_fixture_child() {
+    use std::io::Read;
+    let mut byte = [0];
+    std::io::stdin().read_exact(&mut byte).unwrap();
+    std::process::exit(259);
+}
+
+#[tokio::test]
+async fn windows_update_child_scope_refuses_before_spawn_and_before_owned_stop() {
+    let (runtime, root, task) = update_state_fixture().await;
+    let (other, other_root, other_task) = update_state_fixture().await;
+    let binding = update_state_binding(Uuid::new_v4());
+    let state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    let mut nonexistent = std::process::Command::new(root.join("must-not-spawn"));
+    let refused = update_state::ControllerUpdateChild::spawn_fixture(
+        &state,
+        &other,
+        &binding,
+        &mut nonexistent,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(refused.to_string(), "windows_update_child_runtime_refused");
+    let mut child = update_state::ControllerUpdateChild::spawn_fixture(
+        &state,
+        &runtime,
+        &binding,
+        &mut update_custody_command(),
+    )
+    .unwrap();
+    assert!(child.poll(&runtime, &binding).unwrap().is_none());
+    assert!(child.stop(&other, &binding).is_err());
+    for field in 0..4 {
+        let mut foreign = binding.clone();
+        match field {
+            0 => foreign.operation_id = Uuid::new_v4(),
+            1 => foreign.workspace_id = "ws_other".into(),
+            2 => foreign.server_id = "srv_other".into(),
+            _ => foreign.controller_sha256 = "f".repeat(64),
+        }
+        assert!(child.poll(&runtime, &foreign).is_err());
+        assert!(child.stop(&runtime, &foreign).is_err());
+    }
+    // Refusals did not touch this Child. Only the exact runtime/binding can stop it.
+    assert!(child.poll(&runtime, &binding).unwrap().is_none());
+    child.stop(&runtime, &binding).unwrap();
+    assert!(child.stop(&runtime, &binding).is_err());
+    drop(child);
+    drop(state);
+    drop(runtime);
+    drop(other);
+    task.abort();
+    other_task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(other_root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_child_retains_created_handle_through_exit_and_refuses_restop() {
+    let (runtime, root, task) = update_state_fixture().await;
+    let binding = update_state_binding(Uuid::new_v4());
+    let state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    let mut child = update_state::ControllerUpdateChild::spawn_fixture(
+        &state,
+        &runtime,
+        &binding,
+        &mut update_custody_command(),
+    )
+    .unwrap();
+    child.finish_fixture_input();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.poll(&runtime, &binding).unwrap() {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "owned helper exit deadline"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert_eq!(status.code(), Some(if cfg!(windows) { 259 } else { 3 }));
+    assert_eq!(child.stop(&runtime, &binding).unwrap(), status);
+    assert!(child.stop(&runtime, &binding).is_err());
+    drop(child);
+    drop(state);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_child_native_reservation_keeps_pins_and_claim_while_child_owned() {
+    use crate::windows_update_admission::{
+        tests::{Fixture, NEW, OLD},
+        AdmittedInputs,
+    };
+    use treer_platform::{windows_update_inputs::PinnedPair, windows_update_store::UpdateStore};
+    let (runtime, root, task) = update_state_fixture().await;
+    let directory = |name: &str| {
+        let path = root.join(name);
+        std::fs::create_dir(&path).unwrap();
+        treer_platform::secure_directory(&path).unwrap();
+        path
+    };
+    let installed = directory("installed");
+    let target = directory("target");
+    let job = directory("job");
+    for (path, bytes) in [(&installed, OLD), (&target, NEW)] {
+        for name in ["treer-agent-server.exe", "treer.exe"] {
+            std::fs::write(path.join(name), bytes).unwrap();
+            treer_platform::secure_file(&path.join(name)).unwrap();
+        }
+    }
+    let fixture = Fixture::new(|_| {});
+    let state = runtime
+        .windows_update_state_for_operation(Uuid::new_v4(), "ws_fixture", "srv_fixture")
+        .unwrap();
+    let admitted = AdmittedInputs::prepare_for_controller(
+        PinnedPair::open(&installed)
+            .unwrap()
+            .lock_installation()
+            .unwrap(),
+        PinnedPair::open(&target).unwrap(),
+        &fixture.documents(),
+        &fixture.key.verifying_key(),
+        state,
+    )
+    .unwrap();
+    let binding = admitted.binding().clone();
+    let reserved = admitted.reserve(UpdateStore::open(&job).unwrap()).unwrap();
+    // Execute only the SAME test executable, never the inert admitted image bytes.
+    let mut child = reserved
+        .spawn_owned_child(&runtime, &mut update_custody_command())
+        .unwrap();
+    assert!(child.poll(&runtime, &binding).unwrap().is_none());
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(installed.join("treer-agent-server.exe"))
+        .is_err());
+    assert!(std::fs::rename(root.join("configured-state"), root.join("moved-state")).is_err());
+    assert!(PinnedPair::open(&installed).is_err());
+    child.stop(&runtime, &binding).unwrap();
+    // Pins outlive process termination until this custody object is dropped.
+    assert!(std::fs::rename(root.join("configured-state"), root.join("moved-state")).is_err());
+    drop(child);
+    assert!(installed.join(".treer-controller-update.claim").exists());
+    assert_eq!(
+        std::fs::read(installed.join("treer-agent-server.exe")).unwrap(),
+        OLD
+    );
+    assert_eq!(
+        std::fs::read(target.join("treer-agent-server.exe")).unwrap(),
+        NEW
+    );
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn windows_update_state_native_admission_uses_pinned_runtime_path_not_private_decoy() {

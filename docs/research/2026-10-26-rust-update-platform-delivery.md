@@ -598,6 +598,53 @@ API references: [QueryFullProcessImageNameW](https://learn.microsoft.com/en-us/w
 [IsProcessInJob](https://learn.microsoft.com/en-us/windows/win32/api/jobapi/nf-jobapi-isprocessinjob),
 [WaitForSingleObject](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject).
 
+### Implemented leaf: created Child custody bound to selected runtime
+
+`ReservedInputs::spawn_owned_child` consumes the existing reservation, checks its
+runtime-owned state against the selected Controller instance, Host epoch,
+workspace/server and full operation binding BEFORE `Command::spawn`, then owns
+the actual returned `std::process::Child`. The opaque `ControllerUpdateChild`
+retains the entire reservation (image pins, installation lease and state-root
+pins), runtime and binding until after owned-child teardown. It cannot be
+constructed from a PID, process observation, JSON receipt or reported pathname.
+Neither a matching operation ID alone nor a second runtime with the same server
+and workspace is sufficient to query or stop it.
+
+Scoped `poll` uses the retained Child; scoped `stop` makes at most one teardown
+attempt using that Child. The stop latch precedes observation/signalling and is
+not cleared on failure. Drop cleans up only an owned child with no previous stop
+attempt; it does not retry an unknown observation/kill/wait. A failed spawn
+consumes the reservation and leaves its durable claim intact, without a retry
+entry. No PID reopening, process-name kill, Host operation or restart RPC occurs.
+Dropping the owner after an unknown outcome releases OS handles, not the durable
+claim; it does not establish quiescence or safe claim retirement.
+
+This is an INTERNAL custody primitive, not a production worker execution entry.
+The Command is still constructed by trusted in-process code; its executable and
+arguments are NOT authenticated by this leaf. The future coordinator must bind
+verified pre-spawn executable custody, restricted command/IPC and normal
+identity/Policy before invoking it. The image hashes in the retained reservation
+do not authenticate an arbitrary Command. No endpoint, capability enablement,
+Job escape, Controller restart, workload continuity or health evidence is added.
+
+Two new portable controls run a fixed ignored helper in the SAME test executable
+with cleared environment: foreign runtime/operation/workspace/server/digest
+refusal before spawn or stop, and retained Child exit-259 handling with repeated
+stop refusal. Author macOS focused entry passed both; binary/test strict Clippy,
+fmt, docs and diff checks passed. Controller Windows cross-compilation remains
+unavailable locally because its C dependencies lack a Windows cross-compiler;
+the native entry must establish Windows compilation as well as execution.
+The Windows-only third
+control consumes actual signed fixture admission/reservation and verifies pins,
+state-root denial and durable claim retention while owning the helper and after
+its termination. The admitted fixture image bytes remain inert and are never
+executed. Its native acceptance is NOT_RUN until the sole focused entry:
+
+`cargo test --locked -p treer-agent-server --bin treer-agent-server windows_update_child_ -- --nocapture`
+
+Windows requires exactly three passed, zero failed/ignored, exit zero plus
+independent task TEMP cleanup. No previous acceptance selector is repeated.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

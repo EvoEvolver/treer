@@ -1,5 +1,5 @@
-//! Signed input admission only. No execution, image replacement or capability
-//! activation. Freshness/high-water protection remains a separate missing layer.
+//! Signed input admission and internal linear custody. No exposed execution or
+//! capability activation. Freshness/high-water protection is a separate layer.
 use std::io::Read;
 
 use anyhow::{bail, Result};
@@ -216,8 +216,9 @@ impl AdmittedInputs {
     }
 }
 
-/// A consumed reservation with pinned inputs, deliberately no execution or
-/// second-reservation method. This is not a successful update receipt.
+/// A consumed reservation with pinned inputs and no second-reservation method.
+/// Its internal child-custody transfer is not authenticated worker admission or
+/// a successful update receipt.
 #[cfg(windows)]
 pub struct ReservedInputs(AdmittedInputs);
 
@@ -225,6 +226,25 @@ pub struct ReservedInputs(AdmittedInputs);
 impl ReservedInputs {
     pub fn binding(&self) -> &Binding {
         &self.0.binding
+    }
+
+    pub(crate) fn controller_state(&self) -> Result<&crate::controller::ControllerUpdateState> {
+        self.0
+            .state
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("windows_update_child_runtime_missing"))
+    }
+
+    /// Internal custody primitive, not an admitted worker execution entry. The
+    /// future coordinator must authenticate the executable and command before
+    /// invoking this; normal caller Policy and capability checks remain above it.
+    #[allow(dead_code)] // No production Windows worker/coordinator is wired.
+    pub(crate) fn spawn_owned_child(
+        self,
+        selected: &crate::controller::ControllerRuntime,
+        command: &mut std::process::Command,
+    ) -> Result<crate::controller::ControllerUpdateChild> {
+        crate::controller::ControllerUpdateChild::spawn_reserved(self, selected, command)
     }
 }
 
