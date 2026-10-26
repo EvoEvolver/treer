@@ -1425,6 +1425,11 @@ identity. The legacy 72-byte wire is unchanged and is not accepted as a fallback
 The same pre-await handshake latch covers both variants, including metadata
 failure and cancellation. Parent closes its one stream and checks full scope
 again after an exact ACK; the reservation/pins/claim never move or release.
+Closure here starts when the stream is taken for the exchange. Missing
+reservation or failed held-lock metadata inspection occurs before that take:
+the latch is consumed, but the pipe remains in its owner until teardown/drop.
+The native controls do not claim immediate closure for those pre-exchange
+metadata errors; they still cannot retry or fall back to the legacy variant.
 
 `acknowledge_creator_lock` is a separate internal continuation, not a new command
 or a changed terminal bootstrap. It checks the private operation UUID, the
