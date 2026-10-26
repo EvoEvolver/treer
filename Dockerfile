@@ -15,6 +15,7 @@ COPY --from=launcher /launcher-payload /launcher-payload
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY keys/official-release-ed25519.pub.pem ./keys/official-release-ed25519.pub.pem
 COPY launchers/agent/profiles.json ./launchers/agent/profiles.json
 COPY launchers/agent/provider-recipes.json ./launchers/agent/provider-recipes.json
 COPY skills ./skills

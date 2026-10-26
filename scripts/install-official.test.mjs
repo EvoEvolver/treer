@@ -50,3 +50,15 @@ test('rendered signed shell installs only the verified set into isolated paths, 
  for(const name of names)assert.match(readFileSync(join(name==='treer'?bins:servers,name),'utf8'),/should-never-execute/);
  assert.equal(existsSync(join(home,'should-never-execute')),false);
 });
+
+test('all Proxy Docker builders copy only the canonical public compile-time key',()=>{
+ const input='keys/official-release-ed25519.pub.pem';
+ for(const name of ['Dockerfile','Dockerfile.hosted','Dockerfile.single']){
+  const text=readFileSync(new URL('../'+name,import.meta.url),'utf8');
+  assert.match(text,/COPY keys\/official-release-ed25519\.pub\.pem \.\/keys\/official-release-ed25519\.pub\.pem/);
+  assert.doesNotMatch(text,/^COPY keys(?:\s|\/\s)/m,'never copy an entire custody directory');
+  assert.ok(text.indexOf('COPY '+input)<text.indexOf('cargo build'),'key must reach the Rust builder before compilation');
+ }
+ assert.equal(readFileSync(new URL('../'+input,import.meta.url),'utf8').includes('PRIVATE KEY'),false);
+ assert.doesNotMatch(readFileSync(new URL('../.dockerignore',import.meta.url),'utf8'),/^(?:keys|keys\/|\*\.pem)$/m);
+});

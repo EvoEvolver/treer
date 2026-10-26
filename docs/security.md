@@ -661,11 +661,18 @@ Treer state directory, file transfer rejects the `agent-private` root by
 protected identity, but the rest of the state directory relies on
 `machine.file` Policy (follow-up #127).
 
-Public Unix and Windows bootstrap installers check SHA256 hashes from the same
-artifact origin before installation; Windows also checks matching build identities.
-These same-origin checks do not independently authenticate the publisher or the
-downloaded bootstrap script. Bootstrap signature verification and rollback/freshness
-protection are not supported.
+On the official HTTPS Proxy origins (`proxy.canary.treer.ai` and
+`proxy.treer.ai`), the Unix bootstrap verifies the existing stable channel and
+version manifest's detached Ed25519 signatures against the embedded official
+SPKI. It checks the signed manifest digest and every selected binary's size and
+SHA-256 before installation. Node.js 22+ is required before installation-directory
+changes. The public bootstrap script itself is trusted through its HTTPS delivery,
+not an independently verified script signature. This does not prove freshness:
+there is no persistent accepted-version floor, expiry enforcement, or transactional
+whole-install rollback. Installing files is not a verified running-process upgrade.
+Self-hosted Unix and Windows bootstrap installers retain same-origin SHA256 checks;
+Windows also checks matching build identities. Those bootstrap paths do not
+independently authenticate the publisher with the official release signature.
 Compose image updates do not verify release signatures or enforce an anti-rollback
 floor. Signed Controller updates do not yet enforce release freshness or a
 persistent highest accepted version. Treer makes no end-to-end supply-chain proof,
