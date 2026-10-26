@@ -523,9 +523,17 @@ and independent task TEMP cleanup. The native control uses a normal from_sync
 runtime with a closed fixture Host and synthetic signed inert image bytes:
 configured-directory pinning, signed admission, exact configured startup backup
 instead of a same-volume private decoy, and pin retention across file publication.
-It never executes those image bytes or proves deployed configuration. Native
-execution/Windows Controller compilation for this leaf remain NOT_RUN pending
-the sole focused job. Author macOS binary/test strict Clippy passed.
+It never executes those image bytes or proves deployed configuration. Sole run
+`40310583031` passed all four tests (zero failed/ignored, exit zero) on Windows
+2022/Rust 1.90/fixed NTFS image `20261022.344.1`, exact source
+`9e3921607b0219af0cdee9c738eadbcb68096495`, wrapper
+`370cb3945c8551b6a39fb36fd22183137e807cf4`, after independent review #111:9495.
+Core checked all four names, summary, platform and empty TEMP/cleanup evidence;
+RESULT SHA256 is
+`5dbf3114306486b65dda92222b257becaed7c6a96a80d880402540ea23f98a66`.
+Receipts: `.treer/reviews/core111-windows-state-9e392160/artifact/`
+(`RESULT.json`, `platform.json`, `tests.log`). This accepts the internal runtime
+binding/snapshot scope only. Author macOS binary/test strict Clippy passed.
 
 No production updater command or capability entry is wired. Its future
 coordinator must call this internal selected-runtime entry after normal
@@ -547,7 +555,7 @@ requirements. Ordinary capability stays OFF and Host is untouched.
    install-wide claim and verified-image backup acceptance are complete within
    their stated scopes. Private startup snapshot/backup/evidence acceptance is
    also complete within the limits above. Runtime-owned state-root admission is
-   implemented as the next bounded leaf above, with native acceptance pending;
+   implemented with the four focused native-entry controls accepted above;
    publication evidence must follow real effects, never a generic setter.
 2. The Windows Controller/CLI file-pair publication and restoration leaf above
    has passed the four focused native controls above. Never treat restoring
