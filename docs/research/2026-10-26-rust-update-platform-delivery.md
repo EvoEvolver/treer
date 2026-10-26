@@ -1455,13 +1455,25 @@ SAMEtestexe and a real signed fixture reservation/runtime-owned state: foreign
 scope before consumption, actual inherited-lock ACK retaining lease/image/state
 pins and claim, shared-latch refusal of both variants, nonfile inheritance and
 cancelled peer refusal without legacy fallback. The admitted inert image is not
-executed. Native execution remains NOT_RUN until one independent source review
-and the sole Release focused Windows entry; no old selector or matrix is needed.
+executed. The sole Release native run is recorded below; no old selector or
+matrix was rerun.
 Both new portable controls passed on the author Mac (protocol: 1 passed/84
 filtered; Server: 1 passed/505 filtered, zero failures/ignored). Strict Controller
 bins/tests with the existing acceptance feature plus shared protocol Clippy,
 formatting, docs and diff checks passed. These do not compile/run the additional
-Windows-only controls; those remain the new native entry's responsibility.
+Windows-only controls; those were accepted separately in sole run `40349987092`,
+exact source `ee58e30435baeff231f3d2d92f7f1d8d3180bb08`, wrapper
+`9790237af3cce5033d239fe61aa1c54e4f933871`: Windows 2022/Rust 1.90, fixed NTFS
+image `20261022.344.1`, all three passed, zero failed/ignored, exit zero (300
+filtered). Independent TEMP inventory was empty, cleanup proven and empty root
+removed. Core matched exact source, command, names, platform/test log and
+`RESULT.json` SHA-256
+`eae2c3b32c366ecd55536164fbe81239070c307ff3274ffbf3b7de8cf3b30eeb`
+(#111:9657). One independent source review: #111:9654; its pre-exchange metadata
+closure qualification was added in docs-only `fa4f5167`, without changing the
+tested source or native contract. This accepts only context/actual-lock
+agreement, not full pins/state/Policy or lifecycle ownership transfer. No
+admitted image, installed process, Host or capability was activated.
 
 ## Remaining ordered leaves and waiting boundaries
 
