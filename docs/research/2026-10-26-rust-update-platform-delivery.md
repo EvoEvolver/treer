@@ -465,8 +465,19 @@ no-delete-sharing first/second-name refusal and compensation, stale candidates
 and evidence, and a platform-kernel partial-restoration failure produced by a
 retained duplicate of the new CLI pin. The last control is explicitly a platform
 file-effect test with opaque synthetic claim, not a signed Core operation or
-health test. Native execution and Windows Controller compilation are NOT_RUN
-until that entry actually runs. Windows GNU platform all-target strict Clippy
+health test. Native execution and Windows Controller compilation passed in sole
+run `40304321706`, exact source `1e638b1353f1fba9bf87b6399b630c0d74a7dc08`
+and wrapper `c6ad57b7e3b5a5361ac277ce869b23c6c62d979f`, after one independent
+source review (#111:9484). Windows 2022/Rust 1.90, fixed NTFS image
+`20261022.344.1`: four passed, zero failed/ignored, exit zero; independent TEMP
+inspection found no remaining entries and proved cleanup. Core independently
+checked the four test names, summary, platform and RESULT SHA256
+`15abcfdb8f7a9582993e561562ae225071bded1b74328782ef7ff6c63ecd04b9`.
+Receipts are under
+`.treer/reviews/core111-windows-pair-1e638b13/artifact/` (`RESULT.json`,
+`platform.json`, `tests.log`). This is file-effect acceptance only: no image
+executed, no runtime rollback/Job/health, claim retirement or production
+state-root admission was accepted. Windows GNU platform all-target strict Clippy
 and author macOS Controller binary/test strict Clippy cover local compilation;
 no accepted storage/intent/admission/backup leaf or platform matrix is repeated.
 
@@ -503,7 +514,7 @@ requirements. Ordinary capability stays OFF and Host is untouched.
    the state root to trusted installation/runtime configuration; publication
    evidence must follow real effects, never a generic setter.
 2. The Windows Controller/CLI file-pair publication and restoration leaf above
-   is implemented with native acceptance still pending. Never treat restoring
+   has passed the four focused native controls above. Never treat restoring
    files alone as successful runtime rollback.
 3. Implement Windows original-worker ownership/Job escape and Host-owned
    Controller-only restart plus original workload/epoch/identity checks. Native
