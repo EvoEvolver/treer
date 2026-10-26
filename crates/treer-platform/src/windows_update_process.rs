@@ -28,6 +28,26 @@ fn refused() -> io::Error {
     io::Error::other("windows_update_process_unconfirmed")
 }
 
+/// Read-only check of the ORIGINAL handle in a caller-owned Child. This never
+/// opens a PID or creates lifecycle authority. A successful instantaneous check
+/// is not a promise that another same-account actor cannot assign a Job later.
+/// No breakaway flags or enclosing Job policy are changed here.
+pub fn require_created_child_outside_jobs(child: &std::process::Child) -> io::Result<()> {
+    let handle = child.as_raw_handle();
+    // A process with application-selected exit code 259 is still exited.
+    if unsafe { WaitForSingleObject(handle, 0) } != WAIT_TIMEOUT {
+        return Err(refused());
+    }
+    let mut in_job = 0;
+    if unsafe { IsProcessInJob(handle, std::ptr::null_mut(), &mut in_job) } == 0
+        || in_job != 0
+        || unsafe { WaitForSingleObject(handle, 0) } != WAIT_TIMEOUT
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
 fn live(handle: &OwnedHandle) -> io::Result<()> {
     // Unlike STILL_ACTIVE alone this also refuses an exited process whose
     // application-selected exit code happens to be 259.

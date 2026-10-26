@@ -715,6 +715,46 @@ limitation remains; the sole native run established compilation and execution
 for this leaf. No earlier
 selector/matrix is repeated.
 
+### Implemented leaf: original-Child Job refusal boundary
+
+The internal custody owner can make one scoped Job check on the ORIGINAL
+`Child` handle returned by creation. The platform uses zero-time process waits
+before and after `IsProcessInJob(handle, NULL, ...)`; any Job membership,
+exited process (including application exit code 259), or unconfirmed query
+refuses. It does not reopen a PID or convert `ProcessObservation` into authority.
+Core validates the selected runtime instance, Host epoch and full operation
+binding before the query, then consumes the query attempt before calling the
+OS. Success and failure both forbid repeating this check on that owner. A
+foreign scope does not consume its check. Pins/reservation remain held and
+the existing one-attempt original-Child teardown remains available.
+
+This is an instantaneous negative safety prerequisite, not a durable outside-Job
+proof, readiness or permission to restart. Another same-account process could
+assign a Job after a successful check; a future handoff must address that race
+and continued ownership. This leaf neither sets breakaway flags nor alters the
+Host's kill-on-close Job. It does not implement authenticated worker IPC or
+call the check from a production coordinator. Ordinary capability remains OFF.
+
+New focused entry:
+`cargo test --locked -p treer-agent-server --bin treer-agent-server windows_update_job_boundary_ -- --nocapture`
+
+Two portable controls cover foreign scope before any query, single use after
+success/error and preservation of normal teardown. Two Windows controls query
+an actually created, task-owned helper assigned to a test Job, and a naturally
+exited original Child with exit code 259. They require refusal without escape
+or a second query. No admitted image, installed Controller or Host is run.
+Windows exact four/zero failed/zero ignored/exit zero and independent TEMP
+cleanup are required; native compilation/execution is currently NOT_RUN. No
+previous acceptance selector is repeated. This does not establish a successful
+outside-Job handoff or complete Windows updater acceptance.
+Author macOS new portable two-test entry, Controller binary/test strict Clippy,
+Windows GNU platform all-target strict Clippy, fmt/docs/diff checks passed.
+The local Windows Controller C toolchain limitation remains; native execution
+must also establish compilation of its Windows-only integration controls.
+
+API contracts: [IsProcessInJob](https://learn.microsoft.com/en-us/windows/win32/api/jobapi/nf-jobapi-isprocessinjob),
+[WaitForSingleObject](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject).
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

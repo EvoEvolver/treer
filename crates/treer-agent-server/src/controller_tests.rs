@@ -3032,6 +3032,154 @@ fn update_custody_fixture_child() {
 }
 
 #[tokio::test]
+async fn windows_update_job_boundary_scope_precedes_query_and_check_is_single_use() {
+    let (runtime, root, task) = update_state_fixture().await;
+    let (other, other_root, other_task) = update_state_fixture().await;
+    let binding = update_state_binding(Uuid::new_v4());
+    let state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    let mut child = update_state::ControllerUpdateChild::spawn_fixture(
+        &state,
+        &runtime,
+        &binding,
+        &mut update_custody_command(),
+    )
+    .unwrap();
+    assert!(child
+        .check_fixture_job_boundary(&other, &binding, |_| panic!(
+            "foreign runtime queried Child"
+        ))
+        .is_err());
+    let mut foreign = binding.clone();
+    foreign.operation_id = Uuid::new_v4();
+    assert!(child
+        .check_fixture_job_boundary(&runtime, &foreign, |_| panic!(
+            "foreign operation queried Child"
+        ))
+        .is_err());
+    child
+        .check_fixture_job_boundary(&runtime, &binding, |_| Ok(()))
+        .unwrap();
+    assert!(child
+        .check_fixture_job_boundary(&runtime, &binding, |_| panic!("repeated job query"))
+        .is_err());
+    assert!(child.poll(&runtime, &binding).unwrap().is_none());
+    child.stop(&runtime, &binding).unwrap();
+    drop(child);
+    drop(state);
+    drop(runtime);
+    drop(other);
+    task.abort();
+    other_task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(other_root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_job_boundary_query_error_consumes_check_but_not_teardown() {
+    let (runtime, root, task) = update_state_fixture().await;
+    let binding = update_state_binding(Uuid::new_v4());
+    let state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    let mut child = update_state::ControllerUpdateChild::spawn_fixture(
+        &state,
+        &runtime,
+        &binding,
+        &mut update_custody_command(),
+    )
+    .unwrap();
+    let error = child
+        .check_fixture_job_boundary(&runtime, &binding, |_| {
+            anyhow::bail!("fixed fixture query refusal")
+        })
+        .unwrap_err();
+    assert_eq!(error.to_string(), "fixed fixture query refusal");
+    assert!(child
+        .check_fixture_job_boundary(&runtime, &binding, |_| panic!("unknown query retried"))
+        .is_err());
+    child.stop(&runtime, &binding).unwrap();
+    assert!(child
+        .check_fixture_job_boundary(&runtime, &binding, |_| panic!("stopped Child queried"))
+        .is_err());
+    drop(child);
+    drop(state);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_job_boundary_native_original_child_in_job_refuses_without_escape() {
+    let (runtime, root, task) = update_state_fixture().await;
+    let binding = update_state_binding(Uuid::new_v4());
+    let state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    let mut child = update_state::ControllerUpdateChild::spawn_fixture(
+        &state,
+        &runtime,
+        &binding,
+        &mut update_custody_command(),
+    )
+    .unwrap();
+    let job = child.assign_fixture_job();
+    let error = child
+        .check_worker_job_boundary(&runtime, &binding)
+        .unwrap_err();
+    assert_eq!(error.to_string(), "windows_update_child_job_unconfirmed");
+    assert!(child.check_worker_job_boundary(&runtime, &binding).is_err());
+    // Refusing a query neither escapes the Job nor signals its owned Child.
+    assert!(child.poll(&runtime, &binding).unwrap().is_none());
+    child.stop(&runtime, &binding).unwrap();
+    drop(job);
+    drop(child);
+    drop(state);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_job_boundary_native_exited_259_child_cannot_pass_live_check() {
+    let (runtime, root, task) = update_state_fixture().await;
+    let binding = update_state_binding(Uuid::new_v4());
+    let state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    let mut child = update_state::ControllerUpdateChild::spawn_fixture(
+        &state,
+        &runtime,
+        &binding,
+        &mut update_custody_command(),
+    )
+    .unwrap();
+    child.finish_fixture_input();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.poll(&runtime, &binding).unwrap() {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "own helper exit deadline"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert_eq!(status.code(), Some(259));
+    assert!(child.check_worker_job_boundary(&runtime, &binding).is_err());
+    assert_eq!(child.stop(&runtime, &binding).unwrap(), status);
+    drop(child);
+    drop(state);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn windows_update_child_scope_refuses_before_spawn_and_before_owned_stop() {
     let (runtime, root, task) = update_state_fixture().await;
     let (other, other_root, other_task) = update_state_fixture().await;

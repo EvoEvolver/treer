@@ -151,6 +151,7 @@ pub(crate) struct ControllerUpdateChild {
     evidence: ControllerStateEvidence,
     binding: crate::windows_update_intent::Binding,
     stop_attempted: bool,
+    job_check_attempted: bool,
     #[cfg(windows)]
     _reservation: Option<crate::windows_update_admission::ReservedInputs>,
 }
@@ -178,6 +179,7 @@ impl ControllerUpdateChild {
             evidence,
             binding,
             stop_attempted: false,
+            job_check_attempted: false,
             _reservation: Some(reservation),
         })
     }
@@ -199,6 +201,7 @@ impl ControllerUpdateChild {
             evidence,
             binding,
             stop_attempted: false,
+            job_check_attempted: false,
             _reservation: Some(reservation),
         })
     }
@@ -218,6 +221,7 @@ impl ControllerUpdateChild {
             evidence: state.evidence.clone(),
             binding: binding.clone(),
             stop_attempted: false,
+            job_check_attempted: false,
             #[cfg(windows)]
             _reservation: None,
         })
@@ -260,6 +264,39 @@ impl ControllerUpdateChild {
         }
     }
 
+    // Scope refusal does not consume another runtime's check. Once the exact
+    // owner starts the query, success OR error consumes it. No serialized proof
+    // or new lifecycle authority is returned; pins/reservation remain owned.
+    #[cfg(any(windows, test))]
+    fn check_job_boundary(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+        query: impl FnOnce(&Child) -> Result<()>,
+    ) -> Result<()> {
+        self.matches(selected, binding)?;
+        if self.stop_attempted || self.job_check_attempted {
+            bail!("windows_update_child_job_check_refused");
+        }
+        self.job_check_attempted = true;
+        query(&self.child)
+    }
+
+    /// Only the created Child, never ProcessObservation/PID adoption. This is
+    /// an instantaneous prerequisite for a future handoff, not readiness,
+    /// authenticated IPC, successful breakaway or continued survival evidence.
+    #[cfg(windows)]
+    pub(crate) fn check_worker_job_boundary(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+    ) -> Result<()> {
+        self.check_job_boundary(selected, binding, |child| {
+            treer_platform::windows_update_process::require_created_child_outside_jobs(child)
+                .map_err(|_| anyhow::anyhow!("windows_update_child_job_unconfirmed"))
+        })
+    }
+
     /// One teardown attempt, on the original Child handle only. Set the latch
     /// BEFORE querying/signalling: an error must not cause Drop or a caller to
     /// repeat an uncertain lifecycle mutation. No PID reopen or Host operation.
@@ -288,9 +325,28 @@ impl ControllerUpdateChild {
     }
 
     #[cfg(test)]
+    pub(super) fn check_fixture_job_boundary(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+        query: impl FnOnce(&Child) -> Result<()>,
+    ) -> Result<()> {
+        self.check_job_boundary(selected, binding, query)
+    }
+
+    #[cfg(test)]
     pub(super) fn finish_fixture_input(&mut self) {
         use std::io::Write;
         self.child.stdin.take().unwrap().write_all(b"x").unwrap();
+    }
+
+    #[cfg(all(windows, test))]
+    pub(super) fn assign_fixture_job(&self) -> treer_platform::ProcessTreeGuard {
+        // Test-only assignment of our OWN original Child. No production PID
+        // adoption/termination helper is exposed by this leaf.
+        treer_platform::ProcessTreeGuard::for_process(self.child.id())
+            .unwrap()
+            .unwrap()
     }
 }
 
