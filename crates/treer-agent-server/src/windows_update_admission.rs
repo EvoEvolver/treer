@@ -467,3 +467,7 @@ pub(crate) mod tests;
 mod backup;
 #[cfg(windows)]
 pub use backup::{BackedUpInputs, FilePairPhase, PublishedInputs, StartupBackedUpInputs};
+
+#[cfg(any(windows, test))]
+#[path = "windows_update_receiver_state.rs"]
+mod receiver_state;

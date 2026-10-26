@@ -4659,6 +4659,92 @@ async fn windows_update_lock_binding_native_nonfile_and_cancel_never_fall_back()
 
 #[cfg(windows)]
 #[tokio::test]
+async fn windows_update_receiver_state_native_loaded_store_and_later_fence_invalidation() {
+    use crate::windows_update_admission::tests::{Fixture, NEW};
+    let (runtime, root, task) = update_state_fixture().await;
+    let mut sender = update_launch_reservation(&runtime, &root, NEW);
+    let fixture = Fixture::new(|_| {});
+    let mut received = sender
+        .receiver_descriptor(&runtime)
+        .unwrap()
+        .receive(&fixture.documents(), &fixture.key.verifying_key())
+        .unwrap()
+        .verify_runtime_snapshot()
+        .unwrap();
+    received.inspect_snapshot().unwrap();
+    let configured = root.join("configured-state");
+    assert!(std::fs::rename(&configured, root.join("moved-state")).is_err());
+    // The SAME loaded store may still update its real v2 denial fences. The
+    // receiver has directory guards, NOT a file freeze or a startup-write CAS.
+    runtime.inner.startup_store.deny_absent("ag_later").unwrap();
+    assert_eq!(
+        received.inspect_snapshot().unwrap_err().to_string(),
+        "windows_update_receiver_state_refused"
+    );
+    assert!(received.inspect_snapshot().is_err());
+    let value: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(configured.join("srv_fixture-agent-startup.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["version"], 2);
+    assert_eq!(
+        value["denied_agent_ids"],
+        serde_json::json!(["ag_deleted", "ag_later"])
+    );
+    drop(received);
+    assert!(sender.receiver_descriptor(&runtime).is_err());
+    assert!(sender.spawn_worker_process().is_err());
+    drop(sender);
+    assert!(root
+        .join("installed/.treer-controller-update.claim")
+        .is_file());
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_receiver_state_native_invalid_fence_never_admits_or_replays() {
+    use crate::windows_update_admission::tests::{Fixture, NEW};
+    for bytes in [
+        b"{".as_slice(),
+        br#"{"version":1,"entries":[],"denied_agent_ids":["ag_deleted"]}"#,
+        br#"{"version":2,"entries":[],"denied_agent_ids":["ag_deleted","ag_deleted"]}"#,
+    ] {
+        let (runtime, root, task) = update_state_fixture().await;
+        let mut sender = update_launch_reservation(&runtime, &root, NEW);
+        let fixture = Fixture::new(|_| {});
+        let received = sender
+            .receiver_descriptor(&runtime)
+            .unwrap()
+            .receive(&fixture.documents(), &fixture.key.verifying_key())
+            .unwrap();
+        // Tamper only the disposable runtime fixture file, never a live store.
+        std::fs::write(
+            root.join("configured-state/srv_fixture-agent-startup.json"),
+            bytes,
+        )
+        .unwrap();
+        let error = received
+            .verify_runtime_snapshot()
+            .err()
+            .expect("invalid snapshot must refuse");
+        assert_eq!(error.to_string(), "windows_update_receiver_state_refused");
+        assert!(sender.receiver_descriptor(&runtime).is_err());
+        assert!(sender.spawn_worker_process().is_err());
+        drop(sender);
+        assert!(root
+            .join("installed/.treer-controller-update.claim")
+            .is_file());
+        drop(runtime);
+        task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn windows_update_receiver_native_selected_descriptor_keeps_original_custody() {
     use crate::windows_update_admission::tests::{Fixture, NEW, OLD};
     let (runtime, root, task) = update_state_fixture().await;

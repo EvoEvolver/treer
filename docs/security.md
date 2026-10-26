@@ -226,9 +226,17 @@ or configuration contents. Failed launch retains the newly saved specification.
   another receiver attempt, fixed worker spawn or parent pair publication.
   This is an in-process source boundary, not child-side IPC authentication,
   caller Policy admission or a permission transfer. Original runtime state and
-  fences remain owned by the sender; independent receiver state/fence admission,
-  explicit custody transfer and release authority are still required before a
-  production worker handoff. Success/creator exit never grants them.
+  fences remain owned by the sender. The consuming receiver-state stage gets
+  its directory only from that loaded runtime authority and independently pins
+  it before comparing fixed-file snapshots by physical ID and full raw digest.
+  It reuses complete v1/v2 scope/denial-fence validation, retains no raw entries
+  or credentials, and exposes no restore method. A changed/missing/invalid
+  snapshot or read error permanently invalidates its read-only observation.
+  Directory pins do not freeze legitimate StartupStore file replacements;
+  successful snapshot inspection is not a concurrent-write CAS or permission to
+  restore stale state. Cross-process authority, explicit custody transfer and
+  original-owner release are still required for a production worker handoff.
+  Success/creator exit never grants them.
 
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the

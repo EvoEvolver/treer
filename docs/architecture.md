@@ -133,8 +133,12 @@ readers to zero and compares their complete digests to the original binding.
 Both descriptor and successful receiver borrow the sender, retaining original
 pins/lease/claim/runtime state rather than granting a release permit. One
 receiver attempt excludes repeat admission, fixed worker spawn and parent pair
-publication. This source seam is in-process only; worker IPC and independent
-runtime-state/fence re-admission are not wired.
+publication. A consuming receiver-state stage independently pins the SAME
+runtime-derived configured directory and compares checked startup snapshots by
+file ID and complete raw digest, including v2 denial fences. Read-only inspection
+permanently invalidates the observation on any change/error; normal StartupStore
+writes remain possible. These are in-process source seams, not worker IPC,
+startup-write CAS, state restoration or lifecycle authority transfer.
 
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and

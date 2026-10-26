@@ -12,6 +12,17 @@ pub struct BackupDirectory {
 }
 
 impl BackupDirectory {
+    /// Independent physical-directory guards under this owner's existing pins.
+    /// This does not lock startup-store contents or prevent atomic file updates.
+    pub fn repin(&self) -> io::Result<Self> {
+        let expected = self.identity()?;
+        let directory = Self::open(&self.path)?;
+        if directory.identity()? != expected {
+            return Err(io::Error::other("startup directory changed"));
+        }
+        Ok(directory)
+    }
+
     /// One bounded, checked inode snapshot. Absence means only NotFound at this
     /// observation, not a fence against later Controller startup-store writes.
     pub fn startup_snapshot(&self, name: &str) -> io::Result<Option<(u64, Vec<u8>)>> {

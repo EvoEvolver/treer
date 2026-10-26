@@ -1577,6 +1577,60 @@ original-owner release permission. No feature, extra binary build, old selector
 or matrix, admitted image spawn, live installation, Host or capability action
 was performed.
 
+## Runtime-derived receiver startup snapshot and fences
+
+The consuming `ReceivedInputs::verify_runtime_snapshot` stage takes no new path
+or authority input. It uses the original selected runtime's already-loaded
+StartupStore directory and fixed server filename, independently re-pins that
+physical private fixed-NTFS directory under the sender's guards, and compares
+sender/receiver checked reads by exact file ID and complete raw digest. Both
+reads reuse the existing bounded startup validator, including real v1/v2 format,
+workspace/server/generation scope, mixed/denial-only stores and denial-fence
+limits/conflicts. Absence is just two NotFound observations. Neither private
+same-volume directories nor a deserialized state claim can construct this type.
+
+The result retains image admission and its original sender borrow, independent
+directory guards and only file ID/digest metadata; raw entries/credentials are
+not cached or emitted. `inspect_snapshot` is explicit read-only reconciliation.
+Any changed, invalid or missing snapshot, scope failure or read error permanently
+invalidates that observation, with a static refusal and no retry/repair/restore.
+Full raw-byte hashing prevents dropping denial fences or unknown payload fields
+from the comparison. No startup-write freeze is introduced: directory guards
+permit the loaded store's legitimate atomic file updates. An update after a
+successful read invalidates the old observation at the next inspection; success
+is **not a concurrent-write CAS** or a future state-restoration permit.
+
+This remains an in-process snapshot seam. No external worker descriptor,
+production IPC, original-owner release, claim retirement, startup restoration,
+Controller/Host lifecycle or capability is wired. The next state effect boundary
+needs an explicit coordination/CAS contract against the loaded writer, not an
+inference from creator exit, matching hashes or a private directory.
+
+New `windows_update_receiver_state_` controls comprise portable2 plus native2.
+Portable controls bind full v1/v2 raw bytes, fences, physical ID and absence,
+refusing invalid bounds/fences/scope. Native controls use the real configured
+runtime store: a subsequent normal v2 fence write succeeds and permanently
+invalidates the old receiver snapshot; malformed/v1-with-fence/duplicate-fence
+fixture files refuse state admission without releasing/replaying the sender.
+Author Mac focused two passed (508 filtered), strict Server bins/tests Clippy
+with the existing acceptance feature and strict Platform Windows/Linux
+cross-target Clippy passed, along with fmt/docs/diff. One independent source-only
+review (#111:9683) accepted the stated snapshot scope.
+
+Sole native run `40359411475` accepted exact source
+`93e0e12bee906d45c0f4661f0b7803f7f40a0c84`, wrapper
+`6f4b79bbc561024f2361a2388dab3ca23fddaeac`: Windows 2022/Rust 1.90,
+fixed NTFS image `20261022.344.1`, all four new selector tests passed, zero
+failed/ignored, exit zero (307 filtered). Independent TEMP inventory was empty,
+cleanup proven and empty root removed. Core matched source, command, four names,
+platform and test log against `RESULT.json` SHA-256
+`23cb045499e3ae153b4a283f8bfa75dec694afc023eba45f696979c29e02bb30`
+(#111:9686). No old broad receiver selector/matrix, feature, extra binary build,
+admitted image spawn, live installation, Host or capability action occurred.
+Only task-private inert reservations/state files were involved. This accepts
+point-in-time snapshot comparison, not freeze/CAS/absence fencing, state
+restoration, cross-process authority or original-owner release.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,
