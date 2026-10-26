@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createServer } from "node:http";
+import { createServer, type RequestListener } from "node:http";
+import type { AddressInfo } from "node:net";
 import { fetchRelease, releaseBase, releasePath, releasePlatform, validateFiles } from "../scripts/latest-download.mjs";
 
-async function server(t, handler) {
+async function server(t: test.TestContext, handler: RequestListener) {
   const http = createServer(handler);
-  await new Promise(resolve => http.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>(resolve => http.listen(0, "127.0.0.1", resolve));
   t.after(() => { http.closeAllConnections(); http.close(); });
-  return releaseBase(`http://127.0.0.1:${http.address().port}/`);
+  return releaseBase(`http://127.0.0.1:${(http.address() as AddressInfo).port}/`);
 }
 
 test("platform and object selection refuses unsupported targets and URL/path injection", () => {
