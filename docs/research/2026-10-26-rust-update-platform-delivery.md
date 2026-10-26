@@ -110,13 +110,19 @@ graph needs an unavailable cross C compiler). The single native entry for this
 new leaf is `cargo test --locked -p treer-agent-server --bin treer-agent-server
 windows_update_intent_ -- --nocapture`: expect three tests on Windows, including
 the reservation test, with zero ignored/failed tests and independent fixture
-cleanup. That native execution is pending; no full matrix or installed updater
-is required.
+cleanup. Native execution completed in the sole run `40281612432`, source
+`720c522f1a3991313bcd00d003c383b5d12583a7`, wrapper
+`a60592d91045ead2e345c87758c097445205c436`: all three passed, zero failed/ignored,
+exit zero, on fixed NTFS (Windows 2022 image `20261022.344.1`). Independent
+temporary-directory inventory was empty and cleanup proven. Core matched the
+platform record, test log and `RESULT.json` SHA-256
+`8a7abe78cb9551de6fbb6ea2d6c3fa56dde7a4b886a5d228fe1eeb8b9248b359`
+(#111:9418). The single source review is #111:9412. This accepts the intent/schema
+leaf only, not signature admission, image replacement or a complete transaction.
 
 ## Remaining ordered leaves and waiting boundaries
 
-1. Native NTFS store acceptance is complete. The single-use intent schema above
-   is the next leaf; its native reservation check is pending. Following that,
+1. Native NTFS store and single-use intent acceptance are complete. Next
    connect verified admission and add phase-specific evidence for actual image
    publication, never a generic setter that could manufacture completion.
 2. Implement Windows verified Controller/CLI image backup and two-rename
