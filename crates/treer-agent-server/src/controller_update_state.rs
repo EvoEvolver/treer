@@ -305,6 +305,54 @@ impl ControllerUpdateChild {
         })
     }
 
+    /// Fixed signed image + configuration-selected receiver trust. Failure
+    /// returns the original reservation so callers retain pins/lease/claim even
+    /// after an unknown creation result. No fallback to the legacy ACK worker.
+    #[cfg(windows)]
+    pub(crate) fn spawn_verified_input_reserved(
+        mut reservation: crate::windows_update_admission::ReservedInputs,
+        selected: &ControllerRuntime,
+        trust: &crate::windows_update_worker_entry::Trust,
+    ) -> std::result::Result<
+        Self,
+        (
+            anyhow::Error,
+            Box<crate::windows_update_admission::ReservedInputs>,
+        ),
+    > {
+        let mut spawn = || -> Result<_> {
+            let state = reservation.controller_state()?;
+            state.matches_selected(selected, reservation.binding())?;
+            let runtime = state.runtime.clone();
+            let evidence = state.evidence.clone();
+            let binding = reservation.binding().clone();
+            let selector = Uuid::new_v4();
+            let pipe = treer_platform::windows_update_pipe::CreatedChildPipe::bind(
+                &selector.simple().to_string(),
+            )?;
+            let child = reservation.spawn_input_process_for_pipe(selector, trust)?;
+            Ok((runtime, evidence, binding, pipe, child))
+        };
+        match spawn() {
+            Ok((runtime, evidence, binding, pipe, child)) => Ok(Self {
+                child,
+                runtime,
+                evidence,
+                binding,
+                stop_attempted: false,
+                job_check_attempted: false,
+                pipe_attempted: false,
+                handshake_attempted: false,
+                binding_acknowledged: false,
+                completion_attempted: false,
+                _worker_pipe: None,
+                _bootstrap_pipe: Some(pipe),
+                _reservation: Some(reservation),
+            }),
+            Err(error) => Err((error, Box::new(reservation))),
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn spawn_fixture(
         state: &ControllerUpdateState,
@@ -581,6 +629,26 @@ impl ControllerUpdateChild {
             .ok_or_else(|| anyhow::anyhow!("windows_update_bootstrap_already_attempted"))?;
         self.accept_worker_pipe(selected, binding, pipe).await?;
         self.exchange_worker_binding(selected, binding).await
+    }
+
+    /// Accept only this creator's original Child, then exchange signed inputs.
+    /// Neither receipt nor terminal exit changes readiness/completion or sender
+    /// custody. Unknown/cancellation consumes the original transport/latches.
+    #[cfg(windows)]
+    pub(crate) async fn exchange_created_inputs(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+        documents: &crate::windows_update_admission::Documents<'_>,
+    ) -> Result<()> {
+        self.matches(selected, binding)?;
+        let pipe = self
+            ._bootstrap_pipe
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("windows_update_worker_input_already_attempted"))?;
+        self.accept_worker_pipe(selected, binding, pipe).await?;
+        self.exchange_worker_inputs(selected, binding, documents)
+            .await
     }
 
     /// Observe only the retained original Child after a successful binding ACK.

@@ -258,6 +258,20 @@ or configuration contents. Failed launch retains the newly saved specification.
   original-owner release are still required for a production worker handoff.
   Success/creator exit never grants them.
 
+  The private input-receiver terminal entry separately resolves trust before
+  reading any offer. Its creator reuses the normal release resolver, preserving
+  explicit/local-key priority and fail-closed errors; only a missing local key
+  on the exact official base selects the bundled official key. The child uses
+  that fixed bundle or the selected absolute public-key path, never a key from
+  metadata, a receipt or the offer. Key reads are limited to 16 KiB. The launch
+  preflight requires the configured key to match the original admission and
+  rejects configuration changes before spawning. This remains a local OS-owner
+  trust boundary, not independent child Policy or protection from that owner
+  changing configuration. All creation failures return original sender custody;
+  the consumed creation attempt is not a retry token. Successful reception and
+  a terminal zero exit do not release sender pins/lease/claim or grant mutation,
+  restart, recovery or readiness. Product activation remains disabled.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

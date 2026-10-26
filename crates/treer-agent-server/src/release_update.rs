@@ -1,5 +1,5 @@
 //! Consumer of the signed wire format published by scripts/release-r2.mjs.
-use std::path::Path;
+use std::{io::Read, path::Path};
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -72,9 +72,15 @@ impl VerifiedBinary {
 }
 
 pub(super) fn load_public_key(path: &Path) -> Result<VerifyingKey> {
-    let pem = std::fs::read_to_string(path).with_context(|| format!(
+    let mut pem = String::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(16 * 1024 + 1).read_to_string(&mut pem))
+        .with_context(|| format!(
         "cannot read trusted release public key {}; provision the publisher's SPKI PEM public key locally or use --public-key (TREER_RELEASE_PUBLIC_KEY)", path.display()
     ))?;
+    if pem.len() > 16 * 1024 {
+        bail!("release public key exceeds 16 KiB");
+    }
     VerifyingKey::from_public_key_pem(&pem)
         .context("release public key must be an Ed25519 SPKI PEM key")
 }

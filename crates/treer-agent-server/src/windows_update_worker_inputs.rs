@@ -311,7 +311,8 @@ pub(crate) mod native {
     /// Child-side one-shot receive from its original creator's pipe. The key
     /// MUST come from independent installed trust, never the offer. Creator
     /// identity and runtime context are not independently established Policy.
-    /// No production private-argv branch calls this boundary yet.
+    /// The separate private terminal receiver supplies configuration-selected
+    /// trust; product coordinator/capability activation remains unwired.
     #[allow(dead_code)]
     pub(crate) async fn receive_creator_inputs(
         selector: &str,

@@ -316,6 +316,20 @@ impl ReservedInputs {
         crate::controller::ControllerUpdateChild::spawn_verified_reserved(self, selected)
     }
 
+    /// Returns original custody on ALL failures. A creation attempt is latched
+    /// before trust recheck/hash/spawn; returned custody is never a replay token.
+    #[allow(dead_code)] // No product coordinator/capability route is wired.
+    pub(crate) fn spawn_owned_input_receiver(
+        self,
+        selected: &crate::controller::ControllerRuntime,
+        trust: &crate::windows_update_worker_entry::Trust,
+    ) -> std::result::Result<crate::controller::ControllerUpdateChild, (anyhow::Error, Box<Self>)>
+    {
+        crate::controller::ControllerUpdateChild::spawn_verified_input_reserved(
+            self, selected, trust,
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn spawn_worker_process(&mut self) -> Result<std::process::Child> {
         self.spawn_worker_process_for_pipe(uuid::Uuid::new_v4())
@@ -324,6 +338,22 @@ impl ReservedInputs {
     pub(crate) fn spawn_worker_process_for_pipe(
         &mut self,
         selector: uuid::Uuid,
+    ) -> Result<std::process::Child> {
+        self.spawn_worker_process_selected(selector, None)
+    }
+
+    pub(crate) fn spawn_input_process_for_pipe(
+        &mut self,
+        selector: uuid::Uuid,
+        trust: &crate::windows_update_worker_entry::Trust,
+    ) -> Result<std::process::Child> {
+        self.spawn_worker_process_selected(selector, Some(trust))
+    }
+
+    fn spawn_worker_process_selected(
+        &mut self,
+        selector: uuid::Uuid,
+        trust: Option<&crate::windows_update_worker_entry::Trust>,
     ) -> Result<std::process::Child> {
         if self.0.worker_attempted || self.0.receiver_attempted {
             bail!("windows_update_worker_already_attempted");
@@ -336,18 +366,20 @@ impl ReservedInputs {
         }
         self.controller_state()?.matches(self.binding())?;
         self.binding().validate()?;
+        let arguments = if let Some(trust) = trust {
+            trust.arguments(self.binding().operation_id, selector, &self.0.verifying_key)?
+        } else {
+            vec![
+                "--controller-update-worker".into(),
+                self.binding().operation_id.to_string().into(),
+                selector.simple().to_string().into(),
+            ]
+        };
         let (mut controller, _) = self.0._target.files();
         require_worker_image(&mut controller, &self.binding().controller_sha256)?;
         self.0
             ._target
-            .spawn_pinned_controller(
-                &self.0._installed,
-                &[
-                    "--controller-update-worker".into(),
-                    self.binding().operation_id.to_string().into(),
-                    selector.simple().to_string().into(),
-                ],
-            )
+            .spawn_pinned_controller(&self.0._installed, &arguments)
             .map_err(|_| anyhow::anyhow!("windows_update_worker_spawn_unknown"))
     }
 }

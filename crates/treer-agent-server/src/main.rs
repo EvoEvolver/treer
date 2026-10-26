@@ -29,6 +29,8 @@ mod windows_update_envelope;
 mod windows_update_handshake;
 #[cfg(any(windows, test))]
 pub mod windows_update_intent;
+#[cfg(any(windows, test))]
+mod windows_update_worker_entry;
 mod workload_proxy;
 
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -209,6 +211,14 @@ struct ServerArgs {
 }
 
 fn main() -> Result<()> {
+    #[cfg(windows)]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(windows_update_worker_entry::SWITCH))
+    {
+        // Terminal input receiver before normal configuration/Host/helpers.
+        // Neither a received receipt nor exit zero grants update authority.
+        return windows_update_worker_entry::run(std::env::args_os().skip(2));
+    }
     #[cfg(windows)]
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new("--controller-update-worker"))

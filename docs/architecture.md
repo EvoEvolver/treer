@@ -153,9 +153,20 @@ Only then does it send the distinct input-received receipt bound to the whole
 offer and fresh challenge, returning owned receiver handles and scope evidence.
 The creator keeps its original reservation after receipt or child exit. There
 is no release token, publication, restart, recovery or readiness conversion.
-The new receiver is not wired to the production private argv entry; that entry
-still only performs the legacy terminal ACK. Isolated separate-process helper
-acceptance cannot stand in for signed-image worker/Job survival or full updates.
+The separate `--controller-update-receive-inputs` private terminal entry loads
+trust before opening the creator pipe or reading the offer. Its creator uses the
+normal release resolver: explicit key, existing local key, or the bundled key
+only for the exact official base when the local key is absent. Explicit/local
+errors never fall back. The child reloads the selected absolute key path or the
+fixed official bundle; no offer field selects a key. Public-key reads are bounded
+to 16 KiB. Creation preflight compares that key with the original admission key;
+failure returns the original reservation with its creation-attempt latch intact.
+The child receives signed inputs, rechecks its retained runtime-derived startup
+snapshot, then explicitly drops its read-only receiver custody and exits. This
+does not acknowledge sender release or set readiness/completion. The legacy
+terminal ACK entry is unchanged. The product coordinator/capability route is
+still unwired; signed private dev-image acceptance does not prove a complete
+transaction, independent child Policy, Job survival or runtime rollback.
 
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
