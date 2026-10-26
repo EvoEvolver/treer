@@ -143,7 +143,10 @@ pub(super) fn bootstrap_commands(public_url: &Url, enrollment_key: &str) -> (Str
 pub(super) async fn install_script(Extension(config): Extension<BootstrapConfig>) -> Response {
     let script = render_install_script(&config.public_url);
     (
-        [(header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
         script,
     )
         .into_response()
@@ -319,6 +322,23 @@ fn render_windows_install_script(public_url: &Url) -> String {
 }
 
 pub(super) fn render_install_script(public_url: &Url) -> String {
+    if public_url.scheme() == "https"
+        && public_url.port_or_known_default() == Some(443)
+        && matches!(
+            public_url.host_str(),
+            Some("proxy.canary.treer.ai" | "proxy.treer.ai")
+        )
+    {
+        return include_str!("../install-official.sh")
+            .replace(
+                "__TREER_OFFICIAL_DOWNLOAD_JS__",
+                &include_str!("../install-official.mjs").replace(
+                    "__TREER_OFFICIAL_RELEASE_PEM__",
+                    include_str!("../../../../keys/official-release-ed25519.pub.pem"),
+                ),
+            )
+            .replace("__TREER_PATH_SETUP__", include_str!("../install-path.sh"));
+    }
     let mut artifact_base = public_url.clone();
     artifact_base.set_path("/artifacts/");
     format!(
@@ -427,6 +447,38 @@ mod cleartext_tests {
                 remote,
                 "{url}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod official_unix_installer_tests {
+    use super::*;
+
+    #[test]
+    fn official_origins_embed_signed_stable_and_fixed_key() {
+        for host in ["proxy.canary.treer.ai", "proxy.treer.ai"] {
+            let script = render_install_script(&Url::parse(&format!("https://{host}/")).unwrap());
+            assert!(script.contains("https://releases.treer.ai/"));
+            assert!(script.contains("channels/stable.json"));
+            assert!(script.contains(include_str!(
+                "../../../../keys/official-release-ed25519.pub.pem"
+            )));
+            assert!(!script.contains("__TREER_"));
+            assert!(!script.contains("/artifacts"));
+        }
+    }
+
+    #[test]
+    fn self_hosted_origins_keep_existing_artifact_bootstrap() {
+        for origin in [
+            "https://proxy.example/",
+            "http://localhost:8787/",
+            "https://proxy.canary.treer.ai:444/",
+        ] {
+            let script = render_install_script(&Url::parse(origin).unwrap());
+            assert!(script.contains("/artifacts"));
+            assert!(!script.contains("channels/stable.json"));
         }
     }
 }
