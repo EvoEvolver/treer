@@ -448,20 +448,26 @@ test.describe('resizable tree sidebar', () => {
     await sidebarHidden(page)
     expect(await page.evaluate(() => document.activeElement?.getAttribute('role'))).toBe('tab')
   })
-  for (const [lang, name, text] of [['en', 'MacIntel', 'Drag to resize · ⌘B to hide sidebar'], ['en', 'Win32', 'Drag to resize · Ctrl+B to hide sidebar'], ['zh', 'MacIntel', '拖动调整宽度 · ⌘B 隐藏侧边栏']] as const) test(`the resize handle teaches the shortcut (${lang}, ${name})`, async ({ page }, info) => {
+  for (const [lang, name] of [['en', 'MacIntel'], ['en', 'Win32'], ['zh', 'MacIntel']] as const) test(`the resize handle has no hover or focus hint (${lang}, ${name})`, async ({ page }, info) => {
     await platform(page, name)
     await page.addInitScript((value) => localStorage.setItem('treer-lang', value), lang)
     await page.goto('/')
     await browseTreeOnMobile(page)
     const handle = page.getByRole('separator')
     await handle.hover()
-    await expect(page.getByRole('tooltip')).toHaveText(text)
+    await page.waitForTimeout(500) // Exceeds the Console tooltip delay (350ms).
+    await expect(page.getByRole('tooltip')).toHaveCount(0)
+    await expect(handle).not.toHaveAttribute('title')
+    await handle.focus()
+    await expect(handle).toBeFocused()
+    await expect(page.getByRole('tooltip')).toHaveCount(0)
     await page.screenshot({ path: info.outputPath(`shortcut-hint-${lang}-${name}.png`) })
-    // Dragging closes the hint; the collapse button names the shortcut too.
+    // Resizing still works; the separate collapse button retains its shortcut hint.
     const box = (await handle.boundingBox())!
     await page.mouse.down(); await page.mouse.move(box.x + box.width / 2 + 20, box.y + 200, { steps: 4 })
     await expect(page.getByRole('tooltip')).toHaveCount(0)
     await page.mouse.up()
+    await expect(handle).toHaveAttribute('aria-valuenow', '292')
     const collapse = page.locator('#tree-sidebar button[aria-keyshortcuts]')
     await expect(collapse).toHaveAttribute('aria-keyshortcuts', name === 'MacIntel' ? 'Meta+B' : 'Control+B')
     await expect(collapse).toHaveAttribute('title', new RegExp(name === 'MacIntel' ? '⌘B\\)$' : 'Ctrl\\+B\\)$'))

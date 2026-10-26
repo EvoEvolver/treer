@@ -19,9 +19,7 @@ blocked, failed and offline-machine in the attention colour; exited/stopped mute
 using the same colour tokens as the Overview chips. Idle, running (an App's normal
 state) and unknown rows show no dot. Colour is never the only cue: the dot is an
 `img` with a text name (so the row link's accessible name is e.g. "builder working"),
-and hovering or keyboard-focusing a row shows a tooltip with the full path and the
-status (hover-capable pointers only; it never takes pointer events, so it cannot
-cover the row's "⋯" button). The "⋯" button of Agent/App rows appears on row hover
+and row paths/statuses do not show hover or focus tooltips or native titles. The "⋯" button of Agent/App rows appears on row hover
 or keyboard focus within the row, stays visible while its menu is open, and is
 always visible on coarse pointers (phones and wide touch tablets) with its 44px target (rows, the folder/Agent/App "⋯" and the bottom user row all switch to 44px on `pointer: coarse`, not only below 768px); right-click
 and Shift+F10 open the same menu. Folder rows use the same 36px height and the same
@@ -52,7 +50,7 @@ while retaining the preferred width for larger windows.
 The sidebar shows no user avatar. The bottom row is a **Collapse tree sidebar**
 button (desktop only, in the old avatar slot), the user's name and the "⋯" user
 menu (a slim 36px row on desktop with the same density as the Tree rows; 44px+ below 768px) (Settings, Replay product tour, Log out; the email is in the menu header).
-**Cmd+B** (macOS) or **Ctrl+B** (Windows/Linux) toggles the sidebar like the collapse button, from anywhere in the Console on desktop layouts. It is not captured while focus is in a terminal (Ctrl+B is the tmux prefix) or a rich-text editable, ignores held/repeated keys and extra modifiers, does nothing below 768px or in focus mode, and only moves focus when it was inside the sidebar. Hovering or focusing the resize handle shows "Drag to resize · ⌘B to hide sidebar" (platform key label, en/zh), and both collapse/expand buttons carry `aria-keyshortcuts` and the label in their tooltip. Collapsing hides the sidebar and the divider; a single **Expand tree sidebar**
+**Cmd+B** (macOS) or **Ctrl+B** (Windows/Linux) toggles the sidebar like the collapse button, from anywhere in the Console on desktop layouts. It is not captured while focus is in a terminal (Ctrl+B is the tmux prefix) or a rich-text editable, ignores held/repeated keys and extra modifiers, does nothing below 768px or in focus mode, and only moves focus when it was inside the sidebar. The resize handle has no hover/focus tooltip; its accessible separator label and keyboard controls remain. Both collapse/expand buttons carry `aria-keyshortcuts` and the label in their tooltip. Collapsing hides the sidebar and the divider; a single **Expand tree sidebar**
 button then appears at the left end of the tab bar. Both buttons expose
 `aria-expanded` and `aria-controls="tree-sidebar"`, work with Enter/Space, and
 focus moves to the counterpart button after a toggle. The original width is

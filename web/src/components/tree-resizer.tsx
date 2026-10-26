@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent, type KeyboardEvent } from "react"
 import { t } from "@/i18n"
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { isSidebarShortcut, sidebarShortcutLabel } from "@/lib/shortcut"
+import { isSidebarShortcut } from "@/lib/shortcut"
 
 const DEFAULT_WIDTH = 272
 const MIN_WIDTH = 240
@@ -123,7 +122,7 @@ export function useTreeWidth(userId: string | undefined, onFinish: () => void) {
 // One visible 1px line; the wider invisible zone around it is the drag/keyboard handle.
 export function TreeResizer({ settings }: { settings: ReturnType<typeof useTreeWidth> }) {
   return <div className="relative hidden min-h-0 bg-border md:block">
-    {!settings.collapsed && <Tooltip open={settings.dragging ? false : undefined}><TooltipTrigger asChild><div {...settings.separator} className="absolute inset-y-0 left-1/2 z-20 w-6 -translate-x-1/2 touch-none cursor-col-resize outline-none before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 hover:before:w-0.5 hover:before:bg-primary/60 focus-visible:before:w-0.5 focus-visible:before:bg-ring" /></TooltipTrigger><TooltipContent side="right" className="pointer-events-none">{t("resizer.drag_hint", { shortcut: sidebarShortcutLabel() })}</TooltipContent></Tooltip>}
+    {!settings.collapsed && <div {...settings.separator} className="absolute inset-y-0 left-1/2 z-20 w-6 -translate-x-1/2 touch-none cursor-col-resize outline-none before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 hover:before:w-0.5 hover:before:bg-primary/60 focus-visible:before:w-0.5 focus-visible:before:bg-ring" />}
     {settings.dragging && <div aria-hidden="true" className="fixed inset-0 z-[200] cursor-col-resize touch-none" />}
   </div>
 }

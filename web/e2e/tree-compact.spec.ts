@@ -65,13 +65,15 @@ for (const theme of ['light', 'dark']) test(`Tree rows are one line with a statu
   await page.screenshot({ path: info.outputPath(`tree-compact-${theme}-desktop.png`) })
 })
 
-test('the ⋯ button shows on hover, keyboard focus and while its menu is open, and the tooltip never covers it', async ({ page }) => {
+test('the ⋯ button shows on hover, keyboard focus and while its menu is open, without row hover text', async ({ page }) => {
   await open(page)
   await expect.poll(() => opacity(more(page, 'builder'))).toBe(0)
   await link(page, 'builder').hover()
   await expect.poll(() => opacity(more(page, 'builder'))).toBe(1)
-  // The status tooltip is open on hover and does not block the neighbouring button.
-  await expect(page.getByRole('tooltip')).toContainText('working')
+  // Hover text is absent; the row actions and accessible status remain.
+  await page.waitForTimeout(500) // Beyond the 350ms tooltip delay.
+  await expect(page.getByRole('tooltip')).toHaveCount(0)
+  await expect(tree(page).getByRole('treeitem', { name: 'builder', exact: true })).not.toHaveAttribute('title')
   await more(page, 'builder').click()
   await expect(page.getByRole('menuitem', { name: 'Logs' })).toBeVisible()
   await page.mouse.move(700, 600)
@@ -83,10 +85,10 @@ test('the ⋯ button shows on hover, keyboard focus and while its menu is open, 
   await page.evaluate(() => (document.activeElement as HTMLElement).blur())
   await page.mouse.move(700, 600)
   await expect.poll(() => opacity(more(page, 'builder'))).toBe(0)
-  // Keyboard focus within the row reveals it and shows the same status tooltip.
+  // Keyboard focus reveals the action without opening a status tooltip.
   await link(page, 'waiter').focus()
   await expect.poll(() => opacity(more(page, 'waiter'))).toBe(1)
-  await expect(page.getByRole('tooltip')).toContainText('blocked')
+  await expect(page.getByRole('tooltip')).toHaveCount(0)
   expect(await opacity(more(page, 'sleeper'))).toBe(0)
   // Right-click (#109) still opens the row actions.
   await link(page, 'sleeper').click({ button: 'right' })
@@ -102,6 +104,7 @@ test('folder rows reveal their ⋯ like Agent/App rows', async ({ page }) => {
   await page.goto('/')
   const folder = tree(page).getByRole('treeitem', { name: 'Research', exact: true })
   await expect(folder).toBeVisible()
+  await expect(folder.locator('[title]')).toHaveCount(0)
   await expect.poll(() => opacity(more(page, 'Research'))).toBe(0)
   expect((await folder.locator('[data-tree-primary]').boundingBox())!.height).toBeLessThan(40)
   await folder.locator('[data-tree-primary]').hover()
