@@ -165,6 +165,21 @@ impl Preparation {
     pub(crate) fn shared(&self) -> Result<&[String]> {
         Ok(self.selection.as_ref().ok_or_else(refused)?.shared())
     }
+    /// Explicit backup-only mutation while the SAME receiver remains Holding.
+    pub(crate) async fn prepare_worker_backup(
+        &mut self,
+        runtime: &ControllerRuntime,
+    ) -> Result<()> {
+        self.check(runtime)?;
+        self.poisoned = true;
+        self.coordinator.prepare_worker_backup(runtime).await?;
+        self.selection
+            .as_ref()
+            .ok_or_else(refused)?
+            .check(runtime)?;
+        self.poisoned = false;
+        Ok(())
+    }
     /// Uses the retained, actually downloaded envelopes. ACK does not release
     /// any original sender pins/lease/claim or authorize installation mutation.
     pub(crate) async fn start_downloaded(&mut self, runtime: &ControllerRuntime) -> Result<()> {

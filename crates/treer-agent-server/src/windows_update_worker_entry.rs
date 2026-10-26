@@ -32,6 +32,13 @@ pub(crate) struct Trust {
 #[allow(dead_code)] // Internal launch seam; product coordinator/cap remains unwired.
 impl Trust {
     #[cfg(windows)]
+    pub(crate) fn recheck(&self) -> Result<()> {
+        if self.source.load()? != self.key {
+            return Err(refused());
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
     pub(crate) fn verification_key(&self) -> &VerifyingKey {
         &self.key
     }

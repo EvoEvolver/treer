@@ -337,6 +337,23 @@ or configuration contents. Failed launch retains the newly saved specification.
   an explicit custody transfer or proof that a child exited; the retained claim
   remains a denial fence. There is no durable owner recovery/adoption API here.
 
+  The same Holding owner may explicitly grant one limited backup-preparation
+  write. Its internal non-serializable permit borrows the original confirmed
+  reservation/runtime; fixed catalog, operation, claim and configured trust are
+  checked before sending a distinct full-context/sequence-bound command.
+  Inspection, initial reception, close ACK and creator exit are not that grant.
+  Receiver-created backups use only the original independently pinned target,
+  old images and runtime-derived raw state. The fixed child directory and each
+  output/evidence file are exclusive; existing or partial outputs are never
+  adopted, repaired or retried. Whole-file hashes/raw snapshot fences and evidence
+  are read back before acknowledgement, with read-only backup handles retained
+  alongside input pins and the inherited lock. State comparison is point-in-time,
+  not StartupStore CAS or a freeze of concurrent writes. Failure before a reply
+  can leave backup files, and receiver custody ends when its session exits;
+  sender guards and durable claim still do not become a release permit. This
+  grant adds no installed-image/startup overwrite, cross-creator lifetime,
+  independent child Policy, restart authority, or public capability.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

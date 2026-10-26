@@ -537,3 +537,115 @@ async fn windows_update_consumer_native_unknown_command_is_observation_only_no_r
         drop(catalog);
     }
 }
+
+#[tokio::test]
+async fn windows_update_backup_transition_native_same_holding_worker_writes_and_retains_backup() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, false);
+    let mut prepared = Preparation::local(
+        &runtime,
+        input.dispatch.clone(),
+        &input.settings,
+        &input.fixture.documents(),
+        (&input.bytes, &input.bytes),
+        &[],
+    )
+    .unwrap();
+    let backup = stage(&root, &input).join("worker-backup");
+    assert!(!backup.exists());
+    prepared
+        .start(&runtime, &input.fixture.documents())
+        .await
+        .unwrap();
+    prepared.inspect(&runtime).await.unwrap();
+    assert!(!backup.exists(), "receipt/inspection is not a write grant");
+    prepared.prepare_worker_backup(&runtime).await.unwrap();
+    held(&root, &input);
+    for file in ["controller.backup", "cli.backup", "startup.backup"] {
+        assert!(backup.join(file).is_file());
+        assert!(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(backup.join(file))
+                .is_err(),
+            "receiver independently holds sealed backups"
+        );
+    }
+    let evidence: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(backup.join("backup.evidence")).unwrap()).unwrap();
+    assert_eq!(evidence["phase"], "worker_backup_prepared");
+    assert_eq!(
+        evidence["binding"]["operation_id"],
+        input.dispatch.operation_id
+    );
+    prepared.inspect(&runtime).await.unwrap();
+    prepared.close(&runtime).await.unwrap();
+    let custody = prepared.retain_closed(&runtime).unwrap();
+    assert!(prepared.prepare_worker_backup(&runtime).await.is_err());
+    held(&root, &input);
+    assert_eq!(
+        std::fs::read(backup.join("controller.backup")).unwrap(),
+        OLD
+    );
+    assert_eq!(std::fs::read(backup.join("cli.backup")).unwrap(), OLD);
+    assert_eq!(
+        std::fs::read(backup.join("startup.backup")).unwrap(),
+        std::fs::read(root.join("configured-state/srv_fixture-agent-startup.json")).unwrap()
+    );
+    drop(custody);
+    drop(prepared);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_backup_transition_native_existing_destination_or_changed_state_keeps_unknown(
+) {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    for changed_state in [false, true] {
+        let catalog = UpdatePlanCatalogFixture::new();
+        let (runtime, root, task) = update_state_fixture().await;
+        let input = inputs(&root, &catalog, false);
+        let mut prepared = Preparation::local(
+            &runtime,
+            input.dispatch.clone(),
+            &input.settings,
+            &input.fixture.documents(),
+            (&input.bytes, &input.bytes),
+            &[],
+        )
+        .unwrap();
+        prepared
+            .start(&runtime, &input.fixture.documents())
+            .await
+            .unwrap();
+        let backup = stage(&root, &input).join("worker-backup");
+        if changed_state {
+            runtime.inner.startup_store.deny_absent("ag_later").unwrap();
+        } else {
+            // A pre-existing name is unresolved evidence, not reusable space.
+            std::fs::create_dir(&backup).unwrap();
+            treer_platform::secure_directory(&backup).unwrap();
+            std::fs::write(backup.join("prior"), b"keep").unwrap();
+        }
+        assert!(prepared.prepare_worker_backup(&runtime).await.is_err());
+        assert!(prepared.prepare_worker_backup(&runtime).await.is_err());
+        assert!(prepared.close(&runtime).await.is_err());
+        assert!(prepared.retain_closed(&runtime).is_err());
+        held(&root, &input);
+        if changed_state {
+            assert!(!backup.exists());
+        } else {
+            assert_eq!(std::fs::read(backup.join("prior")).unwrap(), b"keep");
+            assert!(!backup.join("backup.evidence").exists());
+        }
+        drop(prepared);
+        drop(runtime);
+        task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+        drop(catalog);
+    }
+}

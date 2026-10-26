@@ -170,7 +170,7 @@ The internal Windows coordinator preparation seam composes confirmed-plan
 admission, the selected loaded runtime, normal configured trust, and the original
 installation/target handles. Its separate `--controller-update-hold-inputs`
 entry keeps the independently verified receiver custody while serving ordered
-read-only inspections on the same whole-offer context. The session permits at
+inspections on the same whole-offer context. The session permits at
 most 32 controls within 30 seconds; each creator exchange has a three-second
 budget. An explicit close reply plus the original Child's observed zero exit is
 required before moving the SAME sender reservation back to the coordinator's
@@ -230,6 +230,26 @@ ACK/child exit does not permit releasing sender guards. Its operation projection
 is Accepted then Unconfirmed, with unknown health and no phase/receipt: session
 closure is not a completed update. This in-process owner is not a durable
 restart/adoption ledger. Public Windows capability remains OFF.
+
+An internal `Preparation::prepare_worker_backup` continuation can now use the
+SAME still-Holding session. It borrows a non-wire permit from the original
+confirmed reservation and selected runtime, rechecks the fixed catalog, claim
+and normal configured trust, then sends a distinct one-use backup command. The
+receiver preserves its independently authenticated image/state pins and inherited
+lock while creating a fixed EXCL `worker-backup` directory under its pinned
+operation target. It copies and hashes the old image pair, backs up the exact raw
+startup snapshot including denial fences, seals read-only handles and publishes
+read-back-verified evidence. Those backup handles remain with the same receiver
+until explicit close or session exit. The existing 30-second session and
+three-second exchange budgets remain; synchronous filesystem calls are not
+forcibly interruptible. Partial/error/cancelled attempts are unknown and cannot
+replay. Sender pins/lease/claim remain held through success and failure.
+This backup-only mutation does not overwrite installed images or startup state,
+transfer lifetime across creator exit, authorize sender release, or reconnect a
+closed session. The finite public consumer still explicitly closes its read-only
+session; it does not silently request this new mutation. StartupStore CAS,
+durable transfer/outcome and the full publication/restart-health/rollback chain
+remain to be composed before any public Windows capability can be enabled.
 
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and

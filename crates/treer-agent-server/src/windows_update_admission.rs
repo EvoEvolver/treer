@@ -250,8 +250,54 @@ impl AdmittedInputs {
 #[cfg(windows)]
 pub struct ReservedInputs(AdmittedInputs);
 
+/// Borrowed from the SAME held confirmed reservation/runtime. Not wire data,
+/// a general mutation grant, sender release or a way to adopt another job.
+#[cfg(windows)]
+pub(crate) struct ConfirmedBackupPermit<'a> {
+    reserved: &'a ReservedInputs,
+    selected: &'a crate::controller::ControllerRuntime,
+}
+
+#[cfg(windows)]
+impl ConfirmedBackupPermit<'_> {
+    pub(crate) fn check(&self, operation: [u8; 16]) -> Result<()> {
+        if operation != *self.reserved.binding().operation_id.as_bytes() {
+            bail!("windows_update_backup_permit_refused");
+        }
+        self.reserved
+            .controller_state()?
+            .matches_selected(self.selected, self.reserved.binding())?;
+        self.reserved
+            .0
+            .confirmed_plan
+            .as_ref()
+            .ok_or_else(confirmed::refused)?
+            .recheck(
+                &crate::controller_update::catalog::Catalog::local()?,
+                self.reserved.binding(),
+                chrono::Utc::now(),
+            )?;
+        self.reserved.0.inspect_installation_claim()
+    }
+}
+
 #[cfg(windows)]
 impl ReservedInputs {
+    pub(crate) fn backup_permit<'a>(
+        &'a self,
+        selected: &'a crate::controller::ControllerRuntime,
+        key: &VerifyingKey,
+    ) -> Result<ConfirmedBackupPermit<'a>> {
+        if self.0.verifying_key != key.to_bytes() {
+            bail!("windows_update_backup_permit_refused");
+        }
+        let permit = ConfirmedBackupPermit {
+            reserved: self,
+            selected,
+        };
+        permit.check(*self.binding().operation_id.as_bytes())?;
+        Ok(permit)
+    }
     /// Selected-runtime mint only, not a wire constructor or release permit.
     /// Scope refusal does not consume an attempt; after scope validation every
     /// receiver outcome is single-use, including a failed independent recheck.

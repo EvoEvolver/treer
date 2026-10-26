@@ -149,7 +149,9 @@ impl InputReceipt {
     }
 }
 
-/// Bounded read-only custody control on the SAME received-input connection.
+/// Bounded custody control on the SAME received-input connection. Inspection
+/// and close confer no write authority; PrepareBackup is a distinct, one-use
+/// backup-only grant. No role permits sender release or installation changes.
 /// Neither inspection nor close ACK permits sender release or an update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CustodyKind {
@@ -157,6 +159,9 @@ pub enum CustodyKind {
     Inspected,
     Close,
     Closed,
+    /// Explicit original-creator command for private backup preparation ONLY.
+    PrepareBackup,
+    BackupPrepared,
 }
 
 pub const CUSTODY_BYTES: usize = WORKER_BINDING_FRAME_BYTES + 4;
@@ -180,6 +185,8 @@ impl CustodyFrame {
             CustodyKind::Inspected => b"TRWCIA01",
             CustodyKind::Close => b"TRWCCL01",
             CustodyKind::Closed => b"TRWCCA01",
+            CustodyKind::PrepareBackup => b"TRWCBP01",
+            CustodyKind::BackupPrepared => b"TRWCBA01",
         });
         bytes[WORKER_BINDING_FRAME_BYTES..].copy_from_slice(&self.sequence.to_le_bytes());
         Some(bytes)

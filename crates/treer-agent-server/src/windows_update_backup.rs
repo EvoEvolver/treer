@@ -65,7 +65,7 @@ pub(super) fn startup_digest(bytes: &[u8], workspace: &str, server: &str) -> Res
     })
 }
 
-fn copy_checked(
+pub(super) fn copy_checked(
     source: &mut dyn Read,
     target: &mut dyn Write,
     expected: &str,

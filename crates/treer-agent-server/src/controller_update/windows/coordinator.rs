@@ -35,6 +35,34 @@ pub(crate) struct Coordinator {
 
 #[allow(dead_code)] // Public capability remains OFF until full transaction acceptance.
 impl Coordinator {
+    /// One explicit limited write grant on the SAME Holding worker connection.
+    /// Independent receiver backups are not installation/creator-exit authority.
+    pub(crate) async fn prepare_worker_backup(
+        &mut self,
+        selected: &ControllerRuntime,
+    ) -> Result<()> {
+        self.scope(selected)?;
+        if self.phase != Phase::Holding {
+            return Err(refused());
+        }
+        self.phase = Phase::Unknown;
+        self.require_live(selected)?;
+        self.trust.recheck()?;
+        let permit = self.child.as_ref().ok_or_else(refused)?.backup_permit(
+            selected,
+            &self.binding,
+            self.trust.verification_key(),
+        )?;
+        self.channel
+            .as_mut()
+            .ok_or_else(refused)?
+            .prepare_backup(&permit)
+            .await?;
+        permit.check(*self.binding.operation_id.as_bytes())?;
+        self.require_live(selected)?;
+        self.phase = Phase::Holding;
+        Ok(())
+    }
     /// Uses the existing confirmed-plan admission, not a second Policy gate.
     /// Installed/target handles and job store come from the upstream confirmed
     /// installation contract; trust comes from normal official/self-host config.
@@ -146,7 +174,7 @@ impl Coordinator {
         Ok(())
     }
 
-    /// Explicitly end this finite READ-ONLY preparation session. An ACK alone
+    /// Explicitly end this finite preparation session. An ACK alone
     /// cannot complete close: observe the original child exit zero within 3s.
     /// Original sender reservation remains owned here even after that proof.
     pub(crate) async fn close(&mut self, selected: &ControllerRuntime) -> Result<()> {

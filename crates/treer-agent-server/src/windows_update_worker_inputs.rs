@@ -12,6 +12,10 @@ fn refused() -> anyhow::Error {
     anyhow!("windows_update_worker_receive_refused")
 }
 
+#[cfg(windows)]
+#[path = "windows_update_worker_backup.rs"]
+mod backup_preparation;
+
 fn receipt(offer: &InputOffer, bytes: &[u8]) -> InputReceipt {
     InputReceipt(WorkerBindingFrame {
         operation: offer.operation,
@@ -212,6 +216,8 @@ pub(crate) mod native {
         runtime_context_sha256: [u8; 32],
         snapshot_invalidated: bool,
         custody_context: WorkerBindingFrame,
+        backup_attempted: bool,
+        backup: Option<super::backup_preparation::WorkerBackup>,
     }
 
     #[allow(dead_code)] // Internal continuation; production coordinator is not wired.
@@ -230,12 +236,16 @@ pub(crate) mod native {
                         .read_exact(&mut bytes)
                         .await
                         .map_err(|_| refused())?;
-                    let (frame, reply, close) = if let Some(frame) =
+                    let (frame, reply, close, backup) = if let Some(frame) =
                         CustodyFrame::decode(&bytes, CustodyKind::Inspect)
                     {
-                        (frame, CustodyKind::Inspected, false)
+                        (frame, CustodyKind::Inspected, false, false)
                     } else if let Some(frame) = CustodyFrame::decode(&bytes, CustodyKind::Close) {
-                        (frame, CustodyKind::Closed, true)
+                        (frame, CustodyKind::Closed, true, false)
+                    } else if let Some(frame) =
+                        CustodyFrame::decode(&bytes, CustodyKind::PrepareBackup)
+                    {
+                        (frame, CustodyKind::BackupPrepared, false, true)
                     } else {
                         return Err(refused());
                     };
@@ -243,6 +253,27 @@ pub(crate) mod native {
                         return Err(refused());
                     }
                     self.inspect_snapshot()?;
+                    if backup {
+                        if self.backup_attempted {
+                            return Err(refused());
+                        }
+                        // Explicit command precedes every backup write. Consume
+                        // before the first effect; partial/unknown is not retry.
+                        self.backup_attempted = true;
+                        let prepared = super::backup_preparation::prepare(
+                            &self.installed,
+                            &self.target,
+                            &self.state,
+                            &self.binding,
+                            &self.snapshot,
+                            self.custody_context,
+                        )
+                        .map_err(|_| refused())?;
+                        // Keep independent receiver inputs AND backup guards
+                        // before the reply await. ACK does not release sender.
+                        self.backup = Some(prepared);
+                        self.inspect_snapshot()?;
+                    }
                     if tokio::time::Instant::now() >= deadline {
                         return Err(refused());
                     }
@@ -279,6 +310,9 @@ pub(crate) mod native {
                     .state
                     .startup_snapshot(&format!("{}-agent-startup.json", self.binding.server_id))?;
                 check_snapshot(&self.snapshot, observed, &self.binding)?;
+                if let Some(backup) = &self.backup {
+                    backup.inspect(&self.binding, &self.snapshot)?;
+                }
                 if !self.stream.creator_is_live()? {
                     return Err(refused());
                 }
@@ -411,6 +445,8 @@ pub(crate) mod native {
                 runtime_context_sha256: offer.runtime_context_sha256,
                 snapshot_invalidated: false,
                 custody_context,
+                backup_attempted: false,
+                backup: None,
             })
         })
         .await

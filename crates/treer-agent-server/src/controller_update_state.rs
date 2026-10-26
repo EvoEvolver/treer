@@ -467,6 +467,20 @@ impl ControllerUpdateChild {
         self.matches(selected, binding)
     }
 
+    #[cfg(windows)]
+    pub(crate) fn backup_permit<'a>(
+        &'a self,
+        selected: &'a ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<crate::windows_update_admission::ConfirmedBackupPermit<'a>> {
+        self.matches(selected, binding)?;
+        self._reservation
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("windows_update_receiver_custody_missing"))?
+            .backup_permit(selected, key)
+    }
+
     /// Exact original exit observation moves custody back to the coordinator;
     /// it does not retire the durable claim or authorize another worker.
     #[cfg(windows)]
