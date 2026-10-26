@@ -33,6 +33,8 @@ pub use environment::{
 #[allow(unsafe_code)]
 mod windows;
 #[cfg(windows)]
+pub mod windows_update_backup;
+#[cfg(windows)]
 pub mod windows_update_inputs;
 #[cfg(windows)]
 pub mod windows_update_store;

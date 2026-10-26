@@ -458,4 +458,145 @@ mod native {
         assert!(!job.join("receipt.next").exists());
         assert_eq!(std::fs::read(target.join("treer.exe")).unwrap(), NEW);
     }
+
+    #[test]
+    fn windows_update_backup_native_copies_old_pair_and_binds_evidence_without_replacement() {
+        use std::io::Write;
+        use treer_platform::windows_update_backup::BackupDirectory;
+        let root = Root::new();
+        let installed = root.pair("installed", OLD);
+        let target = root.pair("target", NEW);
+        let job = root.directory("job");
+        let destination = root.directory("backup");
+        let fixture = Fixture::new(|_| {});
+        let inputs = prepare(&installed, &target, &fixture).unwrap();
+        let expected = inputs.binding().clone();
+        let reserved = inputs.reserve(UpdateStore::open(&job).unwrap()).unwrap();
+        let backed = reserved
+            .backup(BackupDirectory::open(&destination).unwrap())
+            .unwrap();
+        backed.inspect_backups().unwrap();
+        assert_eq!(backed.binding(), &expected);
+        let receipt_path = destination.join("backup.evidence");
+        let receipt = std::fs::read(&receipt_path).unwrap();
+        let json = std::str::from_utf8(&receipt).unwrap();
+        let mut wrong_identity: serde_json::Value = serde_json::from_slice(&receipt).unwrap();
+        wrong_identity["directory_file_id"] = serde_json::json!(0);
+        // Own disposable evidence only: the strict observer must refuse a
+        // forged phase, duplicate/unknown key or a different physical identity.
+        for invalid in [
+            json.replace("images_backed_up", "images_published"),
+            json.replacen('{', "{\"schema_version\":1,", 1),
+            json.replacen('{', "{\"untrusted\":true,", 1),
+            wrong_identity.to_string(),
+        ] {
+            std::fs::write(&receipt_path, invalid).unwrap();
+            assert!(backed.inspect_backups().is_err());
+        }
+        std::fs::write(&receipt_path, &receipt).unwrap();
+        backed.inspect_backups().unwrap();
+        assert!(prepare(&installed, &target, &fixture).is_err());
+        assert!(BackupDirectory::open(&destination)
+            .unwrap()
+            .create()
+            .is_err());
+        assert!(std::fs::OpenOptions::new()
+            .write(true)
+            .open(destination.join("controller.backup"))
+            .is_err());
+        assert_eq!(
+            std::fs::read(installed.join("treer-agent-server.exe")).unwrap(),
+            OLD
+        );
+        assert_eq!(std::fs::read(target.join("treer.exe")).unwrap(), NEW);
+        drop(backed);
+        for file in ["controller.backup", "cli.backup"] {
+            assert_eq!(std::fs::read(destination.join(file)).unwrap(), OLD);
+            assert!(treer_platform::private_path_is_secure(&destination.join(file)).unwrap());
+        }
+        let evidence: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(destination.join("backup.evidence")).unwrap())
+                .unwrap();
+        assert_eq!(evidence["phase"], "images_backed_up");
+        assert_eq!(evidence["binding"], serde_json::to_value(expected).unwrap());
+        assert_eq!(evidence["controller_size"], OLD.len());
+        assert_eq!(evidence["cli_size"], OLD.len());
+        let (volume, file_id) = BackupDirectory::open(&destination)
+            .unwrap()
+            .identity()
+            .unwrap();
+        assert_eq!(evidence["directory_volume"], volume);
+        assert_eq!(evidence["directory_file_id"], file_id);
+        // Exercise reduced access on the same file object independently of
+        // the Controller evidence: even the borrowed sealed File cannot write.
+        let direct = root.directory("read-only-check");
+        let mut writing = BackupDirectory::open(&direct).unwrap().create().unwrap();
+        let (controller, cli) = writing.files();
+        controller.write_all(OLD).unwrap();
+        cli.write_all(OLD).unwrap();
+        let sealed = writing.seal().unwrap();
+        let (mut controller, mut cli) = sealed.files();
+        assert!(controller.write_all(b"tamper").is_err());
+        assert!(cli.write_all(b"tamper").is_err());
+        drop(sealed);
+    }
+
+    #[test]
+    fn windows_update_backup_native_refuses_alias_unsafe_or_partial_destination_without_success() {
+        use treer_platform::windows_update_backup::BackupDirectory;
+        for case in 0..5 {
+            let root = Root::new();
+            let installed = root.pair("installed", OLD);
+            let target = root.pair("target", NEW);
+            let job = root.directory("job");
+            let destination = match case {
+                0 => installed.clone(),
+                1 => target.clone(),
+                _ => root.directory("backup"),
+            };
+            let fixture = Fixture::new(|_| {});
+            let reserved = prepare(&installed, &target, &fixture)
+                .unwrap()
+                .reserve(UpdateStore::open(&job).unwrap())
+                .unwrap();
+            if case == 2 {
+                treer_platform::apply_sddl_dacl(&destination, "D:P(A;;GA;;;WD)").unwrap();
+                assert!(BackupDirectory::open(&destination).is_err());
+                assert!(!destination.join("controller.backup").exists());
+                drop(reserved);
+            } else {
+                if case == 3 {
+                    std::fs::write(destination.join("cli.backup"), b"prior evidence").unwrap();
+                    treer_platform::secure_file(&destination.join("cli.backup")).unwrap();
+                }
+                if case == 4 {
+                    std::fs::write(destination.join("backup.evidence"), b"prior evidence").unwrap();
+                    treer_platform::secure_file(&destination.join("backup.evidence")).unwrap();
+                }
+                assert!(reserved
+                    .backup(BackupDirectory::open(&destination).unwrap())
+                    .is_err());
+                if case == 3 {
+                    assert_eq!(
+                        std::fs::read(destination.join("cli.backup")).unwrap(),
+                        b"prior evidence"
+                    );
+                    assert!(destination.join("controller.backup").exists());
+                }
+            }
+            if case == 4 {
+                assert_eq!(
+                    std::fs::read(destination.join("backup.evidence")).unwrap(),
+                    b"prior evidence"
+                );
+                assert!(!destination.join("controller.backup").exists());
+            } else {
+                assert!(!destination.join("backup.evidence").exists());
+            }
+            assert_eq!(std::fs::read(installed.join("treer.exe")).unwrap(), OLD);
+            assert_eq!(std::fs::read(target.join("treer.exe")).unwrap(), NEW);
+            let again = prepare(&installed, &target, &fixture).unwrap();
+            assert!(again.reserve(UpdateStore::open(&job).unwrap()).is_err());
+        }
+    }
 }

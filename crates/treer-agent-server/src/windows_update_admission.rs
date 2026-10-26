@@ -179,3 +179,8 @@ impl ReservedInputs {
 #[cfg(test)]
 #[path = "windows_update_admission_tests.rs"]
 mod tests;
+
+#[path = "windows_update_backup.rs"]
+mod backup;
+#[cfg(windows)]
+pub use backup::BackedUpInputs;
