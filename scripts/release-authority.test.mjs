@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash, createPublicKey, generateKeyPairSync, verify } from 'node:crypto';
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { installReleaseTrust } from './install-release-trust.mjs';
@@ -26,6 +27,16 @@ test('legacy migration installs the shipped public key once and keeps an identic
   const before = readFileSync(join(directory, 'release-signing-key.pub.pem'));
   assert.equal(installReleaseTrust(directory).changed, false);
   assert.deepEqual(readFileSync(join(directory, 'release-signing-key.pub.pem')), before);
+});
+test('actual no-argument migration CLI follows platform config home without writing to HOME', t => {
+  const root = fixture(t), home = join(root, 'home'), xdg = join(root, 'xdg'), local = join(root, 'local');
+  mkdirSync(home);
+  const output = JSON.parse(execFileSync(process.execPath, [new URL('./install-release-trust.mjs', import.meta.url).pathname], {
+    encoding:'utf8', env:{...process.env, HOME:home, USERPROFILE:home, XDG_CONFIG_HOME:xdg, LOCALAPPDATA:local},
+  }));
+  const expected = join(process.platform === 'win32' ? local : xdg, process.platform === 'win32' ? 'Treer' : 'treer', 'release-signing-key.pub.pem');
+  assert.equal(output.path, expected); assert.equal(output.changed, true);
+  assert.ok(existsSync(expected)); assert.equal(existsSync(join(home, '.config')), false);
 });
 test('legacy migration preserves invalid and different configured keys', t => {
   for (const data of [Buffer.from('invalid'), generateKeyPairSync('ed25519').publicKey.export({type:'spki',format:'pem'})]) {

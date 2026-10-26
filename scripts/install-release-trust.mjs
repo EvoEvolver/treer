@@ -43,6 +43,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (args.length === 1 && args[0] === '--help') console.log('node scripts/install-release-trust.mjs [--config-dir ABS]\nInstalls only the shipped official public key. Preserves existing keys; no network/update/restart.');
   else {
     assert.ok(args.length === 0 || args.length === 2 && args[0] === '--config-dir');
-    console.log(JSON.stringify(installReleaseTrust(args[1] || join(homedir(), '.config', 'treer'))));
+    const defaultDirectory = process.platform === 'win32'
+      ? process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'Treer')
+      : join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'treer');
+    assert.ok(args[1] || defaultDirectory, 'LOCALAPPDATA is required on Windows');
+    console.log(JSON.stringify(installReleaseTrust(args[1] || defaultDirectory)));
   }
 }

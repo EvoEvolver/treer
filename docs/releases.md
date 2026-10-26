@@ -669,7 +669,9 @@ New official Controllers embed this same reviewed key through the Core trust
 resolver. For an existing installation whose configured key is absent, the
 reviewed source bundle also supplies
 `node scripts/install-release-trust.mjs --config-dir ABS_CONFIG_DIR`.
-This local, network-free migration installs only the shipped public key with
+With no directory argument it follows `XDG_CONFIG_HOME/treer` (otherwise
+`HOME/.config/treer`) on Unix, or `LOCALAPPDATA/Treer` on Windows, matching the
+Controller's configuration parent. This local, network-free migration installs only the shipped public key with
 exclusive creation, preserves a matching key unchanged, and refuses different,
 corrupt, symlinked, or unsafe existing configuration. It does not run update,
 start a provider, or restart anything. Obtain that script and key through the
