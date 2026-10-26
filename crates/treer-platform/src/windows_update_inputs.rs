@@ -1,6 +1,10 @@
 //! Read-only, physically pinned input pair for Windows update admission.
-//! No signature, update phase, process control or file publication occurs here.
-use std::{fs::File, io, path::Path};
+//! No signature, update phase, process control or image publication occurs here.
+use std::{
+    fs::File,
+    io,
+    path::{Path, PathBuf},
+};
 
 /// Retains every physical ancestor and read-only file handles without write or
 /// delete sharing. The caller authenticates contents; no path is exposed for
@@ -9,6 +13,7 @@ pub struct PinnedPair {
     root: crate::machine_file::Root,
     controller: File,
     cli: File,
+    path: PathBuf,
 }
 
 impl PinnedPair {
@@ -30,6 +35,7 @@ impl PinnedPair {
             root,
             controller,
             cli,
+            path: path.into(),
         })
     }
 
@@ -39,5 +45,37 @@ impl PinnedPair {
 
     pub fn files(&self) -> (&File, &File) {
         (&self.controller, &self.cli)
+    }
+
+    /// Consume the pinned installation and hold its stable, no-sharing lock.
+    /// This serializes participating updaters across distinct task directories.
+    /// Never removes/recreates an existing lock or repairs its ACL. The lock
+    /// carries no operation record: owner exit is NOT recovery/retry authority.
+    pub fn lock_installation(self) -> io::Result<LockedInstallation> {
+        let lock = crate::windows_update_store::exclusive_lock(
+            &self.path.join(".treer-controller-update.lock"),
+        )?;
+        Ok(LockedInstallation {
+            pair: self,
+            _lock: lock,
+        })
+    }
+}
+
+/// The installation pair cannot be detached from its exclusive lock. Releasing
+/// this value releases the lease, never deletes its stable name. This is not a
+/// durable crash fence or protection from nonparticipating same-account code.
+pub struct LockedInstallation {
+    pair: PinnedPair,
+    _lock: File,
+}
+
+impl LockedInstallation {
+    pub fn identity(&self) -> io::Result<(u64, u64)> {
+        self.pair.identity()
+    }
+
+    pub fn files(&self) -> (&File, &File) {
+        self.pair.files()
     }
 }

@@ -194,7 +194,7 @@ mod native {
 
     fn prepare(installed: &Path, target: &Path, fixture: &Fixture) -> Result<AdmittedInputs> {
         AdmittedInputs::prepare(
-            PinnedPair::open(installed)?,
+            PinnedPair::open(installed)?.lock_installation()?,
             PinnedPair::open(target)?,
             &fixture.documents(),
             &fixture.key.verifying_key(),
@@ -221,7 +221,7 @@ mod native {
             cli.seek(SeekFrom::End(0)).unwrap();
         }
         let inputs = AdmittedInputs::prepare(
-            pinned_old,
+            pinned_old.lock_installation().unwrap(),
             pinned_target,
             &fixture.documents(),
             &fixture.key.verifying_key(),
@@ -272,5 +272,61 @@ mod native {
         treer_platform::apply_sddl_dacl(&installed, "D:P(A;;GA;;;WD)").unwrap();
         assert!(PinnedPair::open(&installed).is_err());
         assert_eq!(std::fs::read_dir(&job).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn windows_update_lock_native_excludes_distinct_jobs_through_reservation() {
+        let root = Root::new();
+        let installed = root.pair("installed", OLD);
+        let target = root.pair("target", NEW);
+        let job_a = root.directory("job-a");
+        let job_b = root.directory("job-b");
+        let fixture = Fixture::new(|_| {});
+        let inputs = prepare(&installed, &target, &fixture).unwrap();
+        let lock = installed.join(".treer-controller-update.lock");
+        assert!(treer_platform::private_path_is_secure(&lock).unwrap());
+        // Different operation roots do not bypass the physical installation
+        // lease. Reopening the pair itself remains read-only and permissible.
+        assert!(prepare(&installed, &target, &fixture).is_err());
+        assert!(std::fs::remove_file(&lock).is_err());
+        assert!(std::fs::rename(&lock, installed.join("moved-lock")).is_err());
+        assert!(std::fs::OpenOptions::new().write(true).open(&lock).is_err());
+        let reserved = inputs.reserve(UpdateStore::open(&job_a).unwrap()).unwrap();
+        assert!(prepare(&installed, &target, &fixture).is_err());
+        assert_eq!(std::fs::read_dir(&job_b).unwrap().count(), 0);
+        assert_eq!(std::fs::read(installed.join("treer.exe")).unwrap(), OLD);
+        assert_eq!(std::fs::read(target.join("treer.exe")).unwrap(), NEW);
+        drop(reserved);
+        assert!(lock.exists());
+        assert_eq!(std::fs::read(&lock).unwrap(), b"");
+        // This demonstrates OS lease release, NOT permission to resume/retry
+        // either operation. Existing job-a intent must still refuse resubmit.
+        let inputs = prepare(&installed, &target, &fixture).unwrap();
+        assert!(inputs.reserve(UpdateStore::open(&job_a).unwrap()).is_err());
+        assert_eq!(std::fs::read_dir(&job_b).unwrap().count(), 0);
+        assert!(lock.exists());
+    }
+
+    #[test]
+    fn windows_update_lock_native_refuses_unsafe_lock_without_repair_or_intent() {
+        let root = Root::new();
+        let installed = root.pair("installed", OLD);
+        let target = root.pair("target", NEW);
+        let job = root.directory("job");
+        let fixture = Fixture::new(|_| {});
+        let lock = installed.join(".treer-controller-update.lock");
+        std::fs::write(&lock, b"retained evidence").unwrap();
+        treer_platform::secure_file(&lock).unwrap();
+        let alias = installed.join("lock-alias");
+        std::fs::hard_link(&lock, &alias).unwrap();
+        assert!(prepare(&installed, &target, &fixture).is_err());
+        assert_eq!(std::fs::read(&lock).unwrap(), b"retained evidence");
+        std::fs::remove_file(&alias).unwrap();
+        treer_platform::apply_sddl_dacl(&lock, "D:P(A;;GA;;;WD)").unwrap();
+        assert!(prepare(&installed, &target, &fixture).is_err());
+        assert!(!treer_platform::private_path_is_secure(&lock).unwrap());
+        assert_eq!(std::fs::read(&lock).unwrap(), b"retained evidence");
+        assert_eq!(std::fs::read_dir(&job).unwrap().count(), 0);
+        assert_eq!(std::fs::read(installed.join("treer.exe")).unwrap(), OLD);
     }
 }

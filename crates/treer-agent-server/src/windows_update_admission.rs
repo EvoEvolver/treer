@@ -72,11 +72,12 @@ fn verify_inputs(
 
 /// Keeps the physically checked directories and all four no-write/no-delete-
 /// sharing image handles alive. Fields cannot be constructed from digest claims.
-/// An installation mutation lock and worker handoff are NOT supplied here.
+/// The installed pair retains its exclusive installation lease. Worker handoff
+/// and durable cross-job crash/retry fencing are NOT supplied here.
 #[cfg(windows)]
 pub struct AdmittedInputs {
     binding: Binding,
-    _installed: treer_platform::windows_update_inputs::PinnedPair,
+    _installed: treer_platform::windows_update_inputs::LockedInstallation,
     _target: treer_platform::windows_update_inputs::PinnedPair,
 }
 
@@ -85,7 +86,7 @@ impl AdmittedInputs {
     /// Caller identity/Policy and separately configured trust must be resolved
     /// before this internal API. No key is accepted from the signed documents.
     pub fn prepare(
-        installed: treer_platform::windows_update_inputs::PinnedPair,
+        installed: treer_platform::windows_update_inputs::LockedInstallation,
         target: treer_platform::windows_update_inputs::PinnedPair,
         documents: &Documents<'_>,
         key: &VerifyingKey,
