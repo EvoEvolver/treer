@@ -66,10 +66,24 @@ executor records exact source, native test count/exit and cleanup; a cross-targe
 check must not be relabeled as native success. No publisher build or five-platform
 matrix is needed for this leaf.
 
+Native acceptance is complete for this storage scope: Windows Server 2022 run
+`40279041664`, source `1bdf13f801178e32633de737e4993f62117fcdaa`, wrapper
+`96a842a5dec5e9d892e508c2046f2198ff4ef9a5`, on fixed NTFS. The four named tests
+passed with zero failures/ignored tests and exit zero. Independent post-test
+inventory found no remaining fixture entries; cleanup was proven. The retained
+`RESULT.json` SHA-256 is
+`714a4b188429c8d1caf29964ad59b3b9f7568d3b8a4d59651072ab260df856e9`
+(#111:9404). Core independently matched that hash, platform record and test log.
+The single source review is #111:9401. These results do not establish executable
+replacement, worker survival, health reconciliation or a complete Windows update.
+
 ## Remaining ordered leaves and waiting boundaries
 
-1. Finish native NTFS acceptance of this store (one source review, one focused
-   Windows job), then bind versioned receipt/marker semantics and durable intent.
+1. Native NTFS store acceptance is complete. Next bind versioned receipt/marker
+   semantics and durable intent: exact operation/installation binding, legal
+   phase transitions and an exclusive initial intent must refuse malformed or
+   mismatched records and preserve unknown publication outcomes without retry.
+   This source leaf requires no installed machine or production capability.
 2. Implement Windows verified Controller/CLI image backup and two-rename
    publication with locked-image refusal and whole-pair rollback. Never treat
    restoring files alone as successful rollback.
