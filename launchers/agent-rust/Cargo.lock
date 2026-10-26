@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "treer-platform"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "libc",
  "rustix",
