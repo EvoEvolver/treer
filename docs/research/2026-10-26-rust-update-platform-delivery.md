@@ -1475,6 +1475,35 @@ tested source or native contract. This accepts only context/actual-lock
 agreement, not full pins/state/Policy or lifecycle ownership transfer. No
 admitted image, installed process, Host or capability was activated.
 
+## Independently retained physical pair pins
+
+The next mechanical receiver boundary is `PinnedPair::open_matching`: while the
+sender still holds its original pins, independently open the existing private
+fixed-NTFS root and both fixed images using the same non-reparse/no-write and
+no-delete-sharing checks, then compare root, Controller and CLI volume/file-ID
+observations exactly. Invalid/zero IDs, mixed volumes, image aliases and any
+physical mismatch refuse and drop only new handles. No repair, lock adoption,
+claim change, retry, activation or caller-selected executable is added.
+The new handles own physical ancestor pins and independent image read offsets.
+
+`PairIdentity` is mechanical public data, not a signed or authorized handoff.
+This leaf deliberately does not connect it to the creator pipe, terminal worker
+or operation admission. A future receiver must authenticate the complete
+descriptor, independently verify signed documents/trust and whole image hashes,
+and bind runtime-derived state/fence evidence before any parent release.
+Matching private roots alone still cannot prove runtime configuration or Policy.
+
+New PLATFORM LIB selector `windows_update_repin_` contains exactly two native
+controls. A task-owned SAMEtestexe receiver takes matching pins before sender
+release; both images remain unreadable for write/unrenamable and the directory
+cannot be renamed until receiver release. Both receivers start at offset zero
+despite sender EOF positions. Refusal controls change each identity/volume,
+zero/alias tuples and a distinct root containing equal inert bytes, confirming
+sender pins remain held. Only inert fixture bytes are read, never executed.
+These controls do not release a real installation lease/claim or authorize
+retry. Native execution is pending the single independent review and sole
+Release focused job; author cross-target checks are recorded on #111.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

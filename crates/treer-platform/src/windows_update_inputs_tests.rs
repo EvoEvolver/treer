@@ -195,3 +195,159 @@ fn inherited_lock_fixture_child() {
         .unwrap();
     });
 }
+
+#[tokio::test]
+async fn windows_update_repin_child_retains_both_images_after_sender_drop() {
+    let fixture = Fixture::new();
+    let sender = PinnedPair::open(&fixture.0).unwrap();
+    let expected = sender.pair_identity().unwrap();
+    let (mut controller, mut cli) = sender.files();
+    controller.seek(SeekFrom::End(0)).unwrap();
+    cli.seek(SeekFrom::End(0)).unwrap();
+    static NEXT: AtomicU64 = AtomicU64::new(1 << 63);
+    let selector = format!(
+        "{:016x}{:016x}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let pipe = crate::windows_update_pipe::CreatedChildPipe::bind(&selector).unwrap();
+    let identity = [expected.directory, expected.controller, expected.cli]
+        .into_iter()
+        .flat_map(|(volume, file)| [volume.to_string(), file.to_string()])
+        .collect::<Vec<_>>()
+        .join(",");
+    // Fixture-only path/observations, not a production descriptor transport or
+    // authorization contract. Sender pins remain held until receiver ACK.
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "windows_update_inputs::tests::repin_fixture_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env("TREER_TEST_REPIN_SELECTOR", selector)
+        .env("TREER_TEST_REPIN_PATH", &fixture.0)
+        .env("TREER_TEST_REPIN_IDENTITY", identity)
+        .stdin(crate::windows_update_pipe::creator_process_stdio().unwrap())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = OwnedFixture(command.spawn().unwrap());
+    drop(command);
+    let mut stream = pipe.connect(&child.0).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        assert_eq!(stream.read_u8().await.unwrap(), 1);
+        drop(sender);
+        for name in ["treer-agent-server.exe", "treer.exe"] {
+            let path = fixture.0.join(name);
+            assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+            assert!(std::fs::rename(&path, fixture.0.join("replaced")).is_err());
+        }
+        assert!(std::fs::rename(&fixture.0, fixture.0.with_extension("moved")).is_err());
+        stream.write_all(&[2]).await.unwrap();
+        assert_eq!(stream.read_u8().await.unwrap(), 3);
+    })
+    .await
+    .unwrap();
+    child.wait_success().await;
+    // Only a claim-free disposable fixture: this is kernel pin continuity,
+    // never permission to retire a real claim or resume an operation.
+    for name in ["treer-agent-server.exe", "treer.exe"] {
+        let path = fixture.0.join(name);
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let renamed = fixture.0.join(format!("{name}.moved"));
+        std::fs::rename(&path, &renamed).unwrap();
+        std::fs::rename(&renamed, &path).unwrap();
+    }
+}
+
+#[test]
+fn windows_update_repin_exact_all_identities_and_independent_offsets() {
+    let fixture = Fixture::new();
+    let foreign = Fixture::new();
+    let sender = PinnedPair::open(&fixture.0).unwrap();
+    let expected = sender.pair_identity().unwrap();
+    let (mut controller, mut cli) = sender.files();
+    controller.seek(SeekFrom::End(0)).unwrap();
+    cli.seek(SeekFrom::End(0)).unwrap();
+    let receiver = PinnedPair::open_matching(&fixture.0, expected).unwrap();
+    for mut file in [receiver.files().0, receiver.files().1] {
+        let mut observed = Vec::new();
+        file.read_to_end(&mut observed).unwrap();
+        assert_eq!(observed, b"inert fixture, never executed");
+    }
+    let mut wrong_root = expected;
+    wrong_root.directory.1 ^= 1;
+    let mut wrong_controller = expected;
+    wrong_controller.controller.1 ^= 1;
+    let mut wrong_cli = expected;
+    wrong_cli.cli.1 ^= 1;
+    let mut wrong_volume = expected;
+    wrong_volume.cli.0 ^= 1;
+    let mut zero = expected;
+    zero.controller.1 = 0;
+    let mut alias = expected;
+    alias.cli = alias.controller;
+    for invalid in [
+        wrong_root,
+        wrong_controller,
+        wrong_cli,
+        wrong_volume,
+        zero,
+        alias,
+    ] {
+        assert!(PinnedPair::open_matching(&fixture.0, invalid).is_err());
+    }
+    // Equal inert bytes at a distinct physical root cannot satisfy observations.
+    assert!(PinnedPair::open_matching(&foreign.0, expected).is_err());
+    drop(receiver);
+    for name in ["treer-agent-server.exe", "treer.exe"] {
+        assert!(std::fs::OpenOptions::new()
+            .write(true)
+            .open(fixture.0.join(name))
+            .is_err());
+    }
+    assert_eq!(sender.pair_identity().unwrap(), expected);
+}
+
+#[test]
+#[ignore = "explicit task-owned child helper, not a selector entry"]
+fn repin_fixture_child() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let selector = std::env::var("TREER_TEST_REPIN_SELECTOR").unwrap();
+            let path = PathBuf::from(std::env::var_os("TREER_TEST_REPIN_PATH").unwrap());
+            let fields: Vec<u64> = std::env::var("TREER_TEST_REPIN_IDENTITY")
+                .unwrap()
+                .split(',')
+                .map(|part| part.parse().unwrap())
+                .collect();
+            assert_eq!(fields.len(), 6);
+            let expected = PairIdentity {
+                directory: (fields[0], fields[1]),
+                controller: (fields[2], fields[3]),
+                cli: (fields[4], fields[5]),
+            };
+            let mut creator =
+                crate::windows_update_pipe::connect_creation_parent_pipe(&selector).unwrap();
+            let pair = PinnedPair::open_matching(&path, expected).unwrap();
+            for mut file in [pair.files().0, pair.files().1] {
+                let mut observed = Vec::new();
+                file.read_to_end(&mut observed).unwrap();
+                assert_eq!(observed, b"inert fixture, never executed");
+            }
+            assert!(creator.creator_is_live().unwrap());
+            creator.write_all(&[1]).await.unwrap();
+            assert_eq!(creator.read_u8().await.unwrap(), 2);
+            drop(pair);
+            creator.write_all(&[3]).await.unwrap();
+        })
+        .await
+        .unwrap();
+    });
+}

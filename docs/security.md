@@ -208,6 +208,17 @@ or configuration contents. Failed launch retains the newly saved specification.
   signed-input admission, all-pins ownership transfer, restart/health authority
   or production readiness. No normal startup or terminal-bootstrap entry changes.
 
+  `PinnedPair::open_matching` is a separate mechanical receiver primitive: it
+  independently opens the existing private fixed-NTFS directory, physical
+  ancestors and two fixed read-only images, then compares all three physical
+  identities to sender observations. Sender pins must remain held throughout;
+  this is not a way to adopt stale observations after a release/reopen gap.
+  The public identity tuple is not an authenticated descriptor, signed-content
+  proof, state-root authority or permission to release the sender. No receiver
+  admission/ACK/terminal command uses it yet. Signature/whole-hash verification,
+  runtime-derived state/fence binding and explicit custody acceptance remain
+  required before a production handoff can rely on independently retained pins.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

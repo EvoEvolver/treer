@@ -121,6 +121,13 @@ and lock-binding exchanges share one latch; failure/cancellation cannot fall
 back to the other variant. Neither request is a transaction command. The legacy
 terminal bootstrap still uses its original 72-byte exchange and exits.
 
+The platform also provides independent physical pair re-pinning: open the same
+fixed root/Controller/CLI under existing sender pins, compare all physical
+identities, and retain new ancestor/image handles with independent read offsets.
+It never adopts the installation lock or claim. Public identity observations
+are not authenticated descriptors; this primitive is not yet connected to the
+worker exchange or signed/runtime-state receiver admission.
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

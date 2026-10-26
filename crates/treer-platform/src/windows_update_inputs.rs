@@ -18,6 +18,17 @@ pub struct PinnedPair {
     pub(super) path: PathBuf,
 }
 
+/// Physical observations, never content authentication or operation authority.
+/// A receiver must obtain these through its separately authenticated handoff.
+/// Directory privacy, volume equality and a matching tuple do not prove runtime
+/// configuration, signatures, Policy, or permission to release the sender pins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PairIdentity {
+    pub directory: (u64, u64),
+    pub controller: (u64, u64),
+    pub cli: (u64, u64),
+}
+
 impl PinnedPair {
     /// Mechanical creation from the fixed pinned controller name only. No PATH
     /// search, inherited environment, shell or exposed Command override. The
@@ -74,6 +85,39 @@ impl PinnedPair {
 
     pub fn identity(&self) -> io::Result<(u64, u64)> {
         self.root.identity()
+    }
+
+    /// Observe the SAME held directory and fixed image handles. No pathname
+    /// lookup or cursor movement is involved. This does not hash file contents.
+    pub fn pair_identity(&self) -> io::Result<PairIdentity> {
+        Ok(PairIdentity {
+            directory: self.root.identity()?,
+            controller: lock_identity(&self.controller)?,
+            cli: lock_identity(&self.cli)?,
+        })
+    }
+
+    /// Independently retain all physical ancestors and both read-only images,
+    /// then compare exact identities. The sender must still hold its original
+    /// pins throughout this call: observations alone cannot close a release /
+    /// reopen gap. New handles have independent read offsets. On refusal only
+    /// these newly opened handles are dropped; no file, ACL, lock or claim is
+    /// changed. This primitive does not adopt an installation lock or operation.
+    pub fn open_matching(path: &Path, expected: PairIdentity) -> io::Result<Self> {
+        if expected.directory.1 == 0
+            || expected.controller.1 == 0
+            || expected.cli.1 == 0
+            || expected.controller.0 != expected.directory.0
+            || expected.cli.0 != expected.directory.0
+            || expected.controller == expected.cli
+        {
+            return Err(io::Error::other("windows_update_pair_identity_refused"));
+        }
+        let pair = Self::open(path)?;
+        if pair.pair_identity()? != expected {
+            return Err(io::Error::other("windows_update_pair_identity_refused"));
+        }
+        Ok(pair)
     }
 
     pub fn files(&self) -> (&File, &File) {
