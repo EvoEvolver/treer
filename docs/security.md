@@ -174,6 +174,14 @@ or configuration contents. Failed launch retains the newly saved specification.
   any mutation. This adds no worker lock/pin transfer, Job policy/breakaway,
   independent Controller/Policy authorization or automatic reconnect/retry.
 
+  Returning the retained connection after a validated binding ACK preserves
+  custody only. The child still echoes opaque runtime context, rather than
+  independently authorizing it. Its retained-ACK helper has no mutation dispatch,
+  command parser, lock transfer or reconnect. The terminal bootstrap explicitly
+  drops this connection on success; its finite refusal/no normal-startup fallback
+  is unchanged. An eventual worker must separately establish admitted input,
+  lease/pin ownership, authorization and survival before using any lifecycle API.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

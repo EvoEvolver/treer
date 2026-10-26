@@ -93,6 +93,13 @@ and can be consumed to close transport before a three-second read-only wait
 for the original creator's exit. This supplies process custody/observation,
 not selected-runtime authority, worker survival or an update transaction.
 
+The child binding helper can return that same retained connection after its
+single validated operation/context/challenge ACK. This permits a later internal
+worker to keep original-creator custody; it adds no second frame dispatch or
+transaction command. The existing terminal bootstrap explicitly drops the
+returned connection and exits as before. Failed, timed-out or cancelled ACK
+still closes the transport and its retained handle.
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

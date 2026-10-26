@@ -1321,6 +1321,35 @@ Safe evidence is at
 `6ddda5f971c585313b20f473b0a11acf79b5055cba430dbeca86b266558e88c3`.
 No feature, extra binary build, old selectors/matrix or live process was used.
 
+## Preserve creator custody after the binding ACK
+
+The existing child-side binding parser now returns the same owned stream only
+after validating operation and exact request framing and writing its one ACK.
+The internal Windows `acknowledge_creator_for_handoff` returns the retained
+creator connection; it does not reconstruct state from wire data. Timeout,
+invalid operation/frame, write/read error or cancellation drops it. The existing
+terminal `acknowledge_creator` explicitly maps success to drop, so terminal
+bootstrap behavior, frame bytes, private argv, three-second handshake budget and
+no-normal-startup fallback remain unchanged. The parent exchange still closes
+its end after ACK. No second frame or transaction command is introduced.
+
+New author SERVER BIN selector `windows_update_retained_ack_` has two portable
+controls for exact ACK followed by retained same-stream fixture byte I/O, and
+malformed/wrong-operation/deadline/cancel closure. A third Windows-native control
+uses only SAMEtestexe: actual creator-connected child ACK retains its original
+handle after parent transport closure, then refuses a still-live creator only
+at the bounded wait deadline. Native is NOT_RUN until sole focused acceptance.
+This is not actual creator-exit survival, Job isolation, admitted worker image,
+independent Policy/runtime authorization, reservation/lease/pin transfer, health
+or update completion. No production worker/coordinator/capability is enabled.
+
+Author Mac new selector actually passed two controls, zero failed/ignored (503
+filtered). Strict Controller bins/tests Clippy with the existing acceptance
+feature and formatting/docs/diff checks passed. An initial author-only generic
+Result inference error was corrected with an explicit error type before this
+freeze; it is not a native failure or a native pass. Native exact3 remains
+NOT_RUN; no old selector or matrix was rerun.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,
