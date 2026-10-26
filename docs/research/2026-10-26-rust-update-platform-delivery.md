@@ -1079,8 +1079,22 @@ teardown verified. They do not run the admitted inert fixture bytes or repeat
 the prior real-binary bootstrap selector. Author Mac execution passed the one
 portable prerequisite control (zero failed/ignored); strict Controller Clippy
 with the existing acceptance feature, formatting, docs and diff checks passed.
-The two native controls remain NOT_RUN until their separate Windows receipt;
-no production coordinator is connected.
+Sole native run `40328689331` checked out exact source
+`2d91f8c6339fabe10a5a43db2a0d8d37233f3dd6`, wrapper
+`5d54934040efef65150ca31a258d6cb9f253f8e7`, on Windows2022/Rust1.90,
+Fixed NTFS image `20261022.344.1`. The new selector actually completed exactly
+three passed/zero failed/zero ignored/exit zero (285 filtered), including both
+native controls above. Independent task TEMP inventory was empty, cleanup was
+proven and the empty root was removed. Core independently checked exact source,
+command, test names/counts, platform and cleanup receipts. Safe evidence is
+retained under `.treer/reviews/core111-windows-completion-2d91f8c6/artifact/`;
+`RESULT.json` SHA256 is
+`052bcb4aebbe6f63cb1b32be65229a78a957256cad1814b2824e491c3462771f`.
+Only the SAME test executable ran; no admitted inert image, extra Controller
+binary build, acceptance feature or prior selector/matrix was used. This is
+bounded completion evidence, not readiness, authority or a complete update.
+No production coordinator is connected; Host/live processes/capability and
+publisher remain unchanged.
 
 ## Remaining ordered leaves and waiting boundaries
 
