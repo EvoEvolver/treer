@@ -2,7 +2,7 @@
 //! The updater normally never changes this state. Comparison is NOT a CAS and
 //! does not authorize restoring over an active Controller's concurrent writes.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
 };
 
@@ -24,6 +24,8 @@ const INDEX: &str = "startup-backup-index.json";
 struct Store {
     version: u32,
     entries: Vec<Entry>,
+    #[serde(default)]
+    denied_agent_ids: Vec<String>,
 }
 
 // Unknown fields (including workload credentials, command arguments and initial
@@ -90,8 +92,18 @@ fn fingerprint(bytes: &[u8], receipt: &Receipt) -> Result<Fingerprint> {
     }
     let store: Store = serde_json::from_slice(bytes)
         .map_err(|_| anyhow::anyhow!("invalid_update_startup_state"))?;
-    if store.version != 1 || store.entries.len() > ENTRY_LIMIT {
+    if !matches!(store.version, 1 | 2)
+        || store.entries.len() > ENTRY_LIMIT
+        || store.denied_agent_ids.len() > ENTRY_LIMIT
+        || (store.version == 1 && !store.denied_agent_ids.is_empty())
+    {
         bail!("unsupported_update_startup_state");
+    }
+    let mut denied = BTreeSet::new();
+    for agent_id in store.denied_agent_ids {
+        if !identifier(&agent_id, "ag_") || !denied.insert(agent_id) {
+            bail!("invalid_update_startup_state");
+        }
     }
     let mut entries = BTreeMap::new();
     for entry in store.entries {
@@ -99,6 +111,7 @@ fn fingerprint(bytes: &[u8], receipt: &Receipt) -> Result<Fingerprint> {
             || entry.workspace_id != receipt.workspace_id
             || entry.server_id != receipt.server_id
             || entry.generation == 0
+            || denied.contains(&entry.agent_id)
         {
             bail!("update_startup_binding_mismatch");
         }
@@ -107,6 +120,9 @@ fn fingerprint(bytes: &[u8], receipt: &Receipt) -> Result<Fingerprint> {
         }
     }
     Ok(Fingerprint {
+        // Bind the complete raw store, including version and denial fences.
+        // Keep the existing safe index projection/schema: no fence is dropped
+        // from the private backup or omitted from integrity/change detection.
         sha256: format!("{:x}", Sha256::digest(bytes)),
         size: bytes.len() as u64,
         entries: entries.into_values().collect(),
@@ -327,6 +343,90 @@ mod tests {
         );
         assert!(capture(&f.state, &f.journal, 0).is_err());
         assert_eq!(std::fs::read(f.backup_path(BACKUP)).unwrap(), original);
+    }
+
+    #[test]
+    fn actual_startup_store_v2_denial_only_backup_preserves_fences_and_detects_edits() {
+        let f = Fixture::new();
+        let path = f.path.join("state/srv_fixture-agent-startup.json");
+        let store = crate::startup_store::StartupStore::load(path.clone()).unwrap();
+        store.deny_absent("ag_deleted").unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let persisted: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        assert_eq!(persisted["version"], 2);
+        assert_eq!(persisted["entries"], serde_json::json!([]));
+        capture(&f.state, &f.journal, 0).unwrap();
+        assert_eq!(std::fs::read(f.backup_path(BACKUP)).unwrap(), original);
+        assert_eq!(
+            compare(&f.state, &f.journal).unwrap(),
+            Comparison::Unchanged
+        );
+        let backup = crate::startup_store::StartupStore::load(f.backup_path(BACKUP)).unwrap();
+        assert!(backup.is_denied("ag_deleted").unwrap());
+        store.deny_absent("ag_later_deleted").unwrap();
+        assert_eq!(compare(&f.state, &f.journal).unwrap(), Comparison::Changed);
+        assert!(store.is_denied("ag_later_deleted").unwrap());
+        assert!(!backup.is_denied("ag_later_deleted").unwrap());
+        // A tampered backup cannot be accepted even though its entry projection
+        // remains empty and the on-disk format is otherwise valid.
+        std::fs::write(f.backup_path(BACKUP), std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            compare(&f.state, &f.journal).unwrap_err().to_string(),
+            "update_startup_backup_conflict"
+        );
+    }
+
+    #[test]
+    fn v2_mixed_entries_and_denials_keep_private_bytes_and_existing_index_schema() {
+        let f = Fixture::new();
+        let mut json = store();
+        json["version"] = 2.into();
+        json["denied_agent_ids"] = serde_json::json!(["ag_deleted"]);
+        f.store(&json);
+        capture(&f.state, &f.journal, 0).unwrap();
+        assert_eq!(
+            compare(&f.state, &f.journal).unwrap(),
+            Comparison::Unchanged
+        );
+        let index = std::fs::read_to_string(f.backup_path(INDEX)).unwrap();
+        assert!(!index.contains("synthetic-private-credential"));
+        assert!(!index.contains("denied_agent_ids"));
+        let index: Index = serde_json::from_str(&index).unwrap();
+        assert_eq!(index.schema_version, 1);
+        assert_eq!(index.fingerprint.unwrap().entries.len(), 1);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(f.backup_path(BACKUP)).unwrap()).unwrap();
+        assert_eq!(saved, json);
+    }
+
+    #[test]
+    fn invalid_denial_fences_refuse_before_any_backup_without_echoing_input() {
+        for kind in ["legacy", "duplicate", "overlap", "invalid", "limit", "type"] {
+            let f = Fixture::new();
+            let mut json = store();
+            json["version"] = 2.into();
+            json["denied_agent_ids"] = serde_json::json!(["ag_deleted"]);
+            match kind {
+                "legacy" => json["version"] = 1.into(),
+                "duplicate" => {
+                    json["denied_agent_ids"] = serde_json::json!(["ag_deleted", "ag_deleted"])
+                }
+                "overlap" => json["denied_agent_ids"] = serde_json::json!(["ag_fixture"]),
+                "invalid" => json["denied_agent_ids"] = serde_json::json!(["private-credential"]),
+                "limit" => {
+                    json["denied_agent_ids"] = serde_json::json!((0..=ENTRY_LIMIT)
+                        .map(|i| format!("ag_denied{i}"))
+                        .collect::<Vec<_>>())
+                }
+                _ => json["denied_agent_ids"] = serde_json::json!(null),
+            }
+            f.store(&json);
+            let error = capture(&f.state, &f.journal, 0).unwrap_err().to_string();
+            assert!(!error.contains("private"));
+            assert!(!error.contains(f.path.to_str().unwrap()));
+            assert!(!f.backup_path(BACKUP).exists());
+            assert!(!f.backup_path(INDEX).exists());
+        }
     }
 
     #[test]

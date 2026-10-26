@@ -318,6 +318,32 @@ empty root removed. Result SHA256:
 This establishes old-image backup evidence only; startup backup, durability,
 pair replacement, rollback, worker/health and retirement remain outside scope.
 
+## Startup-store format compatibility before Windows backup
+
+The maintained startup store writes version 2 whenever it retains denied Agent
+IDs, including a store with no remaining startup entries. The existing Unix
+updater backup previously accepted version 1 only. Preparation would therefore
+refuse a legitimate denial-fenced store before the update transaction. The
+backup parser now accepts versions 1 and 2, bounds and validates denial IDs,
+rejects duplicate/overlapping fences and rejects version 1 with nonempty fences.
+It still copies the complete credential-bearing bytes into the private job;
+the existing index schema and safe entry projection remain unchanged. Its raw
+SHA256 binds the format and every fence, so fence-only edits or backup tampering
+are detected even with an empty entry list. Comparison never restores startup
+state or removes a later legitimate fence.
+
+Focused coverage includes a version-2 file produced by the real `StartupStore`
+writer, reopening its captured backup with that loader, a later deletion fence,
+backup tampering, mixed entries/fences and malformed/duplicate/overlapping or
+oversized denial sets. This compatibility correction belongs to the existing
+Unix backup path. It does not establish Windows startup capture, a cross-process
+startup-store mutation lock, rollback authorization or a full updater result.
+The author's macOS focused entry
+`cargo test --locked -p treer-agent-server --bin treer-agent-server
+self_update::startup_backup::tests -- --nocapture` passed all nine tests,
+zero failed/ignored. Controller binary/test strict Clippy and formatting passed.
+No hosted job, previously accepted native leaf or live update was rerun.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,
