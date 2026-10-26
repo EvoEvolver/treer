@@ -297,24 +297,34 @@ Startup backup, actual pair publication/rollback, safe claim retirement and
 worker/health remain missing. No production entry or capability is enabled.
 Two portable copy controls cover full bytes/digest/bounds and read/write refusal;
 two native controls cover copied bytes/physical binding/held access/readonly
-duplicate rights, plus alias, weak ACL and partial destination refusal. Native
-acceptance is pending for the focused `windows_update_backup_` four-test entry.
+duplicate rights, plus alias, weak ACL and partial destination refusal.
 The two portable controls passed on the author Mac, as did platform Windows GNU
 and Linux GNU all-target strict Clippy. Controller macOS all-target strict
-Clippy, formatting, documentation and diff checks also passed;
-Controller Windows native compilation is part of the pending focused entry:
+Clippy, formatting, documentation and diff checks also passed. The focused entry is:
 `cargo test --locked -p treer-agent-server --bin treer-agent-server
 windows_update_backup_ -- --nocapture` (four passed, none failed/ignored, exit
 zero and independent TEMP cleanup). No old native leaf or publication matrix
 needs another run for this boundary.
 
+Release executed that entry once in `40293422724`, exact source
+`275c779010858f91d64e51e8593f66f9a9743ced` and wrapper
+`9b2d5e911a40658d08698cd77455859d4ce62be9`. Windows Server 2022/Rust 1.90,
+fixed NTFS image `20261022.344.1` produced four passed, zero failed/ignored and
+exit zero. This includes actual reduced-access duplicate write refusal and
+sharing exclusion. Core independently checked all four named log entries,
+platform and result. TEMP remaining entries were empty, cleanup proven and the
+empty root removed. Result SHA256:
+`4b9e8c988d31775840479513703b6a9999453e27a8f97b8bc70cc6a22bdca7b3`.
+This establishes old-image backup evidence only; startup backup, durability,
+pair replacement, rollback, worker/health and retirement remain outside scope.
+
 ## Remaining ordered leaves and waiting boundaries
 
-1. Native NTFS store, single-use intent, signed pinned-input admission and lease
-   and install-wide claim acceptance are complete within their stated scopes. Next
-   add actual publication evidence after the verified-image backup successor
-   above receives native acceptance, never a generic completion setter.
-2. Implement Windows verified Controller/CLI image backup and two-rename
+1. Native NTFS store, single-use intent, signed pinned-input admission, lease,
+   install-wide claim and verified-image backup acceptance are complete within
+   their stated scopes. Next add startup-store backup and evidence bound to
+   actual publication, never a generic completion setter.
+2. Implement Windows Controller/CLI two-rename
    publication with locked-image refusal and whole-pair rollback. Never treat
    restoring files alone as successful rollback.
 3. Implement Windows original-worker ownership/Job escape and Host-owned
