@@ -279,3 +279,30 @@ Inspect through the existing owner-authenticated API with
 `{"action":"inspect_email_delivery","endpoint_id":"ACTUAL_ENDPOINT_ID"}`.
 Do not POST to the email transport to obtain status: even the same idempotency
 key can cause a new provider attempt after an uncertain outcome.
+
+### Conversation access recovery
+
+A paused email endpoint still permits the correctly bound current member to
+read its history. Reads still require fresh member authentication and the exact
+stored contact/member/generation; being an owner or possessing the emailed link
+does not grant access to somebody else's conversation.
+
+An explicit `GET /api/email/auth/start?thread=THREAD_ID&reauth=1` starts the normal
+state/PKCE/browser-bound OAuth flow even when a valid member session exists.
+`inbox=1&reauth=1` is also supported. There is no automatic logout or identity
+fallback: an invalid injected token still refuses authentication, and every
+subsequent read rechecks current membership and thread scope. Treer may retain
+its existing signed-in account; choose the bound account through the normal
+Treer account flow when needed. Reauthentication itself grants no thread access.
+
+Request-context denials return fixed `email_request_host_rejected` or
+`email_request_context_rejected` codes. Member-authentication errors remain
+separate from the generic `email_reply_unavailable` thread-scope denial; missing,
+retired and another member's threads have identical public denial bodies. Local
+operator logs classify only fixed `email_thread_access` stage/category values:
+member authentication (`login_required`, `identity_invalid`,
+`membership_unavailable`, `rate_limited`, `verification_unavailable`) or thread
+scope (`unavailable`, `identity_mismatch`, `binding_unavailable`). No address,
+member/thread ID, cookie, token, body, or raw upstream error is logged. These
+categories diagnose the request observed; they cannot reconstruct a previous
+403 whose category was discarded. Do not infer that a pause caused a read denial.

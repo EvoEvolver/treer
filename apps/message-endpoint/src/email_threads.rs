@@ -55,22 +55,34 @@ fn thread_id(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
 }
-fn query_thread(query: Option<&str>) -> Result<String, Error> {
+fn query_destination(query: Option<&str>) -> Result<(String, bool), Error> {
     let query = query.ok_or(Error::OAuthState)?;
-    if query == "inbox=1" {
-        return Ok(String::new());
-    }
-    if query.len() > 128 {
+    if query.len() > 160 {
         return Err(Error::OAuthState);
     }
     let url = reqwest::Url::parse(&format!("https://invalid.example/?{query}"))
         .map_err(|_| Error::OAuthState)?;
-    let values = url.query_pairs().collect::<Vec<_>>();
-    if values.len() != 1 || values[0].0 != "thread" || !thread_id(&values[0].1) {
-        return Err(Error::OAuthState);
+    let mut destination = None;
+    let mut reauth = false;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "thread" if destination.is_none() && thread_id(&value) => {
+                destination = Some(value.into_owned());
+            }
+            "inbox" if destination.is_none() && value == "1" => {
+                destination = Some(String::new());
+            }
+            "reauth" if !reauth && value == "1" => reauth = true,
+            _ => return Err(Error::OAuthState),
+        }
     }
-    Ok(values[0].1.to_string())
+    Ok((destination.ok_or(Error::OAuthState)?, reauth))
 }
+#[cfg(test)]
+fn query_thread(query: Option<&str>) -> Result<String, Error> {
+    query_destination(query).map(|(id, _)| id)
+}
+
 fn tokens(headers: &HeaderMap) -> Result<(Option<String>, Option<String>), Error> {
     let mut names = HashSet::new();
     let mut session = None;
@@ -148,8 +160,20 @@ impl Service {
             .map(|value| self.vault.session_token(value, now))
             .transpose()?
             .flatten();
-        self.auth
-            .authenticate_from(&values, token.as_deref(), now, peer.ip())
+        let result = self
+            .auth
+            .authenticate_from(&values, token.as_deref(), now, peer.ip());
+        if let Err(ref error) = result {
+            let category = match error {
+                Error::Required => "login_required",
+                Error::InvalidIdentity => "identity_invalid",
+                Error::OwnerRequired | Error::MemberRequired => "membership_unavailable",
+                Error::RateLimited | Error::LoginCapacity => "rate_limited",
+                _ => "verification_unavailable",
+            };
+            eprintln!("email_thread_access stage=member_auth category={category}");
+        }
+        result
     }
     fn mutation(&self, headers: &HeaderMap) -> Result<(), Error> {
         let values = headers
@@ -175,13 +199,13 @@ impl Service {
         query: Option<&str>,
         now: i64,
     ) -> Response {
-        let id = match query_thread(query) {
-            Ok(id) => id,
+        let (id, reauth) = match query_destination(query) {
+            Ok(value) => value,
             Err(e) => return error(e),
         };
         match self.member(headers, peer, now) {
-            Ok(_) => return redirect(&self.destination(&id)),
-            Err(Error::Required) => {}
+            Ok(_) if !reauth => return redirect(&self.destination(&id)),
+            Ok(_) | Err(Error::Required) => {}
             Err(e) => return error(e),
         }
         let mut destinations = match self.destinations.lock() {
@@ -356,7 +380,7 @@ impl Service {
             .is_some_and(|v| allowed_hosts.contains(&v.to_ascii_lowercase()))
             || hosts.next().is_some()
         {
-            return secure(error(Error::Csrf));
+            return secure(fixed(StatusCode::FORBIDDEN, "email_request_host_rejected"));
         }
         // OAuth callbacks are authenticated by one-use state+browser binding;
         // their top-level cross-site navigation is expected. Other GETs must
@@ -372,7 +396,10 @@ impl Service {
                     .first()
                     .is_some_and(|v| !matches!(v.to_str(), Ok("same-origin" | "none")))
             {
-                return secure(error(Error::Csrf));
+                return secure(fixed(
+                    StatusCode::FORBIDDEN,
+                    "email_request_context_rejected",
+                ));
             }
         }
         let permit = match self.slots.clone().try_acquire_owned() {
@@ -760,7 +787,29 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .contains("frame-ancestors 'none'"));
+            let body = runtime
+                .block_on(to_bytes(response.into_body(), 4096))
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["error"]["code"], "email_request_context_rejected");
         }
+        let (parts, body) = axum::http::Request::builder()
+            .uri(&path)
+            .header("Host", "wrong.example")
+            .body(Body::empty())
+            .unwrap()
+            .into_parts();
+        let wrong_host = runtime.block_on(service.clone().handle(
+            "127.0.0.1:1234".parse().unwrap(),
+            parts,
+            body,
+            &hosts,
+        ));
+        let body = runtime
+            .block_on(to_bytes(wrong_host.into_body(), 4096))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "email_request_host_rejected");
         let request =
             |method: Method, token: Option<&str>, origin: Option<&str>, body: Option<&str>| {
                 let mut request = axum::http::Request::builder()
@@ -808,6 +857,32 @@ mod tests {
             request(Method::GET, Some("synthetic.alice.signature"), None, None).status(),
             StatusCode::OK
         );
+        // Pausing does not revoke Alice's already bound private history.
+        state
+            .lock()
+            .unwrap()
+            .db
+            .execute("UPDATE endpoints SET paused=1", [])
+            .unwrap();
+        assert_eq!(
+            list(Some("synthetic.alice.signature"), &path).0,
+            StatusCode::OK
+        );
+        let denied = list(Some("synthetic.bob.signature"), &path);
+        let absent = list(
+            Some("synthetic.bob.signature"),
+            &format!("/api/email/thread/{}", "f".repeat(64)),
+        );
+        assert_eq!(
+            denied, absent,
+            "no thread-existence oracle for another member"
+        );
+        state
+            .lock()
+            .unwrap()
+            .db
+            .execute("UPDATE endpoints SET paused=0", [])
+            .unwrap();
         let body = r#"{"key":"one","body":"member reply"}"#;
         assert_eq!(
             request(
@@ -946,6 +1021,45 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         let id = "b".repeat(64);
+        let ordinary = call(
+            &format!("/api/email/auth/start?thread={id}"),
+            None,
+            Some("synthetic.bob.signature"),
+        );
+        assert_eq!(
+            ordinary.headers()["location"],
+            format!("https://hub.example/#email-thread={id}")
+        );
+        let reauth = call(
+            &format!("/api/email/auth/start?thread={id}&reauth=1"),
+            None,
+            Some("synthetic.bob.signature"),
+        );
+        assert_eq!(reauth.status(), StatusCode::SEE_OTHER);
+        assert!(reauth.headers()["location"]
+            .to_str()
+            .unwrap()
+            .contains("/api/apps/oauth/authorize?"));
+        assert!(reauth.headers().contains_key("set-cookie"));
+        assert_eq!(
+            call(
+                &format!("/api/email/auth/start?thread={id}&reauth=1"),
+                None,
+                Some("synthetic.forged.signature")
+            )
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        for query in [
+            format!("thread={id}&reauth=0"),
+            format!("thread={id}&reauth=1&reauth=1"),
+            format!("thread={id}&reauth=1&next=https://evil.test"),
+        ] {
+            assert_eq!(
+                call(&format!("/api/email/auth/start?{query}"), None, None).status(),
+                StatusCode::FORBIDDEN
+            );
+        }
         let start = call(&format!("/api/email/auth/start?thread={id}"), None, None);
         assert_eq!(start.status(), StatusCode::SEE_OTHER);
         let location = reqwest::Url::parse(start.headers()["location"].to_str().unwrap()).unwrap();
@@ -1004,6 +1118,27 @@ mod tests {
         );
         assert_eq!(
             call(&thread, Some(session), Some("synthetic.forged.signature")).status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // A real opaque member cookie also gets a fresh OAuth flow only on
+        // explicit reauth; it is not silently discarded or promoted to Owner.
+        let reauth = call(
+            &format!("/api/email/auth/start?thread={id}&reauth=1"),
+            Some(session),
+            None,
+        );
+        assert_eq!(reauth.status(), StatusCode::SEE_OTHER);
+        assert!(reauth.headers()["location"]
+            .to_str()
+            .unwrap()
+            .contains("/api/apps/oauth/authorize?"));
+        assert_eq!(
+            call(
+                &format!("/api/email/auth/start?thread={id}&reauth=1"),
+                Some(session),
+                Some("synthetic.forged.signature")
+            )
+            .status(),
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(

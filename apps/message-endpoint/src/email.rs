@@ -553,11 +553,23 @@ impl<'a> Queue<'a> {
             |r| r.get(0),
         )?;
         if retired {
+            eprintln!("email_thread_access stage=thread_scope category=unavailable");
             return Err(Error::Denied);
         }
-        let (endpoint,generation,recipient,address,member):(String,i64,String,String,String)=self.store.db.query_row("SELECT endpoint,generation,recipient,address,member FROM email_threads WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?.ok_or(Error::Denied)?;
+        let row: Option<(String,i64,String,String,String)> = self.store.db.query_row("SELECT endpoint,generation,recipient,address,member FROM email_threads WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?;
+        let Some((endpoint, generation, recipient, address, member)) = row else {
+            eprintln!("email_thread_access stage=thread_scope category=unavailable");
+            return Err(Error::Denied);
+        };
         let current:bool=self.store.db.query_row("SELECT EXISTS(SELECT 1 FROM email_targets t JOIN endpoints e ON e.id=t.endpoint AND e.generation=t.generation WHERE t.endpoint=?1 AND t.generation=?2 AND t.address=?3 AND t.member=?4 AND t.revoked=0)",params![endpoint,generation,address,member],|r|r.get(0))?;
-        if !current || member != verified_member {
+        // Only fixed categories reach operator logs. Public denial stays identical
+        // for absent, revoked and another member's threads (no existence oracle).
+        if member != verified_member {
+            eprintln!("email_thread_access stage=thread_scope category=identity_mismatch");
+            return Err(Error::Denied);
+        }
+        if !current {
+            eprintln!("email_thread_access stage=thread_scope category=binding_unavailable");
             return Err(Error::Denied);
         }
         let mut query = self.store.db.prepare(
