@@ -154,6 +154,8 @@ pub(crate) struct ControllerUpdateChild {
     job_check_attempted: bool,
     pipe_attempted: bool,
     handshake_attempted: bool,
+    binding_acknowledged: bool,
+    completion_attempted: bool,
     #[cfg(windows)]
     _worker_pipe: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
     #[cfg(windows)]
@@ -188,6 +190,8 @@ impl ControllerUpdateChild {
             job_check_attempted: false,
             pipe_attempted: false,
             handshake_attempted: false,
+            binding_acknowledged: false,
+            completion_attempted: false,
             _worker_pipe: None,
             _bootstrap_pipe: None,
             _reservation: Some(reservation),
@@ -218,6 +222,8 @@ impl ControllerUpdateChild {
             job_check_attempted: false,
             pipe_attempted: false,
             handshake_attempted: false,
+            binding_acknowledged: false,
+            completion_attempted: false,
             _worker_pipe: None,
             _bootstrap_pipe: Some(pipe),
             _reservation: Some(reservation),
@@ -242,6 +248,8 @@ impl ControllerUpdateChild {
             job_check_attempted: false,
             pipe_attempted: false,
             handshake_attempted: false,
+            binding_acknowledged: false,
+            completion_attempted: false,
             #[cfg(windows)]
             _worker_pipe: None,
             #[cfg(windows)]
@@ -395,7 +403,9 @@ impl ControllerUpdateChild {
             ._worker_pipe
             .take()
             .ok_or_else(|| anyhow::anyhow!("windows_update_handshake_transport_unavailable"))?;
-        crate::windows_update_handshake::exchange(stream, request).await
+        crate::windows_update_handshake::exchange(stream, request).await?;
+        self.binding_acknowledged = true;
+        Ok(())
     }
 
     /// Only the pipe bound by THIS verified creator before CreateProcess.
@@ -413,6 +423,43 @@ impl ControllerUpdateChild {
             .ok_or_else(|| anyhow::anyhow!("windows_update_bootstrap_already_attempted"))?;
         self.accept_worker_pipe(selected, binding, pipe).await?;
         self.exchange_worker_binding(selected, binding).await
+    }
+
+    /// Observe only the retained original Child after a successful binding ACK.
+    /// Zero exit completes this terminal exchange, NOT an update or readiness.
+    /// Cancellation/timeout/error consumes this observation; the reservation
+    /// stays owned and the independent one-shot teardown remains available.
+    pub(crate) async fn wait_for_bound_child_exit(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+    ) -> Result<()> {
+        self.matches(selected, binding)?;
+        if self.stop_attempted || !self.binding_acknowledged || self.completion_attempted {
+            bail!("windows_update_child_completion_refused");
+        }
+        self.completion_attempted = true;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        tokio::time::timeout_at(deadline, async {
+            loop {
+                if tokio::time::Instant::now() >= deadline {
+                    bail!("windows_update_child_completion_unconfirmed");
+                }
+                match self.child.try_wait() {
+                    Ok(Some(status))
+                        if status.success() && tokio::time::Instant::now() < deadline =>
+                    {
+                        return Ok(());
+                    }
+                    Ok(Some(_)) | Err(_) => {
+                        bail!("windows_update_child_completion_unconfirmed");
+                    }
+                    Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                }
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("windows_update_child_completion_unconfirmed"))?
     }
 
     #[cfg(test)]

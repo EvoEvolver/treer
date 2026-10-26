@@ -119,7 +119,11 @@ or configuration contents. Failed launch retains the newly saved specification.
   only complete this exchange and exit, before ordinary configuration or Host
   initialization. The transaction coordinator and capability remain unwired;
   normal identity/Policy and signed admission are still required. A zero exit
-  after ACK is not update success or readiness.
+  after ACK is not update success or readiness. The original Child owner can
+  separately observe zero exit within one three-second completion budget only
+  after a successful ACK. Timeout, cancellation or error consumes that attempt
+  without granting authority or releasing its reservation; independent teardown
+  remains one-shot and unknown Drop does not prove exit.
 
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the

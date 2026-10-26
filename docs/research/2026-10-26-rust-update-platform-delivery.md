@@ -1048,6 +1048,40 @@ restart/health or a complete updater. No enrolled image, installation, Host,
 live Controller/Agent, capability or publisher changed. No previous selector
 or platform matrix was repeated.
 
+### Implemented leaf: bounded original-Child completion after binding
+
+The retained owner separately records successful binding exchange; starting a
+handshake or merely accepting its pipe cannot satisfy that condition.
+`wait_for_bound_child_exit` first checks the selected runtime and full operation
+binding, then requires that successful ACK and an unused completion attempt.
+Before observing the original `Child` it consumes the attempt. One three-second
+budget covers polling for natural exit; only an actually observed zero status
+succeeds. Nonzero status, observation error and deadline return a fixed safe
+refusal. Cancellation consumes the attempt too. No PID reopening, kill, respawn,
+retry, receipt publication or command dispatch occurs in this method.
+
+The same reservation, state-root/target pins and installation lease remain
+owned throughout the wait and after its return. An independent one-shot stop
+remains available on the original Child, including after timeout/cancellation;
+unknown Drop still does not prove exit and the durable claim is retained. Even
+successful completion only describes this terminal binding exchange. It cannot
+grant mutation permission, worker readiness, ownership transfer, sustained Job
+survival, Controller restart/health or claim retirement. The existing Host
+restart command has no selected Controller instance/epoch guard and is not
+adopted as an updater restart authority by this change.
+
+New selector `windows_update_completion_` contains one portable prerequisite
+control and two native controls. Native cases use only the task-owned SAME
+test executable and its creator-authenticated pipe: zero-exit with scope refusal
+and retained pins/lease/claim; and ACK followed by exit 73, a live peer exceeding
+the deadline, or cancellation, with repeated completion refused and independent
+teardown verified. They do not run the admitted inert fixture bytes or repeat
+the prior real-binary bootstrap selector. Author Mac execution passed the one
+portable prerequisite control (zero failed/ignored); strict Controller Clippy
+with the existing acceptance feature, formatting, docs and diff checks passed.
+The two native controls remain NOT_RUN until their separate Windows receipt;
+no production coordinator is connected.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

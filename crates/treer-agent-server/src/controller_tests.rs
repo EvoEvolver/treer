@@ -3110,12 +3110,18 @@ async fn update_handshake_fixture_child() {
     let operation =
         Uuid::parse_str(&std::env::var("TREER_TEST_HANDSHAKE_OPERATION").unwrap()).unwrap();
     let mode = std::env::var("TREER_TEST_HANDSHAKE_MODE").unwrap();
-    if mode == "valid" {
+    if matches!(mode.as_str(), "valid" | "exit_zero" | "exit_error") {
         if crate::windows_update_handshake::acknowledge_creator(&selector, *operation.as_bytes())
             .await
             .is_err()
         {
             std::process::exit(81);
+        }
+        if mode == "exit_zero" {
+            std::process::exit(0);
+        }
+        if mode == "exit_error" {
+            std::process::exit(73);
         }
     } else {
         let Ok(mut stream) =
@@ -3166,6 +3172,175 @@ fn update_handshake_command(selector: &str, operation: Uuid, mode: &str) -> std:
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     command
+}
+
+#[tokio::test]
+async fn windows_update_completion_requires_successful_ack_without_consuming_teardown() {
+    let (runtime, root, task) = update_state_fixture().await;
+    let binding = update_state_binding(Uuid::new_v4());
+    let state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    let mut child = update_state::ControllerUpdateChild::spawn_fixture(
+        &state,
+        &runtime,
+        &binding,
+        &mut update_custody_command(),
+    )
+    .unwrap();
+    assert_eq!(
+        child
+            .wait_for_bound_child_exit(&runtime, &binding)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "windows_update_child_completion_refused"
+    );
+    assert!(child.poll(&runtime, &binding).unwrap().is_none());
+    child.stop(&runtime, &binding).unwrap();
+    drop(child);
+    drop(state);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_completion_native_ack_and_original_zero_exit_keep_reservation() {
+    use treer_platform::windows_update_inputs::PinnedPair;
+    use treer_platform::windows_update_pipe::CreatedChildPipe;
+    let (runtime, root, task) = update_state_fixture().await;
+    let (other, other_root, other_task) = update_state_fixture().await;
+    let reservation =
+        update_launch_reservation(&runtime, &root, crate::windows_update_admission::tests::NEW);
+    let binding = reservation.binding().clone();
+    let selector = Uuid::new_v4().simple().to_string();
+    let pipe = CreatedChildPipe::bind(&selector).unwrap();
+    let mut child = reservation
+        .spawn_owned_child(
+            &runtime,
+            &mut update_handshake_command(&selector, binding.operation_id, "exit_zero"),
+        )
+        .unwrap();
+    child
+        .accept_worker_pipe(&runtime, &binding, pipe)
+        .await
+        .unwrap();
+    child
+        .exchange_worker_binding(&runtime, &binding)
+        .await
+        .unwrap();
+    assert!(child
+        .wait_for_bound_child_exit(&other, &binding)
+        .await
+        .is_err());
+    let mut foreign = binding.clone();
+    foreign.operation_id = Uuid::new_v4();
+    assert!(child
+        .wait_for_bound_child_exit(&runtime, &foreign)
+        .await
+        .is_err());
+    child
+        .wait_for_bound_child_exit(&runtime, &binding)
+        .await
+        .unwrap();
+    assert!(child
+        .wait_for_bound_child_exit(&runtime, &binding)
+        .await
+        .is_err());
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("target/treer-agent-server.exe"))
+        .is_err());
+    assert!(PinnedPair::open(&root.join("installed"))
+        .unwrap()
+        .lock_installation()
+        .is_err());
+    assert!(std::fs::rename(root.join("configured-state"), root.join("moved-state")).is_err());
+    assert!(child.stop(&runtime, &binding).unwrap().success());
+    drop(child);
+    assert!(root
+        .join("installed/.treer-controller-update.claim")
+        .exists());
+    assert_eq!(
+        std::fs::read(root.join("installed/treer-agent-server.exe")).unwrap(),
+        crate::windows_update_admission::tests::OLD
+    );
+    drop(runtime);
+    drop(other);
+    task.abort();
+    other_task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(other_root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_completion_native_failed_exit_deadline_and_cancel_refuse_replay() {
+    use treer_platform::windows_update_pipe::CreatedChildPipe;
+    for (mode, cancel) in [("exit_error", false), ("valid", false), ("valid", true)] {
+        let (runtime, root, task) = update_state_fixture().await;
+        let reservation =
+            update_launch_reservation(&runtime, &root, crate::windows_update_admission::tests::NEW);
+        let binding = reservation.binding().clone();
+        let selector = Uuid::new_v4().simple().to_string();
+        let pipe = CreatedChildPipe::bind(&selector).unwrap();
+        let mut child = reservation
+            .spawn_owned_child(
+                &runtime,
+                &mut update_handshake_command(&selector, binding.operation_id, mode),
+            )
+            .unwrap();
+        child
+            .accept_worker_pipe(&runtime, &binding, pipe)
+            .await
+            .unwrap();
+        child
+            .exchange_worker_binding(&runtime, &binding)
+            .await
+            .unwrap();
+        if cancel {
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                child.wait_for_bound_child_exit(&runtime, &binding),
+            )
+            .await
+            .is_err());
+        } else {
+            assert_eq!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    child.wait_for_bound_child_exit(&runtime, &binding),
+                )
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string(),
+                "windows_update_child_completion_unconfirmed"
+            );
+        }
+        assert!(child
+            .wait_for_bound_child_exit(&runtime, &binding)
+            .await
+            .is_err());
+        let status = child.stop(&runtime, &binding).unwrap();
+        if mode == "exit_error" {
+            assert_eq!(status.code(), Some(73));
+        }
+        assert!(child.stop(&runtime, &binding).is_err());
+        drop(child);
+        assert!(root
+            .join("installed/.treer-controller-update.claim")
+            .exists());
+        assert_eq!(
+            std::fs::read(root.join("installed/treer-agent-server.exe")).unwrap(),
+            crate::windows_update_admission::tests::OLD
+        );
+        drop(runtime);
+        task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(all(windows, feature = "native-update-acceptance"))]
