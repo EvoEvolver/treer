@@ -141,7 +141,7 @@ directory. Existing weak ACLs are refused rather than repaired.
 The privately constructed `AdmittedInputs` owns all four pinned files. Consuming
 it for one intent returns `ReservedInputs`, which retains the handles but has no
 second-reservation, publication, rollback, health or execution method. The
-installed pair is only observed. No installation mutation lock or worker/Job
+installed images are only observed. No worker/Job
 handoff is claimed; these read pins must be explicitly reconciled with future
 rename mechanics, not dropped and replaced by an unchecked path reopen. This
 leaf also does not authenticate the old pair's publisher or assert its running
@@ -172,6 +172,40 @@ and the empty root was removed. The result receipt SHA256 is
 `e1939bfaed6f1673afdcd40ff4c67e0e176ff14cb64ff190843ab3c00e75c0b4`.
 This establishes signed pinned-input admission through one reservation only;
 image replacement, mutation locking, Job ownership and health remain untested.
+
+## Installation-wide Windows lease
+
+The next source increment requires a `LockedInstallation` before signed
+admission hashes the installed pair. It consumes an existing `PinnedPair` and
+opens the fixed `.treer-controller-update.lock` in that pinned physical private
+NTFS directory. The lock uses the same checked private, regular, single-link,
+non-reparse, share-zero file opener as the receipt holder. Only an absent name
+may be exclusively created; an existing name is neither truncated, deleted nor
+ACL-repaired. The receipt holder's acquisition is factored into this shared
+helper without changing its behavior.
+
+`AdmittedInputs` and then `ReservedInputs` retain this lease with the installed
+pair, so another participating admission targeting the same physical install
+cannot proceed merely by choosing another task receipt directory. Target image
+pins remain read-only. This is OS lifetime exclusion only, not a durable
+operation claim, crash fence, worker ownership or authority to resume after an
+owner exits. Same-account code that does not use this contract remains outside
+the cooperating-updater guarantee. No caller can release only the lease while
+retaining the admitted/reserved value.
+
+Two new Windows-only `windows_update_lock_` controls cover exclusion before and
+after reservation across distinct job directories, refusal of lock write/delete/
+rename, stable-name retention after lease release and existing-intent refusal;
+and hardlinked/weak-ACL lock refusal without repair, intent or image mutation.
+Native execution of this increment is pending. Prior admission four-test
+acceptance above remains attributed to its original source, not this successor.
+Author checks passed: Controller macOS all-target strict Clippy, platform
+Windows GNU and Linux GNU all-target strict Clippy, formatting, documentation
+and diff checks. Controller Windows compilation and the two new native tests
+require the hosted Windows entry; no unavailable local cross C toolchain was
+installed. The focused entry is `cargo test --locked -p treer-agent-server --bin
+treer-agent-server windows_update_lock_ -- --nocapture`, expecting exactly two
+passed, none failed/ignored, exit zero and independent task TEMP cleanup.
 
 ## Remaining ordered leaves and waiting boundaries
 

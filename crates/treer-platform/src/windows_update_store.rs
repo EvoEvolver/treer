@@ -57,6 +57,18 @@ pub(super) fn open_record(path: &Path, write: bool) -> io::Result<File> {
     Ok(file)
 }
 
+pub(super) fn exclusive_lock(path: &Path) -> io::Result<File> {
+    let lock = match open_record(path, true) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            crate::windows::create_private_update_file(path)?
+        }
+        Err(error) => return Err(error),
+    };
+    checked_file(path, &lock)?;
+    Ok(lock)
+}
+
 impl UpdateStore {
     /// Existing physical directory only. The owner explicitly creates/seals a
     /// fresh job directory beforehand; opening never chmods or adopts a weak ACL.
@@ -67,14 +79,7 @@ impl UpdateStore {
         }
         crate::windows::require_update_ntfs(path)?;
         let lock_path = path.join(LOCK);
-        let lock = match open_record(&lock_path, true) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                crate::windows::create_private_update_file(&lock_path)?
-            }
-            Err(error) => return Err(error),
-        };
-        checked_file(&lock_path, &lock)?;
+        let lock = exclusive_lock(&lock_path)?;
         // Do not mistake a crash, rejected rename, symlink, or unreadable stage
         // for permission to retry publication. Keep all names for reconciliation.
         match std::fs::symlink_metadata(path.join(NEXT)) {
