@@ -125,6 +125,15 @@ or configuration contents. Failed launch retains the newly saved specification.
   without granting authority or releasing its reservation; independent teardown
   remains one-shot and unknown Drop does not prove exit.
 
+  A separate internal `ObserveController` read asks the stable Host supervisor
+  for its original live Child's epoch/instance/PID. The instance UUID changes on
+  each successful spawn, even if a PID is later reused. This is an observation,
+  not independently authenticated mapped-image evidence or a restart token.
+  It neither extends the local Host socket's OS-owner trust boundary nor binds
+  a workspace/operation/selected runtime by itself. The updater has not wired
+  it to a production restart or enabled capability. The existing unconditional
+  Host restart command is not made conditional by this addition.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

@@ -1096,6 +1096,40 @@ bounded completion evidence, not readiness, authority or a complete update.
 No production coordinator is connected; Host/live processes/capability and
 publisher remain unchanged.
 
+### Implemented leaf: Host-owned live Controller identity observation
+
+The legacy Host `RestartController` command carries no expected Host epoch or
+Controller instance. A worker cannot safely turn that ACK, a creator PID or a
+read-only OS process observation into permission to restart the selected
+Controller. The next prerequisite therefore adds only `ObserveController`, a
+read from the supervisor that already owns the actual Controller Child.
+
+The same supervisor loop handles the read, polls its original Child for exit
+(including a real Windows exit 259) and refuses unavailable/exited state. A live
+result contains the stable Host epoch, Child PID and a fresh instance UUID
+assigned after every successful spawn, including automatic and requested
+replacement. There is no caller PID, process reopening, image-path adoption or
+new lifecycle command. The read has a three-second reply budget, bypasses the
+mutation-result cache and does not retry. An expired receiver is skipped by the
+supervisor; cancellation cannot turn this read into a restart. Existing legacy
+restart behavior, Job policy and capability stay unchanged.
+
+New wire variants are appended to the existing Host protocol v2 enums, keeping
+all prior tags/layouts unchanged. An old Host rejects an unknown variant with
+no fallback. This observation alone is not workspace/operation/runtime-bound
+authorization, mapped-image proof, health or continuous liveness. The updater
+coordinator and conditional restart are not connected by this leaf.
+
+Author Mac entry
+`cargo test --locked -p treer-agent-host --bin treer-agent-host controller_update_observation_ -- --nocapture`
+passed three controls with zero failed/ignored: original task-owned Child live
+identity then refusal after exit, fresh read/no mutation cache and legacy wire
+tags, and bounded reply cancellation without a restart/retry. Only SAMEtestexe
+helpers were created; no Host daemon or installed Controller was started.
+Strict Host/protocol/Controller consumer Clippy (bins/tests), formatting, docs
+and diff checks passed. No previous acceptance selector or matrix was rerun.
+Windows execution remains NOT_RUN pending its own focused native receipt.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

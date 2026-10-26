@@ -53,6 +53,16 @@ Windows defaults to a detached user Host. The Host owns a kill-on-close Job
 Object, and runtime workloads get nested jobs; Controller replacement leaves
 these handles with the stable Host. They manage lifecycle, not sandboxing.
 
+The internal Host `ObserveController` request is a bounded read from that
+supervisor's original live Controller Child. It returns the Host epoch, a fresh
+instance UUID assigned at each successful Controller spawn and the Child PID.
+It accepts no caller PID and does not open or adopt a process by PID. This
+point-in-time observation is not a credential, readiness proof or permission to
+restart. Reads bypass the mutation-result cache; a timeout closes only the
+observation reply and never enqueues a restart. Existing Host protocol v2
+command/response tags remain unchanged by append-only variants; an older Host
+rejects the unsupported request rather than falling back to a restart.
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

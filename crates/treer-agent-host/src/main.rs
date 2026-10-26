@@ -10,13 +10,13 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{info, warn};
 use treer_agent_runtime::{HostRuntime, RuntimeError};
 use treer_host_protocol::{
-    decode_message, encode_message, HostBuildInfo, HostCommand, HostDaemonConfig, HostError,
-    HostMessage, HostRequest, HostResponse, OutputCursor, HOST_PROTOCOL_VERSION,
-    MAX_HOST_FRAME_BYTES,
+    decode_message, encode_message, HostBuildInfo, HostCommand, HostControllerIdentity,
+    HostDaemonConfig, HostError, HostMessage, HostRequest, HostResponse, OutputCursor,
+    HOST_PROTOCOL_VERSION, MAX_HOST_FRAME_BYTES,
 };
 use treer_platform::{connect_local, LocalListener, LocalStream};
 use uuid::Uuid;
@@ -52,7 +52,41 @@ struct HostState {
     runtime: HostRuntime,
     results: Mutex<ResultCache>,
     operation_gate: Mutex<()>,
-    restart_controller: mpsc::UnboundedSender<()>,
+    restart_controller: mpsc::UnboundedSender<ControllerRequest>,
+}
+
+enum ControllerRequest {
+    Restart,
+    Observe(oneshot::Sender<Result<HostResponse, HostError>>),
+}
+
+fn observe_controller(
+    controller: &mut Child,
+    host_epoch: &str,
+    instance_id: Uuid,
+) -> Result<HostResponse, HostError> {
+    let refused = || {
+        HostError::new(
+            "controller_unavailable",
+            "live Controller identity unavailable",
+        )
+    };
+    // Query the supervisor's original Child. Never open/adopt a PID supplied by
+    // the client, and never interpret an exit code (including 259) as liveness.
+    if host_epoch.is_empty() || controller.try_wait().map_err(|_| refused())?.is_some() {
+        return Err(refused());
+    }
+    let pid = controller
+        .id()
+        .filter(|pid| *pid != 0)
+        .ok_or_else(refused)?;
+    Ok(HostResponse::ControllerIdentity {
+        identity: HostControllerIdentity {
+            host_epoch: host_epoch.into(),
+            instance_id: instance_id.to_string(),
+            pid,
+        },
+    })
 }
 
 struct ResultCache {
@@ -139,6 +173,7 @@ async fn run_daemon(config: HostDaemonConfig) -> Result<()> {
     );
 
     let mut controller = spawn_controller(&config).await?;
+    let mut controller_instance = Uuid::new_v4();
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     loop {
@@ -150,10 +185,21 @@ async fn run_daemon(config: HostDaemonConfig) -> Result<()> {
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 controller = spawn_controller(&config).await?;
+                controller_instance = Uuid::new_v4();
             }
             restart = restart_rx.recv() => {
-                if restart.is_none() {
-                    bail!("controller restart channel closed");
+                match restart {
+                    None => bail!("controller supervisor channel closed"),
+                    Some(ControllerRequest::Observe(reply)) => {
+                        // A cancelled/expired read cannot enqueue a mutation.
+                        if !reply.is_closed() {
+                            let _ = reply.send(observe_controller(
+                                &mut controller, state.runtime.host_epoch(), controller_instance,
+                            ));
+                        }
+                        continue;
+                    }
+                    Some(ControllerRequest::Restart) => {}
                 }
                 info!("hot restarting controller");
                 if let Err(error) = controller.kill().await {
@@ -161,6 +207,7 @@ async fn run_daemon(config: HostDaemonConfig) -> Result<()> {
                 }
                 let _ = controller.wait().await;
                 controller = spawn_controller(&config).await?;
+                controller_instance = Uuid::new_v4();
             }
             signal = &mut shutdown => {
                 signal?;
@@ -355,6 +402,21 @@ async fn execute_request(
     state: &HostState,
     request: &HostRequest,
 ) -> Result<HostResponse, HostError> {
+    if matches!(&request.command, HostCommand::ObserveController) {
+        let (reply, response) = oneshot::channel();
+        state
+            .restart_controller
+            .send(ControllerRequest::Observe(reply))
+            .map_err(|_| HostError::new("supervisor_stopped", "controller supervisor stopped"))?;
+        // No operation cache entry or retry: this is a point-in-time read from
+        // the actual supervisor, not a replayable process/lifecycle authority.
+        return tokio::time::timeout(Duration::from_secs(3), response)
+            .await
+            .map_err(|_| {
+                HostError::new("controller_unavailable", "Controller observation timed out")
+            })?
+            .map_err(|_| HostError::new("supervisor_stopped", "controller supervisor stopped"))?;
+    }
     let _operation_guard = if request.command.is_mutating() {
         Some(state.operation_gate.lock().await)
     } else {
@@ -373,6 +435,7 @@ async fn execute_request(
     }
     let response: Result<HostResponse, HostError> = (|| match &request.command {
         HostCommand::Sync { .. } => unreachable!("sync is handled by the connection"),
+        HostCommand::ObserveController => unreachable!("observation is handled above"),
         HostCommand::Spawn { request } => Ok(HostResponse::Process {
             process: state
                 .runtime
@@ -405,9 +468,12 @@ async fn execute_request(
             process: state.runtime.stop(process_id).map_err(host_runtime_error)?,
         }),
         HostCommand::RestartController => {
-            state.restart_controller.send(()).map_err(|_| {
-                HostError::new("supervisor_stopped", "controller supervisor stopped")
-            })?;
+            state
+                .restart_controller
+                .send(ControllerRequest::Restart)
+                .map_err(|_| {
+                    HostError::new("supervisor_stopped", "controller supervisor stopped")
+                })?;
             Ok(HostResponse::Ack)
         }
     })();
@@ -570,6 +636,163 @@ mod tests {
     use super::*;
     use serde_json::json;
     use treer_host_protocol::HostSpawnRequest;
+
+    #[test]
+    #[ignore = "owned helper invoked only by Controller observation controls"]
+    fn controller_observation_fixture_child() {
+        use std::io::Read;
+        let mut input = [0];
+        std::io::stdin().read_exact(&mut input).unwrap();
+        std::process::exit(259);
+    }
+
+    fn observation_child() -> Child {
+        Command::new(std::env::current_exe().unwrap())
+            .env_clear()
+            .args([
+                "--exact",
+                "tests::controller_observation_fixture_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn controller_update_observation_original_child_is_live_and_generation_scoped() {
+        let mut child = observation_child();
+        let instance = Uuid::new_v4();
+        let observed = observe_controller(&mut child, "host-fixture", instance).unwrap();
+        let HostResponse::ControllerIdentity { identity } = observed else {
+            panic!("wrong response");
+        };
+        assert_eq!(identity.host_epoch, "host-fixture");
+        assert_eq!(identity.instance_id, instance.to_string());
+        assert_eq!(Some(identity.pid), child.id());
+        assert_eq!(
+            observe_controller(&mut child, "host-fixture", instance).unwrap(),
+            HostResponse::ControllerIdentity { identity }
+        );
+        assert!(observe_controller(&mut child, "", instance).is_err());
+        child.stdin.take().unwrap().write_all(b"x").await.unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!status.success());
+        #[cfg(windows)]
+        assert_eq!(status.code(), Some(259));
+        assert!(observe_controller(&mut child, "host-fixture", instance).is_err());
+        let mut replacement = observation_child();
+        let next = Uuid::new_v4();
+        assert_ne!(instance, next);
+        let HostResponse::ControllerIdentity { identity } =
+            observe_controller(&mut replacement, "host-fixture", next).unwrap()
+        else {
+            panic!("wrong response")
+        };
+        assert_eq!(identity.instance_id, next.to_string());
+        replacement.kill().await.unwrap();
+        replacement.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn controller_update_observation_is_a_fresh_read_without_mutation_or_cached_authority() {
+        assert!(!HostCommand::ObserveController.is_mutating());
+        // Append-only additions preserve the existing command/response tags.
+        assert_eq!(
+            encode_message(&HostCommand::RestartController).unwrap(),
+            vec![6]
+        );
+        assert_eq!(encode_message(&HostResponse::Ack).unwrap(), vec![3]);
+        let encoded = encode_message(&HostCommand::ObserveController).unwrap();
+        assert_eq!(
+            decode_message::<HostCommand>(&encoded).unwrap(),
+            HostCommand::ObserveController
+        );
+        let root = std::env::temp_dir().join(format!("treer-host-observe-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let (restart_controller, mut incoming) = mpsc::unbounded_channel();
+        let state = HostState {
+            runtime: HostRuntime::new(&root).unwrap(),
+            results: Mutex::new(ResultCache::new()),
+            operation_gate: Mutex::new(()),
+            restart_controller,
+        };
+        let request = HostRequest {
+            protocol: HOST_PROTOCOL_VERSION,
+            request_id: "observe".into(),
+            operation_id: Some("same-read-id".into()),
+            command: HostCommand::ObserveController,
+        };
+        for _ in 0..2 {
+            let expected = HostResponse::ControllerIdentity {
+                identity: HostControllerIdentity {
+                    host_epoch: "fixture-epoch".into(),
+                    instance_id: Uuid::new_v4().to_string(),
+                    pid: 1,
+                },
+            };
+            let response = expected.clone();
+            let supervisor = async {
+                let Some(ControllerRequest::Observe(reply)) = incoming.recv().await else {
+                    panic!("observation enqueued a mutation");
+                };
+                reply.send(Ok(response)).unwrap();
+            };
+            let (actual, ()) = tokio::join!(execute_request(&state, &request), supervisor);
+            assert_eq!(actual.unwrap(), expected);
+            let wire = encode_message(&expected).unwrap();
+            assert_eq!(decode_message::<HostResponse>(&wire).unwrap(), expected);
+            assert!(state.results.lock().await.values.is_empty());
+        }
+        assert!(incoming.try_recv().is_err());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn controller_update_observation_deadline_closes_reply_without_restart_or_retry() {
+        let root = std::env::temp_dir().join(format!("treer-host-observe-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let (restart_controller, mut incoming) = mpsc::unbounded_channel();
+        let state = HostState {
+            runtime: HostRuntime::new(&root).unwrap(),
+            results: Mutex::new(ResultCache::new()),
+            operation_gate: Mutex::new(()),
+            restart_controller,
+        };
+        let request = HostRequest {
+            protocol: HOST_PROTOCOL_VERSION,
+            request_id: "observe-timeout".into(),
+            operation_id: None,
+            command: HostCommand::ObserveController,
+        };
+        let supervisor = async {
+            let Some(ControllerRequest::Observe(reply)) = incoming.recv().await else {
+                panic!("observation enqueued a mutation");
+            };
+            // Hold a live sender until the request's own deadline closes it.
+            let mut reply = reply;
+            reply.closed().await;
+            assert!(reply.is_closed());
+        };
+        let (actual, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(execute_request(&state, &request), supervisor)
+        })
+        .await
+        .unwrap();
+        assert_eq!(actual.unwrap_err().code, "controller_unavailable");
+        assert!(incoming.try_recv().is_err());
+        assert!(state.results.lock().await.values.is_empty());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     // Observe consumption, rather than relying on sleeps to interrupt a frame
     // at its exact length/payload boundary.
