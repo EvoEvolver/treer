@@ -175,7 +175,7 @@ image replacement, mutation locking, Job ownership and health remain untested.
 
 ## Installation-wide Windows lease
 
-The next source increment requires a `LockedInstallation` before signed
+Signed admission requires a `LockedInstallation` before it
 admission hashes the installed pair. It consumes an existing `PinnedPair` and
 opens the fixed `.treer-controller-update.lock` in that pinned physical private
 NTFS directory. The lock uses the same checked private, regular, single-link,
@@ -197,19 +197,29 @@ Two new Windows-only `windows_update_lock_` controls cover exclusion before and
 after reservation across distinct job directories, refusal of lock write/delete/
 rename, stable-name retention after lease release and existing-intent refusal;
 and hardlinked/weak-ACL lock refusal without repair, intent or image mutation.
-Native execution of this increment is pending. Prior admission four-test
-acceptance above remains attributed to its original source, not this successor.
+Prior admission four-test acceptance above remains attributed to its original
+source, not this successor.
 Author checks passed: Controller macOS all-target strict Clippy, platform
 Windows GNU and Linux GNU all-target strict Clippy, formatting, documentation
-and diff checks. Controller Windows compilation and the two new native tests
-require the hosted Windows entry; no unavailable local cross C toolchain was
-installed. The focused entry is `cargo test --locked -p treer-agent-server --bin
+and diff checks. No unavailable local cross C toolchain was installed. The
+focused entry is `cargo test --locked -p treer-agent-server --bin
 treer-agent-server windows_update_lock_ -- --nocapture`, expecting exactly two
 passed, none failed/ignored, exit zero and independent task TEMP cleanup.
 
+Release ran that entry once in `40286956540`, exact source
+`8c1d77c4e3da7fec4a7bd1f449346f5e378b7cbe` and wrapper
+`e6b8ffbd38ad08f5208c07d56b51f64abdeec8e8`. Windows Server 2022/Rust 1.90,
+fixed NTFS image `20261022.344.1` produced two passed, zero failed/ignored and
+exit zero. Core independently checked both named log entries, platform and
+result. TEMP remaining entries were empty, cleanup was proven and the empty
+root was removed. Result SHA256:
+`27c4ff6798ea1692e54365705d25eac9f96d0633b31a76e28bb5015de9234be5`.
+This is native lease acceptance only; no image publication, durable crash
+fencing, Job ownership, health or installation authorization is established.
+
 ## Remaining ordered leaves and waiting boundaries
 
-1. Native NTFS store, single-use intent and signed pinned-input admission
+1. Native NTFS store, single-use intent, signed pinned-input admission and lease
    acceptance are complete within their stated scopes. Next
    add phase-specific evidence for actual image
    publication, never a generic setter that could manufacture completion.
