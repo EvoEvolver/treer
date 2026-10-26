@@ -678,3 +678,27 @@ start a provider, or restart anything. Obtain that script and key through the
 trusted reviewed installer/source delivery; never fetch a key from the manifest
 being verified. Explicit/local self-hosted keys retain their Core precedence.
 The initializer has not been executed on any enrolled machine by this change.
+
+## Version 0.1.15 signed-update candidate
+
+Issue #250 prepares `v0.1.15` from the reviewed official-trust source. The
+initial candidate provides only ordinary `linux-x86_64` Controller, CLI and
+Host artifacts. Their version and build commit must be obtained from the new
+ordinary build; the earlier `v0.1.14-56ba2580-trust` binaries retain their
+original identity. Other platforms are not claimed for this candidate.
+
+Candidate preparation does not publish a tag or move a release channel. A
+remote `v*` tag currently triggers both the full release-artifact matrix and
+the GHCR image publishing workflow. Do not push `v0.1.15` as a shortcut for
+this single-platform build: use the isolated dispatch-only Linux wrapper.
+Before any later remote tag publication, coordinate the exact workflow
+side effects separately. Stable promotion still requires the exact local
+non-prerelease tag to match the signed manifest source; never weaken that
+guard or move the existing `v0.1.14` tag.
+
+The same repository-pinned official authority signs candidate metadata.
+Versioned objects, any canary pointer change, and the two stable pointer
+objects each require a named publication scope and fresh authenticated R2
+existence checks. Do not probe unwritten canonical URLs and populate negative
+CDN cache entries. Existing signed channel state must be retained before any
+authorized pointer change; no installed machine update is implied.
