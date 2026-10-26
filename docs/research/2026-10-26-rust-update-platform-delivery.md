@@ -605,7 +605,9 @@ runtime-owned state against the selected Controller instance, Host epoch,
 workspace/server and full operation binding BEFORE `Command::spawn`, then owns
 the actual returned `std::process::Child`. The opaque `ControllerUpdateChild`
 retains the entire reservation (image pins, installation lease and state-root
-pins), runtime and binding until after owned-child teardown. It cannot be
+pins), runtime and binding while the owner exists. Successful teardown is
+observed before normal release; dropping after an unknown outcome releases OS
+custody without proving child exit. It cannot be
 constructed from a PID, process observation, JSON receipt or reported pathname.
 Neither a matching operation ID alone nor a second runtime with the same server
 and workspace is sufficient to query or stop it.

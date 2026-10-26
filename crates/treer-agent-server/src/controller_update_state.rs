@@ -141,7 +141,8 @@ impl ControllerUpdateState {
 /// Linear custody of the Child returned by this creator's spawn, never a PID,
 /// ProcessObservation or deserialized receipt. No image authentication, Job
 /// breakaway, restart authority or readiness claim follows from this object.
-/// The Windows reservation retains all pins/lease/state until after teardown.
+/// The Windows reservation retains pins/lease/state while this owner exists;
+/// dropping after unknown teardown releases custody without proving child exit.
 pub(crate) struct ControllerUpdateChild {
     child: Child,
     runtime: ControllerRuntime,
