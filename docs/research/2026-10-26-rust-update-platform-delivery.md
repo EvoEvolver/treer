@@ -715,7 +715,7 @@ limitation remains; the sole native run established compilation and execution
 for this leaf. No earlier
 selector/matrix is repeated.
 
-### Implemented leaf: original-Child Job refusal boundary
+### Accepted leaf: original-Child Job refusal boundary
 
 The internal custody owner can make one scoped Job check on the ORIGINAL
 `Child` handle returned by creation. The platform uses zero-time process waits
@@ -743,14 +743,21 @@ success/error and preservation of normal teardown. Two Windows controls query
 an actually created, task-owned helper assigned to a test Job, and a naturally
 exited original Child with exit code 259. They require refusal without escape
 or a second query. No admitted image, installed Controller or Host is run.
-Windows exact four/zero failed/zero ignored/exit zero and independent TEMP
-cleanup are required; native compilation/execution is currently NOT_RUN. No
-previous acceptance selector is repeated. This does not establish a successful
-outside-Job handoff or complete Windows updater acceptance.
+Sole run `40318713225` passed all four, zero failed/ignored and exit zero on
+Windows 2022/Rust 1.90/fixed NTFS image `20261022.344.1`, exact source
+`c38deb6f4e48aed6fef307136dc99a74d273df73`, wrapper
+`b81cb2c581f45249a82d5bafcd4814184fff1dbb`, following the single independent
+source review #111:9533. Core independently checked the four names, summary,
+source, platform and empty TEMP/cleanup evidence. RESULT SHA256:
+`43b0dcf322555c609d8902e78ab7da45c0089415421f6641032b564efc74bfb5`.
+Receipts: `.treer/reviews/core111-windows-job-boundary-c38deb6f/artifact/`
+(`RESULT.json`, `platform.json`, `tests.log`). No previous acceptance selector
+is repeated. This does not establish a successful outside-Job handoff or complete
+Windows updater acceptance.
 Author macOS new portable two-test entry, Controller binary/test strict Clippy,
 Windows GNU platform all-target strict Clippy, fmt/docs/diff checks passed.
-The local Windows Controller C toolchain limitation remains; native execution
-must also establish compilation of its Windows-only integration controls.
+The local Windows Controller C toolchain limitation remains; the sole native
+run established compilation and execution for these integration controls.
 
 API contracts: [IsProcessInJob](https://learn.microsoft.com/en-us/windows/win32/api/jobapi/nf-jobapi-isprocessinjob),
 [WaitForSingleObject](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject).
