@@ -256,3 +256,137 @@ async fn windows_update_installation_stage_native_inventory_change_poison_no_sta
     task.abort();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+async fn distributor(
+    input: &Inputs,
+    corrupt: bool,
+) -> (
+    url::Url,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use axum::{
+        body::Body,
+        http::{Request, Response},
+        routing::any,
+        Router,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let docs = input.fixture.documents();
+    let mut bytes = input.bytes.clone();
+    if corrupt {
+        bytes[0] ^= 1;
+    }
+    let objects = Arc::new(std::collections::HashMap::from([
+        ("channels/stable.json", docs.channel.to_vec()),
+        ("channels/stable.json.sig", docs.channel_signature.to_vec()),
+        ("releases/v0.1.16/manifest.json", docs.manifest.to_vec()),
+        (
+            "releases/v0.1.16/manifest.json.sig",
+            docs.manifest_signature.to_vec(),
+        ),
+        (
+            "releases/v0.1.16/windows-x86_64/treer-agent-server",
+            bytes.clone(),
+        ),
+        ("releases/v0.1.16/windows-x86_64/treer", bytes),
+    ]));
+    let requests = Arc::new(AtomicUsize::new(0));
+    let observed = requests.clone();
+    let app = Router::new().route(
+        "/{*path}",
+        any(move |request: Request<Body>| {
+            let objects = objects.clone();
+            let observed = observed.clone();
+            async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                match objects.get(request.uri().path().trim_start_matches('/')) {
+                    Some(bytes) => Response::new(Body::from(bytes.clone())),
+                    None => Response::builder().status(404).body(Body::empty()).unwrap(),
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = url::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (base, requests, task)
+}
+
+#[tokio::test]
+async fn windows_update_download_native_normal_network_to_receiver_retains_custody() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let mut input = inputs(&root, &catalog, true);
+    let (base, requests, server) = distributor(&input, false).await;
+    input.settings.release_base_url = base;
+    let mut prepared = Preparation::download(
+        &runtime,
+        input.dispatch.clone(),
+        &input.settings,
+        &["srv_other".into()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 6);
+    held(&root, &input);
+    // No caller-provided documents: the receiver gets the original HTTP bytes.
+    prepared.start_downloaded(&runtime).await.unwrap();
+    prepared.inspect(&runtime).await.unwrap();
+    prepared.close(&runtime).await.unwrap();
+    let custody = prepared.retain_closed(&runtime).unwrap();
+    held(&root, &input);
+    assert_eq!(custody.reservation.binding().workspace_id, "ws_fixture");
+    assert!(prepared.start_downloaded(&runtime).await.is_err());
+    drop(custody);
+    drop(prepared);
+    server.abort();
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_download_native_trust_before_network_and_corrupt_before_stage() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    for corrupt in [false, true] {
+        let catalog = UpdatePlanCatalogFixture::new();
+        let (runtime, root, task) = update_state_fixture().await;
+        let mut input = inputs(&root, &catalog, false);
+        let (base, requests, server) = distributor(&input, corrupt).await;
+        input.settings.release_base_url = base;
+        if !corrupt {
+            input.settings.public_key = Some(root.join("missing-public-key.pem"));
+        }
+        assert!(
+            Preparation::download(&runtime, input.dispatch.clone(), &input.settings, &[])
+                .await
+                .is_err()
+        );
+        let count = requests.load(std::sync::atomic::Ordering::SeqCst);
+        if !corrupt {
+            assert_eq!(count, 0);
+        } else {
+            assert!((5..=6).contains(&count));
+        }
+        assert!(!stage(&root, &input).exists());
+        assert!(!root
+            .join("installed/.treer-controller-update.claim")
+            .exists());
+        assert_eq!(
+            std::fs::read(root.join("installed/treer-agent-server.exe")).unwrap(),
+            OLD
+        );
+        server.abort();
+        drop(runtime);
+        task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+        drop(catalog);
+    }
+}

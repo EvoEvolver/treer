@@ -207,8 +207,16 @@ enrollment-name set is checked at phase boundaries; changes permanently poison
 the preparation. This does not prevent a new enrollment appearing between
 observations and is not a global enrollment CAS. Retained config handles may
 temporarily refuse config writers, without fallback or service restarts.
-The internal adapter accepts already fetched signed release inputs; network
-download adaptation and the public Windows dispatch/capability remain unwired.
+`Preparation::download` now obtains those inputs from normal local release
+settings through the existing bounded release fetch/signature/artifact verifier.
+It retains the exact channel, detached signature, manifest and detached signature
+HTTP bodies rather than reconstructing signed documents. Normal trust resolves
+before any request, is reloaded before preparation, and must authenticate the
+same bytes again. The no-proxy/no-redirect client has a 10-second connect limit;
+individual requests and the whole download have a 120-second limit. All six
+objects must authenticate before any staging/claim. `start_downloaded` sends the
+retained envelopes to the existing receiver while preserving sender custody.
+Public Windows dispatch/capability remains unwired.
 
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and

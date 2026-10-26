@@ -258,12 +258,17 @@ async fn fetch(client: &reqwest::Client, url: Url, limit: usize) -> Result<Vec<u
     Ok(bytes)
 }
 
-async fn fetch_signed(
+struct SignedDocument {
+    bytes: Vec<u8>,
+    signature: Vec<u8>,
+}
+
+async fn fetch_document(
     client: &reqwest::Client,
     base: &Url,
     path: &str,
     key: &VerifyingKey,
-) -> Result<Vec<u8>> {
+) -> Result<SignedDocument> {
     let (bytes, signature) = tokio::try_join!(
         fetch(client, base.join(path)?, MAX_METADATA_BYTES),
         fetch(
@@ -273,7 +278,19 @@ async fn fetch_signed(
         ),
     )?;
     verify_signed(&bytes, &signature, key)?;
-    Ok(bytes)
+    Ok(SignedDocument { bytes, signature })
+}
+
+async fn fetch_signed(
+    client: &reqwest::Client,
+    base: &Url,
+    path: &str,
+    key: &VerifyingKey,
+) -> Result<Vec<u8>> {
+    let document = fetch_document(client, base, path, key).await?;
+    // Existing binary-only consumers need no retained signature envelope.
+    drop(document.signature);
+    Ok(document.bytes)
 }
 
 async fn fetch_binary(
@@ -374,6 +391,61 @@ pub(super) async fn download(
         fetch_binary(client, &base, &release.controller),
         fetch_binary(client, &base, &release.cli)
     )
+}
+
+/// Exact authenticated network documents, not reconstructed JSON or signatures.
+/// Independent admission may borrow these while keeping their original bytes.
+#[cfg(any(windows, test))]
+pub(super) struct SignedDocuments {
+    channel: SignedDocument,
+    manifest: SignedDocument,
+    channel_name: String,
+}
+
+#[cfg(any(windows, test))]
+impl SignedDocuments {
+    pub(super) fn borrow(&self) -> crate::windows_update_admission::Documents<'_> {
+        crate::windows_update_admission::Documents {
+            channel: &self.channel.bytes,
+            channel_signature: &self.channel.signature,
+            manifest: &self.manifest.bytes,
+            manifest_signature: &self.manifest.signature,
+            channel_name: &self.channel_name,
+        }
+    }
+}
+
+/// Reuses the existing bounded fetch, signature, metadata and binary verifier.
+/// The separately configured key is never selected from a downloaded document.
+#[cfg(any(windows, test))]
+pub(super) async fn download_inputs(
+    client: &reqwest::Client,
+    base: Url,
+    channel_name: &str,
+    key: &VerifyingKey,
+    platform: &str,
+) -> Result<(SignedDocuments, VerifiedBinary, VerifiedBinary)> {
+    let base = normalize_base_url(base)?;
+    validate_channel_name(channel_name)?;
+    let channel =
+        fetch_document(client, &base, &format!("channels/{channel_name}.json"), key).await?;
+    let parsed: Channel = serde_json::from_slice(&channel.bytes)?;
+    validate_channel(&parsed, channel_name)?;
+    let manifest = fetch_document(client, &base, &parsed.manifest_path, key).await?;
+    let release = authenticated_manifest(&parsed, &manifest.bytes, key, platform)?;
+    let (controller, cli) = tokio::try_join!(
+        fetch_binary(client, &base, &release.controller),
+        fetch_binary(client, &base, &release.cli)
+    )?;
+    Ok((
+        SignedDocuments {
+            channel,
+            manifest,
+            channel_name: channel_name.to_owned(),
+        },
+        controller,
+        cli,
+    ))
 }
 
 #[cfg(test)]

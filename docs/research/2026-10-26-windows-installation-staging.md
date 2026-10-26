@@ -61,8 +61,48 @@ replay. Installed OLD bytes stayed unchanged. These are task-private fixtures,
 not live installation or complete transaction acceptance. No prior native
 selector or platform matrix was rerun.
 
-Remaining full transaction paths: adapt network release downloads to this
-already-fetched signed-input seam; connect authenticated Policy and confirmation
+The subsequent download seam uses normal configured release origin/channel/key
+and the existing release fetch/verifier. It preserves the actual channel and
+manifest bytes AND both detached signature envelopes in an owned result, with
+both complete verified binaries. Trust is resolved before networking and loaded
+again by preparation. Only after all six objects authenticate does preparation
+select/confirm the saved installation and stage inputs; the receiver receives the
+retained downloaded envelopes. Connect timeout is 10 seconds, individual requests
+and the overall download are bounded to 120 seconds; proxy and redirect fallback
+remain disabled. This adds no public dispatch, automatic retry or installation
+mutation. Downloads are read-only and hold no operation lease/claim; existing
+unknown/no-replay fences apply as soon as preparation creates operation state.
+
+Download author validation: the two new portable `windows_update_download_`
+controls passed (exact original envelopes and complete inputs; wrong key,
+signature/manifest/binary corruption and metadata bounds reject without a
+bundle). The existing binary-only consumer's success test also passed after its
+shared signed-fetch helper changed. Strict Server Clippy with tests and the
+acceptance feature, formatting and docs passed. The two new native network-to-
+receiver/trust-before-network controls are not covered by those macOS results;
+their Windows acceptance is a separate exact-source run, not the previous
+installation-staging run.
+
+Download acceptance: Release's ONE source-only review of
+`05317f4f31af93105a3decbd019a98da1bc5ba19` passed (#111:9819). Sole new Windows
+run [40402714366](https://github.com/EvoEvolver/treer/actions/runs/40402714366),
+wrapper `ce38a9675d1680d58c32c8123113b07444016abe`, passed dev build, JSON test
+build and direct `windows_update_download_` execution, all exit zero. Exactly
+four tests passed (two portable, two native), none failed or ignored, on Windows
+2022/Rust 1.90/fixed NTFS image `20261022.344.1`. Both executables retained their
+pre-run size/SHA256; isolated marker/TEMP checks proved no remaining entries
+and removal of the empty root. Core independently read RESULT/platform/tests;
+RESULT SHA256 is
+`8d4e2e8614bd5e094e094d8230e2732c904f5d2c4296d8817815b5e8b5005701`.
+The native success chain fetched six loopback objects under normal local trust,
+staged and sent the retained original envelopes to the actual same-source
+receiver, inspected/closed, and returned original custody while installed OLD
+bytes stayed unchanged. Missing explicit key produced zero HTTP requests;
+corrupt downloaded bytes were rejected before stage/claim. These results do not
+attest any external publisher, live installation, public dispatch or complete
+transaction. No old native selector or matrix was rerun.
+
+Remaining full transaction paths: connect authenticated Policy and confirmation
 to public dispatch without enabling it prematurely; authorize worker mutation
 and lifetime; startup/fence CAS; publication, selected Controller-only restart
 and health; whole-pair runtime rollback; durable outcome and safe claim retirement.

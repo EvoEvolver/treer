@@ -117,6 +117,84 @@ fn client() -> reqwest::Client {
         .unwrap()
 }
 
+#[tokio::test]
+async fn windows_update_download_raw_envelopes_and_complete_signed_inputs() {
+    let objects = fixture();
+    let expected = objects.clone();
+    let (base, requests, task) = server(objects).await;
+    let (documents, controller, cli) = download_inputs(
+        &client(),
+        base,
+        "stable",
+        &signing_key().verifying_key(),
+        PLATFORM,
+    )
+    .await
+    .unwrap();
+    let documents = documents.borrow();
+    assert_eq!(documents.channel, expected[CHANNEL]);
+    assert_eq!(
+        documents.channel_signature,
+        expected[&format!("{CHANNEL}.sig")]
+    );
+    assert_eq!(documents.manifest, expected[MANIFEST]);
+    assert_eq!(
+        documents.manifest_signature,
+        expected[&format!("{MANIFEST}.sig")]
+    );
+    assert_eq!(documents.channel_name, "stable");
+    assert_eq!(controller.bytes(), BINARY);
+    assert_eq!(cli.bytes(), BINARY);
+    authenticate_documents(
+        documents.channel,
+        documents.channel_signature,
+        documents.manifest,
+        documents.manifest_signature,
+        documents.channel_name,
+        &signing_key().verifying_key(),
+        PLATFORM,
+    )
+    .unwrap();
+    let mut observed = requests.lock().unwrap().clone();
+    observed.sort();
+    let mut expected_paths = expected.keys().cloned().collect::<Vec<_>>();
+    expected_paths.sort();
+    assert_eq!(observed, expected_paths);
+    task.abort();
+}
+
+#[tokio::test]
+async fn windows_update_download_rejects_wrong_trust_metadata_and_binary_without_bundle() {
+    for case in 0..5 {
+        let mut objects = fixture();
+        let mut key = signing_key().verifying_key();
+        match case {
+            0 => key = SigningKey::from_bytes(&[8; 32]).verifying_key(),
+            1 => objects.get_mut(&format!("{CHANNEL}.sig")).unwrap()[0] ^= 1,
+            2 => objects.get_mut(MANIFEST).unwrap()[0] ^= 1,
+            3 => objects.get_mut(CLI).unwrap()[0] ^= 1,
+            _ => {
+                objects.insert(CHANNEL.into(), vec![b'x'; MAX_METADATA_BYTES + 1]);
+            }
+        }
+        let (base, requests, task) = server(objects).await;
+        assert!(
+            download_inputs(&client(), base, "stable", &key, PLATFORM)
+                .await
+                .is_err(),
+            "case {case}"
+        );
+        if case != 3 {
+            assert!(!requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p == CONTROLLER || p == CLI));
+        }
+        task.abort();
+    }
+}
+
 #[test]
 fn official_release_key_matches_designated_authority() {
     let key = VerifyingKey::from_public_key_pem(OFFICIAL_PUBLIC_KEY_PEM).unwrap();

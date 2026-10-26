@@ -310,6 +310,18 @@ or configuration contents. Failed launch retains the newly saved specification.
   ACK/creator exit never releases them. This is internal preparation only, not
   enabled product dispatch, child mutation authorization or a complete updater.
 
+  The normal release download seam retains the actual four signed metadata
+  bodies and complete verified binary inputs using the existing release
+  consumer, not a second downloader or newly manufactured signatures. Local
+  trust resolves before network access; preparation reloads it and verifies the
+  same bytes before staging. No proxy or redirect fallback is permitted. Connect
+  is bounded to 10 seconds, each request and the full download to 120 seconds;
+  existing 1 MiB metadata and signed artifact-size/128 MiB binary bounds apply.
+  Download error/cancellation cannot leave a claim or stage because preparation
+  has not begun. Errors are static at the preparation boundary, with no automatic
+  retry or unsigned fallback. Retained HTTP documents are input evidence only,
+  never lifecycle authority or a sender-release permit.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.
