@@ -183,4 +183,4 @@ mod tests;
 #[path = "windows_update_backup.rs"]
 mod backup;
 #[cfg(windows)]
-pub use backup::BackedUpInputs;
+pub use backup::{BackedUpInputs, StartupBackedUpInputs};

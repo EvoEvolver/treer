@@ -1,8 +1,69 @@
 //! Copy checked old images, then publish backup-only evidence. Never replace
 //! an installed image, mark rollback/update success or resume an old job.
 use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
+
+const STARTUP_LIMIT: u64 = 16 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupDigest {
+    sha256: String,
+    size: u64,
+}
+
+fn startup_digest(bytes: &[u8], workspace: &str, server: &str) -> Result<StartupDigest> {
+    #[derive(Deserialize)]
+    struct Store {
+        version: u32,
+        entries: Vec<crate::startup_store::StoredAgentStartup>,
+        #[serde(default)]
+        denied_agent_ids: Vec<String>,
+    }
+    if bytes.is_empty() || bytes.len() as u64 > STARTUP_LIMIT {
+        bail!("windows_update_startup_size_refused");
+    }
+    let store: Store = serde_json::from_slice(bytes)
+        .map_err(|_| anyhow::anyhow!("windows_update_startup_format_refused"))?;
+    if !matches!(store.version, 1 | 2)
+        || store.entries.len() > 4096
+        || store.denied_agent_ids.len() > 4096
+        || (store.version == 1 && !store.denied_agent_ids.is_empty())
+    {
+        bail!("windows_update_startup_format_refused");
+    }
+    let valid_id = |id: &str| {
+        id.strip_prefix("ag_").is_some_and(|s| {
+            !s.is_empty()
+                && s.len() <= 128
+                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
+    };
+    let mut denied = std::collections::BTreeSet::new();
+    for id in store.denied_agent_ids {
+        if !valid_id(&id) || !denied.insert(id) {
+            bail!("windows_update_startup_format_refused");
+        }
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for entry in store.entries {
+        if entry.workspace_id != workspace
+            || entry.spec.server_id != server
+            || entry.spec.generation == 0
+            || !valid_id(&entry.spec.agent_id)
+            || denied.contains(&entry.spec.agent_id)
+            || !ids.insert(entry.spec.agent_id)
+        {
+            bail!("windows_update_startup_binding_refused");
+        }
+    }
+    Ok(StartupDigest {
+        sha256: format!("{:x}", Sha256::digest(bytes)),
+        size: bytes.len() as u64,
+    })
+}
 
 fn copy_checked(
     source: &mut dyn Read,
@@ -35,7 +96,6 @@ fn copy_checked(
 mod native {
     use super::super::ReservedInputs;
     use super::*;
-    use serde::{Deserialize, Serialize};
     use std::io::{Seek, SeekFrom};
     use treer_platform::windows_update_backup::{BackupDirectory, SealedBackup};
 
@@ -64,6 +124,137 @@ mod native {
     pub struct BackedUpInputs {
         reserved: ReservedInputs,
         backup: SealedBackup,
+    }
+
+    #[derive(Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    struct StartupEvidence {
+        schema_version: u32,
+        phase: StartupPhase,
+        binding: crate::windows_update_intent::Binding,
+        backup_directory: (u64, u64),
+        state_directory: (u64, u64),
+        source_file_id: Option<u64>,
+        backup_file_id: Option<u64>,
+        snapshot: Option<StartupDigest>,
+    }
+
+    #[derive(Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    enum StartupPhase {
+        StartupBackedUp,
+    }
+
+    /// Full image and startup backups only. No restore, mutation, resume or
+    /// health authority; startup is one snapshot, not a concurrent-write CAS.
+    pub struct StartupBackedUpInputs {
+        images: BackedUpInputs,
+        startup: Option<std::fs::File>,
+        evidence: StartupEvidence,
+    }
+
+    impl BackedUpInputs {
+        pub fn backup_startup(self, state: BackupDirectory) -> Result<StartupBackedUpInputs> {
+            self.inspect_backups()?;
+            let state_id = state.identity()?;
+            if state_id.0 != self.binding().installation_volume
+                || state_id == self.backup.identity()?
+                || state_id == self.reserved.0._installed.identity()?
+                || state_id == self.reserved.0._target.identity()?
+            {
+                bail!("windows_update_startup_directory_refused");
+            }
+            let name = format!("{}-agent-startup.json", self.binding().server_id);
+            let snapshot = state
+                .startup_snapshot(&name)
+                .map_err(|_| anyhow::anyhow!("windows_update_startup_source_refused"))?;
+            let digest = snapshot
+                .as_ref()
+                .map(|(_, bytes)| {
+                    startup_digest(
+                        bytes,
+                        &self.binding().workspace_id,
+                        &self.binding().server_id,
+                    )
+                })
+                .transpose()?;
+            let startup = self
+                .backup
+                .create_startup(snapshot.as_ref().map(|(_, b)| b.as_slice()))?;
+            let backup_file_id = startup
+                .as_ref()
+                .map(|f| treer_platform::transfer_file_identity(f).map(|(_, id, _, _)| id))
+                .transpose()?;
+            let evidence = StartupEvidence {
+                schema_version: 1,
+                phase: StartupPhase::StartupBackedUp,
+                binding: self.binding().clone(),
+                backup_directory: self.backup.identity()?,
+                state_directory: state_id,
+                source_file_id: snapshot.as_ref().map(|(id, _)| *id),
+                backup_file_id,
+                snapshot: digest,
+            };
+            let backed = StartupBackedUpInputs {
+                images: self,
+                startup,
+                evidence,
+            };
+            backed.verify_startup()?;
+            backed
+                .images
+                .backup
+                .publish_startup_evidence(&serde_json::to_vec(&backed.evidence)?)?;
+            backed.inspect_startup()?;
+            Ok(backed)
+        }
+    }
+
+    impl StartupBackedUpInputs {
+        pub fn binding(&self) -> &crate::windows_update_intent::Binding {
+            self.images.binding()
+        }
+
+        fn verify_startup(&self) -> Result<()> {
+            match (self.startup.as_ref(), self.evidence.snapshot.as_ref()) {
+                (Some(mut file), Some(expected)) => {
+                    file.seek(SeekFrom::Start(0))?;
+                    let mut bytes = Vec::new();
+                    file.take(STARTUP_LIMIT + 1).read_to_end(&mut bytes)?;
+                    let (volume, id, _, _) =
+                        treer_platform::transfer_file_identity(self.startup.as_ref().unwrap())?;
+                    if startup_digest(
+                        &bytes,
+                        &self.binding().workspace_id,
+                        &self.binding().server_id,
+                    )? != *expected
+                        || volume != self.evidence.backup_directory.0
+                        || id == 0
+                        || Some(id) != self.evidence.backup_file_id
+                    {
+                        bail!("windows_update_startup_readback_refused");
+                    }
+                }
+                (None, None)
+                    if self.evidence.source_file_id.is_none()
+                        && self.evidence.backup_file_id.is_none()
+                        && self.images.backup.startup_absent()? => {}
+                _ => bail!("windows_update_startup_readback_refused"),
+            }
+            Ok(())
+        }
+
+        pub fn inspect_startup(&self) -> Result<()> {
+            self.images.inspect_backups()?;
+            self.verify_startup()?;
+            let evidence: StartupEvidence =
+                serde_json::from_slice(&self.images.backup.read_startup_evidence()?)
+                    .map_err(|_| anyhow::anyhow!("windows_update_startup_evidence_refused"))?;
+            if evidence != self.evidence {
+                bail!("windows_update_startup_evidence_conflict");
+            }
+            Ok(())
+        }
     }
 
     impl ReservedInputs {
@@ -169,10 +360,82 @@ mod native {
 
 #[cfg(windows)]
 pub use native::BackedUpInputs;
+#[cfg(windows)]
+pub use native::StartupBackedUpInputs;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn startup() -> serde_json::Value {
+        serde_json::json!({"version":2,"denied_agent_ids":["ag_deleted"],"entries":[{
+            "agent_id":"ag_kept","server_id":"srv_fixture","workspace_id":"ws_fixture",
+            "generation":1,"kind":"shell","name":"fixture","cwd":"private-cwd",
+            "command":"fixture","args":["private-argument"],"enabled":false,
+            "workload_credential":"private-credential","last_host_epoch":"fixture"
+        }]})
+    }
+
+    #[test]
+    fn windows_update_startup_format_binds_complete_v1_v2_bytes_and_denial_only_state() {
+        let mut value = startup();
+        let check = |v: &serde_json::Value| {
+            startup_digest(&serde_json::to_vec(v).unwrap(), "ws_fixture", "srv_fixture")
+        };
+        let mixed = check(&value).unwrap();
+        value["entries"] = serde_json::json!([]);
+        let denial_only = check(&value).unwrap();
+        assert_ne!(mixed, denial_only);
+        value["denied_agent_ids"] = serde_json::json!(["ag_deleted", "ag_later"]);
+        assert_ne!(denial_only, check(&value).unwrap());
+        value["version"] = 1.into();
+        value.as_object_mut().unwrap().remove("denied_agent_ids");
+        check(&value).unwrap();
+        let safe = serde_json::to_string(&mixed).unwrap();
+        assert!(!safe.contains("private"));
+        assert!(!safe.contains("ag_deleted"));
+    }
+
+    #[test]
+    fn windows_update_startup_format_refuses_invalid_scope_fences_and_bounds_without_echo() {
+        for case in 0..9 {
+            let mut v = startup();
+            match case {
+                0 => v["version"] = 1.into(),
+                1 => v["denied_agent_ids"] = serde_json::json!(["ag_deleted", "ag_deleted"]),
+                2 => v["denied_agent_ids"] = serde_json::json!(["ag_kept"]),
+                3 => v["entries"][0]["workspace_id"] = "ws_wrong".into(),
+                4 => v["entries"][0]["server_id"] = "srv_wrong".into(),
+                5 => v["entries"][0]["generation"] = 0.into(),
+                6 => v["denied_agent_ids"] = serde_json::json!(["private-invalid"]),
+                7 => v["entries"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("command")
+                    .map(|_| ())
+                    .unwrap(),
+                _ => {
+                    v["denied_agent_ids"] =
+                        serde_json::json!((0..4097).map(|i| format!("ag_{i}")).collect::<Vec<_>>())
+                }
+            }
+            let error = startup_digest(
+                &serde_json::to_vec(&v).unwrap(),
+                "ws_fixture",
+                "srv_fixture",
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(!error.contains("private"));
+        }
+        assert!(startup_digest(
+            &vec![b' '; STARTUP_LIMIT as usize + 1],
+            "ws_fixture",
+            "srv_fixture"
+        )
+        .is_err());
+        assert!(startup_digest(b"", "ws_fixture", "srv_fixture").is_err());
+    }
 
     #[test]
     fn windows_update_backup_copy_checks_full_bytes_bounds_and_digest() {

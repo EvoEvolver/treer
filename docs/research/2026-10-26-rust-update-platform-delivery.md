@@ -344,12 +344,84 @@ self_update::startup_backup::tests -- --nocapture` passed all nine tests,
 zero failed/ignored. Controller binary/test strict Clippy and formatting passed.
 No hosted job, previously accepted native leaf or live update was rerun.
 
+## Windows private startup snapshot after image backup
+
+`BackedUpInputs::backup_startup` consumes the image-backup holder and an existing
+private physical fixed-NTFS state directory on the installation volume, distinct
+from installed, target and backup directories. Only the reserved server's normal
+`<server_id>-agent-startup.json` is read. A checked readonly, single-link,
+non-reparse file handle supplies one snapshot of at most 16 MiB; only NotFound
+means absent. That source handle closes after reading, allowing later normal
+Controller writes. Its directory/file identity is recorded as an observation,
+not a continuing source pin or a promise of unchanged current state.
+
+Core decodes real `StoredAgentStartup` entries, checks workspace/server and
+generation, bounds entries and denial IDs to 4096 each, validates versions 1/2
+and rejects duplicate/overlapping/invalid fences. Credentials and unknown fields
+stay in the complete raw backup, never the evidence. An empty entries array with
+denial fences remains a present version-2 snapshot. Absence creates no data file.
+
+Fixed `startup.backup` and `startup.evidence` names refuse any existing object.
+After raw EXCL creation, flush and reduced-access duplication of the same file
+object, Core reads and validates those held backup bytes again. Only then is
+strict schema-1 `startup_backed_up` evidence created and read back. It contains
+the complete reserved binding, physical state/backup directory identities,
+optional source/backup file IDs and optional full raw SHA256/size. The returned
+holder keeps image/source pins, installation lease and readonly startup-backup
+handle. Inspection rechecks image and startup backups plus exact evidence. It
+never compares current startup state as a CAS, restores a snapshot, retires a
+claim, replaces installed images or authorizes rollback/health success. Failed
+capture consumes its holder and retains existing claim/partial evidence; there
+is no automatic retry or cleanup.
+
+Two portable format controls cover version 1/2, mixed and denial-only stores,
+full-byte digest changes, scope/fence/format/bounds refusal and safe metadata.
+Two Windows native controls use the real StartupStore writer for absent, v1,
+denial-only v2 and mixed v2 files, check exact bytes/normal later writes/retained
+lease and readonly backup pins, and reject unsafe, hardlinked, malformed,
+oversized, aliased or pre-existing backup inputs. Their isolated entry is
+`cargo test --locked -p treer-agent-server --bin treer-agent-server
+windows_update_startup_ -- --nocapture`: require exactly four passed, zero
+failed/ignored, exit zero and independent task TEMP cleanup on fixed NTFS.
+The two portable tests passed on the author Mac; Controller binary/test strict
+Clippy, Windows GNU platform all-target strict Clippy, fmt, docs and diff checks
+passed. This adds no production command or capability. Windows Controller
+compilation and the four-test native entry were subsequently accepted below.
+
+The first Windows entry, run `40299042663` on exact `07273d83` with wrapper
+`ea50cf9a`, failed compilation with E0507: a mutable pattern binding attempted
+to move `File` out of a shared `Option` reference. Exit was 101 and none of the
+four tests ran; this is not a zero-test pass. The successor matches explicit
+`Option<&File>`/`Option<&StartupDigest>` values through `as_ref()`, retaining the
+same file object and readonly rights. No clone, reopen or sharing change is
+introduced. That run's TEMP was empty, cleanup proven and root removed. Result
+SHA256: `378c9ce697c95cfe7c33fb43e9d1a635e434295471f0c649b1ad72e9b3814547`.
+The failed run remains failed; the changed-source entry below retained the
+same four-test contract.
+
+Release's sole changed-source run `40300048784` succeeded on exact source
+`c7b9a7d0f6e3a0fb029f1ed2235223b4a6180bc5`, wrapper
+`311d32ad61371f37df6da6284525d928a27c4c5c`. Windows Server 2022/Rust 1.90,
+fixed NTFS image `20261022.344.1` produced four passed (two portable, two native),
+zero failed/ignored and exit zero. Core independently matched all four named
+test log entries, platform/source and result. TEMP remaining entries were empty,
+cleanup proven and the empty root removed. Result SHA256:
+`dccac76bcabc57b45c1fa35ae213499dff854d81c37a02f165148600a89efe08`.
+This establishes private physical startup snapshot/backup/evidence binding and
+the stated format/fence/refusal controls. The state directory remains an
+internal caller-supplied observation; this does not attest that it is a running
+Controller's resolved configuration root. Production admission still needs that
+trusted installation/runtime binding. No restore, CAS, safe claim retirement,
+pair publication, health, full transaction or power-loss durability is claimed.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,
    install-wide claim and verified-image backup acceptance are complete within
-   their stated scopes. Next add startup-store backup and evidence bound to
-   actual publication, never a generic completion setter.
+   their stated scopes. Private startup snapshot/backup/evidence acceptance is
+   also complete within the limits above. Future production admission must bind
+   the state root to trusted installation/runtime configuration; publication
+   evidence must follow real effects, never a generic setter.
 2. Implement Windows Controller/CLI two-rename
    publication with locked-image refusal and whole-pair rollback. Never treat
    restoring files alone as successful rollback.

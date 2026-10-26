@@ -12,6 +12,37 @@ pub struct BackupDirectory {
 }
 
 impl BackupDirectory {
+    /// One bounded, checked inode snapshot. Absence means only NotFound at this
+    /// observation, not a fence against later Controller startup-store writes.
+    pub fn startup_snapshot(&self, name: &str) -> io::Result<Option<(u64, Vec<u8>)>> {
+        if name.is_empty()
+            || matches!(name, "." | "..")
+            || name.len() > 200
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+        {
+            return Err(io::Error::other("invalid snapshot name"));
+        }
+        let mut file = match crate::windows_update_store::open_record(&self.path.join(name), false)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let (volume, id, _, _) = crate::transfer_file_identity(&file)?;
+        if id == 0 || volume != self.identity()?.0 {
+            return Err(io::Error::other("snapshot volume differs"));
+        }
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(16 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
+            return Err(io::Error::other("invalid startup snapshot size"));
+        }
+        Ok(Some((id, bytes)))
+    }
     /// Only an existing private physical fixed-NTFS directory. No ACL repair.
     pub fn open(path: &Path) -> io::Result<Self> {
         let root = crate::machine_file::Root::open(path, &[])?;
@@ -95,6 +126,42 @@ pub struct SealedBackup {
 }
 
 impl SealedBackup {
+    /// Write a fresh raw startup snapshot, preserving private credentials. An
+    /// absent snapshot has no data file. Never overwrite either existing name.
+    pub fn create_startup(&self, bytes: Option<&[u8]>) -> io::Result<Option<File>> {
+        for name in ["startup.backup", "startup.evidence"] {
+            match std::fs::symlink_metadata(self.directory.path.join(name)) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                _ => return Err(io::Error::other("startup backup exists or is unreadable")),
+            }
+        }
+        let Some(bytes) = bytes else { return Ok(None) };
+        if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
+            return Err(io::Error::other("invalid startup backup size"));
+        }
+        let path = self.directory.path.join("startup.backup");
+        let mut file = crate::windows::create_private_update_file(&path)?;
+        crate::windows_update_store::checked_file(&path, &file)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(Some(crate::windows::readonly_update_file(file)?))
+    }
+
+    pub fn startup_absent(&self) -> io::Result<bool> {
+        match std::fs::symlink_metadata(self.directory.path.join("startup.backup")) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
+            Err(e) => Err(e),
+            Ok(_) => Ok(false),
+        }
+    }
+
+    pub fn publish_startup_evidence(&self, bytes: &[u8]) -> io::Result<()> {
+        self.publish_named_evidence("startup.evidence", bytes)
+    }
+
+    pub fn read_startup_evidence(&self) -> io::Result<Vec<u8>> {
+        self.read_named_evidence("startup.evidence")
+    }
     pub fn identity(&self) -> io::Result<(u64, u64)> {
         self.directory.identity()
     }
@@ -104,13 +171,17 @@ impl SealedBackup {
 
     /// Write-once opaque evidence, not a platform interpretation of success.
     pub fn publish_evidence(&self, bytes: &[u8]) -> io::Result<()> {
+        self.publish_named_evidence("backup.evidence", bytes)
+    }
+
+    fn publish_named_evidence(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
         if bytes.is_empty() || bytes.len() > 4096 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid backup evidence size",
             ));
         }
-        let path = self.directory.path.join("backup.evidence");
+        let path = self.directory.path.join(name);
         let mut file = crate::windows::create_private_update_file(&path)?;
         crate::windows_update_store::checked_file(&path, &file)?;
         file.write_all(bytes)?;
@@ -125,10 +196,12 @@ impl SealedBackup {
     }
 
     pub fn read_evidence(&self) -> io::Result<Vec<u8>> {
-        let mut file = crate::windows_update_store::open_record(
-            &self.directory.path.join("backup.evidence"),
-            false,
-        )?;
+        self.read_named_evidence("backup.evidence")
+    }
+
+    fn read_named_evidence(&self, name: &str) -> io::Result<Vec<u8>> {
+        let mut file =
+            crate::windows_update_store::open_record(&self.directory.path.join(name), false)?;
         let mut bytes = Vec::new();
         (&mut file).take(4097).read_to_end(&mut bytes)?;
         if bytes.is_empty() || bytes.len() > 4096 {

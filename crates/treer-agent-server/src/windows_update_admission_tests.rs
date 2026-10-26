@@ -196,6 +196,169 @@ mod native {
         prepare_operation(installed, target, fixture, uuid::Uuid::new_v4())
     }
 
+    #[test]
+    fn windows_update_startup_native_real_store_snapshots_preserve_fences_and_hold_backups() {
+        use treer_platform::windows_update_backup::BackupDirectory;
+        for mode in 0..4 {
+            let root = Root::new();
+            let installed = root.pair("installed", OLD);
+            let target = root.pair("target", NEW);
+            let job = root.directory("job");
+            let destination = root.directory("backup");
+            let state = root.directory("state");
+            let source = state.join("srv_fixture-agent-startup.json");
+            let store = crate::startup_store::StartupStore::load(source.clone()).unwrap();
+            if mode == 1 || mode == 3 {
+                let entry = serde_json::from_value(json!({
+                    "agent_id":"ag_kept","server_id":"srv_fixture","workspace_id":"ws_fixture",
+                    "generation":1,"kind":"shell","name":"fixture","cwd":"private-cwd",
+                    "command":"fixture","args":["private-argument"],"enabled":false,
+                    "workload_credential":"private-credential","last_host_epoch":"fixture"
+                }))
+                .unwrap();
+                store.upsert(entry).unwrap();
+            }
+            if mode >= 2 {
+                store.deny_absent("ag_deleted").unwrap();
+            }
+            let original = std::fs::read(&source).ok();
+            let fixture = Fixture::new(|_| {});
+            let images = prepare(&installed, &target, &fixture)
+                .unwrap()
+                .reserve(UpdateStore::open(&job).unwrap())
+                .unwrap()
+                .backup(BackupDirectory::open(&destination).unwrap())
+                .unwrap();
+            let expected_binding = images.binding().clone();
+            let backed = images
+                .backup_startup(BackupDirectory::open(&state).unwrap())
+                .unwrap();
+            backed.inspect_startup().unwrap();
+            assert_eq!(backed.binding(), &expected_binding);
+            assert!(prepare(&installed, &target, &fixture).is_err());
+            if original.is_some() {
+                // Exclusive same-object pin also refuses path-based readers.
+                // Core inspection above already read the held handle fully.
+                assert!(std::fs::read(destination.join("startup.backup")).is_err());
+                assert!(std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(destination.join("startup.backup"))
+                    .is_err());
+                assert!(std::fs::rename(
+                    destination.join("startup.backup"),
+                    destination.join("moved")
+                )
+                .is_err());
+            } else {
+                assert!(!destination.join("startup.backup").exists());
+            }
+            // Capture releases the source file pin. A legitimate later write
+            // succeeds and is never restored over or mistaken for corruption.
+            store.deny_absent("ag_later").unwrap();
+            backed.inspect_startup().unwrap();
+            assert!(store.is_denied("ag_later").unwrap());
+            let evidence_path = destination.join("startup.evidence");
+            let safe = std::fs::read_to_string(&evidence_path).unwrap();
+            assert!(!safe.contains("private-credential"));
+            assert!(!safe.contains("ag_deleted"));
+            let mut evidence: serde_json::Value = serde_json::from_str(&safe).unwrap();
+            assert_eq!(evidence["phase"], "startup_backed_up");
+            assert_eq!(
+                evidence["binding"],
+                serde_json::to_value(expected_binding).unwrap()
+            );
+            evidence["state_directory"] = json!([0, 0]);
+            std::fs::write(&evidence_path, serde_json::to_vec(&evidence).unwrap()).unwrap();
+            assert!(backed.inspect_startup().is_err());
+            assert_eq!(std::fs::read(installed.join("treer.exe")).unwrap(), OLD);
+            drop(backed);
+            assert_eq!(
+                std::fs::read(destination.join("startup.backup")).ok(),
+                original
+            );
+            if original.is_some() {
+                let captured =
+                    crate::startup_store::StartupStore::load(destination.join("startup.backup"))
+                        .unwrap();
+                assert_eq!(captured.is_denied("ag_deleted").unwrap(), mode >= 2);
+                assert!(!captured.is_denied("ag_later").unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn windows_update_startup_native_refuses_unsafe_partial_or_cross_scope_without_evidence() {
+        use treer_platform::windows_update_backup::BackupDirectory;
+        for case in 0..8 {
+            let root = Root::new();
+            let installed = root.pair("installed", OLD);
+            let target = root.pair("target", NEW);
+            let job = root.directory("job");
+            let destination = root.directory("backup");
+            let state = root.directory("state");
+            let source = state.join("srv_fixture-agent-startup.json");
+            let store = crate::startup_store::StartupStore::load(source.clone()).unwrap();
+            store.deny_absent("ag_deleted").unwrap();
+            let writer = (case == 7).then(|| {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&source)
+                    .unwrap()
+            });
+            match case {
+                0 => std::fs::write(&source, b"private-invalid-json").unwrap(),
+                1 => {
+                    std::fs::hard_link(&source, state.join("alias")).unwrap();
+                }
+                2 => treer_platform::apply_sddl_dacl(&source, "D:P(A;;GA;;;WD)").unwrap(),
+                3 => {
+                    std::fs::write(destination.join("startup.backup"), b"prior").unwrap();
+                }
+                4 => {
+                    std::fs::write(destination.join("startup.evidence"), b"prior").unwrap();
+                }
+                5 => {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&source)
+                        .unwrap()
+                        .set_len(16 * 1024 * 1024 + 1)
+                        .unwrap();
+                }
+                _ => {}
+            }
+            let fixture = Fixture::new(|_| {});
+            let images = prepare(&installed, &target, &fixture)
+                .unwrap()
+                .reserve(UpdateStore::open(&job).unwrap())
+                .unwrap()
+                .backup(BackupDirectory::open(&destination).unwrap())
+                .unwrap();
+            let source_dir = if case == 6 { &destination } else { &state };
+            assert!(images
+                .backup_startup(BackupDirectory::open(source_dir).unwrap())
+                .is_err());
+            if case == 4 {
+                assert_eq!(
+                    std::fs::read(destination.join("startup.evidence")).unwrap(),
+                    b"prior"
+                );
+            } else {
+                assert!(!destination.join("startup.evidence").exists());
+            }
+            if case == 3 {
+                assert_eq!(
+                    std::fs::read(destination.join("startup.backup")).unwrap(),
+                    b"prior"
+                );
+            }
+            let again = prepare(&installed, &target, &fixture).unwrap();
+            assert!(again.reserve(UpdateStore::open(&job).unwrap()).is_err());
+            assert_eq!(std::fs::read(installed.join("treer.exe")).unwrap(), OLD);
+            drop(writer);
+        }
+    }
+
     fn prepare_operation(
         installed: &Path,
         target: &Path,
