@@ -1275,6 +1275,39 @@ before its own ACK; independent worker survival, ownership transfer and final
 health/continuity evidence still need implementation and isolated acceptance.
 No existing native selectors/matrix or live lifecycle are rerun by this leaf.
 
+## Retained child-side creator process custody
+
+`connect_creation_parent_pipe` returns a connection retaining an explicit
+non-inheritable query/synchronize duplicate of the original inherited creator
+process handle. It checks the same handle before and after comparing the pipe
+server's PID. The connection forwards AsyncRead/AsyncWrite, so existing bounded
+binding exchange still consumes/closes it; its wire frames and bootstrap ACK
+behavior are unchanged. No source token or claimed PID constructs this object.
+Changes to stdin after admission cannot replace the retained process handle.
+
+The connection exposes only a live read and a consuming exit observation. The
+latter closes the stream first, then polls the original handle for at most three
+seconds, checking deadline before/after each query. WAIT_OBJECT_0 means exited;
+WAIT_TIMEOUT means live, independent of any exit-code value. Unknown outcomes
+map to the existing fixed refusal. Cancellation drops the connection/handle;
+there is no internal reconnect or retry. The process observation cannot confer
+runtime/operation/Policy authority or transfer the parent's update reservation.
+
+Author verification is Windows-target platform lib+tests type checking and
+strict Clippy on Mac (`x86_64-pc-windows-gnu`), plus formatting/docs/diff checks,
+not native execution. The Windows Server consumer still requires its native
+bin type check because the returned transport now retains process custody.
+New PLATFORM LIB selector `windows_update_creator_custody_`
+has exactly two native controls, currently NOT_RUN: actual child-side creator
+connection retains identity and async I/O after stdin replacement, and the
+retained-handle wait refuses a live process at deadline then observes a separate
+task-owned original Child's natural exit259. The first also checks pipe closes
+before the live-parent deadline. The latter is an original-process wait control,
+not an integration proof that a worker outlived its real creator or an enclosing
+Job. No admitted/installed image is executed. Original creator exit integration,
+cross-creator pins/lease/claim custody, Job survival, authorization transfer,
+health and full transaction remain separate work. No live Host or cap changes.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

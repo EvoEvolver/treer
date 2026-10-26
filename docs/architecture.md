@@ -85,6 +85,14 @@ consumed. This is not a detached worker or public lifecycle entry. The creator
 Controller could stop before receiving its own reply, so ACK is not a required
 or sufficient proof of update completion.
 
+The Windows child-side creator connection retains a duplicate of the inherited
+query/synchronize-only process handle alongside its pipe stream. Admission
+compares that live original handle with the pipe server; it does not adopt a
+PID or reread stdin after construction. The connection forwards async byte I/O
+and can be consumed to close transport before a three-second read-only wait
+for the original creator's exit. This supplies process custody/observation,
+not selected-runtime authority, worker survival or an update transaction.
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

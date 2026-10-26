@@ -164,6 +164,16 @@ or configuration contents. Failed launch retains the newly saved specification.
   worker or survive creator exit. Existing normal admission must precede any
   future product entry; no such entry or capability is enabled here.
 
+  Child-side creator pipe admission now retains a non-inheritable duplicate of
+  the inherited process handle with query/synchronize rights only. The borrowed
+  standard handle is never closed or owned by this constructor. The retained
+  handle remains stable across stdin replacement and transport loss. Creator
+  exit uses the process handle's wait state, not exit-code 259 or a reopened PID.
+  A consuming three-second wait closes the pipe first and refuses a live creator
+  at deadline; cancellation drops custody. Neither exit nor pipe EOF authorizes
+  any mutation. This adds no worker lock/pin transfer, Job policy/breakaway,
+  independent Controller/Policy authorization or automatic reconnect/retry.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

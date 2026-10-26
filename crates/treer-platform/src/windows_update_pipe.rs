@@ -4,11 +4,14 @@ use std::{
     io,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     path::{Path, PathBuf},
+    pin::Pin,
     process::Child,
+    task::{Context, Poll},
 };
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer};
 use windows_sys::Win32::{
-    Foundation::{DuplicateHandle, INVALID_HANDLE_VALUE, WAIT_TIMEOUT},
+    Foundation::{DuplicateHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT},
     System::{
         Console::{GetStdHandle, STD_INPUT_HANDLE},
         Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId},
@@ -22,6 +25,114 @@ use windows_sys::Win32::{
 pub struct CreatedChildPipe {
     server: NamedPipeServer,
     path: PathBuf,
+}
+
+/// Child-side stream plus retained original creator handle. Neither a PID nor
+/// later changes to stdin can replace this query/synchronize-only custody.
+/// Creator origin/exit observation does not grant selected-runtime authority.
+pub struct CreationParentConnection {
+    stream: NamedPipeClient,
+    creator: OwnedHandle,
+}
+
+fn retain_creator(handle: HANDLE) -> io::Result<OwnedHandle> {
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(refused());
+    }
+    let mut duplicate = std::ptr::null_mut();
+    let result = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            GetCurrentProcess(),
+            &mut duplicate,
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            0,
+            0,
+        )
+    };
+    if result == 0 || duplicate.is_null() || duplicate == INVALID_HANDLE_VALUE {
+        return Err(refused());
+    }
+    let owned = unsafe { OwnedHandle::from_raw_handle(duplicate) };
+    // Reject non-process handles and unknown query outcomes before admission.
+    if unsafe { GetProcessId(owned.as_raw_handle()) } == 0 {
+        return Err(refused());
+    }
+    creator_live(&owned)?;
+    Ok(owned)
+}
+
+fn creator_live(creator: &OwnedHandle) -> io::Result<bool> {
+    match unsafe { WaitForSingleObject(creator.as_raw_handle(), 0) } {
+        WAIT_TIMEOUT => Ok(true),
+        WAIT_OBJECT_0 => Ok(false),
+        _ => Err(refused()),
+    }
+}
+
+async fn wait_creator_exit(creator: OwnedHandle) -> io::Result<()> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(refused());
+        }
+        let live = creator_live(&creator)?;
+        // Do not accept an observation arriving after the finite budget.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(refused());
+        }
+        if !live {
+            return Ok(());
+        }
+        tokio::time::sleep_until(std::cmp::min(
+            deadline,
+            tokio::time::Instant::now() + std::time::Duration::from_millis(10),
+        ))
+        .await;
+    }
+}
+
+impl CreationParentConnection {
+    pub fn creator_is_live(&self) -> io::Result<bool> {
+        creator_live(&self.creator)
+    }
+
+    /// Consume the transport, closing it before a bounded read-only wait on the
+    /// original creator. Success is exit observation, never readiness, authority
+    /// or permission to resume a transaction. Cancellation drops the handle;
+    /// this object cannot reconnect or initiate a second wait.
+    pub async fn wait_for_creator_exit(self) -> io::Result<()> {
+        let Self { stream, creator } = self;
+        drop(stream);
+        wait_creator_exit(creator).await
+    }
+}
+
+impl AsyncRead for CreationParentConnection {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for CreationParentConnection {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
 }
 
 fn refused() -> io::Error {
@@ -71,18 +182,15 @@ pub fn creator_process_stdio() -> io::Result<std::process::Stdio> {
 /// once, with no busy/retry loop, and refuses any other server or exited parent.
 /// This does NOT prove the creator is an authorized Controller/runtime or grant
 /// update authority: that still requires the admitted one-shot worker protocol.
-pub fn connect_creation_parent_pipe(selector: &str) -> io::Result<NamedPipeClient> {
+pub fn connect_creation_parent_pipe(selector: &str) -> io::Result<CreationParentConnection> {
     let path = endpoint(selector)?;
     // Borrow this process's standard handle; do not close or take ownership of
     // a std handle potentially also used by the Rust runtime.
-    let parent = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
-    if parent.is_null()
-        || parent == INVALID_HANDLE_VALUE
-        || unsafe { WaitForSingleObject(parent, 0) } != WAIT_TIMEOUT
-    {
+    let parent = retain_creator(unsafe { GetStdHandle(STD_INPUT_HANDLE) })?;
+    if !creator_live(&parent)? {
         return Err(refused());
     }
-    let expected = unsafe { GetProcessId(parent) };
+    let expected = unsafe { GetProcessId(parent.as_raw_handle()) };
     if expected == 0 {
         return Err(refused());
     }
@@ -92,11 +200,14 @@ pub fn connect_creation_parent_pipe(selector: &str) -> io::Result<NamedPipeClien
     let mut actual = 0;
     if unsafe { GetNamedPipeServerProcessId(client.as_raw_handle(), &mut actual) } == 0
         || actual != expected
-        || unsafe { WaitForSingleObject(parent, 0) } != WAIT_TIMEOUT
+        || !creator_live(&parent)?
     {
         return Err(refused());
     }
-    Ok(client)
+    Ok(CreationParentConnection {
+        stream: client,
+        creator: parent,
+    })
 }
 
 impl CreatedChildPipe {
@@ -201,7 +312,13 @@ mod tests {
     #[ignore = "owned private bootstrap helper; only invoked by focused parents"]
     async fn creation_parent_pipe_fixture_child() {
         let selector = std::env::var("TREER_TEST_PIPE_SELECTOR").unwrap();
-        if std::env::var("TREER_TEST_PIPE_ROLE").unwrap() == "server" {
+        let role = std::env::var("TREER_TEST_PIPE_ROLE").unwrap();
+        if role == "exit259" {
+            use std::io::Read;
+            std::io::stdin().read_exact(&mut [0]).unwrap();
+            std::process::exit(259);
+        }
+        if role == "server" {
             // Fixed fixture-only codes distinguish the pre-ready boundaries;
             // never serialize raw OS errors, paths or child stderr.
             let Ok(path) = endpoint(&selector) else {
@@ -227,10 +344,77 @@ mod tests {
         let Ok(mut client) = connect_creation_parent_pipe(&selector) else {
             std::process::exit(77);
         };
+        if role == "custody" {
+            assert!(client.creator_is_live().unwrap());
+            // This helper alone replaces its stdin slot. The original std
+            // handle is borrowed, never closed by the connection constructor.
+            assert_ne!(
+                unsafe {
+                    windows_sys::Win32::System::Console::SetStdHandle(
+                        STD_INPUT_HANDLE,
+                        INVALID_HANDLE_VALUE,
+                    )
+                },
+                0
+            );
+            assert!(connect_creation_parent_pipe(&selector).is_err());
+            assert!(client.creator_is_live().unwrap());
+        }
         client.write_all(&[0x52]).await.unwrap();
         let mut byte = [0];
         client.read_exact(&mut byte).await.unwrap();
         assert_eq!(byte, [0x53]);
+        if role == "custody" {
+            assert!(client.creator_is_live().unwrap());
+            assert_eq!(
+                client
+                    .wait_for_creator_exit()
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                "windows_update_pipe_unconfirmed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn windows_update_creator_custody_stdin_rebinding_keeps_original_handle_and_stream() {
+        let selector = selector();
+        let pipe = CreatedChildPipe::bind(&selector).unwrap();
+        let mut child = fixture(&selector, "custody", creator_process_stdio().unwrap(), None);
+        let mut server = pipe.connect(&child.0).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut byte = [0];
+            server.read_exact(&mut byte).await.unwrap();
+            assert_eq!(byte, [0x52]);
+            server.write_all(&[0x53]).await.unwrap();
+            // The consuming wait closes transport before waiting on the live
+            // original creator. EOF does not masquerade as creator exit.
+            assert!(server.read_exact(&mut byte).await.is_err());
+        })
+        .await
+        .unwrap();
+        assert!(exited(&mut child.0).await.success());
+    }
+
+    #[tokio::test]
+    async fn windows_update_creator_custody_original_handle_exit259_and_deadline_are_not_liveness()
+    {
+        use std::io::Write;
+        assert!(retain_creator(INVALID_HANDLE_VALUE).is_err());
+        let mut child = fixture(&selector(), "exit259", Stdio::piped(), None);
+        let retained = retain_creator(child.0.as_raw_handle()).unwrap();
+        assert!(creator_live(&retained).unwrap());
+        // A live original handle reaches a finite refusal, never a successful
+        // readiness/exit result. Only the task-owned original Child is reaped.
+        assert_eq!(
+            wait_creator_exit(retained).await.unwrap_err().to_string(),
+            "windows_update_pipe_unconfirmed"
+        );
+        let retained = retain_creator(child.0.as_raw_handle()).unwrap();
+        child.0.stdin.take().unwrap().write_all(b"x").unwrap();
+        wait_creator_exit(retained).await.unwrap();
+        assert_eq!(exited(&mut child.0).await.code(), Some(259));
     }
 
     #[tokio::test]
