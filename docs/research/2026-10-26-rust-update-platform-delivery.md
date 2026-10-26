@@ -1347,8 +1347,17 @@ Author Mac new selector actually passed two controls, zero failed/ignored (503
 filtered). Strict Controller bins/tests Clippy with the existing acceptance
 feature and formatting/docs/diff checks passed. An initial author-only generic
 Result inference error was corrected with an explicit error type before this
-freeze; it is not a native failure or a native pass. Native exact3 remains
-NOT_RUN; no old selector or matrix was rerun.
+freeze; it is not a native failure or a native pass. Native acceptance completed
+in sole run `40343372956`, exact source
+`890e12cbb0efc59f901ebabafc8c44983fc56667`, wrapper
+`ac55ee95291916d5edd3bdaa854e7b41cea169ac`: Windows 2022/Rust 1.90, fixed NTFS
+image `20261022.344.1`, three passed, zero failed/ignored, exit zero (296
+filtered). Independent temporary inventory was empty and cleanup proven; the
+wrapper removed the empty root. Core matched exact test names, source, command,
+platform and `RESULT.json` SHA-256
+`f11871adea69b4d60a87ab238f463381e5a9ac35e4a3b2cd9e159f29fd28a671`
+(#111:9640). Single source review: #111:9636. No old selector or matrix was rerun;
+the custody-only limits above remain unchanged.
 
 ## Remaining ordered leaves and waiting boundaries
 
