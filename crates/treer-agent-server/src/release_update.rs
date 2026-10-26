@@ -58,6 +58,8 @@ pub(super) struct AuthenticatedRelease {
     pub(super) version: String,
     pub(super) controller: Artifact,
     pub(super) cli: Artifact,
+    #[cfg(any(windows, test))]
+    pub(super) manifest_sha256: String,
 }
 
 /// Constructed only after authenticating metadata and matching the binary digest.
@@ -295,19 +297,62 @@ pub(super) async fn authenticate(
         serde_json::from_slice(&channel_bytes).context("invalid signed release channel")?;
     validate_channel(&channel, channel_name)?;
     let manifest_bytes = fetch_signed(client, &base, &channel.manifest_path, key).await?;
-    if digest(&manifest_bytes) != channel.manifest_sha256 {
+    authenticated_manifest(&channel, &manifest_bytes, key, platform)
+}
+
+fn authenticated_manifest(
+    channel: &Channel,
+    manifest_bytes: &[u8],
+    key: &VerifyingKey,
+    platform: &str,
+) -> Result<AuthenticatedRelease> {
+    if digest(manifest_bytes) != channel.manifest_sha256 {
         bail!("release manifest SHA256 does not match the signed channel");
     }
     let manifest: Manifest =
-        serde_json::from_slice(&manifest_bytes).context("invalid signed release manifest")?;
-    let controller = select_artifact(&manifest, &channel, key, platform, "treer-agent-server")?;
-    let cli = select_artifact(&manifest, &channel, key, platform, "treer")?;
+        serde_json::from_slice(manifest_bytes).context("invalid signed release manifest")?;
+    let controller = select_artifact(&manifest, channel, key, platform, "treer-agent-server")?;
+    let cli = select_artifact(&manifest, channel, key, platform, "treer")?;
     Ok(AuthenticatedRelease {
         #[cfg(unix)]
-        version: channel.version,
+        version: channel.version.clone(),
         controller: controller.clone(),
         cli: cli.clone(),
+        #[cfg(any(windows, test))]
+        manifest_sha256: digest(manifest_bytes),
     })
+}
+
+/// Offline admission of independently supplied signed documents. Reuses the
+/// same signature, channel, manifest and artifact binding checks as networking.
+/// The key is separately trusted input, never read from either document.
+#[cfg(any(windows, test))]
+pub(super) fn authenticate_documents(
+    channel_bytes: &[u8],
+    channel_signature: &[u8],
+    manifest_bytes: &[u8],
+    manifest_signature: &[u8],
+    channel_name: &str,
+    key: &VerifyingKey,
+    platform: &str,
+) -> Result<AuthenticatedRelease> {
+    if [
+        channel_bytes,
+        channel_signature,
+        manifest_bytes,
+        manifest_signature,
+    ]
+    .iter()
+    .any(|bytes| bytes.len() > MAX_METADATA_BYTES)
+    {
+        bail!("signed update metadata exceeds limit");
+    }
+    validate_channel_name(channel_name)?;
+    verify_signed(channel_bytes, channel_signature, key)?;
+    let channel: Channel = serde_json::from_slice(channel_bytes)?;
+    validate_channel(&channel, channel_name)?;
+    verify_signed(manifest_bytes, manifest_signature, key)?;
+    authenticated_manifest(&channel, manifest_bytes, key, platform)
 }
 
 pub(super) async fn download(

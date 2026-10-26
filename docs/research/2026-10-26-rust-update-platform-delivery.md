@@ -94,9 +94,9 @@ retains its unknown outcome and all evidence; callers must not retry. Existing
 unresolved staging records remain refused by the underlying store. These are
 atomic-visibility semantics, not a promise of power-loss durability.
 
-The binding's digests are claims until a future admission layer independently
-verifies signatures and opens/pins the physical installation. This leaf does
-not provide that admission, image replacement or a CLI/capability entry. There
+The binding's digests alone are claims; they require the signed admission layer
+below to independently verify signatures and open/pin the physical installation.
+The intent schema itself does not provide that admission, image replacement or a CLI/capability entry. There
 is deliberately no generic phase setter, success marker or recovery executor.
 Portable schema controls can run on the author machine; the additional
 `windows_update_intent_native_single_reservation_and_read_only_reconciliation`
@@ -120,10 +120,64 @@ platform record, test log and `RESULT.json` SHA-256
 (#111:9418). The single source review is #111:9412. This accepts the intent/schema
 leaf only, not signature admission, image replacement or a complete transaction.
 
+## Signed Windows input admission
+
+`windows_update_admission` reuses the ordinary Rust consumer's existing
+Ed25519 channel/manifest validation, manifest hash binding and unique
+`windows-x86_64` Controller/CLI artifact selection. The new offline document
+entry checks all four metadata buffers against the existing 1 MiB bound;
+its verifying key is separately trusted input, never supplied by the manifest.
+No network, downloaded code execution or new channel is needed for admission.
+
+`treer-platform::windows_update_inputs::PinnedPair` opens existing private,
+physical, fixed-NTFS directories and the fixed `treer-agent-server.exe` and
+`treer.exe` names. It retains all ancestor handles and single-link, non-reparse,
+private file handles with no write/delete sharing. Admission seeks each held
+file to zero, streams bounded full-file hashes, matches target size/hash against
+the authenticated manifest, and obtains installation volume/file ID from the
+retained directory handle. Staging and installation cannot be the same physical
+directory. Existing weak ACLs are refused rather than repaired.
+
+The privately constructed `AdmittedInputs` owns all four pinned files. Consuming
+it for one intent returns `ReservedInputs`, which retains the handles but has no
+second-reservation, publication, rollback, health or execution method. The
+installed pair is only observed. No installation mutation lock or worker/Job
+handoff is claimed; these read pins must be explicitly reconciled with future
+rename mechanics, not dropped and replaced by an unchecked path reopen. This
+leaf also does not authenticate the old pair's publisher or assert its running
+process identity, target PE loadability, freshness or power-loss durability.
+Only target bytes are authenticated against the separately trusted signer.
+
+The two portable admission controls and eight affected ordinary signed-consumer
+regressions passed on the author Mac. Controller default all-target strict
+Clippy and platform all-target strict Clippy for Windows GNU and Linux GNU
+passed, as did formatting/docs/diff checks. Controller Windows cross-compilation
+was not run locally because its cross C compiler is unavailable. The initial
+test-fixture borrow-check error was corrected before the test pass. Two further
+native controls require Windows: held files refuse write/rename and reserve the
+exact physical binding without replacement; corrupt/same-root/hardlinked/weak
+ACL inputs refuse before creating an intent.
+The single focused entry is `cargo test --locked -p treer-agent-server --bin
+treer-agent-server windows_update_admission_ -- --nocapture`, expecting four
+passed, none failed/ignored, exit zero, and independent task TEMP cleanup. The
+earlier store/intent native runs do not establish this admission result.
+
+Release executed that entry once in run `40284733737`, pinned to source
+`aaa633664038d93863c68f2f341d031fcb32cb49` and wrapper
+`2af1b8448592e7cc122e099a638968ece3d63612`. Windows Server 2022, Rust 1.90
+and fixed NTFS image `20261022.344.1` produced four passed, zero failed/ignored
+and exit zero. Core independently checked the result, platform and four named
+test log entries. The task TEMP had no remaining entries, cleanup was proven,
+and the empty root was removed. The result receipt SHA256 is
+`e1939bfaed6f1673afdcd40ff4c67e0e176ff14cb64ff190843ab3c00e75c0b4`.
+This establishes signed pinned-input admission through one reservation only;
+image replacement, mutation locking, Job ownership and health remain untested.
+
 ## Remaining ordered leaves and waiting boundaries
 
-1. Native NTFS store and single-use intent acceptance are complete. Next
-   connect verified admission and add phase-specific evidence for actual image
+1. Native NTFS store, single-use intent and signed pinned-input admission
+   acceptance are complete within their stated scopes. Next
+   add phase-specific evidence for actual image
    publication, never a generic setter that could manufacture completion.
 2. Implement Windows verified Controller/CLI image backup and two-rename
    publication with locked-image refusal and whole-pair rollback. Never treat

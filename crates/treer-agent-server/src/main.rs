@@ -21,6 +21,8 @@ mod startup_store;
 // Test-only envelope used by the Unix journal's foreign-record refusal test.
 // This does not add any Windows updater entry or runtime.
 mod tui;
+#[cfg(any(windows, test))]
+pub mod windows_update_admission;
 #[cfg(test)]
 mod windows_update_envelope;
 #[cfg(any(windows, test))]
