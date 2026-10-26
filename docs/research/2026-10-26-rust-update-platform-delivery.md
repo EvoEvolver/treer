@@ -1128,7 +1128,20 @@ tags, and bounded reply cancellation without a restart/retry. Only SAMEtestexe
 helpers were created; no Host daemon or installed Controller was started.
 Strict Host/protocol/Controller consumer Clippy (bins/tests), formatting, docs
 and diff checks passed. No previous acceptance selector or matrix was rerun.
-Windows execution remains NOT_RUN pending its own focused native receipt.
+Sole Windows run `40332011855` checked out exact source
+`0b57dd7c751050f6f4296e2ea97dae95b2f1cb8c`, wrapper
+`ca98a03471f830c5e2177695acc30d4a16191fff`, on Windows2022/Rust1.90,
+Fixed NTFS image `20261022.344.1`. All three new controls actually passed,
+zero failed/ignored/exit zero (six filtered), including the original helper
+Child's exit 259 refusal. Independent task TEMP was empty, cleanup proven and
+the empty root removed. Core independently checked exact source/command/test
+names/counts, platform and cleanup. Safe evidence is retained under
+`.treer/reviews/core111-windows-host-observation-0b57dd7c/artifact/`;
+`RESULT.json` SHA256 is
+`20c28bfae3330c4c45df4e9b2b4dc149f51ad9b8299eb2311bd4cf9866f8292c`.
+This is SAMEtestexe original-Child/channel evidence, not full daemon/socket
+integration or an installed Host observation. No Host daemon, installed
+Controller, capability, publisher, old selector or matrix was exercised.
 
 ## Remaining ordered leaves and waiting boundaries
 
