@@ -1398,11 +1398,21 @@ the new native test source; formatting/docs/diff checks also passed. An initial
 author compilation correctly refused unsafe blocks outside an explicit allowed
 mechanics boundary; the exact duplicate/borrow functions now carry narrow
 allowances rather than enabling unsafe code for the whole module. No native
-test has run yet. One independent source review precedes the sole Release
-Windows entry: Server-bin `cargo check` for the changed fixed-spawn consumer,
-then `cargo test --locked -p treer-platform --lib windows_update_worker_lock_
--- --nocapture`, exact two passed, zero failed/ignored, exit zero, fixed NTFS and
-independent TEMP cleanup. No old selector/matrix or installed process is needed.
+test was run by the author. One independent source review (#111:9645) preceded
+the sole Release Windows run `40345212547`, exact source
+`00adc7721ea93ecf28e3d4c8104648546c251784`, wrapper
+`1568f9ec47d574d02b065a8b6737d001375c999e`. Server-bin `cargo check` for the changed
+fixed-spawn consumer exited zero; `cargo test --locked -p treer-platform --lib
+windows_update_worker_lock_ -- --nocapture` actually passed both native tests,
+zero failed/ignored, exit zero (23 filtered). Windows 2022/Rust 1.90, fixed NTFS
+image `20261022.344.1`; independent TEMP inventory was empty, cleanup proven and
+the wrapper removed the empty root. Core matched exact source, commands, names,
+platform, check/test logs and `RESULT.json` SHA-256
+`500b0ab326a7f0861d6c02e4ec88705b0bcc7b3c32509265d025ebc584d01647`
+(#111:9648). No old selector/matrix, admitted image execution or installed process
+was used. This accepts the lock-reference lifetime boundary only; complete
+input/ancestor/state pin custody, admitted operation handoff, continuous worker
+survival and restart/health reconciliation remain separate source work.
 
 ## Remaining ordered leaves and waiting boundaries
 
