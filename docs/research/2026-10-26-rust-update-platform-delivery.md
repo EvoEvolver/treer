@@ -1219,8 +1219,19 @@ refusal, real absent-executable creation failure with unknown retained, and
 operation-cache identity/legacy conflict plus lost-completion replay refusal.
 The last uses a closed supervisor channel fixture, not a daemon. No installed
 Host, socket daemon, workload continuity, health, durable recovery or Windows
-native result is claimed. The new Windows HOST BIN exact-four entry remains
-NOT_RUN until the sole Release focused run. No old selectors/matrix are rerun.
+native result follows from the author controls alone. Sole native run
+`40338180147`, exact source `ea5eb04bad609cbaf1ee0f3bf899035163be34bb`,
+wrapper `55fbd97d8318ceb9e90062e3ca6844acf92208d1`, actually passed all four
+HOST BIN controls with zero failed/ignored/exit zero (nine filtered) on
+Windows2022/Rust1.90, Fixed NTFS image `20261022.344.1`. Task TEMP inventory was
+empty, cleanup proven and empty root removed. Core independently checked the
+source, command, exact names/counts, platform, log and cleanup receipts at
+`.treer/reviews/core111-windows-host-restart-ea5eb04b/artifact/`;
+`RESULT.json` SHA256 is
+`d1ad8e3fa73b76a51490df9b0b95cb16d4fdb538426ca40113fbd3aa44d6cb42`.
+This accepts the owned-helper and closed-channel scope on Windows, not full
+daemon/socket restart, installed Host, workload continuity or health. No old
+selectors/matrix were rerun, no feature or extra binary build was used.
 The selected runtime mutation admission/coordinator is not yet wired; the
 existing observation remains data, not a lifecycle credential. Normal identity
 and Policy admission must precede any later product entry. Ordinary cap stays
