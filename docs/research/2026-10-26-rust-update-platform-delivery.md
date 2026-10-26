@@ -762,7 +762,7 @@ run established compilation and execution for these integration controls.
 API contracts: [IsProcessInJob](https://learn.microsoft.com/en-us/windows/win32/api/jobapi/nf-jobapi-isprocessinjob),
 [WaitForSingleObject](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject).
 
-### Implemented leaf: single-instance pipe bound to the original Child
+### Accepted leaf: single-instance pipe bound to the original Child
 
 `CreatedChildPipe` creates exactly one fixed-namespace local named-pipe instance
 using the existing current-user+SYSTEM DACL, remote-client refusal and
@@ -799,9 +799,18 @@ accept latch while preserving teardown. Two Windows controls use only the SAME
 running test executable: a real original-Child pipe connection plus fixed
 byte read and exclusive-name/selector refusal, and foreign-parent client plus
 actual cancelled accept with replacement refusal. No admitted image or installed
-Controller is executed. Native exact four/zero failed/zero ignored/exit zero and
-independent empty TEMP cleanup remain NOT_RUN. No previous acceptance selector
-is repeated. The two portable author controls, Controller binary/test strict
+Controller is executed. Sole run `40320150122` passed all four, zero
+failed/ignored and exit zero on Windows 2022/Rust 1.90/fixed NTFS image
+`20261022.344.1`, exact source `99161212db823259d6d0762a10f2060bfeb354f1`,
+wrapper `cbaef26d74796c51c906519e2cca708091d610e1`, following the single
+independent source review #111:9541. Core independently checked the four names,
+summary, source, platform and empty TEMP/cleanup evidence. RESULT SHA256:
+`eb4599b2cecb48151e757309bc959d67ca8fb2fa382535c24692464079e855b1`.
+Receipts: `.treer/reviews/core111-windows-pipe-99161212/artifact/`
+(`RESULT.json`, `platform.json`, `tests.log`). This accepts only the parent's
+original-Child transport peer check, not child-side authentication or a complete
+worker handshake. No previous acceptance selector is repeated.
+The two portable author controls, Controller binary/test strict
 Clippy, Windows GNU platform all-target strict Clippy and fmt/docs/diff checks
 passed; local Windows Controller C toolchain remains unavailable.
 
