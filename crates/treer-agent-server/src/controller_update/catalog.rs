@@ -52,6 +52,11 @@ pub(super) fn platform() -> Result<wire::Platform> {
     }
 }
 impl Catalog {
+    #[cfg(any(windows, test))]
+    pub(crate) fn raw_digest(&self) -> &str {
+        &self.digest
+    }
+
     pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
         Self::parse_for(bytes, platform()?)
     }

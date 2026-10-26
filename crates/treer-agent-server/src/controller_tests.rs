@@ -1,5 +1,256 @@
 use super::*;
 
+#[cfg(windows)]
+static UPDATE_PLAN_CONFIG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(windows)]
+struct UpdatePlanCatalogFixture(PathBuf);
+
+#[cfg(windows)]
+impl UpdatePlanCatalogFixture {
+    fn new() -> Self {
+        // The Release wrapper scopes LOCALAPPDATA to its private TEMP. Never
+        // fall back to an enrolled user's real configuration during a test.
+        let root = std::env::temp_dir().join("local-appdata-fixture");
+        assert_eq!(
+            PathBuf::from(
+                std::env::var_os("TREER_TEST_CONFIRMED_CATALOG_ROOT")
+                    .expect("explicit task-only fixture root required")
+            ),
+            root
+        );
+        assert_eq!(
+            std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+            Some(root.clone())
+        );
+        std::fs::create_dir(&root).unwrap();
+        treer_platform::secure_directory(&root).unwrap();
+        let directory = root.join("Treer/agent-servers");
+        treer_platform::secure_directory(&directory).unwrap();
+        assert_eq!(
+            crate::service::controller_update_config_directory().unwrap(),
+            directory
+        );
+        Self(root)
+    }
+
+    fn path(&self) -> PathBuf {
+        self.0
+            .join("Treer/agent-servers/controller-update-catalog.json")
+    }
+
+    fn write(
+        &self,
+        binding: &treer_protocol::controller_update_runtime::DispatchBinding,
+        pretty: bool,
+    ) {
+        let entry = |sequence, target| {
+            serde_json::json!({"release_sequence":sequence,
+            "target":target,"sums_sha256":"c".repeat(64),
+            "artifact_base":"https://artifacts.example.test/fixed/",
+            "allow_pinned":true,"allow_artifact_origin":false})
+        };
+        let current = treer_protocol::controller_update::Target {
+            target_id: "old".into(),
+            identity: binding.current.clone(),
+            platform: treer_protocol::controller_update::Platform::WindowsX86_64,
+            version_label: "old".into(),
+        };
+        let value = serde_json::json!({"schema_version":1,"revision":binding.catalog_revision,
+            "accept_shared_binaries":false,"entries":[entry(1,current),entry(2,binding.target.clone())]});
+        let bytes = if pretty {
+            serde_json::to_vec_pretty(&value)
+        } else {
+            serde_json::to_vec(&value)
+        }
+        .unwrap();
+        std::fs::write(self.path(), bytes).unwrap();
+        treer_platform::secure_file(&self.path()).unwrap();
+    }
+}
+
+#[cfg(windows)]
+impl Drop for UpdatePlanCatalogFixture {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+#[cfg(windows)]
+fn update_confirmed_plan_binding() -> treer_protocol::controller_update_runtime::DispatchBinding {
+    use crate::windows_update_admission::tests::{NEW, OLD};
+    use sha2::Digest;
+    use treer_protocol::{
+        controller_update::{Identity, Platform, Target},
+        controller_update_runtime::DispatchBinding,
+    };
+    let identity = |source: &str, bytes: &[u8]| Identity {
+        release_sha: source.repeat(40),
+        artifact_source_sha: source.repeat(40),
+        controller_sha256: format!("{:x}", sha2::Sha256::digest(bytes)),
+        cli_sha256: format!("{:x}", sha2::Sha256::digest(bytes)),
+    };
+    let mut binding = DispatchBinding {
+        operation_id: Uuid::new_v4().to_string(),
+        workspace_id: "ws_fixture".into(),
+        server_id: "srv_fixture".into(),
+        current: identity("a", OLD),
+        target: Target {
+            target_id: "new".into(),
+            identity: identity("b", NEW),
+            platform: Platform::WindowsX86_64,
+            version_label: "new".into(),
+        },
+        catalog_revision: 2,
+        plan_digest: "0".repeat(64),
+        created_at: Utc::now(),
+    };
+    binding.plan_digest = binding.expected_plan_digest().unwrap();
+    binding
+}
+
+#[cfg(windows)]
+fn update_confirmed_plan_inputs(
+    runtime: &ControllerRuntime,
+    root: &Path,
+    binding: treer_protocol::controller_update_runtime::DispatchBinding,
+    wrong_key: bool,
+) -> anyhow::Result<crate::windows_update_admission::AdmittedInputs> {
+    use crate::windows_update_admission::{
+        tests::{Fixture, NEW, OLD},
+        AdmittedInputs,
+    };
+    use treer_platform::windows_update_inputs::PinnedPair;
+    let installed = root.join("installed");
+    let target = root.join("target");
+    for (directory, bytes) in [(&installed, OLD), (&target, NEW)] {
+        std::fs::create_dir(directory).unwrap();
+        treer_platform::secure_directory(directory).unwrap();
+        for name in ["treer-agent-server.exe", "treer.exe"] {
+            std::fs::write(directory.join(name), bytes).unwrap();
+            treer_platform::secure_file(&directory.join(name)).unwrap();
+        }
+    }
+    let fixture = Fixture::new(|_| {});
+    let key = if wrong_key {
+        ed25519_dalek::SigningKey::from_bytes(&[99; 32]).verifying_key()
+    } else {
+        fixture.key.verifying_key()
+    };
+    AdmittedInputs::prepare_confirmed_for_controller(
+        PinnedPair::open(&installed)?.lock_installation()?,
+        PinnedPair::open(&target)?,
+        &fixture.documents(),
+        &key,
+        runtime,
+        binding,
+    )
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_confirmed_plan_native_local_catalog_signed_inputs_and_runtime_reserve() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let dispatch = update_confirmed_plan_binding();
+    catalog.write(&dispatch, false);
+    let admitted = update_confirmed_plan_inputs(&runtime, &root, dispatch, false).unwrap();
+    let binding = admitted.binding().clone();
+    let installed = root.join("installed");
+    assert!(!installed.join(".treer-controller-update.claim").exists());
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(installed.join("treer-agent-server.exe"))
+        .is_err());
+    assert!(std::fs::rename(root.join("configured-state"), root.join("moved-state")).is_err());
+    let job = root.join("job");
+    std::fs::create_dir(&job).unwrap();
+    treer_platform::secure_directory(&job).unwrap();
+    let reserved = admitted
+        .reserve(treer_platform::windows_update_store::UpdateStore::open(&job).unwrap())
+        .unwrap();
+    reserved
+        .controller_state()
+        .unwrap()
+        .matches_selected(&runtime, &binding)
+        .unwrap();
+    crate::windows_update_intent::inspect(
+        &std::fs::read(installed.join(".treer-controller-update.claim")).unwrap(),
+        &binding,
+    )
+    .unwrap();
+    crate::windows_update_intent::inspect(
+        &std::fs::read(job.join("receipt.bin")).unwrap(),
+        &binding,
+    )
+    .unwrap();
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("target/treer.exe"))
+        .is_err());
+    drop(reserved);
+    assert!(installed.join(".treer-controller-update.claim").exists());
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_confirmed_plan_native_scope_signature_pins_and_catalog_change_refuse() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    for case in 0..6 {
+        let directory = root.join(format!("case-{case}"));
+        std::fs::create_dir(&directory).unwrap();
+        treer_platform::secure_directory(&directory).unwrap();
+        let mut dispatch = update_confirmed_plan_binding();
+        match case {
+            0 => dispatch.target.identity.controller_sha256 = "e".repeat(64),
+            1 => dispatch.workspace_id = "ws_other".into(),
+            2 => dispatch.created_at -= chrono::Duration::seconds(121),
+            _ => {}
+        }
+        dispatch.plan_digest = dispatch.expected_plan_digest().unwrap();
+        catalog.write(&dispatch, false);
+        let result =
+            update_confirmed_plan_inputs(&runtime, &directory, dispatch.clone(), case == 5);
+        if case == 3 || case == 4 {
+            let admitted = result.unwrap();
+            if case == 3 {
+                catalog.write(&dispatch, true);
+            } else {
+                std::fs::remove_file(catalog.path()).unwrap();
+            }
+            let job = directory.join("job");
+            std::fs::create_dir(&job).unwrap();
+            treer_platform::secure_directory(&job).unwrap();
+            assert!(admitted
+                .reserve(treer_platform::windows_update_store::UpdateStore::open(&job).unwrap())
+                .is_err());
+            assert!(!job.join("receipt.bin").exists());
+        } else {
+            assert!(result.is_err(), "case {case}");
+        }
+        assert!(!directory
+            .join("installed/.treer-controller-update.claim")
+            .exists());
+        assert_eq!(
+            std::fs::read(directory.join("installed/treer-agent-server.exe")).unwrap(),
+            crate::windows_update_admission::tests::OLD
+        );
+        assert_eq!(
+            std::fs::read(directory.join("target/treer.exe")).unwrap(),
+            crate::windows_update_admission::tests::NEW
+        );
+    }
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn recovery_inventory_and_controller_replacement_retain_exited_output() {
     use tokio::io::AsyncWriteExt;

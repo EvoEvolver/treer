@@ -92,6 +92,7 @@ pub struct AdmittedInputs {
     receiver_attempted: bool,
     // Supplied by the trusted admission caller, never by signed metadata.
     verifying_key: [u8; 32],
+    confirmed_plan: Option<confirmed::ConfiguredPlan>,
 }
 
 #[cfg(windows)]
@@ -199,6 +200,7 @@ impl AdmittedInputs {
             worker_attempted: false,
             receiver_attempted: false,
             verifying_key: key.to_bytes(),
+            confirmed_plan: None,
         })
     }
 
@@ -223,6 +225,17 @@ impl AdmittedInputs {
     ) -> Result<ReservedInputs> {
         if let Some(state) = &self.state {
             state.matches(&self.binding)?;
+        }
+        if let Some(plan) = &self.confirmed_plan {
+            plan.recheck(
+                &crate::controller_update::catalog::Catalog::local()?,
+                &self.binding,
+                chrono::Utc::now(),
+            )?;
+            self.state
+                .as_ref()
+                .ok_or_else(confirmed::refused)?
+                .matches(&self.binding)?;
         }
         self._installed
             .claim(&crate::windows_update_intent::encode(&self.binding)?)?;
@@ -471,3 +484,6 @@ pub use backup::{BackedUpInputs, FilePairPhase, PublishedInputs, StartupBackedUp
 #[cfg(any(windows, test))]
 #[path = "windows_update_receiver_state.rs"]
 mod receiver_state;
+
+#[path = "windows_update_confirmed.rs"]
+mod confirmed;

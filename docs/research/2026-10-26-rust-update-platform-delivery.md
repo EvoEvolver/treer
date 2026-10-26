@@ -1731,6 +1731,77 @@ matrix, feature, extra binary build, installation, Host or capability action
 occurred. The original tested source remains preserved; main delivery adds only
 this actual-result note to those Rust source blobs.
 
+## Windows confirmed plan and physical signed inputs
+
+The internal `prepare_confirmed_for_controller` entry compares one confirmed
+operation with the selected runtime, fixed private local catalog and the actual
+four held Controller/CLI files. Existing admission verifies both signatures with
+the independently supplied trusted key and hashes all four files. The new
+comparison requires the complete catalog plan, operation/workspace/Server scope,
+canonical plan digest and matching old/new file hashes. Runtime state remains
+derived from the selected runtime's loaded StartupStore, not the catalog's
+configuration directory. Pins, installation lease and runtime state remain held.
+
+Before creating the installation claim, reservation rereads the fixed catalog,
+checks the complete raw digest and plan again, applies the existing two-minute
+dispatch freshness window with thirty-second future tolerance, and rechecks
+runtime state. Missing, changed, stale or invalid inputs refuse before claim or
+job intent. This is a point-in-time recheck, not a catalog CAS or persistent
+anti-replay ledger. Existing unknown claims are never adopted or cleared.
+
+The entry is internal and not connected to a production route or capability.
+Normal caller identity/Policy confirmation and independently configured key trust
+remain prerequisites; valid public dispatch data is not authorization. Catalog
+release/source labels are operator claims, not measured running-image provenance.
+Matching file hashes does not establish installation selection, shared-binary
+impact, OS ownership, worker readiness or permission to release sender pins.
+
+The new Server selector `windows_update_confirmed_plan_` has two portable
+comparison/freshness controls and two native local-catalog/signed-input/runtime
+controls. Native fixtures require the wrapper to scope `LOCALAPPDATA` and
+`TREER_TEST_CONFIRMED_CATALOG_ROOT` to TEMP's `local-appdata-fixture` child;
+the tests exclusively create and remove that child and serialize access. A
+missing or mismatched fixture marker refuses before configuration writes.
+The native controls include catalog raw-byte change/removal before reservation,
+foreign runtime, stale plan, coherent catalog/dispatch hash lies and wrong key.
+No image executes, Host request occurs or production configuration is touched.
+Native acceptance is pending; portable checks cannot substitute for it.
+
+Author verification: the two portable controls passed on macOS, zero
+failed/ignored, exit zero (513 filtered). Strict Server bins/tests Clippy with
+the existing acceptance feature, formatting, docs and diff checks passed. No
+Windows native execution or prior selector/matrix was run by the author.
+
+One independent Core2 source-only review (#111:9713) found no blocker for
+`b1955bf089aecfb22aab8db35199c337ea3e5d6e`. Sole run `40370617970`, wrapper
+`3550f1d71754ea64dedfccdd342836016e450d4f`, actually passed all four controls,
+zero failed/ignored, Cargo exit zero (314 filtered), on Windows 2022/Rust 1.90,
+fixed NTFS image `20261022.344.1`. Core independently matched exact source,
+wrapper, four names, summary and `RESULT.json` SHA-256
+`be2e52324b354212872341e43b582877050faee39c8ef16c223f2c0471dcb242`.
+The task fixture child was absent afterwards, but the enclosing TEMP contained
+`Microsoft/VSApplicationInsights/...`; cleanup was not proven and the job
+failed. Its creator is unknown. This functional four-test result is not a full
+cleanup-contract PASS. The original root, failed receipt and consumed execution
+intent remain preserved; no old-root reuse, blind deletion or automatic retry.
+
+A changed harness compiled in the normal runner tool environment before creating
+a fresh private test root. Only the exact compiled test executable's two new
+native controls received the private TEMP/LOCALAPPDATA and explicit fixture
+marker. Sole run `40372457309`, wrapper
+`d4714bf864af3376b2b2803586a61f595fb29c61`, accepted the same source: build
+exit zero, unique Cargo artifact, two passed/zero failed/ignored, test exit zero
+(316 filtered), unchanged testexe SHA-256
+`0066a0fccd41bafb6a88d48e6196310929b7b2d34b44d46c8e334de61b5ac531`.
+Windows 2022/Rust 1.90 used the same fixed NTFS image. The test TEMP inventory
+was empty, cleanup proven and empty root removed. Core independently checked
+the exact source/wrapper, commands, two names, build artifact JSON, logs and
+`RESULT.json` SHA-256
+`dc75516f900e598c0f3e7566e45bfa15792a972215c49f1319547727a6e2e545`.
+The original portable controls and four functional PASS results are reused;
+the original failed job and unknown residue creator are unchanged. No new source
+review layer, prior selector, matrix, installed image or live service was used.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

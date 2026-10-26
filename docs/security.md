@@ -109,6 +109,13 @@ or configuration contents. Failed launch retains the newly saved specification.
   the default update. This does not cover
   bootstrap installers, Windows in-place updates, or replay/downgrade protection.
 
+  Internal Windows confirmed-plan admission also matches the fixed private local
+  catalog and complete operation scope against the four actual signed/held input
+  files and selected runtime. Reservation rereads the catalog before claim;
+  changed bytes or stale plans refuse. This is not caller authorization, catalog
+  CAS, measured running-image provenance or production Windows updater enablement.
+  The runtime's loaded StartupStore remains the separate state-root authority.
+
   The internal Windows worker bootstrap additionally has a one-use, bounded
   binding exchange on the original Child's private transport. Its fixed ACK
   agrees to an operation, fresh challenge and digest of the retained selected

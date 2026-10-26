@@ -2,7 +2,7 @@
 //! artifact origin, pins and shared-installation consent come from one checked
 //! local operator configuration, never Proxy command fields or environment.
 #[cfg_attr(not(unix), allow(dead_code))] // Windows coordinator remains unwired.
-mod catalog;
+pub(crate) mod catalog;
 #[cfg(unix)]
 pub(crate) mod unix;
 #[cfg(windows)]
