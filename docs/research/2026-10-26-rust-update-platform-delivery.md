@@ -1937,6 +1937,119 @@ safe receipts remain under the ignored
 This result is limited to the read-only observation/poison leaf, not production
 entry, independent child authorization, sender release, recovery or lifecycle.
 
+## Confirmed Dispatch consumer and retained download ownership
+
+The existing ProxyClient now owns one Windows consumer for its selected runtime.
+It uses the existing authenticated/capability-checked command, full DispatchBinding
+and operation UUID. Public capability remains OFF; tests exercise the internal
+already-confirmed seam, not a real human Policy session. No alternate command,
+environment enable switch or approval service was added. The consumer stays out
+of ControllerRuntime's inner state, avoiding a runtime/Preparation reference cycle.
+
+The normal local `controller-update-catalog.json` accepts an optional explicit
+signed-release section, for example:
+
+```json
+"signed_release": {
+  "base_url": "https://releases.treer.ai/",
+  "channel": "stable",
+  "public_key": null,
+  "confirmed_shared_servers": []
+}
+```
+
+This is a section of the existing catalog, not a complete catalog or production
+configuration change. Legacy catalogs still parse but cannot start this consumer
+without the section. HTTPS, channel syntax, absolute explicit key paths and
+strictly sorted exact server IDs are checked. Null key uses the existing normal
+official/local resolver; explicit self-host keys remain fail-closed. No trust
+comes from the offer. The old artifact-base URL cannot identify a signed channel.
+Shared physical images still require the catalog's existing acceptance boolean
+AND the exact affected-server list verified against normal saved enrollments.
+This local operator list does not establish that a browser confirmed the same
+impacts; public enablement requires that remaining product contract.
+
+Before any network task, the full binding and timestamp are checked against the
+selected runtime and the fixed physical catalog is held. The owner consumes its
+single slot before spawning. Dropping the command response/caller does not cancel
+the detached task. It downloads all six verified inputs through the existing
+Preparation seam, stores Preparation before transport awaits, then starts,
+inspects and explicitly closes the receiver. Closed custody returns to this
+same owner, retaining original sender pins, installation lease/claim and saved
+config guards. Download errors retain the catalog owner; later errors retain
+Preparation/unknown custody. Exact repeated bindings only observe; different
+bindings, even a new operation UUID, cannot reset or replay this owner. A scoped
+operation query uses the same owner without starting anything.
+
+The command returns Accepted with unknown health and no receipt. Both successful
+receive-session closure and errors/cancellation/unwind end its projection as
+Unconfirmed with no phase, receipt or finished timestamp. This is intentionally
+not a completed update result. The slot has no reset, claim-retirement or sender
+release API. In-process ownership is not a durable restart ledger; destruction
+does not prove child teardown or a custody transfer. Existing durable claims
+remain denial fences, with no automatic adoption or replay.
+
+Author macOS checks: new `windows_update_consumer_` portable controls passed
+exactly two tests, zero failed/ignored. Strict Server bins/tests Clippy with the
+existing acceptance feature passed. At source freeze the Windows-only consumer
+compilation and two new native controls remained NOT_RUN; actual results follow.
+The new native success control follows normal saved configuration through six
+downloads and explicit receiver close after dropping the original caller,
+asserting retained custody, scope refusal and observation-only repeats. The
+unknown control checks missing trust before network, corrupt signed input before
+stage/claim, retained source pins and refusal to replay. These controls do not
+exercise real Proxy Policy, an installed machine or any mutation/health action.
+
+Remaining success-path work: explicit worker mutation/lifetime authorization
+and transfer (ACK/creator exit is insufficient), startup CAS with preserved raw
+denial fences, composed pair replacement plus Controller-only restart/health,
+whole-transaction rollback/outcome, durable owner reconciliation and safe claim
+retirement. Existing file-pair and Host helper tests are narrower primitives;
+they are not whole-transaction acceptance. No user/package input blocks this
+source leaf, so waiting_on remains null. Host/live/capability/publishing stay
+untouched. Native execution, if needed, belongs solely to Release and uses only
+the new exact selector, not old leaf or platform-matrix reruns.
+
+The first sole Windows run `40407859541` compiled the production dev fixture
+successfully but failed test compilation: the new fixture serialized a Url
+directly without that dependency's Serialize feature. No test executed and no
+test TEMP root was created; reported cleanup false is retained, not relabeled
+as cleanup success. The narrow successor uses the existing URL's `as_str()` in
+fixture JSON, with no production/dependency/trust change. The original FAIL
+remains a separate spent run; changed-source acceptance uses a fresh contract.
+
+The ONE independent source review accepted `e41c2e15` (#111:9828), then closed
+the fixture-only `ab4e3abc` finding delta in that same review (#111:9833). No
+production or dependency bytes changed in the successor. Core read the complete
+original 120-line wrapper and all successor identity-only changes before each
+concrete handoff. No second source-review layer or old-leaf rerun was added.
+
+The sole changed-source Windows run `40409033100` accepted exact `ab4e3abc`,
+wrapper `3e1faf1d` (#111:9836). Windows 2022/Rust 1.90 on fixed NTFS image
+`20261022.344.1`: same-source acceptance-feature dev compilation and JSON Server
+test compilation both exited zero. Exactly one local package/bin/test executable
+matched the compiler artifact and direct execution path. The new selector
+passed exactly four tests (portable2/native2), zero failed/ignored, 342 filtered,
+exit zero. The real finite success case kept closed custody after caller drop;
+the failure controls retained source pins and did not replay or stage/claim
+unauthenticated inputs. Public capability still refused before network access.
+
+The 36,992,000-byte dev fixture SHA-256 before/after was
+`b019763f419e13548d6fe1ee49caa4eb63d780f98011181031584252dfbc3b44`;
+the 44,997,632-byte test executable SHA-256 before/after was
+`d3834afefaad3f8bfe004bbcbce28ba66075f355bfe750c29d502a5b5250c6f4`.
+Both sizes remained unchanged. The direct test process alone received the
+private TEMP and matching catalog markers, with no child fixture precreated.
+Temporary inventory was empty, cleanup proven and the empty root removed.
+Core independently read RESULT, platform, the compiler-artifact record, build
+commands and all four test names. RESULT SHA-256:
+`38a0cbf777dc590e560c394705407ca263de068cbc1a0ad48d223c19fb86cec7`.
+Safe logs remain under the ignored
+`.treer/reviews/windows111-consumer-ab4e3abc/run-40409033100/` directory; no
+binary was uploaded. The original `40407859541` FAIL/NOT_RUN/cleanup-false
+record is unchanged. These controls are not a real Proxy Policy session,
+installed-machine update, sender release, health or full transaction acceptance.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

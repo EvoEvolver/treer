@@ -216,7 +216,20 @@ same bytes again. The no-proxy/no-redirect client has a 10-second connect limit;
 individual requests and the whole download have a 120-second limit. All six
 objects must authenticate before any staging/claim. `start_downloaded` sends the
 retained envelopes to the existing receiver while preserving sender custody.
-Public Windows dispatch/capability remains unwired.
+The existing Proxy command handler now owns a Windows `Consumer` alongside the
+selected runtime. Its public capability guard remains OFF. After an already
+confirmed command, one immutable operation/binding owns the detached download
+and preparation task; a lost command response does not cancel it. Exact repeats
+observe the same operation, while conflicting/new bindings are refused. The
+normal local catalog must explicitly supply `signed_release` settings; its old
+artifact base is never guessed to be a signed channel. The physical catalog and
+config-directory guards remain held across network IO and unknown outcomes.
+The receive-session success path downloads, starts, inspects and explicitly
+closes the receiver, retaining both Preparation and returned closed custody.
+ACK/child exit does not permit releasing sender guards. Its operation projection
+is Accepted then Unconfirmed, with unknown health and no phase/receipt: session
+closure is not a completed update. This in-process owner is not a durable
+restart/adoption ledger. Public Windows capability remains OFF.
 
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and

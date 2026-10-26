@@ -3,6 +3,8 @@
 //! local operator configuration, never Proxy command fields or environment.
 #[cfg_attr(not(unix), allow(dead_code))] // Windows coordinator remains unwired.
 pub(crate) mod catalog;
+#[cfg(any(windows, test))]
+mod consumption;
 #[cfg(unix)]
 pub(crate) mod unix;
 #[cfg(windows)]
@@ -39,6 +41,7 @@ fn native_accepted() -> bool {
     false
 }
 
+#[cfg(not(windows))]
 pub(crate) async fn dispatch(
     workspace: &str,
     server: &str,

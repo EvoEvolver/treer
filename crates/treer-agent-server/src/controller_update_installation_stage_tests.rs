@@ -390,3 +390,150 @@ async fn windows_update_download_native_trust_before_network_and_corrupt_before_
         drop(catalog);
     }
 }
+
+fn consumer_config(catalog: &UpdatePlanCatalogFixture, input: &Inputs, missing_key: bool) {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(catalog.path()).unwrap()).unwrap();
+    value["signed_release"] = serde_json::json!({
+        "base_url":input.settings.release_base_url.as_str(), "channel":"stable",
+        "public_key": if missing_key { Some(catalog.path().parent().unwrap().join("missing.pem")) } else { None },
+        "confirmed_shared_servers": if value["accept_shared_binaries"] == true { vec!["srv_other"] } else { vec![] },
+    });
+    std::fs::write(catalog.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
+async fn consumer_terminal(
+    consumer: &crate::controller_update::windows::consumer::Consumer,
+    id: &str,
+) -> treer_protocol::controller_update::Operation {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let op = consumer.observe("ws_fixture", "srv_fixture", id).unwrap();
+            if op.state == treer_protocol::controller_update::State::Unconfirmed {
+                return op;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn windows_update_consumer_native_confirmed_command_detaches_and_keeps_closed_custody() {
+    use crate::controller_update::windows::consumer::Consumer;
+    use treer_protocol::controller_update::{Health, State};
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let mut input = inputs(&root, &catalog, true);
+    let (base, requests, server) = distributor(&input, false).await;
+    input.settings.release_base_url = base;
+    consumer_config(&catalog, &input, false);
+    let consumer = Consumer::new(runtime.clone());
+    assert!(consumer
+        .dispatch("ws_fixture", "srv_fixture", input.dispatch.clone())
+        .is_err());
+    assert_eq!(
+        requests.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "cap remains OFF"
+    );
+    assert!(consumer
+        .accept_confirmed("ws_other", "srv_fixture", input.dispatch.clone())
+        .is_err());
+    // The fixture exercises the internal already-authorized seam, NOT a real
+    // Policy session or a public capability bypass.
+    let accepted = consumer
+        .accept_confirmed("ws_fixture", "srv_fixture", input.dispatch.clone())
+        .unwrap();
+    assert_eq!(accepted.state, State::Accepted);
+    accepted.validate().unwrap();
+    let observer = consumer.clone();
+    drop(accepted); // lost browser/command response cannot cancel the owned task
+    drop(consumer);
+    let op = consumer_terminal(&observer, &input.dispatch.operation_id).await;
+    op.validate().unwrap();
+    assert!(observer.closed_for_test());
+    assert_eq!(op.health, Health::Unknown);
+    assert!(op.phase.is_none() && op.receipt_revision.is_none() && op.finished_at.is_none());
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 6);
+    held(&root, &input);
+    let same = observer
+        .accept_confirmed("ws_fixture", "srv_fixture", input.dispatch.clone())
+        .unwrap();
+    assert_eq!(same, op);
+    let mut changed = input.dispatch.clone();
+    changed.operation_id = Uuid::new_v4().to_string();
+    assert!(observer
+        .accept_confirmed("ws_fixture", "srv_fixture", changed)
+        .is_err());
+    assert!(observer
+        .observe("ws_other", "srv_fixture", &input.dispatch.operation_id)
+        .is_err());
+    assert!(observer
+        .observe("ws_fixture", "srv_fixture", &Uuid::new_v4().to_string())
+        .is_err());
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 6);
+    drop(observer);
+    server.abort();
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_consumer_native_unknown_command_is_observation_only_no_replay() {
+    use crate::controller_update::windows::consumer::Consumer;
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    for missing_key in [false, true] {
+        let catalog = UpdatePlanCatalogFixture::new();
+        let (runtime, root, task) = update_state_fixture().await;
+        let mut input = inputs(&root, &catalog, false);
+        let (base, requests, server) = distributor(&input, true).await;
+        input.settings.release_base_url = base;
+        consumer_config(&catalog, &input, missing_key);
+        let consumer = Consumer::new(runtime.clone());
+        consumer
+            .accept_confirmed("ws_fixture", "srv_fixture", input.dispatch.clone())
+            .unwrap();
+        let op = consumer_terminal(&consumer, &input.dispatch.operation_id).await;
+        op.validate().unwrap();
+        assert!(!consumer.closed_for_test());
+        let count = requests.load(std::sync::atomic::Ordering::SeqCst);
+        if missing_key {
+            assert_eq!(count, 0);
+        } else {
+            assert!((5..=6).contains(&count));
+        }
+        assert_eq!(
+            consumer
+                .accept_confirmed("ws_fixture", "srv_fixture", input.dispatch.clone())
+                .unwrap(),
+            op
+        );
+        let mut conflicting = input.dispatch.clone();
+        conflicting.created_at += chrono::Duration::milliseconds(1);
+        assert!(consumer
+            .accept_confirmed("ws_fixture", "srv_fixture", conflicting)
+            .is_err());
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), count);
+        assert!(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(catalog.path())
+                .is_err(),
+            "keep normal source pin on Unknown"
+        );
+        assert!(!stage(&root, &input).exists());
+        assert!(!root
+            .join("installed/.treer-controller-update.claim")
+            .exists());
+        drop(consumer);
+        server.abort();
+        drop(runtime);
+        task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+        drop(catalog);
+    }
+}

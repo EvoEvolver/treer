@@ -322,6 +322,21 @@ or configuration contents. Failed launch retains the newly saved specification.
   retry or unsigned fallback. Retained HTTP documents are input evidence only,
   never lifecycle authority or a sender-release permit.
 
+  The Windows confirmed-command consumer lives on the existing authenticated
+  Proxy client, not a new login, Policy or confirmation route. Production command
+  handling retains the capability check, currently OFF. One full binding owns
+  a detached task and pinned normal local catalog across download and receiver
+  closure; exact repeats observe, conflicts refuse, and error/cancellation does
+  not reset the slot. Explicit signed-release settings are local configuration,
+  not offer-selected trust. The exact shared-server list in that configuration
+  is a local operator confirmation; it does not prove the current browser
+  confirmed those impacts. Enabling the product still requires the complete
+  transaction and confirmation contract. All reports after finite session close
+  remain Unconfirmed, including successful input reception. The owner retains
+  original custody without a release permit. Process/client destruction is not
+  an explicit custody transfer or proof that a child exited; the retained claim
+  remains a denial fence. There is no durable owner recovery/adoption API here.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

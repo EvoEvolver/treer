@@ -17,6 +17,19 @@ pub(crate) struct Catalog {
     pub(crate) revision: u64,
     pub(crate) accept_shared_binaries: bool,
     pub(crate) entries: Vec<Entry>,
+    /// Normal local settings for the signed Windows consumer. Not command data.
+    #[serde(default)]
+    pub(crate) signed_release: Option<SignedRelease>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SignedRelease {
+    #[serde(deserialize_with = "deserialize_url")]
+    pub(crate) base_url: url::Url,
+    pub(crate) channel: String,
+    pub(crate) public_key: Option<std::path::PathBuf>,
+    pub(crate) confirmed_shared_servers: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,6 +85,40 @@ impl Catalog {
             || catalog.entries.len() > wire::MAX_TARGETS + 1
         {
             bail!("controller_update_catalog_invalid");
+        }
+        if let Some(settings) = &catalog.signed_release {
+            let base = &settings.base_url;
+            let test_loopback = cfg!(test)
+                && base.scheme() == "http"
+                && matches!(base.host(), Some(url::Host::Ipv4(ip)) if ip.is_loopback());
+            if (base.scheme() != "https" && !test_loopback)
+                || base.host_str().is_none()
+                || !base.username().is_empty()
+                || base.password().is_some()
+                || base.query().is_some()
+                || base.fragment().is_some()
+                || !base.path().ends_with('/')
+                || settings.channel.len() > 64
+                || crate::release_update::validate_channel_name(&settings.channel).is_err()
+                || settings
+                    .public_key
+                    .as_ref()
+                    .is_some_and(|p| !p.is_absolute())
+                || settings.confirmed_shared_servers.len() > 1024
+                || settings.confirmed_shared_servers.iter().any(|s| {
+                    !s.strip_prefix("srv_").is_some_and(|id| {
+                        !id.is_empty()
+                            && id.len() <= 128
+                            && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    })
+                })
+                || settings
+                    .confirmed_shared_servers
+                    .windows(2)
+                    .any(|p| p[0] >= p[1])
+            {
+                bail!("controller_update_catalog_invalid");
+            }
         }
         let mut sequences = std::collections::HashSet::new();
         let mut ids = std::collections::HashSet::new();
@@ -149,6 +196,28 @@ impl Catalog {
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    #[test]
+    fn windows_update_consumer_normal_signed_configuration_is_explicit_and_strict() {
+        let mut doc = document(wire::Platform::WindowsX86_64);
+        assert!(
+            parse_windows(&doc).unwrap().signed_release.is_none(),
+            "legacy config never guesses a signed publisher"
+        );
+        doc["signed_release"] = json!({"base_url":"https://releases.treer.ai/","channel":"stable","public_key":null,"confirmed_shared_servers":["srv_a","srv_b"]});
+        assert!(parse_windows(&doc).is_ok());
+        for (field, bad) in [
+            ("base_url", json!("https://user:secret@example.test/")),
+            ("channel", json!("../canary")),
+            ("public_key", json!("relative.pem")),
+            ("confirmed_shared_servers", json!(["srv_b", "srv_a"])),
+            ("confirmed_shared_servers", json!(["srv_a", "srv_a"])),
+        ] {
+            let mut bad_doc = doc.clone();
+            bad_doc["signed_release"][field] = bad;
+            assert!(parse_windows(&bad_doc).is_err(), "{field}");
+        }
+    }
 
     fn document(platform: wire::Platform) -> Value {
         let entry = |sequence, id: &str, hash: &str| {

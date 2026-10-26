@@ -46,6 +46,13 @@ fn validate_path(path: &Path, server_id: &str) -> Result<()> {
 
 impl ControllerRuntime {
     #[cfg(windows)]
+    pub(crate) fn check_update_command_scope(&self, workspace: &str, server: &str) -> Result<()> {
+        if workspace != self.inner.workspace_id || server != self.inner.server_id {
+            bail!("windows_update_runtime_scope_refused");
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
     pub(crate) fn check_update_enrollment(
         &self,
         workspace: &str,

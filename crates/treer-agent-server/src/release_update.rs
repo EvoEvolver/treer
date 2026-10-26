@@ -146,7 +146,7 @@ fn verify_signed(bytes: &[u8], signature: &[u8], key: &VerifyingKey) -> Result<(
         .context("release signature verification failed")
 }
 
-fn validate_channel_name(channel: &str) -> Result<()> {
+pub(super) fn validate_channel_name(channel: &str) -> Result<()> {
     if !channel.starts_with(|c: char| c.is_ascii_lowercase())
         || !channel
             .bytes()

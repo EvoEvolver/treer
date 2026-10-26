@@ -127,6 +127,8 @@ pub struct ProxyClient {
     pub network: NetworkRuntime,
     controller_instance_id: String,
     command_cache: Arc<Mutex<HashMap<String, CommandResult>>>,
+    #[cfg(windows)]
+    controller_updates: crate::controller_update::windows::consumer::Consumer,
     advertised_agents: Arc<Mutex<Vec<String>>>,
     last_activity: Arc<Mutex<Instant>>,
     continue_signal: Arc<Notify>,
@@ -159,6 +161,10 @@ impl ProxyClient {
             });
         }
         Self {
+            #[cfg(windows)]
+            controller_updates: crate::controller_update::windows::consumer::Consumer::new(
+                runtime.clone(),
+            ),
             proxy_ws,
             machine_token,
             server,
@@ -1038,14 +1044,24 @@ impl ProxyClient {
                     .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error))
             }
             AgentCommand::ControllerUpdateDispatch { binding } => {
-                crate::controller_update::dispatch(
-                    &self.server.workspace_id,
-                    &self.server.server_id,
-                    binding,
-                )
-                .await
-                .map(|operation| CommandResult::success(command_id.clone(), operation))
-                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error))
+                #[cfg(windows)]
+                {
+                    self.controller_updates
+                        .dispatch(&self.server.workspace_id, &self.server.server_id, binding)
+                        .map(|operation| CommandResult::success(command_id.clone(), operation))
+                        .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error))
+                }
+                #[cfg(not(windows))]
+                {
+                    crate::controller_update::dispatch(
+                        &self.server.workspace_id,
+                        &self.server.server_id,
+                        binding,
+                    )
+                    .await
+                    .map(|operation| CommandResult::success(command_id.clone(), operation))
+                    .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error))
+                }
             }
             AgentCommand::ControllerUpdateOperation { operation_id } => {
                 #[cfg(unix)]
@@ -1071,7 +1087,18 @@ impl ProxyClient {
                         ),
                     }
                 }
-                #[cfg(not(unix))]
+                #[cfg(windows)]
+                {
+                    self.controller_updates
+                        .observe(
+                            &self.server.workspace_id,
+                            &self.server.server_id,
+                            &operation_id,
+                        )
+                        .map(|operation| CommandResult::success(command_id.clone(), operation))
+                        .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error))
+                }
+                #[cfg(not(any(unix, windows)))]
                 {
                     let _ = operation_id;
                     CommandResult::failure(

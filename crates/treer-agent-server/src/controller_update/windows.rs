@@ -3,6 +3,7 @@ use anyhow::Result;
 
 use super::catalog::Catalog;
 
+pub(crate) mod consumer;
 pub(crate) mod coordinator;
 pub(crate) mod preparation;
 
