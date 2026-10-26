@@ -77,13 +77,48 @@ inventory found no remaining fixture entries; cleanup was proven. The retained
 The single source review is #111:9401. These results do not establish executable
 replacement, worker survival, health reconciliation or a complete Windows update.
 
+## Single-use Windows intent
+
+`windows_update_intent` adds a separate `TRWININT` schema version 1, capped at
+4 KiB and using only the `reserved` state. It binds the RFC UUIDv4 operation,
+workspace/server, installation volume/file identity, old and target Controller
+and CLI hashes, and signed-manifest hash. Unknown/duplicate fields, malformed
+identifiers, other versions/phases and mismatched independently supplied inputs
+refuse. This is not the earlier test-only `TRUPDWIN` draft envelope.
+
+On Windows, `reserve` consumes one exclusive `UpdateStore` holder and publishes
+only when no record exists. A matching existing intent is also refused, so it
+cannot become a replay entry. Read-only `inspect` checks the entire binding;
+it supplies no continuation, execution or rollback permission. A write error
+retains its unknown outcome and all evidence; callers must not retry. Existing
+unresolved staging records remain refused by the underlying store. These are
+atomic-visibility semantics, not a promise of power-loss durability.
+
+The binding's digests are claims until a future admission layer independently
+verifies signatures and opens/pins the physical installation. This leaf does
+not provide that admission, image replacement or a CLI/capability entry. There
+is deliberately no generic phase setter, success marker or recovery executor.
+Portable schema controls can run on the author machine; the additional
+`windows_update_intent_native_single_reservation_and_read_only_reconciliation`
+test requires a fresh private Windows NTFS temporary directory. Its native
+result is not supplied by the earlier four storage tests.
+
+Author checks: two portable schema tests passed on macOS; strict default
+all-target Controller Clippy, workspace formatting, docs and diff checks passed.
+Windows cross-target compilation was not run locally (the Controller dependency
+graph needs an unavailable cross C compiler). The single native entry for this
+new leaf is `cargo test --locked -p treer-agent-server --bin treer-agent-server
+windows_update_intent_ -- --nocapture`: expect three tests on Windows, including
+the reservation test, with zero ignored/failed tests and independent fixture
+cleanup. That native execution is pending; no full matrix or installed updater
+is required.
+
 ## Remaining ordered leaves and waiting boundaries
 
-1. Native NTFS store acceptance is complete. Next bind versioned receipt/marker
-   semantics and durable intent: exact operation/installation binding, legal
-   phase transitions and an exclusive initial intent must refuse malformed or
-   mismatched records and preserve unknown publication outcomes without retry.
-   This source leaf requires no installed machine or production capability.
+1. Native NTFS store acceptance is complete. The single-use intent schema above
+   is the next leaf; its native reservation check is pending. Following that,
+   connect verified admission and add phase-specific evidence for actual image
+   publication, never a generic setter that could manufacture completion.
 2. Implement Windows verified Controller/CLI image backup and two-rename
    publication with locked-image refusal and whole-pair rollback. Never treat
    restoring files alone as successful rollback.
