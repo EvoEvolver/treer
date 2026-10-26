@@ -64,7 +64,10 @@ Before enabling, inspect the relay startup status and binding pins, then use the
 existing preview/resume controls with the global runtime activation gate enabled
 by the deployment owner. Real external sending is a separate explicit step with
 the intended recipient and content; setup never sends a test email automatically.
-Treer performs current membership/recipient allowlist/Policy checks on each send.
+The matching Core revision under #204/9252 checks App identity, `email.send`
+Policy, address syntax, rate and idempotency; it does not require recipient
+membership or `TREER_EMAIL_ALLOWLIST`. Hub still checks its own member/contact
+binding for this conversation and browser-reply workflow.
 Outbox means queued locally; platform acceptance is not inbox delivery; an
 unknown send outcome is not automatically retried.
 

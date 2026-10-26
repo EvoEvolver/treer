@@ -50,8 +50,7 @@ eight attempts with a 60-second lease and bounded backoff. Owner pause blocks
 new dispatch immediately (an in-flight network request cannot be recalled);
 readback/generation fencing applies immediately before dispatch. Network work never holds the SQLite mutex.
 Persist the frozen notification intent and idempotency before dispatch; preserve
-retry/lease/backoff through restart. Check current binding, membership and
-allowlist again before a queued send. Conflict on changed idempotent payloads.
+retry/lease/backoff through restart. Check current binding and membership again before a queued send. Conflict on changed idempotent payloads.
 Outbox transport is the default and is explicit in status; it does not claim
 that email was delivered. Outbox files are exclusive-created private records.
 
@@ -67,10 +66,12 @@ promise exactly-once external delivery. Core/Proxy owns provider idempotency.
 Tests use private outbox or a closed loopback Proxy; they send no real email.
 The Hub uses the owner's normalized, generation-bound contact address rather
 than a hardcoded historical test mailbox. The existing Treer email API still
-requires the real App/workspace identity and `email.send` Policy, and accepts
-only verified organization-member addresses or its operator-managed allowlist.
-A member ID/address association asserted in Hub is not an exemption from those
-platform checks. Live sends require the intended recipient/content to be
+requires the real App/workspace identity, `email.send` Policy, valid address
+syntax, rate limits and idempotency. Under decision #204/9252, the matching Core
+revision accepts any valid recipient email without a workspace-membership or
+`TREER_EMAIL_ALLOWLIST` gate. Hub's own current-member/contact binding remains
+part of this member conversation/reply workflow; it is not a platform email
+recipient restriction or proof that the mailbox belongs to that member. Live sends require the intended recipient/content to be
 coordinated separately; this source change does not initiate any send. Missing
 platform configuration or denied recipients never produce a fake sent receipt.
 No full Core body, user-controlled email HTML or external URL goes into

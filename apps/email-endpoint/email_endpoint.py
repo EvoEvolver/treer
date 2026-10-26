@@ -1116,8 +1116,8 @@ def load_settings(config_path=None, state_dir=None):
         c,
         value.get("workspace_id") or os.environ["TREER_WORKSPACE_ID"],
         value.get("members", {}),
-        [entry.strip() for entry in os.environ.get("EMAIL_ENDPOINT_ALLOWLIST", os.environ.get("TREER_EMAIL_ALLOWLIST", "")).split(",") if entry.strip()]
-        if "EMAIL_ENDPOINT_ALLOWLIST" in os.environ or "TREER_EMAIL_ALLOWLIST" in os.environ
+        [entry.strip() for entry in os.environ.get("EMAIL_ENDPOINT_ALLOWLIST", "").split(",") if entry.strip()]
+        if "EMAIL_ENDPOINT_ALLOWLIST" in os.environ
         else value.get("allowlist", []),
         value.get("wake_agents", []),
         value.get("mode", "outbox"),

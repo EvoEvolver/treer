@@ -571,10 +571,12 @@ class Tests(unittest.TestCase):
                          "runtime_agent_id":"app_test", "mode":"outbox"}))
         config.chmod(0o600)
         database = str(Path(self.tmp.name) / "managed/state/app.sqlite3")
-        with patch.dict(os.environ, {"EMAIL_ENDPOINT_DB":database}):
+        with patch.dict(os.environ, {"EMAIL_ENDPOINT_DB":database,
+                                    "TREER_EMAIL_ALLOWLIST":"@obsolete.example.test"}):
             settings = e.load_settings(str(config), str(Path(self.tmp.name) / "state"))
         self.assertEqual(settings.config.database_path, Path(database))
         self.assertEqual(settings.mode, "outbox")
+        self.assertEqual(settings.allowlist, [], "removed Core env must not configure App restrictions")
         self.assertEqual(settings.runtime_id, "app_test")
         config.chmod(0o644)
         with self.assertRaises(ValueError): e.load_settings(str(config))

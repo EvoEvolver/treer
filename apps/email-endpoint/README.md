@@ -7,6 +7,14 @@ contains a summary and thread link; replies happen on the web, never via inbound
 email. Core remains the canonical body/thread store. The committed React frontend runs
 without Node or a runtime build; Node is used only when developing the UI.
 
+This is the separate Python sample, not the deployed Message Hub in
+`apps/message-endpoint`. Decision #204/9252 removes the **Core API's** member and
+recipient-allowlist requirement. This sample still has its historical local
+contact/member and real-recipient restrictions; do not present those as Core
+requirements or this sample as the arbitrary-recipient transport. Its local
+`allowlist` / `EMAIL_ENDPOINT_ALLOWLIST` setting is independent; it no longer
+inherits the removed `TREER_EMAIL_ALLOWLIST` environment variable.
+
 ## Deployment and activation
 
 Python 3.10+, `treer`, enabled Core Messages, registered workspace ingress and
