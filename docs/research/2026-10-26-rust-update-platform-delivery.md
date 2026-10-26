@@ -975,6 +975,79 @@ it does not prove independent child authorization, worker readiness, continued
 Job survival, Controller-only restart/health or a complete updater. No admitted
 image, installation, Host, live process, capability or publisher changed.
 
+### Implemented leaf: terminal Windows private binding entry
+
+The verified creator now binds its fresh private UUID pipe before creating the
+fixed signed image. Its restricted argv is exactly the private worker switch,
+operation UUID and simple lowercase pipe UUID. The original reservation owner
+retains this exact pending pipe; `exchange_created_bootstrap` matches the selected
+runtime/full binding before taking it, then performs the existing single-use
+original-Child peer accept and binding exchange. A failed/cancelled attempt
+cannot recreate the taken pipe or reset those owner latches. Spawn ambiguity
+still consumes the worker attempt; installation claim and publication refusal
+remain unchanged. No caller executable/pipe path override is added.
+
+Windows `main` branches on this private switch before normal argument parsing,
+configuration, metrics, service/Host or Controller initialization. Exactly two
+canonical UUIDv4/RFC arguments are required (hyphenated operation, simple pipe
+selector); missing/extra/noncanonical or malformed arguments refuse terminally.
+It creates only a current-thread I/O/timer runtime, checks the explicit inherited
+creator handle against the one pipe server, completes the existing three-second
+binding ACK and exits. There is no fallback to normal service execution. This
+does not run a transaction, mutate installed files, recover an old claim,
+transfer pins/ownership, escape a Job, restart a Controller or prove ready.
+ACK/exit zero remains only a completed binding exchange. Ordinary capOFF and
+normal caller identity/Policy prerequisites are unchanged.
+
+Author focused parser control passed on Mac: exact arguments accepted;
+missing/extra/nil/wrong case/path-like inputs refused. Strict Controller Clippy
+with the existing `native-update-acceptance` test feature, formatting, docs and
+diff checks passed. No previous leaf selector or matrix is rerun. Windows
+production-entry execution is covered by the isolated receipt below.
+
+The new isolated Windows contract uses the existing acceptance test feature to
+keep its actual-binary fixture out of ordinary tests. Build only the same-source
+Controller with
+`cargo build --locked -p treer-agent-server --bin treer-agent-server --features native-update-acceptance`,
+then set the test-only `TREER_TEST_BOOTSTRAP_BINARY` to that absolute output path
+and run
+`cargo test --locked -p treer-agent-server --bin treer-agent-server --features native-update-acceptance windows_update_bootstrap_ -- --nocapture`.
+Require exactly three passed/zero failed/zero ignored/exit zero: one portable
+parser control plus two native controls. One signs a private copy of the actual
+new Controller with the closed fixture key, creates it through signed admission/
+reservation and fixed creator, checks the full ACK then natural exit zero,
+pins/lease/state-root retention and unchanged old installed bytes/durable claim.
+The other invokes the actual binary privately with missing creator handle or
+bad argv and requires bounded refusal without normal Controller startup. These
+are task-owned processes only, not installed or enrolled images. Require fixed
+NTFS and independent empty task TEMP/cleanup proof. This dedicated binary build
+is a new entry fixture, not a release package, old gate or platform matrix.
+
+Sole native run `40326920278` checked out exact source
+`c73d54924c8c55c701cf227f367da1f3c7e3d407`, with wrapper
+`199931b3c727cda1e261d79de35d65357318f42d`. Windows2022/Rust1.90,
+Fixed NTFS image `20261022.344.1` completed the same-source dev fixture build
+with exit zero, then exactly three passed/zero failed/zero ignored/exit zero
+(284 filtered). Both native cases and the portable parser case above actually
+ran. The 35,885,056-byte fixture binary SHA256 was
+`ba7b83a6e4595c148d6c52951b5285f8f93814fa2bbd1169c88e07bef031d645`;
+the recorded before/after check confirmed it unchanged. Independent task TEMP
+inventory was empty, cleanup was proven and the empty root was removed.
+Core independently checked the source, commands, build/test exits, exact names,
+binary metadata and platform/cleanup receipts. Safe evidence is retained under
+`.treer/reviews/core111-windows-bootstrap-c73d5492/artifact/`;
+`RESULT.json` SHA256 is
+`fc20166b56cf630c20b3d65a63308f54742b4a9e0b5834284194754ba91e3b82`.
+
+This proves only the terminal bootstrap exchange and its selected refusal
+controls. The installed-directory absence assertion is not exhaustive proof
+against every ambient side effect; the inspected early terminal branch supplies
+the no-fallback source contract. ACK and natural exit zero do not prove worker
+readiness, mutation authority, Job survival, ownership transfer, Controller
+restart/health or a complete updater. No enrolled image, installation, Host,
+live Controller/Agent, capability or publisher changed. No previous selector
+or platform matrix was repeated.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

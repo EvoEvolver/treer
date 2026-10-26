@@ -209,6 +209,14 @@ struct ServerArgs {
 }
 
 fn main() -> Result<()> {
+    #[cfg(windows)]
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--controller-update-worker"))
+    {
+        // Terminal, deny-on-error path before normal config/Host/metrics/CLI.
+        // This worker can only ACK a binding and exit; it cannot run updates.
+        return windows_update_handshake::run_bootstrap(std::env::args_os().skip(2));
+    }
     // Private old-image worker MUST branch before Tokio, normal Controller
     // startup, metrics helpers or any other threads/forks. Never fall back to
     // ordinary service execution after malformed or failed worker bootstrap.

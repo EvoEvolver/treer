@@ -266,13 +266,24 @@ impl ReservedInputs {
         crate::controller::ControllerUpdateChild::spawn_verified_reserved(self, selected)
     }
 
+    #[cfg(test)]
     pub(crate) fn spawn_worker_process(&mut self) -> Result<std::process::Child> {
+        self.spawn_worker_process_for_pipe(uuid::Uuid::new_v4())
+    }
+
+    pub(crate) fn spawn_worker_process_for_pipe(
+        &mut self,
+        selector: uuid::Uuid,
+    ) -> Result<std::process::Child> {
         if self.0.worker_attempted {
             bail!("windows_update_worker_already_attempted");
         }
         // Even an error after this point consumes this attempt. No re-spawn
         // after an uncertain CreateProcess result, and no parent publication.
         self.0.worker_attempted = true;
+        if selector.get_version_num() != 4 || selector.get_variant() != uuid::Variant::RFC4122 {
+            bail!("windows_update_worker_selector_refused");
+        }
         self.controller_state()?.matches(self.binding())?;
         self.binding().validate()?;
         let (mut controller, _) = self.0._target.files();
@@ -282,6 +293,7 @@ impl ReservedInputs {
             .spawn_pinned_controller(&[
                 "--controller-update-worker".into(),
                 self.binding().operation_id.to_string().into(),
+                selector.simple().to_string().into(),
             ])
             .map_err(|_| anyhow::anyhow!("windows_update_worker_spawn_unknown"))
     }

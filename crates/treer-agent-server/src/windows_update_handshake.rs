@@ -9,6 +9,47 @@ fn refused() -> anyhow::Error {
     anyhow!("windows_update_handshake_unconfirmed")
 }
 
+/// Strict private argv only. No environment, installed configuration, Host,
+/// identity route or service initialization is consulted on this entry.
+#[cfg(any(windows, test))]
+pub(crate) fn bootstrap_arguments(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+) -> Result<(uuid::Uuid, String)> {
+    let operation_text = args
+        .next()
+        .and_then(|v| v.into_string().ok())
+        .ok_or_else(refused)?;
+    let selector = args
+        .next()
+        .and_then(|v| v.into_string().ok())
+        .ok_or_else(refused)?;
+    let operation = uuid::Uuid::parse_str(&operation_text).map_err(|_| refused())?;
+    let endpoint = uuid::Uuid::parse_str(&selector).map_err(|_| refused())?;
+    if args.next().is_some()
+        || operation.to_string() != operation_text
+        || endpoint.simple().to_string() != selector
+        || [operation, endpoint]
+            .iter()
+            .any(|id| id.get_version_num() != 4 || id.get_variant() != uuid::Variant::RFC4122)
+    {
+        return Err(refused());
+    }
+    Ok((operation, selector))
+}
+
+#[cfg(windows)]
+pub(crate) fn run_bootstrap(args: impl Iterator<Item = std::ffi::OsString>) -> Result<()> {
+    let (operation, selector) = bootstrap_arguments(args)?;
+    // Bootstrap agreement only: it exits after one ACK. No normal Controller,
+    // update engine, publication, Host connection or recovery runs here.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|_| refused())?
+        .block_on(acknowledge_creator(&selector, *operation.as_bytes()))
+}
+
 /// Owns and closes this transport on success, error OR cancellation. There is
 /// no reusable post-handshake command channel or second frame dispatch.
 pub(crate) async fn exchange<S>(mut stream: S, expected: WorkerBindingFrame) -> Result<()>
@@ -66,6 +107,29 @@ pub(crate) async fn acknowledge_creator(selector: &str, operation: [u8; 16]) -> 
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn windows_update_bootstrap_private_arguments_are_exact_and_nonambient() {
+        let operation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string();
+        let selector = "bbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb".to_string();
+        let parse = |values: Vec<String>| bootstrap_arguments(values.into_iter().map(Into::into));
+        assert_eq!(
+            parse(vec![operation.clone(), selector.clone()]).unwrap(),
+            (Uuid::parse_str(&operation).unwrap(), selector.clone())
+        );
+        for values in [
+            vec![],
+            vec![operation.clone()],
+            vec![operation.clone(), selector.clone(), "extra".into()],
+            vec![Uuid::nil().to_string(), selector.clone()],
+            vec![operation.to_uppercase(), selector.clone()],
+            vec![operation.clone(), Uuid::nil().simple().to_string()],
+            vec![operation.clone(), "../pipe".into()],
+            vec![operation, selector.to_uppercase()],
+        ] {
+            assert!(parse(values).is_err());
+        }
+    }
 
     #[tokio::test]
     async fn windows_update_handshake_bounded_frames_match_and_refuse_corruption() {

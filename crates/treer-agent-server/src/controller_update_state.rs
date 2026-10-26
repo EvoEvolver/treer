@@ -157,6 +157,8 @@ pub(crate) struct ControllerUpdateChild {
     #[cfg(windows)]
     _worker_pipe: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
     #[cfg(windows)]
+    _bootstrap_pipe: Option<treer_platform::windows_update_pipe::CreatedChildPipe>,
+    #[cfg(windows)]
     _reservation: Option<crate::windows_update_admission::ReservedInputs>,
 }
 
@@ -187,6 +189,7 @@ impl ControllerUpdateChild {
             pipe_attempted: false,
             handshake_attempted: false,
             _worker_pipe: None,
+            _bootstrap_pipe: None,
             _reservation: Some(reservation),
         })
     }
@@ -201,7 +204,11 @@ impl ControllerUpdateChild {
         let runtime = state.runtime.clone();
         let evidence = state.evidence.clone();
         let binding = reservation.binding().clone();
-        let child = reservation.spawn_worker_process()?;
+        let selector = Uuid::new_v4();
+        let pipe = treer_platform::windows_update_pipe::CreatedChildPipe::bind(
+            &selector.simple().to_string(),
+        )?;
+        let child = reservation.spawn_worker_process_for_pipe(selector)?;
         Ok(Self {
             child,
             runtime,
@@ -212,6 +219,7 @@ impl ControllerUpdateChild {
             pipe_attempted: false,
             handshake_attempted: false,
             _worker_pipe: None,
+            _bootstrap_pipe: Some(pipe),
             _reservation: Some(reservation),
         })
     }
@@ -236,6 +244,8 @@ impl ControllerUpdateChild {
             handshake_attempted: false,
             #[cfg(windows)]
             _worker_pipe: None,
+            #[cfg(windows)]
+            _bootstrap_pipe: None,
             #[cfg(windows)]
             _reservation: None,
         })
@@ -386,6 +396,23 @@ impl ControllerUpdateChild {
             .take()
             .ok_or_else(|| anyhow::anyhow!("windows_update_handshake_transport_unavailable"))?;
         crate::windows_update_handshake::exchange(stream, request).await
+    }
+
+    /// Only the pipe bound by THIS verified creator before CreateProcess.
+    /// The private image merely ACKs and exits: no transaction is authorized.
+    #[cfg(windows)]
+    pub(crate) async fn exchange_created_bootstrap(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+    ) -> Result<()> {
+        self.matches(selected, binding)?;
+        let pipe = self
+            ._bootstrap_pipe
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("windows_update_bootstrap_already_attempted"))?;
+        self.accept_worker_pipe(selected, binding, pipe).await?;
+        self.exchange_worker_binding(selected, binding).await
     }
 
     #[cfg(test)]

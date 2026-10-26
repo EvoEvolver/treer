@@ -115,9 +115,11 @@ or configuration contents. Failed launch retains the newly saved specification.
   runtime/input evidence. Child-side creator-handle checking proves transport
   origin only; echoing the context is not independent runtime authorization.
   Neither an ACK nor its wire data constructs admission, transfers locks,
-  permits lifecycle commands or proves readiness. The production Windows worker
-  entry/coordinator and capability remain unwired; normal identity/Policy and
-  signed admission are still required.
+  permits lifecycle commands or proves readiness. The Windows private entry can
+  only complete this exchange and exit, before ordinary configuration or Host
+  initialization. The transaction coordinator and capability remain unwired;
+  normal identity/Policy and signed admission are still required. A zero exit
+  after ACK is not update success or readiness.
 
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the

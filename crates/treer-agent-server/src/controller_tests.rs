@@ -3168,6 +3168,126 @@ fn update_handshake_command(selector: &str, operation: Uuid, mode: &str) -> std:
     command
 }
 
+#[cfg(all(windows, feature = "native-update-acceptance"))]
+fn update_bootstrap_binary() -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(
+        std::env::var_os("TREER_TEST_BOOTSTRAP_BINARY")
+            .expect("focused acceptance requires the separately built same-source Controller"),
+    );
+    assert!(path.is_absolute() && path.is_file());
+    path
+}
+
+#[cfg(all(windows, feature = "native-update-acceptance"))]
+#[tokio::test]
+async fn windows_update_bootstrap_native_signed_private_image_acks_then_exits_without_publication()
+{
+    use treer_platform::windows_update_inputs::PinnedPair;
+    let bytes = std::fs::read(update_bootstrap_binary()).unwrap();
+    assert!(!bytes.is_empty() && bytes.len() <= 128 * 1024 * 1024);
+    let (runtime, root, task) = update_state_fixture().await;
+    // Closed fixture signing authority only; these bytes are never installed.
+    let reserved = update_launch_reservation(&runtime, &root, &bytes);
+    let binding = reserved.binding().clone();
+    let mut child = reserved.spawn_owned_worker(&runtime).unwrap();
+    child
+        .exchange_created_bootstrap(&runtime, &binding)
+        .await
+        .unwrap();
+    assert!(child
+        .exchange_created_bootstrap(&runtime, &binding)
+        .await
+        .is_err());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.poll(&runtime, &binding).unwrap() {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "owned bootstrap exit deadline"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert!(status.success(), "private binding entry must ACK and exit");
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("target/treer-agent-server.exe"))
+        .is_err());
+    assert!(PinnedPair::open(&root.join("installed"))
+        .unwrap()
+        .lock_installation()
+        .is_err());
+    assert!(std::fs::rename(root.join("configured-state"), root.join("moved-state")).is_err());
+    child.stop(&runtime, &binding).unwrap();
+    drop(child);
+    assert!(root
+        .join("installed/.treer-controller-update.claim")
+        .exists());
+    assert_eq!(
+        std::fs::read(root.join("installed/treer-agent-server.exe")).unwrap(),
+        crate::windows_update_admission::tests::OLD
+    );
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(all(windows, feature = "native-update-acceptance"))]
+#[tokio::test]
+async fn windows_update_bootstrap_native_missing_creator_or_malformed_argv_never_starts_controller()
+{
+    let (runtime, root, task) = update_state_fixture().await;
+    let operation = Uuid::new_v4().to_string();
+    let selector = Uuid::new_v4().simple().to_string();
+    for arguments in [
+        vec![operation.clone(), selector],
+        vec![operation],
+        vec!["invalid".into(), "invalid".into()],
+    ] {
+        let state = runtime
+            .windows_update_state_for_operation(Uuid::new_v4(), "ws_fixture", "srv_fixture")
+            .unwrap();
+        let binding = update_state_binding(state.scope().0);
+        let mut command = std::process::Command::new(update_bootstrap_binary());
+        command
+            .arg("--controller-update-worker")
+            .args(arguments)
+            .env_clear()
+            .current_dir(&root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = update_state::ControllerUpdateChild::spawn_fixture(
+            &state,
+            &runtime,
+            &binding,
+            &mut command,
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.poll(&runtime, &binding).unwrap() {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "owned private refusal deadline"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        assert!(!status.success());
+        child.stop(&runtime, &binding).unwrap();
+        drop(child);
+        drop(state);
+    }
+    // The private entry never resolves service roots or opens a Host listener.
+    assert!(!root.join("installed").exists());
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn windows_update_handshake_native_creator_ack_retains_scoped_owner() {
