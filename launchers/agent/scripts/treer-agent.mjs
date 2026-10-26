@@ -32,7 +32,7 @@ if (args[0] === "update") {
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => stopProcessTree(child));
 } else if (args.length === 1 && ["--help", "-h", "help"].includes(args[0])) {
   console.log("       treer-agent session --help  (Claude export/import/prepare/launch/persistent run; macOS/Linux)");
-  console.log("Usage: treer-agent [--harness codex|claude|acp] [--session-id ID|--thread-id ID] [--cwd ABS] [--name NAME] [--runtime rust|node]\n       treer-agent update [--controller ABS] [--treer ABS]\n       treer-agent update --bundle ABS --sha256 MANIFEST_SHA256 [--treer ABS] [--root ABS]\n       treer-agent update --help\nCodex/Claude default to Rust; ACP explicitly uses Node. Update changes only the default for future starts; running Agents/Host/Controller are not restarted.");
+  console.log("Usage: treer-agent [--harness codex|claude|acp] [--session-id ID|--thread-id ID] [--cwd ABS] [--name NAME] [--runtime rust|node]\n       treer-agent update [--controller ABS] [--treer ABS]\n       treer-agent update --latest [--treer ABS] [--root ABS]\n       treer-agent update --bundle ABS --sha256 MANIFEST_SHA256 [--treer ABS] [--root ABS]\n       treer-agent update --help\nCodex/Claude default to Rust; ACP explicitly uses Node. Update changes only the default for future starts; running Agents/Host/Controller are not restarted.");
 } else {
 const mapping = { "--session-id": "AGENT_UI_SESSION_ID", "--thread-id": "AGENT_UI_SESSION_ID", "--cwd": "AGENT_UI_CWD", "--name": "AGENT_UI_NAME" };
 let runtime, harness = env.AGENT_UI_HARNESS || "codex", nodeArgs = [];

@@ -85,12 +85,13 @@ From an installed entry, run:
 
 ```sh
 treer-agent update
+treer-agent update --latest
 treer-agent update --help
 # Launcher-only delivery, independently of the Controller's embedded version:
 treer-agent update --bundle /absolute/prepared --sha256 MANIFEST_SHA256
 ```
 
-Without a bundle, the command uses the local Controller's existing launcher
+Without `--latest` or a bundle, the command uses the local Controller's existing launcher
 installer with `update --require-runtime rust`. It discovers the Controller
 beside the pinned Treer CLI or in its sibling `libexec` directory; select a
 trusted absolute `--controller` if installed elsewhere. This requires the new
@@ -98,6 +99,32 @@ guarded Controller bridge and an embedded, verified native Rust payload. Older
 Controllers or Node-only embedded payloads refuse; the command never retries
 without the Rust requirement. This selects the local Controller release, not
 an Internet “latest” channel, and does not upgrade the Controller itself.
+
+`--latest` resolves the dedicated
+`https://github.com/EvoEvolver/treer/releases/download/launcher-stable/launcher-latest.json`
+channel once, selects the current OS/architecture and downloads its versioned
+platform package. This launcher channel leaves Core's GitHub latest release
+unchanged. Trust comes from the official GitHub repository over HTTPS plus the
+channel's SHA256 and exact per-file checksums; it is not an independent signature,
+immutable GitHub release guarantee, or rollback protection. Redirects are limited
+to GitHub's release asset host. Missing platforms, interrupted downloads,
+corrupt bytes and incompatible Controller/tool bindings fail without fallback.
+
+An existing verified Rust installation is required: native binaries currently
+bind their provider and Treer executable paths at compile time. The published
+native's tool paths, versions and hashes must match the existing installation.
+The updater never installs providers or substitutes tool paths to hide an
+incompatibility. Native source attribution remains separate when a new dispatcher
+release reuses an unchanged native image. Verified native/public files receive
+private permanent local custody; the existing installer owns compatibility,
+locking, profiles and atomic default publication. A repeat of the same verified
+platform package skips package download and pointer/profile writes. If an install
+result is unknown, its private assets are retained and status must be inspected
+before retrying. Old sessions keep their pinned files.
+
+For controlled HTTP verification only, `--latest --release-url
+http://127.0.0.1:PORT/latest` selects a loopback fixture. Other URLs must remain in
+the official repository's release download namespace. No credentials are sent.
 
 Explicit `--bundle` delivery reuses the same prepared-bundle installer described
 below. Supply the independently checked SHA256 of `bundle-manifest.json`, not
@@ -111,7 +138,8 @@ of shell cwd. A source invocation requires `--treer /absolute/treer` (Node22+);
 explicit bundle delivery also accepts `--root ABS` inside the enrolled machine
 root. An installed entry refuses a different root. Existing authentication and
 Controller selection remain in force; ambiguous enrollment fails explicitly.
-No download, Git, npm or provider installation occurs in this command.
+Only `--latest` downloads launcher release data; local Controller and explicit
+bundle paths remain offline. No Git, npm or provider installation occurs.
 
 The result is JSON with current and target content versions, source commit,
 runtime/provider status, whether the version changed, and success/failure exit

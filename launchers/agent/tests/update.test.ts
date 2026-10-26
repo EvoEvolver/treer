@@ -1,18 +1,33 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:http";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { hermeticEnv } from "./hermetic.mjs";
 import { nativeBindingFixture } from "./native-binding-fixture.mjs";
 import { digest } from "../scripts/bundle-contract.mjs";
+import { updateExecutable } from "../scripts/update.mjs";
+import { releasePlatform } from "../scripts/latest-download.mjs";
 
 const source = resolve(import.meta.dirname, ".."), temporary = () => realpathSync.native(mkdtempSync(join(tmpdir(), "launcher-update-")));
 const prepared = temporary(), bindingRoot = temporary();
-const binding = nativeBindingFixture(bindingRoot, join(source, "public"));
+const binding = nativeBindingFixture(bindingRoot, join(source, "public"), process.platform === "win32" ? process.execPath : "/usr/bin/true");
 execFileSync(process.execPath, [join(source, "scripts/prepare-bundle.mjs"), "--output", prepared, "--source-commit", "a".repeat(40), "--native-manifest", binding.path, "--native-sha256", binding.sha256], { env: hermeticEnv(), stdio: "pipe" });
 test.after(() => { rmSync(prepared, { recursive: true, force: true }); rmSync(bindingRoot, { recursive: true, force: true }); });
+
+test("local executable selectors resolve installed links without applying bundle-member memory/size limits", t => {
+  const root = temporary(); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const executable = join(root, "controller"), link = join(root, "controller-link");
+  writeFileSync(executable, "x"); truncateSync(executable, 40 * 1024 * 1024);
+  assert.equal(updateExecutable(executable, "Controller"), executable);
+  if (process.platform !== "win32") {
+    symlinkSync(executable, link); assert.equal(updateExecutable(link, "Controller"), executable);
+  }
+  assert.throws(() => updateExecutable(root, "Controller"), /Controller executable selector/);
+  assert.throws(() => updateExecutable(join(root, "missing"), "Treer CLI"), /Treer CLI executable selector/);
+});
 
 const cli = `import fs from 'node:fs';import path from 'node:path';
 const root=process.env.UPDATE_FIXTURE,args=process.argv.slice(2),file=path.join(root,'db.json'),db=JSON.parse(fs.readFileSync(file));
@@ -95,6 +110,11 @@ if(args.at(-1)==='status')console.log(JSON.stringify({current:'sha256-'+ 'a'.rep
 else if(process.env.REFUSE_UPDATE){console.error('unrecognized flag --require-runtime secret-do-not-relay');process.exit(2)}
 else {if(args.slice(-3).join(' ')!=='update --require-runtime rust')throw Error('unguarded');console.log(JSON.stringify({version:'sha256-'+'b'.repeat(64),runtime:{default:'rust',codex:'rust',claude:'unavailable-provider'}}));}`);
   const run = (extra = {}) => f.run(f.runner, ["update", "--controller", controller], extra);
+  if (process.platform !== "win32") {
+    const controllerLink = join(f.root, "controller-link.mjs"); symlinkSync(controller, controllerLink);
+    const linked = f.run(f.runner, ["update", "--controller", controllerLink]); assert.equal(linked.status, 0, linked.stderr);
+    writeFileSync(calls, "[]");
+  }
   const result = run(); assert.equal(result.status, 0, result.stderr); assert.equal(JSON.parse(result.stdout).runtime.default, "rust");
   const refused = run({ REFUSE_UPDATE: "1" }); assert.notEqual(refused.status, 0); assert.match(refused.stderr, /No retry or unguarded fallback/); assert.doesNotMatch(refused.stderr, /secret-do-not-relay/);
   const seen = JSON.parse(readFileSync(calls, "utf8")); assert.equal(seen.filter((a: string[]) => a.includes("update")).length, 2);
@@ -123,4 +143,54 @@ test("provider availability, install lock and installed-root binding are enforce
   const db = f.db(); db.controller.machine.root = f.root; writeFileSync(f.file, JSON.stringify(db));
   assert.match(f.run(f.runner, ["update", "--controller", f.treer]).stderr, /Controller root differs/);
   assert.deepEqual(readFileSync(join(f.base, "current.json")), pointer);
+});
+
+test("actual installed latest entry freezes one HTTP channel, installs verified native payload and same version performs no writes", async t => {
+  if (process.platform === "win32") { t.skip("Windows native test image exceeds the bounded release fixture; requires a small PE control image"); return; }
+  const f = fixture(t); assert.equal(f.install().status, 0);
+  const sourceCommit = "d".repeat(40), platform = releasePlatform();
+  const original = JSON.parse(readFileSync(join(f.bundle, "bundle-manifest.json"), "utf8"));
+  const payload = { ...original, source_commit: sourceCommit, files: original.files.filter((file: any) => file.path !== "native-runtime.json") };
+  const manifest = Buffer.from(JSON.stringify(payload));
+  const encoded = (path: string, data: Buffer, executable = false) => ({ path, size: data.length, sha256: digest(data), executable, data_base64: data.toString("base64") });
+  const native = readFileSync(binding.value.executable.path);
+  const value = { schema: "treer.launcher-package/v1", source_commit: sourceCommit, platform, payload_manifest_sha256: digest(manifest), native: { path: "native/treer-agent", source_commit: binding.value.source_commit, tools: binding.value.tools }, files: [encoded("payload/bundle-manifest.json", manifest), ...payload.files.map((file: any) => encoded(`payload/${file.path}`, readFileSync(join(f.bundle, file.path)), file.executable)), encoded("native/treer-agent", native, true)] };
+  let packageBytes = Buffer.from(JSON.stringify(value)), mode = "ok", channelReads = 0, packageReads = 0;
+  const http = createServer((request, response) => {
+    if (request.url === "/latest") {
+      channelReads++;
+      const row = { package_url: `${base}/package`, package_sha256: mode === "checksum" ? "f".repeat(64) : digest(packageBytes), package_size: packageBytes.length };
+      response.end(JSON.stringify({ schema: "treer.launcher-latest/v1", source_commit: sourceCommit, platforms: mode === "platform" ? {} : { [platform]: row } }));
+    } else {
+      packageReads++;
+      if (mode === "cut") { response.writeHead(200, { "Content-Length": packageBytes.length }); response.flushHeaders(); response.write(packageBytes.subarray(0, 20)); setImmediate(() => response.destroy()); }
+      else response.end(packageBytes);
+    }
+  });
+  await new Promise<void>(resolve => http.listen(0, "127.0.0.1", resolve));
+  t.after(() => { http.closeAllConnections(); http.close(); });
+  const base = `http://127.0.0.1:${(http.address() as any).port}`;
+  const run = () => new Promise<{ status: number | null, stdout: string, stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, [f.runner, "update", "--latest", "--release-url", `${base}/latest`], { env: f.env });
+    let stdout = "", stderr = ""; child.stdout.on("data", data => stdout += data); child.stderr.on("data", data => stderr += data);
+    const timer = setTimeout(() => { child.kill(); reject(new Error("latest entry fixture deadline")); }, 20000);
+    child.on("error", reject); child.on("close", status => { clearTimeout(timer); resolve({ status, stdout, stderr }); });
+  });
+  const initial = readFileSync(join(f.base, "current.json"));
+  for (const failure of ["checksum", "cut", "platform", "tools", "closure"]) {
+    mode = failure;
+    const candidate = JSON.parse(JSON.stringify(value));
+    if (failure === "tools") candidate.native.tools.codex.path = "/different/provider";
+    if (failure === "closure") candidate.files.push(encoded("payload/extra.mjs", Buffer.from("unlisted")));
+    packageBytes = Buffer.from(JSON.stringify(candidate));
+    const result = await run(); assert.notEqual(result.status, 0, failure); assert.deepEqual(readFileSync(join(f.base, "current.json")), initial);
+    assert.equal(f.run(f.runner, ["--help"]).status, 0);
+  }
+  mode = "ok"; packageBytes = Buffer.from(JSON.stringify(value));
+  const result = await run(); assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout); assert.equal(output.changed, true); assert.equal(output.release_source, sourceCommit); assert.equal(output.runtime.source_commit, binding.value.source_commit); assert.equal(output.running_agents, "unchanged");
+  const after = readFileSync(join(f.base, "current.json")), count = packageReads, profiles = JSON.stringify(f.db().profiles);
+  const repeat = await run(); assert.equal(repeat.status, 0, repeat.stderr); assert.equal(JSON.parse(repeat.stdout).status, "unchanged");
+  assert.equal(packageReads, count); assert.equal(channelReads, 7); assert.deepEqual(readFileSync(join(f.base, "current.json")), after); assert.equal(JSON.stringify(f.db().profiles), profiles);
+  assert.deepEqual(f.db().calls.filter((args: string[]) => args[0] !== "interface" && args.slice(0, 3).join(" ") !== "agent admin profile"), []);
 });
