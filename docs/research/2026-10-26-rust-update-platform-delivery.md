@@ -1501,8 +1501,22 @@ despite sender EOF positions. Refusal controls change each identity/volume,
 zero/alias tuples and a distinct root containing equal inert bytes, confirming
 sender pins remain held. Only inert fixture bytes are read, never executed.
 These controls do not release a real installation lease/claim or authorize
-retry. Native execution is pending the single independent review and sole
-Release focused job; author cross-target checks are recorded on #111.
+retry. Author strict all-targets Platform Clippy passed for Windows GNU and
+Linux GNU; formatting, docs and diff checks passed. One independent source-only
+review (#111:9664) found no blocker within this mechanical scope.
+
+Sole Release run `40353564037` accepted exact source
+`4fcebacf43dacfa8764986a5626e175de9eed2cd`, wrapper
+`d2423434471d3e2331f630bf1e34fcab5ff662aa`: Windows 2022/Rust 1.90,
+fixed NTFS image `20261022.344.1`, Platform library selector above, two passed,
+zero failed/ignored, exit zero (26 filtered). Independent TEMP inventory was
+empty, cleanup proven and empty root removed. Core independently matched
+source, command, both exact names, platform and test log against `RESULT.json`
+SHA-256 `08b4d2e0feb0650dd3ba717f9810710c85fadcd10bc850484078e189d349be7b`
+(#111:9667). No feature, extra binary build, old selector/matrix, admitted image
+execution, live installation, Host or capability action was performed. This
+accepts independent pair pin custody only; sender continuity and authenticated
+descriptor/signed-input/runtime-state admission remain explicit prerequisites.
 
 ## Remaining ordered leaves and waiting boundaries
 
