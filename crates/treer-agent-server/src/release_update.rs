@@ -13,6 +13,8 @@ use url::Url;
 
 const MAX_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_BINARY_BYTES: usize = 128 * 1024 * 1024;
+pub(super) const OFFICIAL_PUBLIC_KEY_PEM: &str =
+    include_str!("../../../keys/official-release-ed25519.pub.pem");
 
 #[derive(Deserialize)]
 struct DetachedSignature {

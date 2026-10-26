@@ -377,7 +377,12 @@ not permission to replace it or fall back to another publisher.
 
 Only the exact official distributor `https://releases.treer.ai/` may use an
 official distribution's bundled SPKI Ed25519 key when the implicit local key is
-absent. Custom `--release-base-url` values require a separately trusted publisher
+absent. The reviewed public key is `keys/official-release-ed25519.pub.pem`; its
+complete SPKI DER SHA-256 is
+`634761ff47a6a113b4b8925f0db0e030d8bfce07f2fa228fdc0a4904874dc41f`
+(key ID `634761ff47a6a113`). This is a new signing authority, not evidence that
+previous unsigned artifacts or currently inaccessible channel URLs are signed.
+Custom `--release-base-url` values require a separately trusted publisher
 key. The key must arrive through the trusted installation/package, never from
 the channel or manifest being verified. A distribution without an official key
 refuses the update with an explicit installation/configuration error. It does

@@ -118,6 +118,17 @@ fn client() -> reqwest::Client {
 }
 
 #[test]
+fn official_release_key_matches_designated_authority() {
+    let key = VerifyingKey::from_public_key_pem(OFFICIAL_PUBLIC_KEY_PEM).unwrap();
+    assert_eq!(
+        digest(key.to_public_key_der().unwrap().as_bytes()),
+        "634761ff47a6a113b4b8925f0db0e030d8bfce07f2fa228fdc0a4904874dc41f"
+    );
+    assert_eq!(key_id(&key).unwrap(), "634761ff47a6a113");
+    assert!(verify_signed(b"channel", &signature(b"channel"), &key).is_err());
+}
+
+#[test]
 fn release_trust_resolution_preserves_explicit_and_existing_installation_keys() {
     use ed25519_dalek::pkcs8::EncodePublicKey;
     let directory =

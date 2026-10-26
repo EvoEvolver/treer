@@ -94,7 +94,7 @@ struct UpdateArgs {
     /// Signed release channel to follow.
     #[arg(long, env = "TREER_RELEASE_CHANNEL", default_value = "stable")]
     channel: String,
-    /// Trusted local SPKI Ed25519 PEM public key; never fetched from the distributor.
+    /// Override the bundled official trust with a local SPKI Ed25519 PEM key.
     #[arg(long, env = "TREER_RELEASE_PUBLIC_KEY")]
     public_key: Option<PathBuf>,
 }

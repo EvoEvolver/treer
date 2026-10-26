@@ -1095,7 +1095,7 @@ pub async fn update(
         &release_base_url,
         public_key.as_deref(),
         &public_key_path,
-        None,
+        Some(crate::release_update::OFFICIAL_PUBLIC_KEY_PEM),
     )?;
     let services = installed_services()?;
     let (paths, _) = services.first().context(
