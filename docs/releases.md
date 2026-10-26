@@ -623,3 +623,56 @@ actual GitHub objects; do not retry blindly or overwrite version assets. A
 pointer replacement can briefly return unavailable; the client must fail
 without silently choosing an older Controller payload. GitHub HTTPS redirects
 are bounded and host-restricted; temporary signed redirect URLs are not logged.
+
+## Official release signing authority
+
+The public SPKI in `keys/official-release-ed25519.pub.pem` is the newly
+owner-designated authority for the exact `https://releases.treer.ai/` distributor.
+Its full DER SHA256 is
+`634761ff47a6a113b4b8925f0db0e030d8bfce07f2fa228fdc0a4904874dc41f`.
+`keys/official-release-authority.json` records its designation; the separate
+establishment proof verifies custody can sign, and is not an artifact manifest
+or evidence that a release/channel has been published. Earlier signed channels
+must not be assumed to use this key. Do not overwrite an unknown channel.
+
+Official publisher custody uses the macOS login Keychain, an explicit trusted
+signer executable ACL, and a non-synchronizing item. Private bytes are handled
+only in the native signer process and encrypted Keychain storage, never ordinary
+PEM files, argv, Git, or stdout. This is OS-account/Keychain custody, not Secure
+Enclave, hardware non-extractability, per-Agent isolation, or a CI secret. A
+machine owner able to change that account or its Keychain remains trusted.
+Separate recovery/backup custody has not been established; retain the original
+Keychain and authorized stable executable. The implementation uses macOS classic
+Keychain ACL APIs (deprecated but available on the established host).
+
+Build `scripts/release-keychain.swift` with `xcrun swiftc -O` into a stable
+owner-only physical directory, chmod the executable to 700, and record its
+SHA256. `status` is metadata-only, `public` returns public metadata, and `sign`
+accepts at most 1 MiB on stdin and returns only a detached signature. `selftest`
+uses an in-memory control key and does not touch custody. `create` is a separate,
+authorized once-only authority-establishment operation: it refuses an existing
+or unreadable item and never rotates/replaces it. A lost create result requires
+status/public readback, not repeating create. There is no export operation.
+Do not rebuild/replace an already-authorized executable or change its ACL as a
+routine publish step.
+
+For official `prepare`, `publish`, or `promote`, supply
+`--keychain-signer ABS --signer-sha256 HASH`. The publisher pins the executable,
+checks its public key against the reviewed repository SPKI, and independently
+verifies every returned signature. Errors never fall back to a private-key
+file. Explicit file-key publishing remains available for self-hosted publishers;
+it cannot be selected together with Keychain custody. The existing publish and
+promote commands still change channels, so prepare the exact version/object
+inventory and get the named publication scope approved first.
+
+New official Controllers embed this same reviewed key through the Core trust
+resolver. For an existing installation whose configured key is absent, the
+reviewed source bundle also supplies
+`node scripts/install-release-trust.mjs --config-dir ABS_CONFIG_DIR`.
+This local, network-free migration installs only the shipped public key with
+exclusive creation, preserves a matching key unchanged, and refuses different,
+corrupt, symlinked, or unsafe existing configuration. It does not run update,
+start a provider, or restart anything. Obtain that script and key through the
+trusted reviewed installer/source delivery; never fetch a key from the manifest
+being verified. Explicit/local self-hosted keys retain their Core precedence.
+The initializer has not been executed on any enrolled machine by this change.

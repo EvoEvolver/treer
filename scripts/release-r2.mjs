@@ -15,6 +15,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { execFileSync } from "node:child_process";
 
+import { keychainSigner as protectedSigner } from "./release-keychain.mjs";
+
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_BUCKET = "treer-releases";
 const DEFAULT_BASE_URL = "https://releases.treer.ai/";
@@ -91,13 +93,17 @@ function publicKeyId(publicKey) {
   return sha256Bytes(der).slice(0, 16);
 }
 
+function signingPublicKey(key) {
+  return key.publisherPublicKey ?? createPublicKey(key);
+}
+
 function detachedSignature(bytes, privateKey) {
-  const publicKey = createPublicKey(privateKey);
+  const publicKey = signingPublicKey(privateKey);
   return {
     schema_version: 1,
     algorithm: "ed25519",
     key_id: publicKeyId(publicKey),
-    signature: sign(null, bytes, privateKey).toString("base64"),
+    signature: (privateKey.signDetached ? privateKey.signDetached(bytes) : sign(null, bytes, privateKey)).toString("base64"),
   };
 }
 
@@ -260,7 +266,8 @@ function releaseOutputDir(version, override) {
   return resolve(override ?? join(root, "target", "releases", version));
 }
 
-function loadPrivateKey(path) {
+function loadPrivateKey(path, keychainSigner, signerSha256) {
+  if (keychainSigner) return protectedSigner(keychainSigner, signerSha256);
   if (!existsSync(path)) {
     fail(`release signing key not found at ${path}; run just artifacts-keygen first`);
   }
@@ -271,11 +278,11 @@ function loadPrivateKey(path) {
   return createPrivateKey(readFileSync(path));
 }
 
-function loadPublicKey(publicKeyPath, privateKeyPath) {
+function loadPublicKey(publicKeyPath, privateKeyPath, keychainSigner, signerSha256) {
   if (existsSync(publicKeyPath)) {
     return createPublicKey(readFileSync(publicKeyPath));
   }
-  return createPublicKey(loadPrivateKey(privateKeyPath));
+  return signingPublicKey(loadPrivateKey(privateKeyPath, keychainSigner, signerSha256));
 }
 
 function readDetached(path) {
@@ -288,10 +295,12 @@ export function prepareRelease({
   outputDir,
   platforms,
   privateKeyPath,
+  keychainSigner,
+  signerSha256,
   gitCommit,
   createdAt = new Date().toISOString(),
 }) {
-  const privateKey = loadPrivateKey(privateKeyPath);
+  const privateKey = loadPrivateKey(privateKeyPath, keychainSigner, signerSha256);
   const artifacts = buildArtifactRecords({ distDir, platforms, version });
   const builds = buildProvenanceRecords({ distDir, platforms, version, gitCommit });
   mkdirSync(outputDir, { recursive: true });
@@ -304,7 +313,7 @@ export function prepareRelease({
     }
     const bytes = readFileSync(manifestPath);
     const manifest = JSON.parse(bytes);
-    verifyDetachedSignature(bytes, readDetached(signaturePath), createPublicKey(privateKey));
+    verifyDetachedSignature(bytes, readDetached(signaturePath), signingPublicKey(privateKey));
     if (
       manifest.version !== version ||
       manifest.git_commit !== gitCommit ||
@@ -316,7 +325,7 @@ export function prepareRelease({
     return { artifacts, manifest, manifestBytes: bytes, manifestPath, signaturePath };
   }
 
-  const publicKey = createPublicKey(privateKey);
+  const publicKey = signingPublicKey(privateKey);
   const manifest = {
     schema_version: 2,
     version,
@@ -461,7 +470,7 @@ async function uploadChannel({
     contentType: "application/json",
     cacheControl: CHANNEL_CACHE_CONTROL,
   });
-  const remote = await fetchJsonWithSignature(baseUrl, `channels/${channel}.json`, createPublicKey(privateKey));
+  const remote = await fetchJsonWithSignature(baseUrl, `channels/${channel}.json`, signingPublicKey(privateKey));
   if (remote.value.version !== version || remote.value.manifest_sha256 !== payload.manifest_sha256) {
     fail(`remote ${channel} channel did not converge to ${version}`);
   }
@@ -507,8 +516,8 @@ async function publishRelease(config) {
     });
   }
 
-  const privateKey = loadPrivateKey(config.privateKeyPath);
-  await verifyRemoteRelease({ baseUrl: config.baseUrl, version: config.version, publicKey: createPublicKey(privateKey) });
+  const privateKey = loadPrivateKey(config.privateKeyPath, config.keychainSigner, config.signerSha256);
+  await verifyRemoteRelease({ baseUrl: config.baseUrl, version: config.version, publicKey: signingPublicKey(privateKey) });
   await uploadChannel({
     ...config,
     channel: config.channel,
@@ -520,8 +529,8 @@ async function publishRelease(config) {
 
 async function promoteRelease(config) {
   requireCleanGit();
-  const privateKey = loadPrivateKey(config.privateKeyPath);
-  const publicKey = createPublicKey(privateKey);
+  const privateKey = loadPrivateKey(config.privateKeyPath, config.keychainSigner, config.signerSha256);
+  const publicKey = signingPublicKey(privateKey);
   const source = await fetchJsonWithSignature(config.baseUrl, `channels/${config.fromChannel}.json`, publicKey);
   if (source.value.version !== config.version) {
     fail(`${config.fromChannel} currently points to ${source.value.version}, not ${config.version}`);
@@ -565,6 +574,8 @@ function commonConfig(options) {
     outputDir: version ? releaseOutputDir(version, options.output) : undefined,
     platforms: parsePlatforms(options),
     privateKeyPath,
+    keychainSigner: options["keychain-signer"],
+    signerSha256: options["signer-sha256"],
     publicKeyPath: resolve(optionValue(options, "public-key", "TREER_RELEASE_PUBLIC_KEY", defaultPublicKeyPath(privateKeyPath))),
     bucket: optionValue(options, "bucket", "TREER_RELEASE_BUCKET", DEFAULT_BUCKET),
     baseUrl: normalizeBaseUrl(optionValue(options, "base-url", "TREER_RELEASE_BASE_URL", DEFAULT_BASE_URL)),
@@ -582,7 +593,9 @@ function usage() {
   node scripts/release-r2.mjs verify --version vMAJOR.MINOR.PATCH
 
 Environment:
-  TREER_RELEASE_SIGNING_KEY       PKCS#8 Ed25519 private key
+  --keychain-signer ABS --signer-sha256 HASH
+                                 Use the pinned macOS official Keychain signer; no file-key fallback
+  TREER_RELEASE_SIGNING_KEY       PKCS#8 Ed25519 private key (self-hosted publisher)
   TREER_RELEASE_PUBLIC_KEY        SPKI Ed25519 public key
   TREER_RELEASE_BUCKET            R2 bucket (default: ${DEFAULT_BUCKET})
   TREER_RELEASE_BASE_URL          HTTPS custom domain (default: ${DEFAULT_BASE_URL})
@@ -601,6 +614,8 @@ async function main() {
       output: { type: "string" },
       platform: { type: "string", multiple: true },
       "private-key": { type: "string" },
+      "keychain-signer": { type: "string" },
+      "signer-sha256": { type: "string" },
       "public-key": { type: "string" },
       bucket: { type: "string" },
       "base-url": { type: "string" },
@@ -614,6 +629,9 @@ async function main() {
     usage();
     return;
   }
+  if (options["keychain-signer"] && (options["private-key"] || process.env.TREER_RELEASE_SIGNING_KEY)) fail("Choose Keychain or file custody explicitly, not both");
+  if (Boolean(options["keychain-signer"]) !== Boolean(options["signer-sha256"])) fail("Keychain signer and checksum are required together");
+  if (command === "keygen" && options["keychain-signer"]) fail("Use the dedicated Keychain create operation, never file keygen");
   const config = commonConfig(options);
 
   if (command === "keygen") {
@@ -648,7 +666,7 @@ async function main() {
     return;
   }
   if (command === "verify") {
-    const publicKey = loadPublicKey(config.publicKeyPath, config.privateKeyPath);
+    const publicKey = loadPublicKey(config.publicKeyPath, config.privateKeyPath, config.keychainSigner, config.signerSha256);
     await verifyRemoteRelease({ baseUrl: config.baseUrl, version: config.version, publicKey });
     console.log(`verified ${config.version} from ${config.baseUrl}`);
     return;

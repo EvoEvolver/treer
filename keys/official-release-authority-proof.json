@@ -1,0 +1,6 @@
+{
+  "schema": "treer.release-authority-proof/v1",
+  "message": "Treer official release authority establishment v1\nDistributor: https://releases.treer.ai/\nNo artifact or channel publication.\n",
+  "signature_base64": "55jFg4JVRSuhMhtN3sAxZS7KMvvwtzlaq5bjRF4oLyNBfjuxfgfNqwNmlQxt1djEdjEQr7h3SVK3Tl/XwLpyCQ==",
+  "spki_der_sha256": "634761ff47a6a113b4b8925f0db0e030d8bfce07f2fa228fdc0a4904874dc41f"
+}

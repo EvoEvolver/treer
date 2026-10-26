@@ -1,0 +1,9 @@
+{
+  "schema": "treer.release-authority/v1",
+  "algorithm": "ed25519",
+  "spki_der_sha256": "634761ff47a6a113b4b8925f0db0e030d8bfce07f2fa228fdc0a4904874dc41f",
+  "key_id": "634761ff47a6a113",
+  "distributor": "https://releases.treer.ai/",
+  "custody": "macOS login Keychain; Release owner; not Secure Enclave; private bytes not in repository",
+  "established_by_decision": "msg_a6d6ecbcd05c4a62bfc349173f3b0fe8"
+}
