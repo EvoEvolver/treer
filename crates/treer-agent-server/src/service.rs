@@ -690,7 +690,6 @@ pub(crate) fn self_update_jobs_directory() -> Result<PathBuf> {
         .join("jobs"))
 }
 
-#[cfg(unix)]
 pub(crate) fn controller_update_config_directory() -> Result<PathBuf> {
     config_dir().map_err(|_| anyhow::anyhow!("controller_update_catalog_unavailable"))
 }

@@ -1671,6 +1671,66 @@ adds only this review note to the frozen source. Windows trusted local-file
 loading and actual signed-pair/runtime admission remain the next source work;
 neither publisher readiness nor a leader push is a source dependency.
 
+## Windows read-only local catalog file
+
+The Windows-only `Catalog::local` now resolves the existing Controller config
+directory (`LOCALAPPDATA/Treer/agent-servers`) through the same service helper as
+Unix and reads only `controller-update-catalog.json`. No new path/URL/key/flag
+comes from a browser request, operation field or a second startup-root resolver.
+The `treer-platform::windows_update_catalog::read_catalog` adapter retains
+physical non-reparse, same-volume ancestor handles, requires a private root on
+local fixed NTFS, and opens that fixed file with no write/delete sharing. The
+file must be private, regular, single-link, on the same volume, nonempty and at
+most 64 KiB. Bounded read and length readback use the same held file; the private
+descriptor is checked again before returning the raw snapshot. Missing,
+unreadable, weak, oversized or busy-writer input refuses without creating a
+directory, repairing ACLs, publishing a lock/receipt or changing any file.
+
+The returned bytes still pass the shared strict parser and compiled-host
+platform selection. The Controller maps errors to one static unavailable code.
+This reads operator configuration only; it does not prove caller Policy, actual
+installed identity or signed input provenance, select a runtime, publish an
+intent, transfer custody or permit effects. A file read is not a future catalog
+change CAS. Production Windows inspect/dispatch remain unsupported, ordinary
+cap stays OFF, and the loaded-runtime StartupStore/fence authority remains a
+separate source, never substituted by this configuration directory.
+
+The new `windows_update_catalog_file_` selector is Platform LIB only: one
+portable bounded-read/IO-error control and three native fixed-file/private-root,
+weak-ACL/hardlink and missing/bounds/directory/busy-writer controls. Fixtures are
+fresh private task directories with PID/atomic names and owned cleanup. The
+native handoff also compiles the default Server consumer; no feature, admitted
+image, extra binary build, installation or live service is needed. These new
+native controls require Windows and are not covered by the earlier catalog
+parser's five author tests or any earlier updater leaf.
+
+Author verification: the portable bounded-reader control passed on macOS,
+zero failed/ignored, exit zero (70 filtered); strict Platform all-target Windows
+GNU Clippy compiled the new native controls, and strict Server bins/tests
+Clippy with the existing acceptance feature passed on macOS. Formatting,
+documentation and diff checks passed. These author checks did not run native
+three or Windows Server consumer compilation. The bounded native contract is default-feature Server
+`cargo check --locked -p treer-agent-server --bin treer-agent-server`, then
+`cargo test --locked -p treer-platform --lib windows_update_catalog_file_ --
+--nocapture`, exact four on a private fixed-NTFS task TEMP, with independent
+empty-directory cleanup evidence. No prior selectors or matrix are included.
+
+One independent Release source-only review (#111:9698) accepted exact source
+`04f1394455bc49145f24561ff7d2ee6be3abbbe3`. Sole native run `40366123638`,
+wrapper `81b2f739e3533ccabfa0cd9818b4ed7056eba4b5`, then passed the default
+Server consumer check and all four new Platform controls, zero failed/ignored,
+both exits zero (28 filtered). Windows 2022/Rust 1.90 used fixed NTFS image
+`20261022.344.1`. Independent TEMP inventory was empty, cleanup proven and the
+empty root removed. Core matched exact source, both commands/exits, all four
+names and log summary, platform and `RESULT.json` SHA-256
+`0dad23ae1073da244b6c4a8284ebacaa720fd01945df8587bae3f81b38026e77`
+against the actual receipt (#111:9702). This accepts only the fixed private-file
+reader and consumer compilation, not a full selected-runtime/catalog/signed-pair
+integration, operation authorization, worker or complete updater. No prior leaf,
+matrix, feature, extra binary build, installation, Host or capability action
+occurred. The original tested source remains preserved; main delivery adds only
+this actual-result note to those Rust source blobs.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

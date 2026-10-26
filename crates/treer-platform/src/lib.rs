@@ -34,6 +34,8 @@ pub use environment::{
 mod windows;
 #[cfg(windows)]
 pub mod windows_update_backup;
+#[cfg(any(windows, test))]
+pub mod windows_update_catalog;
 #[cfg(windows)]
 pub mod windows_update_inputs;
 #[cfg(windows)]
