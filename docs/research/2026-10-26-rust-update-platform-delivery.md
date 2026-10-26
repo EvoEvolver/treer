@@ -241,7 +241,7 @@ This is a process-exit fence for cooperating callers while the installation and
 record remain intact, not power-loss/volume durability, rollback, an anti-rollback
 high-water mark, protection from other same-account code or update success.
 Production capabilities and the missing worker/image engine remain unchanged.
-Native controls are pending under `windows_update_claim_`: a child test process
+Native controls under `windows_update_claim_` cover a child test process that
 exits without Rust destructors after reservation, then a fresh owner must reject
 both same-binding and different-binding submissions through a different task
 root; a task-intent failure preserves the consumed install claim; and partial,
@@ -250,18 +250,28 @@ Bounds refuse before file creation. None of the earlier accepted native leaves
 is relabeled as acceptance for this successor.
 Author Controller macOS all-target strict Clippy, platform Windows GNU and Linux
 GNU all-target strict Clippy, formatting, documentation and diff checks passed.
-The Controller's Windows native compilation is pending with the focused entry:
+The focused Windows entry is:
 `cargo test --locked -p treer-agent-server --bin treer-agent-server
 windows_update_claim_ -- --nocapture`, expecting three passed, none failed/
 ignored, exit zero and independent TEMP cleanup. Its child process is only the
 same filtered test executable on fresh task-owned files, never an installed
 Controller or Host. No unavailable cross C compiler was installed locally.
 
+Release executed this entry once in run `40290264517`, exact source
+`030921bc042298031b4504edcd44079ba70477ba` and wrapper
+`8f63f00c2018c9028e9dc09a8a5c75a2d92c1e74`. Windows Server 2022/Rust 1.90,
+fixed NTFS image `20261022.344.1` produced three passed, zero failed/ignored
+and exit zero. Core independently checked all three named log entries, platform
+and result; TEMP remaining entries were empty, cleanup proven and the empty
+root removed. Result SHA256:
+`3c1e4e4d43b05591fb2023d25c4ecec242d0b8284a42c0d1c1603b9efd96d90f`.
+Acceptance remains limited to process-exit claim retention and refusal, not
+power loss, a real worker, safe claim retirement or a complete update engine.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission and lease
-   acceptance are complete within their stated scopes. The install-wide claim
-   successor above is implemented with native acceptance pending. Next
+   and install-wide claim acceptance are complete within their stated scopes. Next
    add phase-specific evidence for actual image
    publication, never a generic setter that could manufacture completion.
 2. Implement Windows verified Controller/CLI image backup and two-rename
