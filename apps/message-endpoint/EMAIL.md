@@ -233,6 +233,13 @@ an old intent. Historical uncertain rows retain their consumed reservation and
 null diagnostic. Current configuration and permission must be inspected through
 the existing authenticated APIs rather than inferred from this source tree.
 
+The worker scans the existing bounded ready page (at most 100 transfers),
+checking the original payload digest even for already admitted messages. A
+pending intent, including a retained uncertain send, does not block a distinct
+later message from admission. Each tick still admits at most one new message or
+completes one transfer. This does not complete, rebuild, or retry the old unknown
+intent; its consumed reservation and attempts remain unchanged.
+
 ### Safe committed-send diagnostics
 
 New committed sends persist a bounded `diagnostic` alongside the dispatch outcome

@@ -412,19 +412,23 @@ fn step(
     }
     refresh(hub, core, id)?;
     fence(hub, id, &contact)?;
-    // Admit one reassembled Agent message. A frozen email intent is durable before
-    // the Core transfer can be completed; a replay checks the same payload digest.
+    // Scan the bounded ready page, admitting at most one new message per tick.
+    // Existing pending intents (including uncertain sends) keep their transfer
+    // ready, but must not starve later messages. Recheck their payload digest;
+    // skipping them neither completes their transfer nor releases a reservation.
     let outbound = {
         hub.lock()
             .map_err(|_| ())?
             .ready_outbound(id, clock()?)
             .map_err(|_| ())?
-            .into_iter()
-            .next()
     };
-    if let Some((transfer, envelope)) = outbound {
+    for (transfer, envelope) in outbound {
+        let crate::protocol::Envelope::Outbound { ref message_id, .. } = envelope else {
+            return Err(());
+        };
         let mut h = hub.lock().map_err(|_| ())?;
         let mut q = Queue::new(&mut h.store).map_err(|_| ())?;
+        let previous = q.receipt(id, generation, message_id).map_err(|_| ())?;
         let admitted = q.admit(id, generation, &envelope, clock()?);
         match admitted {
             Ok(_) => {
@@ -442,6 +446,8 @@ fn step(
                             clock()?,
                         )
                         .map_err(|_| ())?;
+                } else if receipt == Some(0) && previous == Some(0) {
+                    continue;
                 } else if receipt == Some(2) {
                     h.park_transport(
                         id,
@@ -465,6 +471,7 @@ fn step(
             }
             Err(_) => return Err(()),
         }
+        break;
     }
     let intent = {
         let mut h = hub.lock().map_err(|_| ())?;

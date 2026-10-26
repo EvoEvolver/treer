@@ -806,6 +806,69 @@ fn email_runtime_chain_review(
 }
 
 #[test]
+fn email_uncertain_old_transfer_does_not_starve_new_message_after_restart() {
+    let f = Fixture::new();
+    f.control("email-uncertain", json!({"uncertain":true}));
+    let running = f.start_email_mode(true, Some(crate::email::Mode::Proxy));
+    let preview = f.command(json!({"action":"preview_create","endpoint_id":"ag_endpoint","recipient":"ag_recipient","generation":1}))["preview"].clone();
+    f.command(json!({"action":"create","endpoint_id":"ag_endpoint","recipient":"ag_recipient","generation":1,"expected":preview,"confirm":true}));
+    f.command(json!({"action":"bind_email","endpoint_id":"ag_endpoint","revision":1,"contact":{"address":"member@example.test","member_id":"user_member"},"confirm":true}));
+    let root = f._root.path().canonicalize().unwrap();
+    let cli = root.join("endpoint-cli");
+    let config = crate::relay::Config {
+        endpoint_id: "ag_endpoint".into(),
+        hub_id: "app_hub".into(),
+        generation: 1,
+        recipients: vec!["ag_recipient".into()],
+        cli_sha256: crate::relay::hash_executable(&cli).unwrap(),
+        cli,
+        state_directory: root.join("relay-state"),
+        release_sha256: crate::relay::hash_executable(&std::env::current_exe().unwrap()).unwrap(),
+    };
+    let (mut relay, _) = crate::relay::Relay::open(config, "ag_endpoint").unwrap();
+    let preview = f.command(json!({"action":"preview_resume","endpoint_id":"ag_endpoint"}));
+    f.command(json!({"action":"resume","endpoint_id":"ag_endpoint","expected":preview["preview"],"confirm":true,"evidence":{"profile_reviewed":true,"isolation":"reviewed","reference":"closed synthetic test only","held_action":"discard","parked_count_ack":0}}));
+    running.release_readbacks();
+    let inject = |suffix: &str| {
+        f.control("core", json!({"delivery_id":format!("del_{suffix}"),"recipient":{"kind":"agent","id":"ag_endpoint"},"message":{"message_id":format!("msg_{suffix}"),"sender":{"kind":"agent","id":"ag_recipient"},"body":format!("synthetic private {suffix}"),"context_ids":[]}}))
+    };
+    inject("old");
+    wait_until(|| {
+        relay.tick(now()).unwrap();
+        f.status()["emails"].as_array().unwrap().len() == 1
+    });
+    let first = f.status()["emails"][0].clone();
+    drop(running);
+    let restarted = f.start_email_mode(true, Some(crate::email::Mode::Proxy));
+    restarted.release_readbacks();
+    f.control("email-uncertain", json!({"uncertain":false}));
+    inject("new");
+    wait_until(|| {
+        relay.tick(now()).unwrap();
+        f.status()["emails"].as_array().unwrap().len() == 2
+    });
+    let emails = f.status()["emails"].as_array().unwrap().clone();
+    assert_eq!(emails.len(), 2, "old uncertain POST must never repeat");
+    assert_eq!(emails[0], first);
+    assert_ne!(emails[0]["idempotency_key"], emails[1]["idempotency_key"]);
+    let inspection =
+        f.command(json!({"action":"inspect_email_delivery","endpoint_id":"ag_endpoint"}));
+    assert_eq!(inspection["delivery"]["uncertain"], 1);
+    assert_eq!(inspection["delivery"]["provider_accepted"], 1);
+    drop(restarted);
+    let store = Store::open(&root.join("state"), Limits::default()).unwrap();
+    let rows: Vec<(String,i64,i64,String)> = store.db.prepare("SELECT m.source,i.state,i.attempts,d.state FROM email_intents i JOIN email_dispatch d ON d.id=i.id JOIN email_messages m ON m.thread=i.thread ORDER BY m.source").unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("msg_new".into(), 1, 1, "provider_accepted".into()),
+            ("msg_old".into(), 0, 1, "uncertain".into())
+        ]
+    );
+    eprintln!("PASS: closed synthetic Core/Proxy, native Hub/relay + SQLite: restart retains old unknown attempt1; distinct next message gets one independent accepted intent; no old resend");
+}
+
+#[test]
 fn email_setup_real_assembly_reports_config_without_enabling_or_sending() {
     let f = Fixture::new();
     for mode in [
