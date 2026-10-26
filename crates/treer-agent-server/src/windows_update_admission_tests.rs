@@ -50,6 +50,100 @@ fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn receive_fixture(fixture: &Fixture, expected: &Binding, bytes: [&[u8]; 4]) -> Result<()> {
+    let [mut a, mut b, mut c, mut d] = bytes.map(Cursor::new);
+    for reader in [&mut a, &mut b, &mut c, &mut d] {
+        reader.set_position(reader.get_ref().len() as u64);
+    }
+    verify_received_inputs(
+        &fixture.documents(),
+        &fixture.key.verifying_key(),
+        expected,
+        [&mut a, &mut b, &mut c, &mut d],
+    )
+}
+
+#[test]
+fn windows_update_receiver_whole_inputs_and_exact_digests() {
+    let fixture = Fixture::new(|_| {});
+    let expected = fixture.verify(NEW, OLD).unwrap();
+    receive_fixture(&fixture, &expected, [OLD, OLD, NEW, NEW]).unwrap();
+    for index in 0..4 {
+        let mut bytes = [OLD, OLD, NEW, NEW];
+        bytes[index] = b"wrong whole file";
+        assert!(receive_fixture(&fixture, &expected, bytes).is_err());
+    }
+    for field in [
+        "old_controller_sha256",
+        "old_cli_sha256",
+        "controller_sha256",
+        "cli_sha256",
+        "signed_manifest_sha256",
+    ] {
+        let mut value = serde_json::to_value(&expected).unwrap();
+        value[field] = json!("0".repeat(64));
+        let changed = serde_json::from_value(value).unwrap();
+        assert!(
+            receive_fixture(&fixture, &changed, [OLD, OLD, NEW, NEW]).is_err(),
+            "{field}"
+        );
+    }
+    for index in 0..4 {
+        let mut bytes = [OLD, OLD, NEW, NEW];
+        bytes[index] = b"";
+        assert!(receive_fixture(&fixture, &expected, bytes).is_err());
+    }
+    assert!(receive_fixture(
+        &fixture,
+        &expected,
+        [OLD, OLD, &[NEW, b"extra"].concat(), NEW]
+    )
+    .is_err());
+}
+
+#[test]
+fn windows_update_receiver_signature_trust_and_io_refusals() {
+    let source = Fixture::new(|_| {});
+    let expected = source.verify(NEW, OLD).unwrap();
+    for mode in 0..4 {
+        let mut fixture = Fixture::new(|_| {});
+        match mode {
+            0 => fixture.key = SigningKey::from_bytes(&[99; 32]),
+            1 => fixture.channel_signature[0] ^= 1,
+            2 => fixture.manifest_signature[0] ^= 1,
+            _ => fixture.manifest.push(b' '),
+        }
+        assert!(receive_fixture(&fixture, &expected, [OLD, OLD, NEW, NEW]).is_err());
+    }
+    struct Broken(bool);
+    impl Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            assert!(!self.0, "failed seek must refuse before any read");
+            Err(std::io::Error::other("fixture read refused"))
+        }
+    }
+    impl std::io::Seek for Broken {
+        fn seek(&mut self, _: std::io::SeekFrom) -> std::io::Result<u64> {
+            if self.0 {
+                Err(std::io::Error::other("fixture seek refused"))
+            } else {
+                Ok(0)
+            }
+        }
+    }
+    for seek_error in [false, true] {
+        let mut broken = Broken(seek_error);
+        let [mut b, mut c, mut d] = [OLD, NEW, NEW].map(Cursor::new);
+        assert!(verify_received_inputs(
+            &source.documents(),
+            &source.key.verifying_key(),
+            &expected,
+            [&mut broken, &mut b, &mut c, &mut d]
+        )
+        .is_err());
+    }
+}
+
 pub(crate) struct Fixture {
     pub(crate) key: SigningKey,
     channel: Vec<u8>,

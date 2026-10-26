@@ -1518,6 +1518,50 @@ execution, live installation, Host or capability action was performed. This
 accepts independent pair pin custody only; sender continuity and authenticated
 descriptor/signed-input/runtime-state admission remain explicit prerequisites.
 
+## Selected borrowed descriptor and whole-input receiver
+
+The next internal source seam is `ReservedInputs::receiver_descriptor`. It first
+matches the full binding against the selected runtime instance, workspace,
+server and Host epoch using the original runtime-owned state. It then consumes
+one attempt before any receiver work. The descriptor has no public fields,
+Clone/Deserialize, caller path/identity constructor or creator-exit fallback.
+It borrows that original reservation and selected runtime; even a successful
+`ReceivedInputs` retains the same borrow. This deliberately prevents releasing
+sender pins/lease/claim/state authority while receiver custody lives, rather
+than treating successful validation as release permission.
+
+`receive` independently re-pins both original old/target pairs through their
+held owners, comparing exact physical identities under the existing original
+pins. The separately supplied verifying key must equal the independently
+configured key used at sender admission; the descriptor/documents cannot
+introduce a replacement key. Existing release verification checks both channel
+and manifest signatures, platform, path, size and manifest hash. All four new
+held readers seek to zero and are hashed completely with existing per-image
+128 MiB bounds; all five original digest fields must match exactly. Runtime
+scope is checked again after verification. Errors drop only new pins and map
+to a static receiver refusal. No claim/intent mutation or partial input object
+is returned. The attempt stays consumed on descriptor drop or any failure;
+fixed worker creation and parent pair publication also refuse after it.
+
+This descriptor is a trusted **in-process** borrow, not a cross-process wire
+credential. It does not authenticate a child, serialize runtime authority,
+re-admit startup snapshots/denial fences independently, freeze concurrent
+StartupStore writes, create an IPC ACK, transfer the installation lease or
+grant lifecycle permission. No production worker entry is changed. A future
+delegated wire context must preserve these facts rather than deserialize a
+new authority from a public tuple, digest or creator observation.
+
+New selector `windows_update_receiver_` has two portable controls (whole files
+from EOF, exact five digests, empty/trailing/wrong bytes, both signatures,
+independent-key refusal and seek/read errors) and two Windows controls. The
+native controls use real runtime-from-config and signed inert reservations:
+foreign runtime refuses before consuming the proper selected admission; success
+retains originals, image/state-root pins, lease and claim; bad key or signature
+consumes the attempt and blocks fixed spawn and parent publication while old
+files and the durable claim remain unchanged. They do not execute admitted
+images or start Host processes. Author focused and sole native results are
+recorded on #111; native execution is not yet claimed here.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

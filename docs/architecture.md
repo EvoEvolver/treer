@@ -125,8 +125,16 @@ The platform also provides independent physical pair re-pinning: open the same
 fixed root/Controller/CLI under existing sender pins, compare all physical
 identities, and retain new ancestor/image handles with independent read offsets.
 It never adopts the installation lock or claim. Public identity observations
-are not authenticated descriptors; this primitive is not yet connected to the
-worker exchange or signed/runtime-state receiver admission.
+are not authenticated descriptors. The internal signed-input receiver instead
+uses a non-serializable descriptor minted only from the selected runtime's
+original reservation. It independently re-pins both old/target pairs, checks
+the separately trusted admission key and both signatures, seeks all four held
+readers to zero and compares their complete digests to the original binding.
+Both descriptor and successful receiver borrow the sender, retaining original
+pins/lease/claim/runtime state rather than granting a release permit. One
+receiver attempt excludes repeat admission, fixed worker spawn and parent pair
+publication. This source seam is in-process only; worker IPC and independent
+runtime-state/fence re-admission are not wired.
 
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and

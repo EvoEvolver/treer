@@ -192,7 +192,7 @@ impl ControllerUpdateState {
         &self.evidence
     }
 
-    fn matches_selected(
+    pub(crate) fn matches_selected(
         &self,
         selected: &ControllerRuntime,
         binding: &crate::windows_update_intent::Binding,

@@ -89,6 +89,9 @@ pub struct AdmittedInputs {
     _target: treer_platform::windows_update_inputs::PinnedPair,
     state: Option<crate::controller::ControllerUpdateState>,
     worker_attempted: bool,
+    receiver_attempted: bool,
+    // Supplied by the trusted admission caller, never by signed metadata.
+    verifying_key: [u8; 32],
 }
 
 #[cfg(windows)]
@@ -194,6 +197,8 @@ impl AdmittedInputs {
             _target: target,
             state: None,
             worker_attempted: false,
+            receiver_attempted: false,
+            verifying_key: key.to_bytes(),
         })
     }
 
@@ -234,6 +239,26 @@ pub struct ReservedInputs(AdmittedInputs);
 
 #[cfg(windows)]
 impl ReservedInputs {
+    /// Selected-runtime mint only, not a wire constructor or release permit.
+    /// Scope refusal does not consume an attempt; after scope validation every
+    /// receiver outcome is single-use, including a failed independent recheck.
+    #[allow(dead_code)] // Internal receiver boundary; no coordinator/IPC wiring.
+    pub(crate) fn receiver_descriptor<'a>(
+        &'a mut self,
+        selected: &'a crate::controller::ControllerRuntime,
+    ) -> Result<ReceiverDescriptor<'a>> {
+        self.controller_state()?
+            .matches_selected(selected, self.binding())?;
+        if self.0.receiver_attempted || self.0.worker_attempted {
+            bail!("windows_update_receiver_consumed");
+        }
+        self.0.receiver_attempted = true;
+        Ok(ReceiverDescriptor {
+            sender: self,
+            selected,
+        })
+    }
+
     pub(crate) fn installation_lock_identity(&self) -> Result<(u64, u64)> {
         self.0
             ._installed
@@ -287,7 +312,7 @@ impl ReservedInputs {
         &mut self,
         selector: uuid::Uuid,
     ) -> Result<std::process::Child> {
-        if self.0.worker_attempted {
+        if self.0.worker_attempted || self.0.receiver_attempted {
             bail!("windows_update_worker_already_attempted");
         }
         // Even an error after this point consumes this attempt. No re-spawn
@@ -312,6 +337,126 @@ impl ReservedInputs {
             )
             .map_err(|_| anyhow::anyhow!("windows_update_worker_spawn_unknown"))
     }
+}
+
+/// Opaque borrowed descriptor. No Clone, Deserialize, public fields or arbitrary
+/// expected-binding/path constructor. Sender originals, lock and runtime-owned
+/// state remain alive through the receiver result. This is an in-process source
+/// seam, not child-side IPC authentication or normal caller Policy admission.
+#[cfg(windows)]
+pub(crate) struct ReceiverDescriptor<'a> {
+    sender: &'a ReservedInputs,
+    selected: &'a crate::controller::ControllerRuntime,
+}
+
+#[cfg(windows)]
+impl<'a> ReceiverDescriptor<'a> {
+    #[allow(dead_code)] // No production worker/IPC entry yet.
+    pub(crate) fn receive(
+        self,
+        documents: &Documents<'_>,
+        independently_trusted_key: &VerifyingKey,
+    ) -> Result<ReceivedInputs<'a>> {
+        let refused = || anyhow::anyhow!("windows_update_receiver_refused");
+        let admit = || -> Result<_> {
+            self.sender
+                .controller_state()?
+                .matches_selected(self.selected, self.sender.binding())?;
+            if independently_trusted_key.to_bytes() != self.sender.0.verifying_key {
+                return Err(refused());
+            }
+            // Each new Root/file is independently opened while originals remain
+            // borrowed/held. Public identity tuples are never taken from caller.
+            let installed = self.sender.0._installed.repin_images()?;
+            let target = self.sender.0._target.repin()?;
+            if installed.identity()?
+                != (
+                    self.sender.binding().installation_volume,
+                    self.sender.binding().installation_file_id,
+                )
+                || installed.identity()? == target.identity()?
+                || installed.identity()?.0 != target.identity()?.0
+            {
+                return Err(refused());
+            }
+            let (mut old_controller, mut old_cli) = installed.files();
+            let (mut controller, mut cli) = target.files();
+            verify_received_inputs(
+                documents,
+                independently_trusted_key,
+                self.sender.binding(),
+                [&mut old_controller, &mut old_cli, &mut controller, &mut cli],
+            )?;
+            self.sender
+                .controller_state()?
+                .matches_selected(self.selected, self.sender.binding())?;
+            Ok((installed, target))
+        };
+        let (installed, target) = admit().map_err(|_| refused())?;
+        Ok(ReceivedInputs {
+            descriptor: self,
+            _installed: installed,
+            _target: target,
+        })
+    }
+}
+
+/// Verified receiver pins plus the STILL borrowed sender. Success never grants
+/// permission to release originals, publish files, create a worker, retire a
+/// claim or restart anything. Runtime state/fences are retained at the sender;
+/// they have not been independently re-admitted or transferred to this receiver.
+#[cfg(windows)]
+pub(crate) struct ReceivedInputs<'a> {
+    descriptor: ReceiverDescriptor<'a>,
+    _installed: treer_platform::windows_update_inputs::PinnedPair,
+    _target: treer_platform::windows_update_inputs::PinnedPair,
+}
+
+#[cfg(windows)]
+impl ReceivedInputs<'_> {
+    #[allow(dead_code)]
+    pub(crate) fn binding(&self) -> &Binding {
+        self.descriptor.sender.binding()
+    }
+}
+
+trait WholeInput: Read + std::io::Seek {}
+impl<T: Read + std::io::Seek> WholeInput for T {}
+
+/// All four SAME pinned readers start at zero; signed target metadata and every
+/// expected binding digest are rechecked, never replaced by observed hashes.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn verify_received_inputs(
+    documents: &Documents<'_>,
+    key: &VerifyingKey,
+    expected: &Binding,
+    readers: [&mut dyn WholeInput; 4],
+) -> Result<()> {
+    expected.validate()?;
+    let [old_controller, old_cli, controller, cli] = readers;
+    for reader in [
+        &mut *old_controller,
+        &mut *old_cli,
+        &mut *controller,
+        &mut *cli,
+    ] {
+        reader.seek(std::io::SeekFrom::Start(0))?;
+    }
+    let mut observed = expected.clone();
+    verify_inputs(
+        documents,
+        key,
+        &mut observed,
+        PairReaders {
+            controller: old_controller,
+            cli: old_cli,
+        },
+        PairReaders { controller, cli },
+    )?;
+    if observed != *expected {
+        bail!("windows_update_receiver_binding_refused");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

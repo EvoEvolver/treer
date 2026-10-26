@@ -124,6 +124,12 @@ impl PinnedPair {
         (&self.controller, &self.cli)
     }
 
+    /// Re-pin this SAME held pair without exporting a path. The borrow keeps
+    /// sender pins alive throughout independent opening and identity comparison.
+    pub fn repin(&self) -> io::Result<Self> {
+        Self::open_matching(&self.path, self.pair_identity()?)
+    }
+
     /// Consume the pinned installation and hold its stable, no-sharing lock.
     /// This serializes participating updaters across distinct task directories.
     /// Never removes/recreates an existing lock or repairs its ACL. The lock
@@ -148,6 +154,12 @@ pub struct LockedInstallation {
 }
 
 impl LockedInstallation {
+    /// Retain an independent read-only image pair, never adopt/duplicate its
+    /// installation lease or claim. Caller must retain this original owner.
+    pub fn repin_images(&self) -> io::Result<PinnedPair> {
+        self.pair.repin()
+    }
+
     /// Physical identity of the held lock FILE, not its installation directory.
     /// This observation alone never authorizes adoption of an operation.
     pub fn lock_file_identity(&self) -> io::Result<(u64, u64)> {

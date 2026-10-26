@@ -67,8 +67,10 @@ impl StartupBackedUpInputs {
             _target,
             state,
             worker_attempted,
+            receiver_attempted,
+            ..
         }) = reserved;
-        if worker_attempted {
+        if worker_attempted || receiver_attempted {
             bail!("windows_update_worker_already_attempted");
         }
         let mut staging = _installed.stage_pair()?;

@@ -4658,6 +4658,111 @@ async fn windows_update_lock_binding_native_nonfile_and_cancel_never_fall_back()
 }
 
 #[cfg(windows)]
+#[tokio::test]
+async fn windows_update_receiver_native_selected_descriptor_keeps_original_custody() {
+    use crate::windows_update_admission::tests::{Fixture, NEW, OLD};
+    let (runtime, root, task) = update_state_fixture().await;
+    let (foreign, other_root, other_task) = update_state_fixture().await;
+    let mut sender = update_launch_reservation(&runtime, &root, NEW);
+    let expected = sender.binding().clone();
+    let source = Fixture::new(|_| {});
+    let startup = root.join("configured-state/srv_fixture-agent-startup.json");
+    let before = std::fs::read(&startup).unwrap();
+    // Same workspace/server with a different runtime instance still refuses,
+    // and this scope refusal must not consume the proper selected admission.
+    assert!(sender.receiver_descriptor(&foreign).is_err());
+    let received = sender
+        .receiver_descriptor(&runtime)
+        .unwrap()
+        .receive(&source.documents(), &source.key.verifying_key())
+        .unwrap();
+    assert_eq!(received.binding(), &expected);
+    for name in ["installed", "target"] {
+        for image in ["treer-agent-server.exe", "treer.exe"] {
+            let path = root.join(name).join(image);
+            assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+            assert!(std::fs::rename(&path, root.join("moved-image")).is_err());
+        }
+    }
+    assert!(
+        treer_platform::windows_update_inputs::PinnedPair::open(&root.join("installed"))
+            .unwrap()
+            .lock_installation()
+            .is_err()
+    );
+    assert!(std::fs::rename(root.join("configured-state"), root.join("moved-state")).is_err());
+    drop(received);
+    assert!(sender.receiver_descriptor(&runtime).is_err());
+    assert!(sender.spawn_worker_process().is_err());
+    assert_eq!(std::fs::read(&startup).unwrap(), before);
+    assert_eq!(
+        std::fs::read(root.join("installed/treer-agent-server.exe")).unwrap(),
+        OLD
+    );
+    drop(sender);
+    assert!(root
+        .join("installed/.treer-controller-update.claim")
+        .is_file());
+    drop(runtime);
+    drop(foreign);
+    task.abort();
+    other_task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(other_root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_receiver_native_rejection_consumes_and_blocks_publication() {
+    use crate::windows_update_admission::tests::{Fixture, NEW, OLD};
+    for bad_key in [false, true] {
+        let (runtime, root, task) = update_state_fixture().await;
+        let mut sender = update_launch_reservation(&runtime, &root, NEW);
+        let source = Fixture::new(|_| {});
+        let mut documents = source.documents();
+        if !bad_key {
+            documents.channel_signature = b"{}";
+        }
+        let key = if bad_key {
+            ed25519_dalek::SigningKey::from_bytes(&[99; 32]).verifying_key()
+        } else {
+            source.key.verifying_key()
+        };
+        let claim = root.join("installed/.treer-controller-update.claim");
+        let before = std::fs::read(&claim).unwrap();
+        let error = sender
+            .receiver_descriptor(&runtime)
+            .unwrap()
+            .receive(&documents, &key)
+            .err()
+            .expect("receiver must refuse");
+        assert_eq!(error.to_string(), "windows_update_receiver_refused");
+        assert!(sender.receiver_descriptor(&runtime).is_err());
+        assert!(sender.spawn_worker_process().is_err());
+        let backup = root.join("receiver-backup");
+        std::fs::create_dir(&backup).unwrap();
+        treer_platform::secure_directory(&backup).unwrap();
+        let backed = sender
+            .backup(treer_platform::windows_update_backup::BackupDirectory::open(&backup).unwrap())
+            .unwrap()
+            .backup_configured_startup()
+            .unwrap();
+        assert!(backed.publish_pair().is_err());
+        assert_eq!(std::fs::read(&claim).unwrap(), before);
+        for image in ["treer-agent-server.exe", "treer.exe"] {
+            assert_eq!(
+                std::fs::read(root.join("installed").join(image)).unwrap(),
+                OLD
+            );
+            assert_eq!(std::fs::read(root.join("target").join(image)).unwrap(), NEW);
+        }
+        drop(runtime);
+        task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(windows)]
 fn update_launch_reservation(
     runtime: &ControllerRuntime,
     root: &std::path::Path,

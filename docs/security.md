@@ -214,10 +214,21 @@ or configuration contents. Failed launch retains the newly saved specification.
   identities to sender observations. Sender pins must remain held throughout;
   this is not a way to adopt stale observations after a release/reopen gap.
   The public identity tuple is not an authenticated descriptor, signed-content
-  proof, state-root authority or permission to release the sender. No receiver
-  admission/ACK/terminal command uses it yet. Signature/whole-hash verification,
-  runtime-derived state/fence binding and explicit custody acceptance remain
-  required before a production handoff can rely on independently retained pins.
+  proof, state-root authority or permission to release the sender. The internal
+  signed receiver takes no caller tuple/path: only the original reservation can
+  mint its opaque borrowed descriptor after full selected-runtime matching.
+  Successful receiver pins retain that borrow, so sender originals cannot be
+  released while the result lives. The separately supplied trusted key must
+  match the original admission key; no manifest-provided key is used. Both
+  signatures and four whole held images are rechecked, with every original
+  binding digest compared rather than replaced by observed values. Failure
+  drops new pins and emits only a static refusal; its consumed latch prevents
+  another receiver attempt, fixed worker spawn or parent pair publication.
+  This is an in-process source boundary, not child-side IPC authentication,
+  caller Policy admission or a permission transfer. Original runtime state and
+  fences remain owned by the sender; independent receiver state/fence admission,
+  explicit custody transfer and release authority are still required before a
+  production worker handoff. Success/creator exit never grants them.
 
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
