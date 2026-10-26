@@ -1,0 +1,2 @@
+import { defineConfig } from '@playwright/test'
+export default defineConfig({testDir:'./e2e',testMatch:'tree-add-machine.spec.ts',workers:1,retries:0,timeout:20000,outputDir:'../.treer/reviews/tree-add-machine-browser',use:{baseURL:'http://127.0.0.1:19353',headless:true},webServer:{command:'node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 19353 --strictPort',url:'http://127.0.0.1:19353',reuseExistingServer:false}})

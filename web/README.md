@@ -1281,3 +1281,12 @@ mode-bound acknowledgement refusal, desktop/390px, Chinese dark keyboard/Escape,
 receipt mode/environment/project/intent mismatches and unknown prepare. These are
 closed synthetic API controls, not real-provider authentication or live Create.
 Native validation and one combined Core review remain owned by Launcher/Core.
+
+Tree header **+ → Add machine** opens the existing workspace install/enrollment
+dialog through `openInstall`, just like Workspace settings. It remains available
+with zero or offline machines; Add folder and Add agent keep their existing
+behavior. Opening the dialog uses the existing bootstrap request only and does
+not install or start anything. `tree-add-machine.spec.ts` covers this entry in
+English/Chinese at desktop/390px with online, offline and empty inventory, plus
+keyboard selection and Escape focus return. These are closed browser controls,
+not actual machine enrollment or deployed acceptance.

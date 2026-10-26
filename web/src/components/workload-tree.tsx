@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { ChevronDown, ChevronRight, Folder, MoreVertical, Plus } from "lucide-react"
+import { ChevronDown, ChevronRight, Folder, MoreVertical, Plus, Monitor } from "lucide-react"
 import { agentPath, workloadKind, folderPath as resolveFolderPath } from "@/lib/workload-path"
 import { readFolderExpansion, writeFolderExpansion, type FolderExpansion } from "@/lib/folder-expansion"
 import { AgentStartupDialog } from "@/components/agent-startup-dialog"
@@ -36,10 +36,10 @@ function StatusDot({ status }: { status: TreeStatus }) {
   return <span role="img" aria-label={label} data-tree-status={status.key} className={`size-2 shrink-0 rounded-full ${status.tone}`} />
 }
 
-export function WorkloadTree({ pins, workspaceId, agents, apps, machines, selectedId, onOpen, workloadHref, onOpenInNewTab, onSettings, onRename, onDelete, onNew, preview, placementRevision = 0, onTreeChange, prewarm }: {
+export function WorkloadTree({ pins, workspaceId, agents, apps, machines, selectedId, onOpen, workloadHref, onOpenInNewTab, onSettings, onRename, onDelete, onNew, onAddMachine, preview, placementRevision = 0, onTreeChange, prewarm }: {
   prewarm?: { enter: (id: string, intent: 'pointer' | 'focus') => void; leave: (id: string) => void }
   pins: PinsController; workspaceId: string | null; agents: Agent[]; apps: AppDeployment[]; machines: Machine[]; selectedId: string | null
-  onOpen: (id: string, logs?: boolean) => void; workloadHref: (id: string) => string; onOpenInNewTab: (id: string) => void; onSettings: (app: AppDeployment) => void; onRename: (agent: Agent) => void; onDelete: (agent: Agent) => void; onNew: (folder?: NewAgentFolder) => void; preview: boolean; placementRevision?: number; onTreeChange?: (tree: Tree) => void
+  onOpen: (id: string, logs?: boolean) => void; workloadHref: (id: string) => string; onOpenInNewTab: (id: string) => void; onSettings: (app: AppDeployment) => void; onRename: (agent: Agent) => void; onDelete: (agent: Agent) => void; onNew: (folder?: NewAgentFolder) => void; onAddMachine: () => void; preview: boolean; placementRevision?: number; onTreeChange?: (tree: Tree) => void
 }) {
   const [tree, setTree] = useState<Tree>({ folders: [], placements: [] })
   const [loading, setLoading] = useState(false)
@@ -343,6 +343,7 @@ export function WorkloadTree({ pins, workspaceId, agents, apps, machines, select
     {startupAgent && workspaceId && <AgentStartupDialog key={`${workspaceId}/${startupAgent.agent_id}`} workspaceId={workspaceId} agent={{ ...startupAgent, path: agentPath(startupAgent, tree) }} onClose={() => setStartupAgent(null)} onSaved={() => setCopyNotice(`Saved startup command and restarted ${agentPath(startupAgent, tree)}`)} />}
     <div className="flex h-10 shrink-0 items-center justify-between px-3 max-md:h-11 text-[11px] font-medium text-muted-foreground"><span>{t("tree.tree")}</span><div className="flex items-center gap-1">
       <DropdownMenu><DropdownMenuTrigger asChild><Button data-tour="create-agent" variant="ghost" size="icon" className="size-7 max-md:size-11" aria-label={t("tree.add_to_tree")} disabled={!workspaceId}><Plus className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={onAddMachine}><Monitor className="mr-2 size-3.5" />{t("dialogs.add_machine")}</DropdownMenuItem>
         <DropdownMenuItem disabled={!workspaceId || busy || loading} onSelect={() => edit("create", null)}><Folder className="mr-2 size-3.5" />{t("tree.add_folder")}</DropdownMenuItem>
         <DropdownMenuItem aria-label={!preview && !machines.length ? t("tree.set_up_a_machine_before") : undefined} disabled={!workspaceId || (!preview && machines.length > 0 && !machines.some((machine) => machine.status === "online"))} onSelect={() => onNew()}><Plus className="mr-2 size-3.5" />{t("overview.add_agent")}{!preview && !machines.length && <span className="ml-2 text-[10px] text-muted-foreground">{t("tree.set_up_a_machine_first")}</span>}</DropdownMenuItem>
       </DropdownMenuContent></DropdownMenu>

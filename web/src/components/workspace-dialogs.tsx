@@ -73,6 +73,7 @@ export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, c
     setLaunchMachineId, launchAgentName, setLaunchAgentName, renameName, setRenameName, installPlatform,
     setInstallPlatform, inviteUrl, installCommand, connectCommand,
   } = state
+  const installOpener = useRef<HTMLElement | null>(null)
   const createOpener = useRef<HTMLElement | null>(null)
   const sessionCopy = useSessionCopy()
   const preparedMachine = onlineMachines.find(machine => machine.server_id === agentServerId)
@@ -152,7 +153,7 @@ export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, c
 
 
     <Dialog open={installOpen} onOpenChange={setInstallOpen}>
-      <DialogContent className="max-w-xl" data-tour="add-machine-dialog">
+      <DialogContent className="max-w-xl" data-tour="add-machine-dialog" onOpenAutoFocus={() => { installOpener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null }} onCloseAutoFocus={event => { if (installOpener.current?.isConnected) { event.preventDefault(); installOpener.current.focus() } }}>
         <DialogHeader><DialogTitle>{t("dialogs.add_machine")}</DialogTitle><DialogDescription>{t("dialogs.install_treer_then_connect_this")}</DialogDescription></DialogHeader>
         <div className="space-y-4">
           <Field label={t("dialogs.operating_system")}><Select value={installPlatform} onValueChange={setInstallPlatform}><SelectTrigger aria-label={t("dialogs.installation_operating_system")}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="unix">{t("dialogs.linux_macos")}</SelectItem><SelectItem value="windows">{t("dialogs.windows_powershell")}</SelectItem></SelectContent></Select></Field>
