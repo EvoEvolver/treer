@@ -2,60 +2,14 @@ use std::io::Read;
 
 use crate::self_update::selection::{Inventory, Selected, SelectionLocks};
 use anyhow::{bail, Result};
-use serde::Deserialize;
 use treer_platform::private_directory::PrivateDirectory;
-use treer_protocol::{
-    controller_update as wire,
-    controller_update_runtime::{DispatchBinding, Inspection},
-};
+use treer_protocol::controller_update_runtime::{DispatchBinding, Inspection};
+
+pub(crate) use super::catalog::Catalog;
+use super::catalog::{platform, Entry, LIMIT};
 
 const NAME: &str = "controller-update-catalog.json";
-const LIMIT: u64 = 64 * 1024;
 
-/// Local operator authorization, not a publisher signature or browser choice.
-/// Same-release/downgrade overrides intentionally do not exist in this format.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Catalog {
-    #[serde(skip)]
-    digest: String,
-    schema_version: u8,
-    pub(crate) revision: u64,
-    pub(crate) accept_shared_binaries: bool,
-    pub(crate) entries: Vec<Entry>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Entry {
-    pub(crate) release_sequence: u64,
-    pub(crate) target: wire::Target,
-    pub(crate) sums_sha256: String,
-    #[serde(deserialize_with = "deserialize_url")]
-    pub(crate) artifact_base: url::Url,
-    pub(crate) allow_pinned: bool,
-    pub(crate) allow_artifact_origin: bool,
-}
-fn deserialize_url<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> std::result::Result<url::Url, D::Error> {
-    url::Url::parse(&String::deserialize(d)?)
-        .map_err(|_| serde::de::Error::custom("invalid artifact origin"))
-}
-fn hex(value: &str, size: usize) -> bool {
-    value.len() == size
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-fn platform() -> Result<wire::Platform> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => Ok(wire::Platform::LinuxX86_64),
-        ("linux", "aarch64") => Ok(wire::Platform::LinuxAarch64),
-        ("macos", "x86_64") => Ok(wire::Platform::DarwinX86_64),
-        ("macos", "aarch64") => Ok(wire::Platform::DarwinAarch64),
-        _ => bail!("controller_update_unsupported"),
-    }
-}
 impl Catalog {
     pub(crate) fn local() -> Result<Self> {
         let directory = crate::service::controller_update_config_directory()?;
@@ -66,51 +20,6 @@ impl Catalog {
             .take(LIMIT + 1)
             .read_to_end(&mut bytes)?;
         Self::parse(&bytes)
-    }
-    pub(crate) fn parse(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() as u64 > LIMIT {
-            bail!("controller_update_catalog_invalid");
-        }
-        let mut catalog: Self = serde_json::from_slice(bytes)?;
-        if catalog.schema_version != 1
-            || catalog.revision == 0
-            || catalog.revision >= 1 << 53
-            || catalog.entries.is_empty()
-            || catalog.entries.len() > wire::MAX_TARGETS + 1
-        {
-            bail!("controller_update_catalog_invalid");
-        }
-        let mut sequences = std::collections::HashSet::new();
-        let mut ids = std::collections::HashSet::new();
-        let mut identities = std::collections::HashSet::new();
-        for entry in &catalog.entries {
-            entry
-                .target
-                .validate()
-                .map_err(|_| anyhow::anyhow!("controller_update_catalog_invalid"))?;
-            let base = &entry.artifact_base;
-            if entry.target.platform != platform()?
-                || entry.release_sequence == 0
-                || entry.release_sequence >= 1 << 53
-                || !entry.allow_pinned
-                || !hex(&entry.sums_sha256, 64)
-                || base.scheme() != "https"
-                || base.host_str().is_none()
-                || !base.username().is_empty()
-                || base.password().is_some()
-                || base.query().is_some()
-                || base.fragment().is_some()
-                || !base.path().ends_with('/')
-                || !sequences.insert(entry.release_sequence)
-                || !ids.insert(&entry.target.target_id)
-                || !identities.insert(serde_json::to_string(&entry.target.identity)?)
-            {
-                bail!("controller_update_catalog_invalid");
-            }
-        }
-        use sha2::{Digest, Sha256};
-        catalog.digest = format!("{:x}", Sha256::digest(bytes));
-        Ok(catalog)
     }
     pub(crate) fn select(
         &self,
@@ -147,39 +56,11 @@ impl Catalog {
             .await?;
         Ok(entry)
     }
-    pub(crate) fn target<'a>(
-        &'a self,
-        binding: &DispatchBinding,
-        current: &Entry,
-    ) -> Result<&'a Entry> {
-        if !binding.validate()
-            || binding.catalog_revision != self.revision
-            || binding.current != current.target.identity
-            || binding.plan_digest != binding.expected_plan_digest()?
-        {
-            bail!("controller_update_preview_changed");
-        }
-        let entry = self
-            .entries
-            .iter()
-            .find(|entry| entry.target == binding.target)
-            .ok_or_else(|| anyhow::anyhow!("controller_update_target_unavailable"))?;
-        if entry.release_sequence <= current.release_sequence {
-            bail!("controller_update_target_not_upgrade");
-        }
-        Ok(entry)
-    }
-
     pub(crate) fn admission(
         &self,
         binding: &DispatchBinding,
     ) -> Result<crate::self_update::web_admission::Admission> {
-        let current = self
-            .entries
-            .iter()
-            .find(|entry| entry.target.identity == binding.current)
-            .ok_or_else(|| anyhow::anyhow!("controller_update_current_unknown"))?;
-        let target = self.target(binding, current)?;
+        let (current, target) = self.select_plan(binding)?;
         Ok(crate::self_update::web_admission::Admission {
             schema_version: 1,
             binding: binding.clone(),

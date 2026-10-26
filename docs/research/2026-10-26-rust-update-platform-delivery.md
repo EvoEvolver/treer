@@ -1631,6 +1631,46 @@ Only task-private inert reservations/state files were involved. This accepts
 point-in-time snapshot comparison, not freeze/CAS/absence fencing, state
 restoration, cross-process authority or original-owner release.
 
+## Shared local-catalog parsing and plan selection
+
+The existing Unix local-catalog parser and full plan matcher now live in
+`controller_update::catalog`. Windows x86_64 is an explicit supported parsing
+platform, selected from the compiled host OS/architecture, never from a document
+or caller override. Cross-platform entries refuse. The same strict 64 KiB
+schema, bounded unique sequences/target IDs/identities, explicit pin consent,
+HTTPS origin rules, complete raw-byte catalog digest and monotone target checks
+are retained. `select_plan` resolves both full current and target records from
+that catalog and checks the canonical confirmed plan digest. The existing Unix
+preparation and recheck still compare against the actually selected installed
+entry; `target` also refuses an Entry from another Catalog instance.
+
+This is input validation, not a new Windows catalog loader or updater entry.
+Unix alone still opens the local configured file, selects/locks an installation,
+authenticates current images and constructs journal admission. Windows normal
+authenticated dispatch, trusted file-root selection and signed physical inputs
+must be connected separately before a coordinator can use these parsed data.
+Neither a valid DispatchBinding nor catalog provenance grants caller Policy,
+runtime state/worker authority or original-owner release. No network requests,
+filesystem writes, image probes or lifecycle actions occur in the shared parser.
+Capability, runtime-derived snapshot/fence checks and unknown/no-replay custody
+are unchanged. The new `windows_update_catalog_` selector contains three portable
+controls for host/platform matching, full monotone plan matching and local
+schema/origin/raw-digest refusals. It requires no fixture directories or images.
+
+Author verification on macOS: all three new controls and the two affected
+existing Unix catalog tests passed (five total, zero failed/ignored, exit zero,
+508 filtered). Strict Server bins/tests Clippy with the existing acceptance
+feature, formatting, documentation and diff checks passed. No Windows run is
+claimed: the shared implementation contains no Win32/filesystem/process code;
+the Windows-specific default host selection remains unexecuted on the author
+machine. No previous native selector or platform matrix was rerun.
+One independent source-only review (#111:9692) accepted exact source
+`ab70af93ecf112fc68c8252d6fcabc5f820b5ceb` with no blocker and confirmed no new
+native job is needed for this data-only extraction. The normal main handoff
+adds only this review note to the frozen source. Windows trusted local-file
+loading and actual signed-pair/runtime admission remain the next source work;
+neither publisher readiness nor a leader push is a source dependency.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

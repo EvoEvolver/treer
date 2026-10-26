@@ -1,6 +1,8 @@
 //! Controller-owned #222 runtime. Browser requests carry only typed bindings;
 //! artifact origin, pins and shared-installation consent come from one checked
 //! local operator configuration, never Proxy command fields or environment.
+#[cfg_attr(not(unix), allow(dead_code))] // Windows coordinator remains unwired.
+mod catalog;
 #[cfg(unix)]
 pub(crate) mod unix;
 #[cfg(all(unix, feature = "native-update-acceptance"))]
