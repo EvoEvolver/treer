@@ -47,7 +47,13 @@ struct StoreFile {
 struct StoreState {
     entries: HashMap<String, StoredAgentStartup>,
     denied_agent_ids: BTreeSet<String>,
+    revision: u64,
+    update_unknown: bool,
 }
+
+#[cfg(any(windows, test))]
+#[path = "startup_store_update.rs"]
+pub(crate) mod update;
 
 #[derive(Clone)]
 pub struct StartupStore {
@@ -60,6 +66,19 @@ struct StartupStoreInner {
 }
 
 impl StartupStore {
+    fn write_state(&self) -> io::Result<std::sync::MutexGuard<'_, StoreState>> {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
+        if state.update_unknown {
+            return Err(io::Error::other(
+                "Agent startup update requires reconciliation",
+            ));
+        }
+        Ok(state)
+    }
     #[cfg(any(windows, test))]
     pub(crate) fn configured_path(&self) -> &Path {
         &self.inner.path
@@ -113,11 +132,7 @@ impl StartupStore {
     }
 
     pub fn upsert(&self, entry: StoredAgentStartup) -> io::Result<()> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
+        let mut state = self.write_state()?;
         if state.denied_agent_ids.contains(&entry.spec.agent_id) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -126,22 +141,16 @@ impl StartupStore {
         }
         let mut updated = state.clone();
         updated.entries.insert(entry.spec.agent_id.clone(), entry);
-        persist(&self.inner.path, &updated)?;
-        *state = updated;
+        commit(&self.inner.path, &mut state, updated)?;
         Ok(())
     }
 
     pub fn remove(&self, agent_id: &str) -> io::Result<bool> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
+        let mut state = self.write_state()?;
         let mut updated = state.clone();
         let removed = updated.entries.remove(agent_id).is_some();
         if removed {
-            persist(&self.inner.path, &updated)?;
-            *state = updated;
+            commit(&self.inner.path, &mut state, updated)?;
         }
         Ok(removed)
     }
@@ -149,11 +158,7 @@ impl StartupStore {
     /// A Proxy-confirmed deletion removes the declaration and fences delayed
     /// creates and retained Host inventory in the same durable transaction.
     pub fn remove_deleted(&self, agent_id: &str) -> io::Result<()> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
+        let mut state = self.write_state()?;
         if state.denied_agent_ids.contains(agent_id) && !state.entries.contains_key(agent_id) {
             return Ok(());
         }
@@ -165,8 +170,7 @@ impl StartupStore {
         let mut updated = state.clone();
         updated.entries.remove(agent_id);
         updated.denied_agent_ids.insert(agent_id.to_owned());
-        persist(&self.inner.path, &updated)?;
-        *state = updated;
+        commit(&self.inner.path, &mut state, updated)?;
         Ok(())
     }
 
@@ -175,11 +179,7 @@ impl StartupStore {
         agent_id: &str,
         mutate: impl FnOnce(&mut StoredAgentStartup),
     ) -> io::Result<()> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
+        let mut state = self.write_state()?;
         let mut updated = state.clone();
         if let Some(entry) = updated.entries.get_mut(agent_id) {
             mutate(entry);
@@ -189,8 +189,7 @@ impl StartupStore {
                     "Agent startup update cannot change identity",
                 ));
             }
-            persist(&self.inner.path, &updated)?;
-            *state = updated;
+            commit(&self.inner.path, &mut state, updated)?;
         }
         Ok(())
     }
@@ -199,11 +198,7 @@ impl StartupStore {
     /// runtime absence. Persist before acknowledging: delayed creates must fail
     /// even after Controller replacement. A clear/remove never removes this fence.
     pub fn deny_absent(&self, agent_id: &str) -> io::Result<()> {
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
+        let mut state = self.write_state()?;
         if state.entries.contains_key(agent_id) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -218,8 +213,7 @@ impl StartupStore {
         }
         let mut updated = state.clone();
         updated.denied_agent_ids.insert(agent_id.to_owned());
-        persist(&self.inner.path, &updated)?;
-        *state = updated;
+        commit(&self.inner.path, &mut state, updated)?;
         Ok(())
     }
 
@@ -266,7 +260,18 @@ fn read_store(path: &Path) -> io::Result<StoreState> {
     Ok(StoreState {
         entries,
         denied_agent_ids: store.denied_agent_ids,
+        ..Default::default()
     })
+}
+
+fn commit(path: &Path, state: &mut StoreState, mut updated: StoreState) -> io::Result<()> {
+    updated.revision = state
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("Agent startup revision exhausted"))?;
+    persist(path, &updated)?;
+    *state = updated;
+    Ok(())
 }
 
 fn persist(path: &Path, state: &StoreState) -> io::Result<()> {

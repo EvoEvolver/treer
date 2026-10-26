@@ -31,6 +31,8 @@ pub(crate) struct Coordinator {
     child: Option<ControllerUpdateChild>,
     channel: Option<Channel<NamedPipeServer>>,
     phase: Phase,
+    backup_prepared: bool,
+    startup_attempted: bool,
 }
 
 #[allow(dead_code)] // Public capability remains OFF until full transaction acceptance.
@@ -59,6 +61,46 @@ impl Coordinator {
             .prepare_backup(&permit)
             .await?;
         permit.check(*self.binding.operation_id.as_bytes())?;
+        self.require_live(selected)?;
+        self.backup_prepared = true;
+        self.phase = Phase::Holding;
+        Ok(())
+    }
+    /// One loaded-store CAS while the SAME explicitly authorised backup owner
+    /// remains Holding. No worker path reload, release, restart or retry.
+    pub(crate) async fn compare_write_startup(
+        &mut self,
+        selected: &ControllerRuntime,
+        replacement: Option<&[u8]>,
+    ) -> Result<()> {
+        self.scope(selected)?;
+        if self.phase != Phase::Holding || !self.backup_prepared || self.startup_attempted {
+            return Err(refused());
+        }
+        self.startup_attempted = true;
+        self.phase = Phase::Unknown;
+        self.require_live(selected)?;
+        self.trust.recheck()?;
+        let permit = self.child.as_ref().ok_or_else(refused)?.backup_permit(
+            selected,
+            &self.binding,
+            self.trust.verification_key(),
+        )?;
+        let expected = self
+            .channel
+            .as_ref()
+            .ok_or_else(refused)?
+            .startup()?
+            .clone();
+        let mut compare = permit.startup_compare(&expected)?;
+        let committed = compare.commit(replacement)?;
+        permit.check(*self.binding.operation_id.as_bytes())?;
+        self.channel
+            .as_mut()
+            .ok_or_else(refused)?
+            .accept_startup(&committed)
+            .await?;
+        committed.snapshot(*self.binding.operation_id.as_bytes())?;
         self.require_live(selected)?;
         self.phase = Phase::Holding;
         Ok(())
@@ -92,6 +134,8 @@ impl Coordinator {
             child: None,
             channel: None,
             phase: Phase::Prepared,
+            backup_prepared: false,
+            startup_attempted: false,
         })
     }
 

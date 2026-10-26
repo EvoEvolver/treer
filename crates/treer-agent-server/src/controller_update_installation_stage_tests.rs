@@ -7,6 +7,142 @@ use crate::{
 use ed25519_dalek::pkcs8::EncodePublicKey;
 use sha2::Digest;
 
+#[tokio::test]
+async fn windows_update_startup_cas_native_loaded_store_commit_continues_same_worker() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, false);
+    let path = root.join("configured-state/srv_fixture-agent-startup.json");
+    let original = std::fs::read(&path).unwrap();
+    let mut next: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    next["denied_agent_ids"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("ag_cas"));
+    let replacement = serde_json::to_vec(&next).unwrap();
+    let mut prepared = Preparation::local(
+        &runtime,
+        input.dispatch.clone(),
+        &input.settings,
+        &input.fixture.documents(),
+        (&input.bytes, &input.bytes),
+        &[],
+    )
+    .unwrap();
+    prepared
+        .start(&runtime, &input.fixture.documents())
+        .await
+        .unwrap();
+    prepared.prepare_worker_backup(&runtime).await.unwrap();
+    prepared
+        .compare_write_startup(&runtime, Some(&replacement))
+        .await
+        .unwrap();
+    // BOTH the original loaded Arc and the SAME worker now accept the new state.
+    assert!(runtime
+        .inner
+        .startup_store
+        .clone()
+        .is_denied("ag_cas")
+        .unwrap());
+    assert!(runtime.inner.startup_store.is_denied("ag_deleted").unwrap());
+    prepared.inspect(&runtime).await.unwrap();
+    held(&root, &input);
+    let backup = stage(&root, &input).join("worker-backup/startup.backup");
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(&backup)
+        .is_err());
+    prepared.close(&runtime).await.unwrap();
+    let custody = prepared.retain_closed(&runtime).unwrap();
+    assert!(prepared
+        .compare_write_startup(&runtime, Some(&original))
+        .await
+        .is_err());
+    assert_eq!(std::fs::read(&backup).unwrap(), original);
+    let disk: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(disk["version"], 2);
+    assert!(disk["denied_agent_ids"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("ag_cas")));
+    held(&root, &input);
+    drop(custody);
+    drop(prepared);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_startup_cas_native_fence_regression_concurrent_write_or_missing_grant_refused(
+) {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    for kind in 0..3 {
+        let catalog = UpdatePlanCatalogFixture::new();
+        let (runtime, root, task) = update_state_fixture().await;
+        let input = inputs(&root, &catalog, false);
+        let path = root.join("configured-state/srv_fixture-agent-startup.json");
+        let original = std::fs::read(&path).unwrap();
+        let mut prepared = Preparation::local(
+            &runtime,
+            input.dispatch.clone(),
+            &input.settings,
+            &input.fixture.documents(),
+            (&input.bytes, &input.bytes),
+            &[],
+        )
+        .unwrap();
+        prepared
+            .start(&runtime, &input.fixture.documents())
+            .await
+            .unwrap();
+        if kind != 2 {
+            prepared.prepare_worker_backup(&runtime).await.unwrap();
+        }
+        if kind == 1 {
+            runtime
+                .inner
+                .startup_store
+                .clone()
+                .deny_absent("ag_concurrent")
+                .unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let replacement = if kind == 0 {
+            br#"{"version":1,"entries":[]}"#.as_slice()
+        } else {
+            original.as_slice()
+        };
+        assert!(prepared
+            .compare_write_startup(&runtime, Some(replacement))
+            .await
+            .is_err());
+        assert!(prepared
+            .compare_write_startup(&runtime, Some(replacement))
+            .await
+            .is_err());
+        assert!(prepared.close(&runtime).await.is_err());
+        assert!(prepared.retain_closed(&runtime).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(runtime.inner.startup_store.is_denied("ag_deleted").unwrap());
+        if kind == 1 {
+            assert!(runtime
+                .inner
+                .startup_store
+                .is_denied("ag_concurrent")
+                .unwrap());
+        }
+        held(&root, &input);
+        drop(prepared);
+        drop(runtime);
+        task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+        drop(catalog);
+    }
+}
+
 struct Inputs {
     bytes: Vec<u8>,
     fixture: Fixture,

@@ -93,6 +93,29 @@ pub(super) fn prepare(
 }
 
 impl WorkerBackup {
+    pub(super) fn preserves_fences(&self, next: Option<&[u8]>) -> Result<()> {
+        #[derive(serde::Deserialize)]
+        struct Fences {
+            #[serde(default)]
+            denied_agent_ids: std::collections::BTreeSet<String>,
+        }
+        let fences = |raw: Option<&[u8]>| -> Result<std::collections::BTreeSet<String>> {
+            Ok(match raw {
+                Some(b) => serde_json::from_slice::<Fences>(b)?.denied_agent_ids,
+                None => Default::default(),
+            })
+        };
+        let mut original = Vec::new();
+        if let Some(mut file) = self.startup.as_ref() {
+            file.seek(SeekFrom::Start(0))?;
+            file.take(16 * 1024 * 1024 + 1).read_to_end(&mut original)?;
+        }
+        let old = fences(self.startup.as_ref().map(|_| original.as_slice()))?;
+        if !old.is_subset(&fences(next)?) {
+            return Err(refused());
+        }
+        Ok(())
+    }
     fn verify_bytes(&self, binding: &Binding, snapshot: &Option<Snapshot>) -> Result<()> {
         let (mut c, mut l) = self.backup.files();
         c.seek(SeekFrom::Start(0))?;

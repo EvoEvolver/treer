@@ -24,6 +24,10 @@ pub(crate) struct Channel<S> {
     sequence: u32,
     phase: Phase,
     backup_attempted: bool,
+    #[cfg(windows)]
+    startup: Option<Option<treer_protocol::controller_update_worker_inputs::Snapshot>>,
+    #[cfg(windows)]
+    startup_attempted: bool,
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -35,7 +39,53 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Channel<S> {
             sequence: 1,
             phase: Phase::Holding,
             backup_attempted: false,
+            #[cfg(windows)]
+            startup: None,
+            #[cfg(windows)]
+            startup_attempted: false,
         }
+    }
+    #[cfg(windows)]
+    pub(crate) fn with_startup(
+        mut self,
+        snapshot: Option<treer_protocol::controller_update_worker_inputs::Snapshot>,
+    ) -> Self {
+        self.startup = Some(snapshot);
+        self
+    }
+    #[cfg(windows)]
+    pub(crate) fn startup(
+        &self,
+    ) -> Result<&Option<treer_protocol::controller_update_worker_inputs::Snapshot>> {
+        if self.phase != Phase::Holding || !self.backup_attempted || self.startup_attempted {
+            return Err(refused());
+        }
+        self.startup.as_ref().ok_or_else(refused)
+    }
+    #[cfg(windows)]
+    pub(crate) async fn accept_startup(
+        &mut self,
+        committed: &crate::startup_store::update::Committed,
+    ) -> Result<()> {
+        let previous = self.startup()?.clone();
+        self.startup_attempted = true;
+        let next = committed.snapshot(self.context.operation)?.clone();
+        let payload = serde_json::to_vec(
+            &treer_protocol::controller_update_worker_inputs::StartupTransition {
+                previous,
+                next: next.clone(),
+            },
+        )?;
+        self.exchange_payload(
+            CustodyKind::StartupCommitted,
+            CustodyKind::StartupAccepted,
+            false,
+            Some(&payload),
+        )
+        .await?;
+        committed.snapshot(self.context.operation)?;
+        self.startup = Some(next);
+        Ok(())
     }
     /// Set Unknown before the first await: cancellation/error cannot repeat or
     /// close over a transport whose last request may already have been consumed.
@@ -86,6 +136,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Channel<S> {
         reply: CustodyKind,
         close: bool,
     ) -> Result<()> {
+        self.exchange_payload(request, reply, close, None).await
+    }
+    async fn exchange_payload(
+        &mut self,
+        request: CustodyKind,
+        reply: CustodyKind,
+        close: bool,
+        payload: Option<&[u8]>,
+    ) -> Result<()> {
         if self.phase != Phase::Holding {
             return Err(refused());
         }
@@ -98,6 +157,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Channel<S> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
         tokio::time::timeout_at(deadline, async {
             self.stream.write_all(&bytes).await.map_err(|_| refused())?;
+            if let Some(payload) = payload {
+                if payload.is_empty()
+                    || payload.len()
+                        > treer_protocol::controller_update_worker_inputs::STARTUP_TRANSITION_LIMIT
+                {
+                    return Err(refused());
+                }
+                self.stream
+                    .write_u32_le(payload.len() as u32)
+                    .await
+                    .map_err(|_| refused())?;
+                self.stream
+                    .write_all(payload)
+                    .await
+                    .map_err(|_| refused())?;
+            }
             let mut response = [0; CUSTODY_BYTES];
             self.stream
                 .read_exact(&mut response)
@@ -126,6 +201,70 @@ mod tests {
             operation: *uuid::Uuid::new_v4().as_bytes(),
             challenge: *uuid::Uuid::new_v4().as_bytes(),
             context_sha256: [3; 32],
+        }
+    }
+    #[tokio::test]
+    async fn windows_update_startup_cas_ordered_transition_and_wrong_reply_are_single_use() {
+        use treer_protocol::controller_update_worker_inputs::{
+            Snapshot, StartupTransition, STARTUP_TRANSITION_LIMIT,
+        };
+        for wrong_reply in [false, true] {
+            let context = context();
+            let payload = serde_json::to_vec(&StartupTransition {
+                previous: None,
+                next: Some(Snapshot {
+                    file_id: 7,
+                    size: 41,
+                    sha256: "c".repeat(64),
+                }),
+            })
+            .unwrap();
+            let (a, mut b) = tokio::io::duplex(1024);
+            let peer = tokio::spawn(async move {
+                let mut bytes = [0; CUSTODY_BYTES];
+                b.read_exact(&mut bytes).await.unwrap();
+                let frame = CustodyFrame::decode(&bytes, CustodyKind::StartupCommitted).unwrap();
+                assert_eq!(
+                    frame,
+                    CustodyFrame {
+                        context,
+                        sequence: 1
+                    }
+                );
+                let size = b.read_u32_le().await.unwrap() as usize;
+                assert!(size <= STARTUP_TRANSITION_LIMIT);
+                let mut body = vec![0; size];
+                b.read_exact(&mut body).await.unwrap();
+                let parsed: StartupTransition = serde_json::from_slice(&body).unwrap();
+                assert!(parsed.previous.is_none());
+                assert_eq!(parsed.next.unwrap().file_id, 7);
+                b.write_all(
+                    &frame
+                        .encode(if wrong_reply {
+                            CustodyKind::Inspected
+                        } else {
+                            CustodyKind::StartupAccepted
+                        })
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            });
+            let mut channel = Channel::new(a, context);
+            let result = channel
+                .exchange_payload(
+                    CustodyKind::StartupCommitted,
+                    CustodyKind::StartupAccepted,
+                    false,
+                    Some(&payload),
+                )
+                .await;
+            assert_eq!(result.is_err(), wrong_reply);
+            if wrong_reply {
+                assert!(channel.request(false).await.is_err());
+                assert!(channel.request(true).await.is_err());
+            }
+            peer.await.unwrap();
         }
     }
     #[tokio::test]

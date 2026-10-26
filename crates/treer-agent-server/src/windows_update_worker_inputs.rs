@@ -202,8 +202,9 @@ pub(crate) mod native {
         }
     }
 
-    /// Independent receiver custody. No conversion to ReservedInputs, mutation,
-    /// resume or release token exists; dropping it never proves an update.
+    /// Independent receiver custody. Only explicit same-session commands can
+    /// advance preparation; no conversion to ReservedInputs, resume or sender
+    /// release token exists. Dropping it never proves an update.
     #[allow(dead_code)]
     pub(crate) struct WorkerReceivedInputs {
         stream: CreationParentConnection,
@@ -213,17 +214,20 @@ pub(crate) mod native {
         state: BackupDirectory,
         binding: crate::windows_update_intent::Binding,
         snapshot: Option<Snapshot>,
+        current_snapshot: Option<Snapshot>,
         runtime_context_sha256: [u8; 32],
         snapshot_invalidated: bool,
         custody_context: WorkerBindingFrame,
         backup_attempted: bool,
+        startup_attempted: bool,
         backup: Option<super::backup_preparation::WorkerBackup>,
     }
 
     #[allow(dead_code)] // Internal continuation; production coordinator is not wired.
     impl WorkerReceivedInputs {
         /// Finite preparation session only. Keep all receiver guards while
-        /// serving exact ordered inspections; close is explicit and read-only.
+        /// serving ordered inspections and explicit preparation continuations;
+        /// close is explicit and grants no sender release.
         pub(crate) async fn serve_custody(mut self) -> Result<()> {
             use treer_protocol::controller_update_worker_inputs::{
                 CustodyFrame, CustodyKind, CUSTODY_BYTES, CUSTODY_MAX_STEPS,
@@ -236,23 +240,31 @@ pub(crate) mod native {
                         .read_exact(&mut bytes)
                         .await
                         .map_err(|_| refused())?;
-                    let (frame, reply, close, backup) = if let Some(frame) =
+                    let (frame, reply, close, backup, adopt) = if let Some(frame) =
                         CustodyFrame::decode(&bytes, CustodyKind::Inspect)
                     {
-                        (frame, CustodyKind::Inspected, false, false)
+                        (frame, CustodyKind::Inspected, false, false, false)
                     } else if let Some(frame) = CustodyFrame::decode(&bytes, CustodyKind::Close) {
-                        (frame, CustodyKind::Closed, true, false)
+                        (frame, CustodyKind::Closed, true, false, false)
                     } else if let Some(frame) =
                         CustodyFrame::decode(&bytes, CustodyKind::PrepareBackup)
                     {
-                        (frame, CustodyKind::BackupPrepared, false, true)
+                        (frame, CustodyKind::BackupPrepared, false, true, false)
+                    } else if let Some(frame) =
+                        CustodyFrame::decode(&bytes, CustodyKind::StartupCommitted)
+                    {
+                        (frame, CustodyKind::StartupAccepted, false, false, true)
                     } else {
                         return Err(refused());
                     };
                     if frame.context != self.custody_context || frame.sequence != sequence {
                         return Err(refused());
                     }
-                    self.inspect_snapshot()?;
+                    if adopt {
+                        self.accept_committed_startup().await?;
+                    } else {
+                        self.inspect_snapshot()?;
+                    }
                     if backup {
                         if self.backup_attempted {
                             return Err(refused());
@@ -294,7 +306,41 @@ pub(crate) mod native {
             .map_err(|_| refused())?
         }
 
-        /// Read-only point-in-time recheck against this custody's original raw
+        async fn accept_committed_startup(&mut self) -> Result<()> {
+            use treer_protocol::controller_update_worker_inputs::{
+                StartupTransition, STARTUP_TRANSITION_LIMIT,
+            };
+            if self.startup_attempted || self.backup.is_none() || !self.stream.creator_is_live()? {
+                return Err(refused());
+            }
+            self.startup_attempted = true;
+            let size = self.stream.read_u32_le().await.map_err(|_| refused())? as usize;
+            if size == 0 || size > STARTUP_TRANSITION_LIMIT {
+                return Err(refused());
+            }
+            let mut bytes = vec![0; size];
+            self.stream
+                .read_exact(&mut bytes)
+                .await
+                .map_err(|_| refused())?;
+            let transition: StartupTransition =
+                serde_json::from_slice(&bytes).map_err(|_| refused())?;
+            if transition.previous != self.current_snapshot {
+                return Err(refused());
+            }
+            let observed = self
+                .state
+                .startup_snapshot(&format!("{}-agent-startup.json", self.binding.server_id))?;
+            self.backup
+                .as_ref()
+                .ok_or_else(refused)?
+                .preserves_fences(observed.as_ref().map(|(_, b)| b.as_slice()))?;
+            check_snapshot(&transition.next, observed, &self.binding)?;
+            self.current_snapshot = transition.next;
+            self.inspect_snapshot()
+        }
+
+        /// Read-only point-in-time recheck against this custody's accepted raw
         /// snapshot, never a freeze, CAS, authorization or release permit. Any
         /// observation error permanently poisons this object, even if a later
         /// caller restores the old bytes. Custody itself remains held on error.
@@ -309,7 +355,7 @@ pub(crate) mod native {
                 let observed = self
                     .state
                     .startup_snapshot(&format!("{}-agent-startup.json", self.binding.server_id))?;
-                check_snapshot(&self.snapshot, observed, &self.binding)?;
+                check_snapshot(&self.current_snapshot, observed, &self.binding)?;
                 if let Some(backup) = &self.backup {
                     backup.inspect(&self.binding, &self.snapshot)?;
                 }
@@ -441,11 +487,13 @@ pub(crate) mod native {
                 target,
                 state,
                 binding,
+                current_snapshot: offer.state.snapshot.clone(),
                 snapshot: offer.state.snapshot,
                 runtime_context_sha256: offer.runtime_context_sha256,
                 snapshot_invalidated: false,
                 custody_context,
                 backup_attempted: false,
+                startup_attempted: false,
                 backup: None,
             })
         })

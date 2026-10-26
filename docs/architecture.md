@@ -247,9 +247,29 @@ replay. Sender pins/lease/claim remain held through success and failure.
 This backup-only mutation does not overwrite installed images or startup state,
 transfer lifetime across creator exit, authorize sender release, or reconnect a
 closed session. The finite public consumer still explicitly closes its read-only
-session; it does not silently request this new mutation. StartupStore CAS,
-durable transfer/outcome and the full publication/restart-health/rollback chain
+session; it does not silently request this new mutation. Durable transfer/outcome
+and the full publication/restart-health/rollback chain
 remain to be composed before any public Windows capability can be enabled.
+
+After explicit backup preparation, `Preparation::compare_write_startup` can
+continue that SAME Holding session. It obtains a non-wire one-operation token
+from the selected runtime's actual loaded `StartupStore` Arc. The same mutex
+used by normal Store writers covers revision/raw/physical snapshot comparison,
+scope and monotone denial-fence validation, the existing persistence routine,
+readback and memory commit without an await or unlock between them. Normal
+writes advance the instance revision, including logical ABA. A persistence or
+readback failure after potential effects fences further writes on that loaded
+instance; the operation remains unknown and cannot retry.
+
+The original connection then carries a bounded, sequenced old/new snapshot
+transition. The receiver checks its original backup fences and current pinned
+directory before accepting the new snapshot, retaining the original backup and
+all custody. The parent checks its committed revision again after acceptance.
+This synchronizes this loaded instance's writers, not arbitrary processes or
+separately loaded Stores, and does not freeze later writes. The worker never
+opens a new Store by path. ACK, snapshot acceptance and creator exit still grant
+no sender release, durable lifetime transfer or restart authority. See the
+[CAS boundary and validation](research/2026-10-26-windows-startup-cas.md).
 
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and

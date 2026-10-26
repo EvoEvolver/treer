@@ -112,6 +112,21 @@ impl ControllerRuntime {
 }
 
 impl ControllerUpdateState {
+    #[cfg(windows)]
+    pub(crate) fn startup_compare(
+        &self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+        expected: &Option<treer_protocol::controller_update_worker_inputs::Snapshot>,
+    ) -> Result<crate::startup_store::update::Compare> {
+        self.matches_selected(selected, binding)?;
+        Ok(self.runtime.inner.startup_store.update_compare(
+            self.operation_id,
+            &self.workspace_id,
+            &self.server_id,
+            expected,
+        )?)
+    }
     /// Internal creator-side request only; not a worker authorization or exposed
     /// coordinator. The creator may itself stop before receiving an ACK, so no
     /// transport result proves health/completion or permits automatic retry.
@@ -776,11 +791,12 @@ impl ControllerUpdateChild {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("windows_update_receiver_custody_missing"))?
             .worker_input_offer(selected, context, documents)?;
+        let snapshot = offer.state.snapshot.clone();
         let context =
             crate::windows_update_admission::worker_inputs::exchange_retained(&mut stream, offer)
                 .await?;
         self.matches(selected, binding)?;
-        Ok(crate::windows_update_custody::Channel::new(stream, context))
+        Ok(crate::windows_update_custody::Channel::new(stream, context).with_startup(snapshot))
     }
 
     /// Observe only the retained original Child after a successful binding ACK.

@@ -354,6 +354,21 @@ or configuration contents. Failed launch retains the newly saved specification.
   grant adds no installed-image/startup overwrite, cross-creator lifetime,
   independent child Policy, restart authority, or public capability.
 
+  A separate internal continuation after that explicit backup grant can perform
+  one synchronous compare/write on the selected runtime's actual loaded
+  StartupStore. Its non-wire token retains the same Arc, revision, operation and
+  original physical/raw snapshot. Normal writers and CAS share the same mutex
+  through fence validation, existing persistence, readback and memory commit.
+  Replacement entries must retain workspace/server scope and all existing v2
+  deletion/denial fences. Unknown persistence/readback fences normal writers on
+  that instance; neither reloading a path nor replaying a token reconciles it.
+  The same Holding worker independently checks the new physical/raw snapshot and
+  original backup fences before a sequenced acceptance. Both sender custody and
+  the old backup remain held. Acceptance is not a release or lifetime grant.
+  This is loaded-instance CAS, not OS-wide CAS, a freeze of later writers or
+  durable cross-creator recovery. The finite public consumer remains read-only
+  and public Windows capability remains OFF.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

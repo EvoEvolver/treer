@@ -22,7 +22,7 @@ pub struct StateLocation {
     pub snapshot: Option<Snapshot>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
     pub file_id: u64,
@@ -162,7 +162,19 @@ pub enum CustodyKind {
     /// Explicit original-creator command for private backup preparation ONLY.
     PrepareBackup,
     BackupPrepared,
+    /// Explicit acceptance of a loaded-store CAS on the SAME Holding session.
+    StartupCommitted,
+    StartupAccepted,
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartupTransition {
+    pub previous: Option<Snapshot>,
+    pub next: Option<Snapshot>,
+}
+
+pub const STARTUP_TRANSITION_LIMIT: usize = 512;
 
 pub const CUSTODY_BYTES: usize = WORKER_BINDING_FRAME_BYTES + 4;
 pub const CUSTODY_MAX_STEPS: u32 = 32;
@@ -187,6 +199,8 @@ impl CustodyFrame {
             CustodyKind::Closed => b"TRWCCA01",
             CustodyKind::PrepareBackup => b"TRWCBP01",
             CustodyKind::BackupPrepared => b"TRWCBA01",
+            CustodyKind::StartupCommitted => b"TRWCSC01",
+            CustodyKind::StartupAccepted => b"TRWCSA01",
         });
         bytes[WORKER_BINDING_FRAME_BYTES..].copy_from_slice(&self.sequence.to_le_bytes());
         Some(bytes)

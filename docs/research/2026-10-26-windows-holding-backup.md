@@ -75,3 +75,8 @@ selected Controller-only restart/health, whole-pair runtime rollback, durable
 outcome and safe claim retirement. Backup preparation alone supplies none of
 those contracts. No installed images, Host, live service, publisher or capability
 are operated by this change.
+
+The subsequent [loaded-instance CAS continuation](2026-10-26-windows-startup-cas.md)
+now composes synchronized Store compare/write and same-session snapshot
+acceptance. The backup-only acceptance above remains distinct; durable custody
+transfer/sender release and the remaining full transaction are still incomplete.

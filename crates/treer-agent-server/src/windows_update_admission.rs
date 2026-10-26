@@ -260,6 +260,17 @@ pub(crate) struct ConfirmedBackupPermit<'a> {
 
 #[cfg(windows)]
 impl ConfirmedBackupPermit<'_> {
+    pub(crate) fn startup_compare(
+        &self,
+        expected: &Option<treer_protocol::controller_update_worker_inputs::Snapshot>,
+    ) -> Result<crate::startup_store::update::Compare> {
+        self.check(*self.reserved.binding().operation_id.as_bytes())?;
+        self.reserved.controller_state()?.startup_compare(
+            self.selected,
+            self.reserved.binding(),
+            expected,
+        )
+    }
     pub(crate) fn check(&self, operation: [u8; 16]) -> Result<()> {
         if operation != *self.reserved.binding().operation_id.as_bytes() {
             bail!("windows_update_backup_permit_refused");
