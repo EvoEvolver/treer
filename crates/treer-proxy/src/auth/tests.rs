@@ -3257,7 +3257,7 @@ fn machine_route_is_limited_to_credential_workspace() {
 }
 
 #[tokio::test]
-async fn app_email_member_admission_delivery_idempotency_rates_and_body_free_audit() {
+async fn app_email_any_recipient_delivery_idempotency_rates_and_body_free_audit() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let captured = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -3279,49 +3279,51 @@ async fn app_email_member_admission_delivery_idempotency_rates_and_body_free_aud
         .execute(&store.pool).await.unwrap();
     sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES('org_email','u','member','now'),('org_email','unverified','member','now')").execute(&store.pool).await.unwrap();
     let mut request = treer_protocol::SendAppEmailRequest {
-        to: "member@example.test".into(),
+        to: "outside@external.test".into(),
         subject: "Test".into(),
         text: "PRIVATE BODY <script>bad()</script>".into(),
         idempotency_key: "first".into(),
     };
     let error = store
-        .send_app_email("email", "app-a", &request, "")
+        .send_app_email("email", "app-a", &request)
         .await
         .unwrap_err();
     assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(error.error.code, "email_not_configured");
-    request.to = "unverified@example.test".into();
-    assert_eq!(
-        store
-            .send_app_email("email", "app-a", &request, "")
-            .await
-            .unwrap_err()
-            .error
-            .code,
-        "email_recipient_denied"
-    );
     store.email_sender = Some(CloudflareEmailSender {
         client: reqwest::Client::new(),
         endpoint: Url::parse(&format!("http://{address}/send")).unwrap(),
         api_token: "fake-token".into(),
         from: "fixed@example.test".into(),
     });
-    request.to = "member@example.test".into();
     let first = store
-        .send_app_email("email", "app-a", &request, "")
+        .send_app_email("email", "app-a", &request)
         .await
         .unwrap();
     assert_eq!(first.status, "sent");
     assert_eq!(
         store
-            .send_app_email("email", "app-a", &request, "")
+            .send_app_email("email", "app-a", &request)
             .await
             .unwrap()
             .email_id,
         first.email_id
     );
     assert_eq!(captured.lock().await.len(), 1);
+    let mut conflict = request.clone();
+    conflict.text = "different content".into();
+    assert_eq!(
+        store
+            .send_app_email("email", "app-a", &conflict)
+            .await
+            .unwrap_err()
+            .error
+            .code,
+        "email_idempotency_conflict"
+    );
+    assert_eq!(captured.lock().await.len(), 1);
     let body = captured.lock().await[0].clone();
+    assert_eq!(body["to"], "outside@external.test");
     assert_eq!(body["from"], "fixed@example.test");
     assert!(body.get("reply_to").is_none());
     assert!(body["html"].as_str().unwrap().contains("&lt;script&gt;"));
@@ -3331,45 +3333,54 @@ async fn app_email_member_admission_delivery_idempotency_rates_and_body_free_aud
         .unwrap();
     let audit = serde_json::to_string(&audit).unwrap();
     assert!(!audit.contains("PRIVATE"));
-    assert!(!audit.contains("member@example.test"));
+    assert!(!audit.contains("outside@external.test"));
     assert!(!audit.contains("fake-token"));
     for i in 0..4 {
         request.idempotency_key = format!("next-{i}");
         store
-            .send_app_email("email", "app-a", &request, "")
+            .send_app_email("email", "app-a", &request)
             .await
             .unwrap();
     }
     request.idempotency_key = "limited".into();
     assert_eq!(
         store
-            .send_app_email("email", "app-b", &request, "")
+            .send_app_email("email", "app-b", &request)
             .await
             .unwrap_err()
             .status,
         StatusCode::TOO_MANY_REQUESTS
     );
-    request.to = "outside@allowed.test".into();
-    request.idempotency_key = "allowlisted".into();
+    // An unverified member is also a legal recipient; membership/verification
+    // must not decide outbound admission.
+    request.to = "unverified@example.test".into();
+    request.idempotency_key = "unverified".into();
     assert!(store
-        .send_app_email("email", "app-a", &request, "@allowed.test")
+        .send_app_email("email", "app-a", &request)
         .await
         .is_ok());
-    request.to = "outside@evil.test".into();
+    assert_eq!(
+        captured.lock().await.last().unwrap()["to"],
+        "unverified@example.test"
+    );
+    request.to = "malformed@@external.test".into();
+    request.idempotency_key = "malformed".into();
+    let attempts_before = captured.lock().await.len();
     assert_eq!(
         store
-            .send_app_email("email", "app-a", &request, "@allowed.test")
+            .send_app_email("email", "app-a", &request)
             .await
             .unwrap_err()
             .error
             .code,
-        "email_recipient_denied"
+        "email_invalid"
     );
+    assert_eq!(captured.lock().await.len(), attempts_before);
     for i in 0..14 {
         request.to = format!("p{i}@allowed.test");
         request.idempotency_key = format!("app-limit-{i}");
         store
-            .send_app_email("email", "app-a", &request, "@allowed.test")
+            .send_app_email("email", "app-a", &request)
             .await
             .unwrap();
     }
@@ -3377,7 +3388,7 @@ async fn app_email_member_admission_delivery_idempotency_rates_and_body_free_aud
     request.idempotency_key = "app-limited".into();
     assert_eq!(
         store
-            .send_app_email("email", "app-a", &request, "@allowed.test")
+            .send_app_email("email", "app-a", &request)
             .await
             .unwrap_err()
             .status,
@@ -3386,7 +3397,7 @@ async fn app_email_member_admission_delivery_idempotency_rates_and_body_free_aud
     request.subject = "injected\r\nBcc: other".into();
     assert_eq!(
         store
-            .send_app_email("email", "app-a", &request, "@allowed.test")
+            .send_app_email("email", "app-a", &request)
             .await
             .unwrap_err()
             .error
@@ -3422,10 +3433,7 @@ async fn app_email_provider_failure_is_sanitized_and_retryable() {
         idempotency_key: "k".into(),
     };
     for _ in 0..2 {
-        let error = store
-            .send_app_email("email", "app", &r, "allowed@example.test")
-            .await
-            .unwrap_err();
+        let error = store.send_app_email("email", "app", &r).await.unwrap_err();
         assert_eq!(error.error.code, "email_delivery_failed");
         assert!(!error.error.message.contains("SECRET"));
     }

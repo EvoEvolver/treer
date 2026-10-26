@@ -5810,6 +5810,23 @@ async fn app_email_requires_owned_managed_app_identity_and_policy() {
         header::AUTHORIZATION,
         HeaderValue::from_str(&format!("Bearer {}", token.access_token)).unwrap(),
     );
+    // A legitimate Managed App with permission reaches sender configuration
+    // even for a non-member recipient. Missing credentials above still fail.
+    assert_eq!(
+        send_app_email(
+            Extension(auth.clone()),
+            Extension(identity.clone()),
+            Extension(PolicyEngine::allow_all()),
+            Path(app.service_id.clone()),
+            headers.clone(),
+            Json(request.clone())
+        )
+        .await
+        .unwrap_err()
+        .error
+        .code,
+        "email_not_configured"
+    );
     let policy_store = WorkspacePolicyStore::new(auth.pool());
     policy_store
         .replace(

@@ -15,28 +15,12 @@ fn valid_address(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b".!#$%&'*+-/=?^_`{|}~@".contains(&b))
 }
 
-pub(crate) fn email_allowlisted(address: &str, allowlist: &str) -> bool {
-    let domain = address.rsplit_once('@').map(|(_, d)| d).unwrap_or("");
-    allowlist
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .any(|entry| {
-            if let Some(allowed_domain) = entry.strip_prefix('@') {
-                domain.eq_ignore_ascii_case(allowed_domain)
-            } else {
-                address.eq_ignore_ascii_case(entry)
-            }
-        })
-}
-
 impl AuthStore {
     pub(crate) async fn send_app_email(
         &self,
         workspace: &str,
         app: &str,
         request: &SendAppEmailRequest,
-        allowlist: &str,
     ) -> Result<SendAppEmailResponse, ApiFailure> {
         let to = request.to.to_ascii_lowercase();
         if !valid_address(&to)
@@ -51,15 +35,6 @@ impl AuthStore {
             return Err(ApiFailure::bad_request(
                 "email_invalid",
                 "invalid email fields (subject 1-200 bytes, text 1-4096 bytes, key 1-128 bytes)",
-            ));
-        }
-        let member: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM workspaces w JOIN organization_members m ON m.organization_id=w.organization_id JOIN users u ON u.id=m.user_id WHERE w.workspace_id=$1 AND lower(u.email)=$2 AND u.email_verified=TRUE)")
-            .bind(workspace).bind(&to).fetch_one(&self.pool).await
-            .map_err(|_| ApiFailure::internal("email_storage_failed", "email storage unavailable"))?;
-        if !member && !email_allowlisted(&to, allowlist) {
-            return Err(ApiFailure::forbidden(
-                "email_recipient_denied",
-                "recipient is not a verified organization member or allowlisted",
             ));
         }
         let sender = self.email_sender.as_ref().ok_or_else(|| {
@@ -176,11 +151,10 @@ fn email_storage(_: sqlx::Error) -> ApiFailure {
 mod tests {
     use super::*;
     #[test]
-    fn strict_allowlist() {
-        assert!(email_allowlisted("a@example.com", "@example.com"));
-        assert!(email_allowlisted("a@example.com", "A@EXAMPLE.COM"));
-        assert!(!email_allowlisted("a@sub.example.com", "@example.com"));
-        assert!(!email_allowlisted("a@evil-example.com", "@example.com"));
+    fn strict_address_and_request_fields() {
+        assert!(valid_address("outside+tag@example.test"));
+        assert!(!valid_address("missing-at"));
+        assert!(!valid_address("a@@example.test"));
         assert!(!valid_address("a@example.com\r\nBcc:b@evil.com"));
         assert!(serde_json::from_value::<SendAppEmailRequest>(json!({
             "to":"a@example.test", "subject":"test", "text":"text",

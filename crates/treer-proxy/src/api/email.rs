@@ -45,14 +45,9 @@ pub(super) async fn send_app_email(
             PolicyResource::new(RESOURCE_MACHINE_SERVICE, &service_id),
         )
         .await?;
-        auth.send_app_email(
-            &claims.workspace_id,
-            &app.app_id,
-            &request,
-            &std::env::var("TREER_EMAIL_ALLOWLIST").unwrap_or_default(),
-        )
-        .await
-        .map(Json)
+        auth.send_app_email(&claims.workspace_id, &app.app_id, &request)
+            .await
+            .map(Json)
     }
     .await;
     let outcome = match &result {

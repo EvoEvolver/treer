@@ -2306,11 +2306,10 @@ adapter tests are focused, opt-in checks; while iterating on messaging, use
 `POST /api/apps/{service_id}/email` reuses the Cloudflare sender configured for
 registration/recovery. Configure `CLOUDFLARE_API_TOKEN`, the existing Cloudflare
 account configuration, and `TREER_EMAIL_FROM` on the Proxy only. Do not give an
-App these credentials. `TREER_EMAIL_ALLOWLIST` is a comma-separated list of
-exact addresses and `@domain.example` entries (exact domains, no subdomain
-matching). Without an allowlist, only verified organization-member addresses
-are admitted. `email.send` is evaluated for the Managed App's runtime Agent
-against its owned `machine.service`; ordinary Agents and human tokens cannot
+App these credentials. Any syntactically valid recipient email address is
+accepted, including non-member and unverified addresses. No recipient allowlist
+or organization membership is required. `email.send` is evaluated for the
+Managed App's runtime Agent against its owned `machine.service`; ordinary Agents and human tokens cannot
 use this route. No SMTP configuration is required.
 
 The Cloudflare token needs `Email Sending: Edit`, and the sender domain must be
@@ -2321,7 +2320,7 @@ failure. Do not expose the token or send another email merely to check them.
 Request JSON contains only `to`, `subject` (1–200 bytes, no controls), `text`
 (1–4096 bytes), and `idempotency_key` (1–128 bytes). No caller HTML, From or
 Reply-To is accepted. Success returns `email_id` and `status=sent`. Errors include
-`email_not_configured` (503), `email_recipient_denied` (403), `email_rate_limited`
+`email_not_configured` (503), `email_invalid` (400), `email_rate_limited`
 (429), `email_delivery_failed` (502), and `email_in_progress` (503). Each workspace
 limits App attempts to 20/hour and recipient attempts to 5/hour. Failed attempts
 consume limits; identical completed sends return the original result after

@@ -1652,8 +1652,9 @@ human tokens and unrelated Agents cannot use it. Workspace Policy evaluates
 Deployment Policy must explicitly govern this action; permissive/audit modes
 retain their ordinary semantics.
 
-Recipients must have verified email in the workspace's organization or match
-the operator's `TREER_EMAIL_ALLOWLIST`. This is permission to send email, not
+Any syntactically valid recipient email address is admitted, including addresses
+outside the workspace's organization. No recipient allowlist is required or
+consulted. This is permission to send email, not
 permission to read Core Messages. Fixed hourly limits are 20 attempts per App
 and 5 per recipient per workspace, shared across Proxy replicas and restarts.
 Subject is at most 200 bytes and plain text at most 4096 bytes. Caller HTML,
