@@ -1295,10 +1295,10 @@ runtime/operation/Policy authority or transfer the parent's update reservation.
 
 Author verification is Windows-target platform lib+tests type checking and
 strict Clippy on Mac (`x86_64-pc-windows-gnu`), plus formatting/docs/diff checks,
-not native execution. The Windows Server consumer still requires its native
-bin type check because the returned transport now retains process custody.
+not native execution. The Windows Server consumer's native bin type check is
+recorded below because the returned transport now retains process custody.
 New PLATFORM LIB selector `windows_update_creator_custody_`
-has exactly two native controls, currently NOT_RUN: actual child-side creator
+has exactly two native controls: actual child-side creator
 connection retains identity and async I/O after stdin replacement, and the
 retained-handle wait refuses a live process at deadline then observes a separate
 task-owned original Child's natural exit259. The first also checks pipe closes
@@ -1307,6 +1307,19 @@ not an integration proof that a worker outlived its real creator or an enclosing
 Job. No admitted/installed image is executed. Original creator exit integration,
 cross-creator pins/lease/claim custody, Job survival, authorization transfer,
 health and full transaction remain separate work. No live Host or cap changes.
+
+Sole run `40341470720` checked exact source
+`1b0a70d52424b4c0d71de839b9a6e625462d9c47`, wrapper
+`68d16bef1bcc2ddaf732a8316d7e8989a33f64bc`, on Windows2022/Rust1.90,
+Fixed NTFS image `20261022.344.1`. Server bin check exited zero, then both
+platform controls actually passed, zero failed/ignored/test exit zero (20
+filtered). Core independently checked both commands/exits, exact test names,
+logs/platform and empty task TEMP cleanup; the wrapper removed the empty root.
+Safe evidence is at
+`.treer/reviews/core111-windows-creator-custody-1b0a70d5/artifact/`;
+`RESULT.json` SHA256 is
+`6ddda5f971c585313b20f473b0a11acf79b5055cba430dbeca86b266558e88c3`.
+No feature, extra binary build, old selectors/matrix or live process was used.
 
 ## Remaining ordered leaves and waiting boundaries
 
