@@ -268,13 +268,63 @@ root removed. Result SHA256:
 Acceptance remains limited to process-exit claim retention and refusal, not
 power loss, a real worker, safe claim retirement or a complete update engine.
 
+## Verified Windows old-image backups
+
+The next source increment consumes `ReservedInputs` to copy only the observed
+old Controller and CLI images from their already-held no-write/no-delete-sharing
+handles. Each stream seeks to zero, is bounded to 128 MiB and must match its
+reserved old-image SHA256. The destination is an existing private physical
+fixed-NTFS directory on the installation volume, distinct from both installed
+and target directories. Fixed `controller.backup` and `cli.backup` names use
+exclusive private creation; existing evidence or image names are never adopted
+or overwritten. A second-file failure may leave a partial first file, which is
+retained along with the installation claim, never cleaned up for a retry.
+
+After both writes, the platform flushes the files and uses reduced-access
+`DuplicateHandle` copies of the same file objects. It drops the writable handles
+without any path reopen or sharing gap. The returned backup handles have read
+access only and retain the original exclusive sharing. Core independently
+hashes these held backup bytes before publishing `backup.evidence`: a strict
+bounded record containing only `images_backed_up`, the full reserved binding,
+physical backup directory/file IDs and sizes. Exact readback is required.
+`BackedUpInputs` keeps installation lease, all source pins and backup pins;
+read-only inspection rechecks bytes and evidence. There is no generic phase
+setter, recovery/adoption, install replacement, rollback-success or health API.
+
+This records old-image copies, not an authenticated old publisher, startup-store
+backup, power-loss durability, running-process identity or rollback success.
+Startup backup, actual pair publication/rollback, safe claim retirement and
+worker/health remain missing. No production entry or capability is enabled.
+Two portable copy controls cover full bytes/digest/bounds and read/write refusal;
+two native controls cover copied bytes/physical binding/held access/readonly
+duplicate rights, plus alias, weak ACL and partial destination refusal.
+The two portable controls passed on the author Mac, as did platform Windows GNU
+and Linux GNU all-target strict Clippy. Controller macOS all-target strict
+Clippy, formatting, documentation and diff checks also passed. The focused entry is:
+`cargo test --locked -p treer-agent-server --bin treer-agent-server
+windows_update_backup_ -- --nocapture` (four passed, none failed/ignored, exit
+zero and independent TEMP cleanup). No old native leaf or publication matrix
+needs another run for this boundary.
+
+Release executed that entry once in `40293422724`, exact source
+`275c779010858f91d64e51e8593f66f9a9743ced` and wrapper
+`9b2d5e911a40658d08698cd77455859d4ce62be9`. Windows Server 2022/Rust 1.90,
+fixed NTFS image `20261022.344.1` produced four passed, zero failed/ignored and
+exit zero. This includes actual reduced-access duplicate write refusal and
+sharing exclusion. Core independently checked all four named log entries,
+platform and result. TEMP remaining entries were empty, cleanup proven and the
+empty root removed. Result SHA256:
+`4b9e8c988d31775840479513703b6a9999453e27a8f97b8bc70cc6a22bdca7b3`.
+This establishes old-image backup evidence only; startup backup, durability,
+pair replacement, rollback, worker/health and retirement remain outside scope.
+
 ## Remaining ordered leaves and waiting boundaries
 
-1. Native NTFS store, single-use intent, signed pinned-input admission and lease
-   and install-wide claim acceptance are complete within their stated scopes. Next
-   add phase-specific evidence for actual image
-   publication, never a generic setter that could manufacture completion.
-2. Implement Windows verified Controller/CLI image backup and two-rename
+1. Native NTFS store, single-use intent, signed pinned-input admission, lease,
+   install-wide claim and verified-image backup acceptance are complete within
+   their stated scopes. Next add startup-store backup and evidence bound to
+   actual publication, never a generic completion setter.
+2. Implement Windows Controller/CLI two-rename
    publication with locked-image refusal and whole-pair rollback. Never treat
    restoring files alone as successful rollback.
 3. Implement Windows original-worker ownership/Job escape and Host-owned

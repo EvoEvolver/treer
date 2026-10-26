@@ -300,6 +300,25 @@ pub(super) fn create_private_update_file(path: &Path) -> io::Result<std::fs::Fil
     }
 }
 
+/// Reduce access on the same file object without a path reopen or sharing gap.
+/// The exclusive sharing mode survives in the duplicate; callers cannot write
+/// through the returned handle. Never inherit it into a child process.
+pub(super) fn readonly_update_file(file: std::fs::File) -> io::Result<std::fs::File> {
+    let mut handle = ptr::null_mut();
+    unsafe {
+        checked(DuplicateHandle(
+            GetCurrentProcess(),
+            file.as_raw_handle(),
+            GetCurrentProcess(),
+            &mut handle,
+            windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ,
+            0,
+            0,
+        ))?;
+        Ok(std::fs::File::from_raw_handle(handle))
+    }
+}
+
 /// This record backend is deliberately local NTFS-only. Network/FAT/ReFS are
 /// not admitted merely because an individual file write happened to succeed.
 pub(super) fn require_update_ntfs(path: &Path) -> io::Result<()> {
