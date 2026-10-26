@@ -140,6 +140,23 @@ permanently invalidates the observation on any change/error; normal StartupStore
 writes remain possible. These are in-process source seams, not worker IPC,
 startup-write CAS, state restoration or lifecycle authority transfer.
 
+The separate child-side input receiver now accepts one bounded offer on the
+original creator pipe. The creator mints it from its confirmed local plan,
+selected loaded runtime, reserved four held images and raw startup snapshot;
+caller paths cannot replace that source. Shared protocol models carry only
+locator/identity observations, public signed metadata and startup raw digest,
+never the raw credential-bearing startup store or a trust key. The child
+retains the inherited lock, independently opens exact physical pairs/state root,
+verifies both signatures using an independently supplied trusted key, hashes
+all four complete files and checks the startup snapshot including denial fences.
+Only then does it send the distinct input-received receipt bound to the whole
+offer and fresh challenge, returning owned receiver handles and scope evidence.
+The creator keeps its original reservation after receipt or child exit. There
+is no release token, publication, restart, recovery or readiness conversion.
+The new receiver is not wired to the production private argv entry; that entry
+still only performs the legacy terminal ACK. Isolated separate-process helper
+acceptance cannot stand in for signed-image worker/Job survival or full updates.
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

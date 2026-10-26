@@ -1802,6 +1802,86 @@ The original portable controls and four functional PASS results are reused;
 the original failed job and unknown residue creator are unchanged. No new source
 review layer, prior selector, matrix, installed image or live service was used.
 
+## Child-side whole-input reception and explicit received receipt
+
+The next finite boundary uses the original creator/Child pipe for one bounded
+input offer, with a distinct receipt rather than the terminal bootstrap ACK.
+The selected creator mints paths and complete physical identities only from its
+retained confirmed-plan reservation and loaded runtime state. It rereads the
+fixed catalog and verifies signed inputs again before minting; a supplied wire
+value cannot construct that source authority. A fresh challenge and retained
+runtime-context digest accompany the offer. Normal identity/Policy and correct
+installation selection remain prerequisites, not properties of serialized data.
+
+Worker-side reception retains the actual inherited lock, independently opens
+both image pairs and the private physical state directory, authenticates channel
+and manifest with a separately supplied trusted key, seeks/hashes all four held
+files in full, then compares the actual startup snapshot's inode/raw digest and
+real v1/v2 denial fences with the sender observation. No raw startup credentials
+or trusted key travel in the offer. Paths, IDs and opaque runtime digest remain
+creator-derived observations; this does not independently prove the child has
+normal runtime authorization. A caller that can control the creator account is
+not isolated by this protocol.
+
+Only completed checks permit `TRWIRX01`, a receipt covering operation, challenge
+and SHA-256 of the complete bounded offer. A three-second total deadline is
+checked after synchronous verification and before/after receipt transmission.
+There is no generic follow-up command parser or automatic reconnect. Creator
+exchanges consume the existing pre-await handshake latch and transport; error,
+timeout, cancellation or a lost receipt cannot retry or downgrade to legacy ACK.
+Success deliberately does not set readiness/completion authority. The returned
+worker custody owns independent ancestor/image/state pins, lock reference,
+creator connection and exact input/snapshot scope. The sender still owns its
+original reservation after receipt and even natural child exit; there is no
+release, claim retirement, publication, rollback or restart conversion.
+
+This is a child-side implementation, not a production worker argv/coordinator
+activation: the existing terminal entry is unchanged. The new focused native
+controls execute this receiver in a real separate task-owned testexe helper,
+using synthetic test-only signatures and no admitted/installed image execution.
+They cover signed input/state receipt while sender pins/lease/claim remain,
+foreign scope before consumption, refusal of signature/physical ID/state digest/
+whole-image expectation/key tampering, and no retry after failed receive.
+The same task-only LOCALAPPDATA/marker fixture discipline is required as for
+confirmed-plan admission. Compile in the normal runner environment first and
+scope those variables only to direct testexe execution, preventing compiler
+tools from sharing the test cleanup root. No older native leaf or platform
+matrix is repeated.
+
+Author verification: the new Protocol wire-role/bounds control passed (one,
+zero failed/ignored, 85 filtered), as did the new Server portable exact-receipt/
+partial-header/cancellation control (one, zero failed/ignored, 515 filtered).
+Strict macOS Server bins/tests with the existing acceptance feature and Protocol
+Clippy passed. Strict Platform all-target Clippy passed for Windows GNU and
+Linux GNU, compiling the two path-observation accessors without running old
+native tests. Formatting, docs and diff checks passed. The Server graph needs
+the Release Windows runner for native compilation/execution. No Host or
+installed process ran.
+
+One independent source review accepted exact `c17b4ef8` within this scope
+(#111:9744). The three-second budget rejects late success after synchronous
+verification; it cannot forcibly interrupt a blocking OS file read. Receipt
+transmission is not durable acceptance or proof of continuing child survival:
+a later write error or child exit can still leave the creator with a received
+receipt. Keeping the original sender reservation is therefore mandatory. No
+review finding required a source change or another review layer.
+
+The sole native run `40377432400` accepted exact `c17b4ef8` with wrapper
+`e4ea1361` (#111:9747). Windows 2022/Rust 1.90, fixed NTFS image
+`20261022.344.1`: normal-environment Server test compilation exited zero and
+selected one exact local package/bin/test artifact, 41,396,736 bytes. Direct
+isolated execution passed exactly three tests (portable1/native2), zero
+failed/ignored, 319 filtered, test exit zero. Binary SHA-256 before and after
+was `10aacaf0bf916c727d10f790a6faba3dff12ac5d35c53b7906f4062f45933990`.
+The temporary inventory was empty, cleanup was proven, and the empty root was
+removed. Core independently checked RESULT, platform and all test names; RESULT
+SHA-256 was `57f7e5b28f9e4d813cf231f69cd0b22e6b257badea72c4ae6511b524aee220c2`.
+Receipts remain under the ignored
+`.treer/reviews/core111-windows-worker-receive-c17b4ef8/actual/` directory.
+These controls used a separate task-owned testexe helper; they did not run an
+admitted image or production worker entry, confer lifecycle authority, or
+exercise restart health, Job survival or the complete updater.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

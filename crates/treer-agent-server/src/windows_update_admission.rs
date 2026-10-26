@@ -485,5 +485,8 @@ pub use backup::{BackedUpInputs, FilePairPhase, PublishedInputs, StartupBackedUp
 #[path = "windows_update_receiver_state.rs"]
 mod receiver_state;
 
+#[path = "windows_update_worker_inputs.rs"]
+pub(crate) mod worker_inputs;
+
 #[path = "windows_update_confirmed.rs"]
 mod confirmed;

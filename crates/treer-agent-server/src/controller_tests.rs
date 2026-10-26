@@ -1,6 +1,10 @@
 use super::*;
 
 #[cfg(windows)]
+#[path = "controller_update_worker_receive_tests.rs"]
+mod worker_receive;
+
+#[cfg(windows)]
 static UPDATE_PLAN_CONFIG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[cfg(windows)]

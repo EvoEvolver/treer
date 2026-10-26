@@ -1,0 +1,177 @@
+//! Bounded receiver input observations. Neither paths, IDs, signatures nor a
+//! received receipt authorize an update or release of original sender custody.
+use serde::{Deserialize, Serialize};
+
+use crate::{controller_update_runtime::DispatchBinding, controller_update_worker::*};
+
+pub const INPUT_HEADER_BYTES: usize = 12;
+pub const INPUT_LIMIT: usize = 512 * 1024;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairLocation {
+    pub directory: String,
+    pub identities: [(u64, u64); 3],
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateLocation {
+    pub directory: String,
+    pub identity: (u64, u64),
+    pub snapshot: Option<Snapshot>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
+    pub file_id: u64,
+    pub size: u64,
+    pub sha256: String,
+}
+
+/// Only a retained selected-runtime sender may mint the trusted offer. A
+/// deserialized value is still data: receiver trust and policy are separate.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputOffer {
+    pub schema_version: u32,
+    pub operation: [u8; 16],
+    pub challenge: [u8; 16],
+    pub runtime_context_sha256: [u8; 32],
+    pub dispatch: DispatchBinding,
+    pub signed_manifest_sha256: String,
+    pub lock: (u64, u64),
+    pub installed: PairLocation,
+    pub target: PairLocation,
+    pub state: StateLocation,
+    pub channel_name: String,
+    pub channel: Vec<u8>,
+    pub channel_signature: Vec<u8>,
+    pub manifest: Vec<u8>,
+    pub manifest_signature: Vec<u8>,
+}
+
+impl InputOffer {
+    pub fn valid_shape(&self) -> bool {
+        let hash = |s: &str| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        let path = |s: &str| !s.is_empty() && s.len() <= 32768 && !s.contains('\0');
+        self.schema_version == 1
+            && WorkerBindingFrame {
+                operation: self.operation,
+                context_sha256: self.runtime_context_sha256,
+                challenge: self.challenge,
+            }
+            .encode(WorkerBindingKind::Request)
+            .is_some()
+            && self.dispatch.validate()
+            && hash(&self.signed_manifest_sha256)
+            && self.lock.1 != 0
+            && [&self.installed, &self.target].iter().all(|p| {
+                path(&p.directory)
+                    && p.identities
+                        .iter()
+                        .all(|id| id.1 != 0 && id.0 == self.lock.0)
+            })
+            && path(&self.state.directory)
+            && self.state.identity.1 != 0
+            && self.state.identity.0 == self.lock.0
+            && self.state.snapshot.as_ref().is_none_or(|s| {
+                s.file_id != 0 && s.size > 0 && s.size <= 16 * 1024 * 1024 && hash(&s.sha256)
+            })
+            && !self.channel_name.is_empty()
+            && self.channel_name.len() <= 32
+            && !self.channel.is_empty()
+            && self.channel.len() <= 64 * 1024
+            && !self.manifest.is_empty()
+            && self.manifest.len() <= 128 * 1024
+            && [&self.channel_signature, &self.manifest_signature]
+                .iter()
+                .all(|s| !s.is_empty() && s.len() <= 2048)
+    }
+
+    pub fn encode(&self) -> Option<Vec<u8>> {
+        if !self.valid_shape() {
+            return None;
+        }
+        let body = serde_json::to_vec(self).ok()?;
+        if body.is_empty() || body.len() > INPUT_LIMIT {
+            return None;
+        }
+        let mut bytes = b"TRWIRF01".to_vec();
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend(body);
+        Some(bytes)
+    }
+
+    pub fn body_length(header: &[u8; INPUT_HEADER_BYTES]) -> Option<usize> {
+        if &header[..8] != b"TRWIRF01" {
+            return None;
+        }
+        let size = u32::from_le_bytes(header[8..12].try_into().ok()?) as usize;
+        (size > 0 && size <= INPUT_LIMIT).then_some(size)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let header = bytes.get(..INPUT_HEADER_BYTES)?.try_into().ok()?;
+        let size = Self::body_length(header)?;
+        if bytes.len() != INPUT_HEADER_BYTES + size {
+            return None;
+        }
+        let offer: Self = serde_json::from_slice(&bytes[INPUT_HEADER_BYTES..]).ok()?;
+        offer.valid_shape().then_some(offer)
+    }
+}
+
+/// Receipt of independently verified inputs, deliberately a distinct wire role
+/// from bootstrap ACK. It conveys no permission to release sender pins.
+pub struct InputReceipt(pub WorkerBindingFrame);
+impl InputReceipt {
+    pub fn encode(&self) -> Option<[u8; WORKER_BINDING_FRAME_BYTES]> {
+        let mut bytes = self.0.encode(WorkerBindingKind::Ack)?;
+        bytes[..8].copy_from_slice(b"TRWIRX01");
+        Some(bytes)
+    }
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != WORKER_BINDING_FRAME_BYTES || &bytes[..8] != b"TRWIRX01" {
+            return None;
+        }
+        let mut legacy: [u8; WORKER_BINDING_FRAME_BYTES] = bytes.try_into().ok()?;
+        legacy[..8].copy_from_slice(b"TRWACK01");
+        Some(Self(WorkerBindingFrame::decode(
+            &legacy,
+            WorkerBindingKind::Ack,
+        )?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn windows_update_worker_receive_wire_bounds_and_receipt_role() {
+        let mut header = *b"TRWIRF01\x01\x00\x00\x00";
+        assert_eq!(InputOffer::body_length(&header), Some(1));
+        header[8..12].copy_from_slice(&((INPUT_LIMIT + 1) as u32).to_le_bytes());
+        assert!(InputOffer::body_length(&header).is_none());
+        header[8..12].copy_from_slice(&0u32.to_le_bytes());
+        assert!(InputOffer::body_length(&header).is_none());
+        assert!(InputOffer::decode(b"TRWIRF01\x01\x00\x00\x00{}").is_none());
+        let mut id = [1; 16];
+        id[6] = 0x41;
+        id[8] = 0x81;
+        let frame = WorkerBindingFrame {
+            operation: id,
+            challenge: id,
+            context_sha256: [3; 32],
+        };
+        let bytes = InputReceipt(frame).encode().unwrap();
+        assert_eq!(InputReceipt::decode(&bytes).unwrap().0, frame);
+        assert!(WorkerBindingFrame::decode(&bytes, WorkerBindingKind::Ack).is_none());
+        assert!(InputReceipt::decode(&frame.encode(WorkerBindingKind::Ack).unwrap()).is_none());
+    }
+}

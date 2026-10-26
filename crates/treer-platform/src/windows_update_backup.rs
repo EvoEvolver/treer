@@ -12,6 +12,11 @@ pub struct BackupDirectory {
 }
 
 impl BackupDirectory {
+    /// Locator only, never proof of a selected runtime's configured state root.
+    /// A sender must retain its runtime-derived authority and physical guards.
+    pub fn directory_path(&self) -> &Path {
+        &self.path
+    }
     /// Independent physical-directory guards under this owner's existing pins.
     /// This does not lock startup-store contents or prevent atomic file updates.
     pub fn repin(&self) -> io::Result<Self> {

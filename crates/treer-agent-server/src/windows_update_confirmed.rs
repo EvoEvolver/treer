@@ -30,6 +30,10 @@ pub(super) struct ConfiguredPlan {
 }
 
 impl ConfiguredPlan {
+    #[cfg(windows)]
+    pub(super) fn dispatch(&self) -> &DispatchBinding {
+        &self.dispatch
+    }
     fn check(
         dispatch: &DispatchBinding,
         catalog: &Catalog,

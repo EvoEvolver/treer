@@ -116,6 +116,19 @@ or configuration contents. Failed launch retains the newly saved specification.
   CAS, measured running-image provenance or production Windows updater enablement.
   The runtime's loaded StartupStore remains the separate state-root authority.
 
+  The internal worker-side input receiver verifies both signatures with an
+  independently supplied trust key and all four whole-image digests under
+  independently opened physical pins. Its state snapshot is compared with the
+  original selected-runtime sender's loaded-store observation, including raw
+  digest/file identity and denial fences; this is not independently established
+  child-side runtime authorization or a freeze against subsequent writes.
+  The bounded wire offer includes no trust key or raw startup credentials.
+  A distinct received receipt binds the entire offer and fresh challenge only
+  after verification, while receiver handles and the sender reservation remain
+  held. It is not a sender-release permit, lifecycle authority, readiness,
+  durable replay protection or proof of worker survival after creator exit.
+  Production worker argv/coordinator wiring and capability remain unchanged.
+
   The internal Windows worker bootstrap additionally has a one-use, bounded
   binding exchange on the original Child's private transport. Its fixed ACK
   agrees to an operation, fresh challenge and digest of the retained selected

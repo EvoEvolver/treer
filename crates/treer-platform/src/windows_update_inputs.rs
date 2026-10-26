@@ -30,6 +30,12 @@ pub struct PairIdentity {
 }
 
 impl PinnedPair {
+    /// Locator data for a separately authenticated receiver. The caller must
+    /// keep these pins held while the receiver opens and compares every ID;
+    /// the pathname alone is neither custody nor operation authorization.
+    pub fn directory_path(&self) -> &Path {
+        &self.path
+    }
     /// Mechanical creation from the fixed pinned controller name only. No PATH
     /// search, inherited environment, shell or exposed Command override. The
     /// caller authenticates the SAME held bytes and selects restricted argv;

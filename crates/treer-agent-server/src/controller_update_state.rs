@@ -462,6 +462,56 @@ impl ControllerUpdateChild {
         )
     }
 
+    /// One distinct receipt only after the real receiver verifies signed whole
+    /// inputs and the runtime-derived state snapshot. Reservation/pins remain
+    /// owned here; neither receipt nor creator exit releases them or grants a
+    /// lifecycle action. Shares the handshake latch: no downgrade or retry.
+    #[cfg(windows)]
+    pub(crate) async fn exchange_worker_inputs(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+        documents: &crate::windows_update_admission::Documents<'_>,
+    ) -> Result<()> {
+        let context = self.begin_handshake(selected, binding)?;
+        let stream = self
+            ._worker_pipe
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("windows_update_handshake_transport_unavailable"))?;
+        let offer = self
+            ._reservation
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("windows_update_worker_receive_refused"))?
+            .worker_input_offer(selected, context, documents)?;
+        crate::windows_update_admission::worker_inputs::exchange(stream, offer).await?;
+        self.matches(selected, binding)?;
+        // Deliberately do not set binding_acknowledged or any readiness flag.
+        Ok(())
+    }
+
+    /// Test-only corruption after normal trusted mint; never a product override.
+    #[cfg(all(windows, test))]
+    pub(super) async fn exchange_fixture_worker_inputs(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+        documents: &crate::windows_update_admission::Documents<'_>,
+        mutate: impl FnOnce(&mut treer_protocol::controller_update_worker_inputs::InputOffer),
+    ) -> Result<()> {
+        let context = self.begin_handshake(selected, binding)?;
+        let stream = self
+            ._worker_pipe
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("fixture transport missing"))?;
+        let mut offer = self
+            ._reservation
+            .as_ref()
+            .unwrap()
+            .worker_input_offer(selected, context, documents)?;
+        mutate(&mut offer);
+        crate::windows_update_admission::worker_inputs::exchange(stream, offer).await
+    }
+
     /// Bind one ACK to the already selected runtime/evidence/full inputs and a
     /// fresh challenge. The original Child/lease/pins/claim remain retained.
     /// This agreement does not grant a command, readiness or restart authority.

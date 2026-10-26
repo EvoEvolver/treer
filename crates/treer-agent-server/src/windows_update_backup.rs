@@ -10,8 +10,8 @@ const STARTUP_LIMIT: u64 = 16 * 1024 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct StartupDigest {
-    sha256: String,
-    size: u64,
+    pub(super) sha256: String,
+    pub(super) size: u64,
 }
 
 pub(super) fn startup_digest(bytes: &[u8], workspace: &str, server: &str) -> Result<StartupDigest> {
