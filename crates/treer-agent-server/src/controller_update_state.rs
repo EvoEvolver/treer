@@ -1,5 +1,5 @@
 //! In-process state and created-Child custody only. No wire constructor,
-//! environment/default resolver, admitted worker, restart or resumable operation.
+//! environment/default resolver, admitted worker or resumable operation.
 use super::ControllerRuntime;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,7 @@ pub(crate) struct ControllerUpdateState {
     workspace_id: String,
     server_id: String,
     evidence: ControllerStateEvidence,
+    restart_attempted: bool,
     #[cfg(windows)]
     directory: treer_platform::windows_update_backup::BackupDirectory,
 }
@@ -79,6 +80,7 @@ impl ControllerRuntime {
                     Sha256::digest(self.inner.host_epoch.as_bytes())
                 ),
             },
+            restart_attempted: false,
             #[cfg(windows)]
             directory: treer_platform::windows_update_backup::BackupDirectory::open(
                 path.parent().unwrap(),
@@ -88,6 +90,45 @@ impl ControllerRuntime {
 }
 
 impl ControllerUpdateState {
+    /// Internal creator-side request only; not a worker authorization or exposed
+    /// coordinator. The creator may itself stop before receiving an ACK, so no
+    /// transport result proves health/completion or permits automatic retry.
+    #[allow(dead_code)] // Production mutation admission/coordinator remains unwired.
+    pub(crate) async fn request_selected_controller_restart(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+    ) -> Result<()> {
+        self.matches_selected(selected, binding)?;
+        if self.restart_attempted {
+            bail!("windows_update_selected_restart_consumed");
+        }
+        // Before the first await, including the observation: cancellation or
+        // lost response must not allow this owner to initiate another attempt.
+        self.restart_attempted = true;
+        let refused = || anyhow::anyhow!("windows_update_selected_restart_unconfirmed");
+        let expected = self
+            .observe_selected_controller(selected, binding)
+            .await
+            .map_err(|_| refused())?;
+        self.matches_selected(selected, binding)?;
+        let response = self
+            .runtime
+            .inner
+            .host
+            .request(
+                treer_host_protocol::HostCommand::RestartControllerIfCurrent { expected },
+                Some(self.operation_id.to_string()),
+            )
+            .await
+            .map_err(|_| refused())?;
+        self.matches_selected(selected, binding)?;
+        if response != treer_host_protocol::HostResponse::Ack {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
     /// Read through this selected runtime's existing Host connection only.
     /// The returned wire value is point-in-time observation, NOT an authority
     /// constructor, persisted proof, restart token or readiness claim.

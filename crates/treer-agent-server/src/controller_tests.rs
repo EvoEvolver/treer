@@ -2957,6 +2957,18 @@ async fn selected_host_fixture(
     tokio::task::JoinHandle<()>,
     Arc<std::sync::atomic::AtomicUsize>,
 ) {
+    selected_host_commands_fixture(responses, None).await
+}
+
+async fn selected_host_commands_fixture(
+    responses: Vec<Result<HostResponse, treer_host_protocol::HostError>>,
+    commands: Option<Vec<(HostCommand, Option<String>)>>,
+) -> (
+    ControllerRuntime,
+    PathBuf,
+    tokio::task::JoinHandle<()>,
+    Arc<std::sync::atomic::AtomicUsize>,
+) {
     use tokio::io::AsyncWriteExt;
     use treer_host_protocol::{
         decode_message, encode_message, HostBuildInfo, HostMessage, HostRequest,
@@ -3003,14 +3015,26 @@ async fn selected_host_fixture(
     let task = tokio::spawn(async move {
         let mut stream = listener.accept().await.unwrap();
         let mut responses = responses.into_iter();
+        let mut commands = commands.map(Vec::into_iter);
         while let Ok(length) = stream.read_u32().await {
             let mut bytes = vec![0; length as usize];
             stream.read_exact(&mut bytes).await.unwrap();
             let request: HostRequest = decode_message(&bytes).unwrap();
-            assert_eq!(request.command, HostCommand::ObserveController);
-            assert!(request.operation_id.is_none());
+            if let Some(commands) = &mut commands {
+                let (command, operation_id) = commands.next().expect("unexpected request");
+                assert_eq!(request.command, command);
+                assert_eq!(request.operation_id, operation_id);
+            } else {
+                assert_eq!(request.command, HostCommand::ObserveController);
+                assert!(request.operation_id.is_none());
+            }
             observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let response = responses.next().expect("unexpected retry/request");
+            let response = match responses.next() {
+                Some(response) => response,
+                // Explicit empty response sequence models a lost reply; the
+                // test aborts this private responder after cancelling its call.
+                None => std::future::pending().await,
+            };
             let (response, error) = match response {
                 Ok(v) => (Some(v), None),
                 Err(e) => (None, Some(e)),
@@ -3035,6 +3059,210 @@ fn selected_host_identity() -> treer_host_protocol::HostControllerIdentity {
         host_epoch: "selected-host".into(),
         instance_id: Uuid::new_v4().to_string(),
         pid: std::process::id(),
+    }
+}
+
+#[tokio::test]
+async fn windows_update_selected_restart_fresh_identity_and_exact_operation_once() {
+    use std::sync::atomic::Ordering;
+    let identity = selected_host_identity();
+    let binding = update_state_binding(Uuid::new_v4());
+    let (runtime, root, task, reads) = selected_host_commands_fixture(
+        vec![
+            Ok(HostResponse::ControllerIdentity {
+                identity: identity.clone(),
+            }),
+            Ok(HostResponse::Ack),
+        ],
+        Some(vec![
+            (HostCommand::ObserveController, None),
+            (
+                HostCommand::RestartControllerIfCurrent { expected: identity },
+                Some(binding.operation_id.to_string()),
+            ),
+        ]),
+    )
+    .await;
+    let mut state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    state
+        .request_selected_controller_restart(&runtime, &binding)
+        .await
+        .unwrap();
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        state
+            .request_selected_controller_restart(&runtime, &binding)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "windows_update_selected_restart_consumed"
+    );
+    assert_eq!(reads.load(Ordering::SeqCst), 2);
+    drop(state);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_selected_restart_foreign_scope_refuses_before_consumption() {
+    use std::sync::atomic::Ordering;
+    let (runtime, root, task, reads) = selected_host_fixture(vec![Ok(HostResponse::Ack)]).await;
+    let (other, other_root, other_task) = update_state_fixture().await;
+    let binding = update_state_binding(Uuid::new_v4());
+    let mut state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    assert!(state
+        .request_selected_controller_restart(&other, &binding)
+        .await
+        .is_err());
+    for field in 0..3 {
+        let mut foreign = binding.clone();
+        match field {
+            0 => foreign.operation_id = Uuid::new_v4(),
+            1 => foreign.workspace_id = "ws_other".into(),
+            _ => foreign.server_id = "srv_other".into(),
+        }
+        assert!(state
+            .request_selected_controller_restart(&runtime, &foreign)
+            .await
+            .is_err());
+    }
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    // Scope refusal has not consumed the valid owner's first attempt. A fixed
+    // invalid observation consumes it, without ever enqueuing a mutation.
+    assert_eq!(
+        state
+            .request_selected_controller_restart(&runtime, &binding)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "windows_update_selected_restart_unconfirmed"
+    );
+    assert_eq!(
+        state
+            .request_selected_controller_restart(&runtime, &binding)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "windows_update_selected_restart_consumed"
+    );
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    drop(state);
+    drop(runtime);
+    drop(other);
+    task.abort();
+    other_task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(other_root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_selected_restart_negative_or_lost_reply_never_falls_back() {
+    use std::sync::atomic::Ordering;
+    for result in [
+        Ok(HostResponse::ControllerIdentity {
+            identity: selected_host_identity(),
+        }),
+        Err(treer_host_protocol::HostError::new(
+            "private",
+            "PRIVATE DETAIL",
+        )),
+    ] {
+        let identity = selected_host_identity();
+        let binding = update_state_binding(Uuid::new_v4());
+        let (runtime, root, task, reads) = selected_host_commands_fixture(
+            vec![
+                Ok(HostResponse::ControllerIdentity {
+                    identity: identity.clone(),
+                }),
+                result,
+            ],
+            Some(vec![
+                (HostCommand::ObserveController, None),
+                (
+                    HostCommand::RestartControllerIfCurrent { expected: identity },
+                    Some(binding.operation_id.to_string()),
+                ),
+            ]),
+        )
+        .await;
+        let mut state = runtime
+            .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+            .unwrap();
+        assert_eq!(
+            state
+                .request_selected_controller_restart(&runtime, &binding)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "windows_update_selected_restart_unconfirmed"
+        );
+        assert_eq!(
+            state
+                .request_selected_controller_restart(&runtime, &binding)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "windows_update_selected_restart_consumed"
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        drop(state);
+        drop(runtime);
+        task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn windows_update_selected_restart_cancelled_observation_consumes_attempt() {
+    use std::sync::atomic::Ordering;
+    for cancel_at_mutation in [false, true] {
+        let binding = update_state_binding(Uuid::new_v4());
+        let identity = selected_host_identity();
+        let mut commands = vec![(HostCommand::ObserveController, None)];
+        let mut responses = vec![];
+        let expected_reads = if cancel_at_mutation {
+            commands.push((
+                HostCommand::RestartControllerIfCurrent {
+                    expected: identity.clone(),
+                },
+                Some(binding.operation_id.to_string()),
+            ));
+            responses.push(Ok(HostResponse::ControllerIdentity { identity }));
+            2
+        } else {
+            1
+        };
+        let (runtime, root, task, reads) =
+            selected_host_commands_fixture(responses, Some(commands)).await;
+        let mut state = runtime
+            .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let call = state.request_selected_controller_restart(&runtime, &binding);
+        tokio::pin!(call);
+        tokio::select! {
+            _ = &mut call => panic!("lost reply unexpectedly completed"),
+            _ = async { while reads.load(Ordering::SeqCst) < expected_reads { tokio::task::yield_now().await; } } => {}
+        }
+    }).await.unwrap();
+        assert_eq!(
+            state
+                .request_selected_controller_restart(&runtime, &binding)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "windows_update_selected_restart_consumed"
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), expected_reads);
+        drop(state);
+        drop(runtime);
+        task.abort();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

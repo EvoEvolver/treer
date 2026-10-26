@@ -1237,6 +1237,32 @@ existing observation remains data, not a lifecycle credential. Normal identity
 and Policy admission must precede any later product entry. Ordinary cap stays
 OFF and no live lifecycle is authorized by this implementation.
 
+## Selected runtime conditional request scope
+
+The internal `ControllerUpdateState::request_selected_controller_restart`
+requires the retained runtime and exact validated operation/workspace/server
+Binding, checks runtime instance/Host epoch, then consumes a per-state attempt
+before any await. It obtains a fresh identity through the selected runtime's
+existing HostClient, rechecks scope, and sends only `RestartControllerIfCurrent`
+with the same operation UUID. Only ACK is accepted; private errors and wrong
+responses map to a fixed unconfirmed result. Cancellation during observation
+or mutation leaves the attempt consumed; there is no fallback/retry. The state
+and its physical root pin remain borrowed for the call. The Host-side identity
+comparison remains necessary after observation; the wire value grants no
+permission on its own.
+
+Author Mac new SERVER BIN `windows_update_selected_restart_` exact-four controls
+cover fresh identity/exact operation/two-request sequence, foreign scope before
+consumption, fixed error/wrong-kind refusal, and cancellation at both observation
+and submitted mutation boundaries. These are private HostClient fixtures, not
+actual supervisor restart, live Controller, detached worker or health proof.
+Windows focused exact4 is NOT_RUN. The internal method is not reachable through
+a public coordinator/capability and does not add authorization: normal identity
+and Policy remain prerequisites for a future entry. Its creator could stop
+before its own ACK; independent worker survival, ownership transfer and final
+health/continuity evidence still need implementation and isolated acceptance.
+No existing native selectors/matrix or live lifecycle are rerun by this leaf.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

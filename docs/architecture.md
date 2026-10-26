@@ -76,6 +76,15 @@ handles remain in place. The existing explicit unconditional restart command
 remains separate. This internal primitive is not yet connected to the updater
 coordinator or exposed as a production update capability.
 
+The creator-side internal state method binds that conditional request to the
+retained selected runtime and operation. It marks a single attempt before any
+await, obtains a fresh observation through the same HostClient, and sends only
+the conditional command with that operation UUID. It checks the scope around
+each response and accepts only ACK; cancellation or failure leaves the attempt
+consumed. This is not a detached worker or public lifecycle entry. The creator
+Controller could stop before receiving its own reply, so ACK is not a required
+or sufficient proof of update completion.
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

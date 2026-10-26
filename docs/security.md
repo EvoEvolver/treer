@@ -154,6 +154,16 @@ or configuration contents. Failed launch retains the newly saved specification.
   not health, workload continuity or update completion. No selected-runtime
   mutation admission or production coordinator is connected by this primitive.
 
+  The internal selected-state request wrapper performs fresh same-HostClient
+  observation and binds the conditional mutation's operation UUID and expected
+  identity itself, never accepting a caller-supplied observation. Foreign
+  runtime/operation/workspace/server refuses before consumption; a valid call
+  consumes its in-memory attempt before any await. Cancellation, bad response
+  and transport failure never trigger an unconditional fallback or internal
+  retry. The wrapper does not grant Policy permission, transfer authority to a
+  worker or survive creator exit. Existing normal admission must precede any
+  future product entry; no such entry or capability is enabled here.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.
