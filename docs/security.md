@@ -133,6 +133,13 @@ or configuration contents. Failed launch retains the newly saved specification.
   a workspace/operation/selected runtime by itself. The updater has not wired
   it to a production restart or enabled capability. The existing unconditional
   Host restart command is not made conditional by this addition.
+  The internal selected-Controller reader uses only that retained runtime's
+  existing HostClient and checks its operation/workspace/server/runtime scope
+  before sending and after receiving. It requires the synced Host epoch, this
+  Controller process PID and a canonical UUIDv4/RFC instance. Unexpected wire
+  responses or Host errors produce a fixed refusal, with no restart fallback.
+  The returned identity is still ordinary observation data: it cannot recreate
+  the selected runtime/state authority or authorize a later lifecycle mutation.
 
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the

@@ -1143,6 +1143,37 @@ This is SAMEtestexe original-Child/channel evidence, not full daemon/socket
 integration or an installed Host observation. No Host daemon, installed
 Controller, capability, publisher, old selector or matrix was exercised.
 
+### Implemented leaf: selected runtime checks the same Host observation
+
+`ControllerUpdateState::observe_selected_controller` checks its operation,
+workspace/server, selected runtime instance and Host epoch binding before any
+request. It uses only the retained runtime's existing HostClient, sending one
+read-only `ObserveController` with no mutation operation ID. There is no socket
+path/PID supplied by the caller and no second ambient Host connection. The
+existing bounded HostClient request lifetime is reused (15 seconds); no retry
+or new request timeout implementation is added.
+
+After the response it rechecks the selected scope, requires exactly a typed
+Controller identity with the already-synced Host epoch, this Controller process
+PID and canonical lowercase UUIDv4/RFC instance. Wrong response kind, transport/
+Host error or invalid identity yields a fixed safe refusal without copying raw
+Host detail. No result is cached: separate explicit reads observe their separate
+responses. The returned wire value is not a persisted selected-runtime proof,
+credential, readiness result or restart token; it cannot construct the retained
+state authority. This is creator-Controller observation, not a worker inheriting
+the creator's PID or permission. No coordinator or conditional restart is wired.
+
+Author Mac new selector `windows_update_selected_host_` passed three controls
+with zero failed/ignored: real private fixture HostClient connection returns
+distinct observations, foreign runtime/operation/workspace/server refuses before
+any request, and changed epoch/PID, nil/noncanonical/wrong-version/variant UUID,
+wrong response kind and private Host error refuse without a second request or
+restart fallback. The fixture is a closed Host responder, not the real supervisor
+or an installed Host. Windows private-pipe/state-root behavior remains NOT_RUN
+until the separate focused native entry; old selectors/matrix are not rerun.
+Strict Controller bins/tests Clippy with the existing acceptance feature,
+formatting, docs and diff checks passed. No real machine or Host was queried.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

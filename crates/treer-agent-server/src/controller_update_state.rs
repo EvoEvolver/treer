@@ -88,6 +88,40 @@ impl ControllerRuntime {
 }
 
 impl ControllerUpdateState {
+    /// Read through this selected runtime's existing Host connection only.
+    /// The returned wire value is point-in-time observation, NOT an authority
+    /// constructor, persisted proof, restart token or readiness claim.
+    #[allow(dead_code)] // Internal observation; production coordinator remains unwired.
+    pub(crate) async fn observe_selected_controller(
+        &self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+    ) -> Result<treer_host_protocol::HostControllerIdentity> {
+        self.matches_selected(selected, binding)?;
+        let refused = || anyhow::anyhow!("windows_update_selected_host_unconfirmed");
+        let response = self
+            .runtime
+            .inner
+            .host
+            .request(treer_host_protocol::HostCommand::ObserveController, None)
+            .await
+            .map_err(|_| refused())?;
+        self.matches_selected(selected, binding)?;
+        let treer_host_protocol::HostResponse::ControllerIdentity { identity } = response else {
+            return Err(refused());
+        };
+        let instance = Uuid::parse_str(&identity.instance_id).map_err(|_| refused())?;
+        if identity.host_epoch != self.runtime.inner.host_epoch
+            || identity.pid != std::process::id()
+            || instance.to_string() != identity.instance_id
+            || instance.get_version_num() != 4
+            || instance.get_variant() != uuid::Variant::RFC4122
+        {
+            return Err(refused());
+        }
+        Ok(identity)
+    }
+
     pub(crate) fn scope(&self) -> (Uuid, String, String) {
         (
             self.operation_id,
