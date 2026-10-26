@@ -414,6 +414,86 @@ Controller's resolved configuration root. Production admission still needs that
 trusted installation/runtime binding. No restore, CAS, safe claim retirement,
 pair publication, health, full transaction or power-loss durability is claimed.
 
+## Windows pair file publication and restoration
+
+This leaf starts only from the consumed `StartupBackedUpInputs` holder. Core
+checks its existing evidence, refuses pre-existing publication/restoration
+records, and copies four fixed CREATE_NEW candidates in the pinned installation:
+new Controller/CLI and old Controller/CLI restoration copies. Each copy is
+bounded, hashed against the admitted binding, flushed and independently hashed
+from its held handle. Target, backup and startup pins remain held.
+
+The platform retains the physical installation parents and exclusive lease,
+then releases only its original installed image pins immediately before file
+replacement. It uses `SetFileInformationByHandle(FileRenameInfo)` on the held
+candidate with DELETE rights; there is no source-path reopen and no POSIX or
+delete-sharing bypass flag. The API contract is documented by Microsoft in
+[FILE_RENAME_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info).
+Existing external no-delete-sharing readers must make replacement refuse. The
+two names are replaced sequentially: a transient mixed pair is possible, so
+this is explicitly not a pair-atomic operation or an activation API.
+
+Only known physical identities authorize the next step. First-step refusal
+requires both original file IDs still present. Second-step refusal requires the
+known new Controller/original CLI pair before compensating the Controller from
+its old copy. Both current files are then pinned and Core verifies their whole
+old hashes. Unknown identities, observation errors or failed compensation stop
+without another rename attempt or success evidence. Partial names and the
+installation claim remain; owner exit does not authorize replay.
+
+After two successful replacements, Core verifies both current pinned hashes and
+IDs before EXCL `publication.evidence` with one of `files_published`,
+`files_restored` or `publication_refused`. Current pins have reduced readonly
+rights. A published holder supports one explicit `restore_files` operation using
+the previously verified old pair: it verifies current evidence, refuses an
+existing restoration record, releases its current pins, replaces both names,
+then revalidates both old hashes/IDs before new EXCL `restoration.evidence`.
+Original publication evidence remains historical. If only part of restoration
+succeeds, the result is unknown and no restored-pair evidence is published.
+Neither files-restored state nor a file-only refusal is runtime rollback/health
+success. No installed image is executed, no claim retired, no new Controller
+started, and there is no recovery/adoption or automatic retry command. A future
+activation handoff must deliberately release/transfer current pins and prove
+worker ownership and health; this leaf does not supply it.
+
+The new isolated Windows entry is
+`cargo test --locked -p treer-agent-server --bin treer-agent-server
+windows_update_pair_ -- --nocapture`, requiring exactly four native tests,
+zero failed/ignored, exit zero and independent task TEMP cleanup on fixed NTFS.
+It covers authenticated Core publication/explicit full file restoration, actual
+no-delete-sharing first/second-name refusal and compensation, stale candidates
+and evidence, and a platform-kernel partial-restoration failure produced by a
+retained duplicate of the new CLI pin. The last control is explicitly a platform
+file-effect test with opaque synthetic claim, not a signed Core operation or
+health test. Native execution and Windows Controller compilation are NOT_RUN
+until that entry actually runs. Windows GNU platform all-target strict Clippy
+and author macOS Controller binary/test strict Clippy cover local compilation;
+no accepted storage/intent/admission/backup leaf or platform matrix is repeated.
+
+### Trusted state-root admission still required
+
+Current `main.rs` supplies `ControllerConfig.startup_store_path` from
+`service::startup_state_path(server_id)`; `controller.rs` loads exactly that
+path into its live StartupStore. On Windows the source resolver uses
+`TREER_STATE_DIR` when configured, otherwise `LOCALAPPDATA/Treer/state`, followed
+by the normal server filename. Those are resolver rules, not observations of a
+deployed Controller's environment. The isolated Windows backup API instead takes
+an internal caller-supplied directory. It verifies its physical/private/NTFS
+properties and the normal server filename, not that live configuration fact.
+No production updater entry currently connects those two contracts.
+
+Before production admission, the coordinator must obtain the selected running
+Controller's authoritative resolved startup path/configuration and Server/workspace
+identity, bind that observation to this operation and pin its physical parent.
+It must use that configuration rather than recomputing a default from the
+updater's environment or accepting an arbitrary empty private directory. Older
+deployed status/ServerInfo responses do not attest the runtime config binding;
+the old Mariana inventory gap remains. This source integration is independently
+actionable when the production coordinator is wired; it is not a publisher,
+missing-package or live-activation prerequisite for the isolated file leaf.
+Named live scope, shared-installation impact and recovery custody remain separate
+requirements. Ordinary capability stays OFF and Host is untouched.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,
@@ -422,9 +502,9 @@ pair publication, health, full transaction or power-loss durability is claimed.
    also complete within the limits above. Future production admission must bind
    the state root to trusted installation/runtime configuration; publication
    evidence must follow real effects, never a generic setter.
-2. Implement Windows Controller/CLI two-rename
-   publication with locked-image refusal and whole-pair rollback. Never treat
-   restoring files alone as successful rollback.
+2. The Windows Controller/CLI file-pair publication and restoration leaf above
+   is implemented with native acceptance still pending. Never treat restoring
+   files alone as successful runtime rollback.
 3. Implement Windows original-worker ownership/Job escape and Host-owned
    Controller-only restart plus original workload/epoch/identity checks. Native
    isolated acceptance is required; no Host restart or blind retry on lost ACK.

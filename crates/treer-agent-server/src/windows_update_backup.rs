@@ -122,8 +122,8 @@ mod native {
     /// Retains installed/target pins and installation lease with checked backup
     /// files. There is no public constructor, execution, resume or success API.
     pub struct BackedUpInputs {
-        reserved: ReservedInputs,
-        backup: SealedBackup,
+        pub(super) reserved: ReservedInputs,
+        pub(super) backup: SealedBackup,
     }
 
     #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -148,8 +148,8 @@ mod native {
     /// Full image and startup backups only. No restore, mutation, resume or
     /// health authority; startup is one snapshot, not a concurrent-write CAS.
     pub struct StartupBackedUpInputs {
-        images: BackedUpInputs,
-        startup: Option<std::fs::File>,
+        pub(super) images: BackedUpInputs,
+        pub(super) startup: Option<std::fs::File>,
         evidence: StartupEvidence,
     }
 
@@ -362,6 +362,12 @@ mod native {
 pub use native::BackedUpInputs;
 #[cfg(windows)]
 pub use native::StartupBackedUpInputs;
+
+#[cfg(windows)]
+#[path = "windows_update_publication.rs"]
+mod publication;
+#[cfg(windows)]
+pub use publication::{FilePairPhase, PublishedInputs};
 
 #[cfg(test)]
 mod tests {

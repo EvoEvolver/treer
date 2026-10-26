@@ -162,6 +162,37 @@ impl SealedBackup {
     pub fn read_startup_evidence(&self) -> io::Result<Vec<u8>> {
         self.read_named_evidence("startup.evidence")
     }
+
+    pub fn publish_pair_evidence(&self, bytes: &[u8], restoration: bool) -> io::Result<()> {
+        self.publish_named_evidence(
+            if restoration {
+                "restoration.evidence"
+            } else {
+                "publication.evidence"
+            },
+            bytes,
+        )
+    }
+
+    pub fn require_pair_evidence_absent(&self, restoration: bool) -> io::Result<()> {
+        let name = if restoration {
+            "restoration.evidence"
+        } else {
+            "publication.evidence"
+        };
+        match std::fs::symlink_metadata(self.directory.path.join(name)) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            _ => Err(io::Error::other("pair evidence exists or is unreadable")),
+        }
+    }
+
+    pub fn read_pair_evidence(&self, restoration: bool) -> io::Result<Vec<u8>> {
+        self.read_named_evidence(if restoration {
+            "restoration.evidence"
+        } else {
+            "publication.evidence"
+        })
+    }
     pub fn identity(&self) -> io::Result<(u64, u64)> {
         self.directory.identity()
     }

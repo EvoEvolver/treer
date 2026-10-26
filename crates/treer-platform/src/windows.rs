@@ -275,6 +275,17 @@ pub fn secure_path(path: &Path) -> io::Result<()> {
 /// Exclusive, non-inherited handle and private DACL from the first instant.
 /// The caller retains checked physical parent handles for the complete write.
 pub(super) fn create_private_update_file(path: &Path) -> io::Result<std::fs::File> {
+    create_private_update_file_access(path, GENERIC_READ | GENERIC_WRITE)
+}
+
+pub(super) fn create_private_update_candidate(path: &Path) -> io::Result<std::fs::File> {
+    create_private_update_file_access(
+        path,
+        GENERIC_READ | GENERIC_WRITE | windows_sys::Win32::Storage::FileSystem::DELETE,
+    )
+}
+
+fn create_private_update_file_access(path: &Path, access: u32) -> io::Result<std::fs::File> {
     use windows_sys::Win32::Storage::FileSystem::*;
     let descriptor = descriptor(false)?;
     let attributes = SECURITY_ATTRIBUTES {
@@ -286,7 +297,7 @@ pub(super) fn create_private_update_file(path: &Path) -> io::Result<std::fs::Fil
     unsafe {
         let handle = CreateFileW(
             path.as_ptr(),
-            GENERIC_READ | GENERIC_WRITE,
+            access,
             0,
             &attributes,
             CREATE_NEW,
@@ -297,6 +308,37 @@ pub(super) fn create_private_update_file(path: &Path) -> io::Result<std::fs::Fil
             return Err(io::Error::last_os_error());
         }
         Ok(std::fs::File::from_raw_handle(handle))
+    }
+}
+
+/// Rename the held candidate itself, without reopening its source pathname.
+/// No POSIX/delete-sharing bypass flags: locked destination images must refuse.
+pub(super) fn rename_update_candidate(file: &std::fs::File, target: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::*;
+    let name = wide(target.as_os_str());
+    let offset = mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let size = offset
+        .checked_add(name.len() * 2)
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| io::Error::other("update rename name too large"))?;
+    // u64 storage provides alignment for FILE_RENAME_INFO on supported Windows.
+    let mut storage = vec![0_u64; (size as usize).div_ceil(8)];
+    unsafe {
+        let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        (*info).Anonymous.ReplaceIfExists = true;
+        (*info).RootDirectory = ptr::null_mut();
+        (*info).FileNameLength = ((name.len() - 1) * 2) as u32;
+        ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            storage.as_mut_ptr().cast::<u8>().add(offset).cast::<u16>(),
+            name.len(),
+        );
+        checked(SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileRenameInfo,
+            info.cast(),
+            size,
+        ))
     }
 }
 

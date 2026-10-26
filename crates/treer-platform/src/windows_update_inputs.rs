@@ -10,10 +10,10 @@ use std::{
 /// delete sharing. The caller authenticates contents; no path is exposed for
 /// reopening or later execution. This is not an installation mutation lock.
 pub struct PinnedPair {
-    root: crate::machine_file::Root,
-    controller: File,
-    cli: File,
-    path: PathBuf,
+    pub(super) root: crate::machine_file::Root,
+    pub(super) controller: File,
+    pub(super) cli: File,
+    pub(super) path: PathBuf,
 }
 
 impl PinnedPair {
@@ -66,8 +66,8 @@ impl PinnedPair {
 /// this value releases the lease, never deletes its stable name. This is not a
 /// durable crash fence or protection from nonparticipating same-account code.
 pub struct LockedInstallation {
-    pair: PinnedPair,
-    _lock: File,
+    pub(super) pair: PinnedPair,
+    pub(super) _lock: File,
 }
 
 impl LockedInstallation {

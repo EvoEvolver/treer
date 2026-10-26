@@ -37,6 +37,8 @@ pub mod windows_update_backup;
 #[cfg(windows)]
 pub mod windows_update_inputs;
 #[cfg(windows)]
+pub mod windows_update_pair;
+#[cfg(windows)]
 pub mod windows_update_store;
 #[cfg(windows)]
 pub use windows::{

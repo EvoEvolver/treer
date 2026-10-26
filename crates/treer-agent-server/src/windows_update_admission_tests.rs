@@ -196,6 +196,166 @@ mod native {
         prepare_operation(installed, target, fixture, uuid::Uuid::new_v4())
     }
 
+    fn pair_ready(
+        root: &Root,
+        installed: &Path,
+        target: &Path,
+        fixture: &Fixture,
+    ) -> (StartupBackedUpInputs, PathBuf) {
+        use treer_platform::windows_update_backup::BackupDirectory;
+        let job = root.directory("pair-job");
+        let backup = root.directory("pair-backup");
+        let state = root.directory("pair-state");
+        crate::startup_store::StartupStore::load(state.join("srv_fixture-agent-startup.json"))
+            .unwrap()
+            .deny_absent("ag_deleted")
+            .unwrap();
+        let ready = prepare(installed, target, fixture)
+            .unwrap()
+            .reserve(UpdateStore::open(&job).unwrap())
+            .unwrap()
+            .backup(BackupDirectory::open(&backup).unwrap())
+            .unwrap()
+            .backup_startup(BackupDirectory::open(&state).unwrap())
+            .unwrap();
+        (ready, backup)
+    }
+
+    #[test]
+    fn windows_update_pair_native_publishes_and_explicitly_restores_complete_files() {
+        for restore in [false, true] {
+            let root = Root::new();
+            let installed = root.pair("installed", OLD);
+            let target = root.pair("target", NEW);
+            let fixture = Fixture::new(|_| {});
+            let (ready, backup) = pair_ready(&root, &installed, &target, &fixture);
+            let binding = ready.binding().clone();
+            let published = ready.publish_pair().unwrap();
+            assert_eq!(published.phase(), FilePairPhase::FilesPublished);
+            assert_eq!(published.binding(), &binding);
+            published.inspect_pair().unwrap();
+            assert!(prepare(&installed, &target, &fixture).is_err());
+            assert!(std::fs::OpenOptions::new()
+                .write(true)
+                .open(installed.join("treer.exe"))
+                .is_err());
+            let history = std::fs::read(backup.join("publication.evidence")).unwrap();
+            if restore {
+                let restored = published.restore_files().unwrap();
+                assert_eq!(restored.phase(), FilePairPhase::FilesRestored);
+                restored.inspect_pair().unwrap();
+                assert_eq!(
+                    std::fs::read(backup.join("publication.evidence")).unwrap(),
+                    history
+                );
+                assert!(backup.join("restoration.evidence").exists());
+                assert!(restored.restore_files().is_err());
+            } else {
+                drop(published);
+            }
+            let expected = if restore { OLD } else { NEW };
+            for name in ["treer-agent-server.exe", "treer.exe"] {
+                assert_eq!(std::fs::read(installed.join(name)).unwrap(), expected);
+            }
+            assert!(installed.join(".treer-controller-update.claim").exists());
+        }
+    }
+
+    #[test]
+    fn windows_update_pair_native_locked_destinations_refuse_or_compensate_without_mixed_result() {
+        use std::os::windows::fs::OpenOptionsExt;
+        for locked in ["treer-agent-server.exe", "treer.exe"] {
+            let root = Root::new();
+            let installed = root.pair("installed", OLD);
+            let target = root.pair("target", NEW);
+            let fixture = Fixture::new(|_| {});
+            let (ready, _) = pair_ready(&root, &installed, &target, &fixture);
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1) // FILE_SHARE_READ, deliberately no DELETE sharing
+                .open(installed.join(locked))
+                .unwrap();
+            let refused = ready.publish_pair().unwrap();
+            let expected = if locked == "treer.exe" {
+                FilePairPhase::FilesRestored
+            } else {
+                FilePairPhase::PublicationRefused
+            };
+            assert_eq!(refused.phase(), expected);
+            refused.inspect_pair().unwrap();
+            assert!(refused.restore_files().is_err());
+            drop(lock);
+            for name in ["treer-agent-server.exe", "treer.exe"] {
+                assert_eq!(std::fs::read(installed.join(name)).unwrap(), OLD);
+            }
+            assert!(installed.join(".treer-controller-update.claim").exists());
+        }
+    }
+
+    #[test]
+    fn windows_update_pair_native_stale_candidates_or_evidence_never_authorize_publication() {
+        for case in 0..3 {
+            let root = Root::new();
+            let installed = root.pair("installed", OLD);
+            let target = root.pair("target", NEW);
+            let fixture = Fixture::new(|_| {});
+            let (ready, backup) = pair_ready(&root, &installed, &target, &fixture);
+            let stale = match case {
+                0 => installed.join(".treer-update-cli.new"),
+                1 => backup.join("publication.evidence"),
+                _ => backup.join("restoration.evidence"),
+            };
+            std::fs::write(&stale, b"prior unknown evidence").unwrap();
+            treer_platform::secure_file(&stale).unwrap();
+            assert!(ready.publish_pair().is_err());
+            assert_eq!(std::fs::read(&stale).unwrap(), b"prior unknown evidence");
+            assert_eq!(
+                installed.join(".treer-update-controller.new").exists(),
+                case == 0
+            );
+            for name in ["treer-agent-server.exe", "treer.exe"] {
+                assert_eq!(std::fs::read(installed.join(name)).unwrap(), OLD);
+            }
+            let job = root.directory("new-job");
+            assert!(prepare(&installed, &target, &fixture)
+                .unwrap()
+                .reserve(UpdateStore::open(&job).unwrap())
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn windows_update_pair_native_partial_restore_is_unknown_and_never_replayed() {
+        use std::io::Write;
+        let root = Root::new();
+        let installed = root.pair("installed", OLD);
+        // Exercise the platform kernel's real second-restore refusal. This is
+        // not an authenticated Core operation or runtime health fixture.
+        let locked = PinnedPair::open(&installed)
+            .unwrap()
+            .lock_installation()
+            .unwrap();
+        locked.claim(b"synthetic platform-only claim").unwrap();
+        let mut staging = locked.stage_pair().unwrap();
+        for (file, bytes) in staging.files().into_iter().zip([NEW, NEW, OLD, OLD]) {
+            file.write_all(bytes).unwrap();
+        }
+        let published = staging.seal().unwrap().publish().unwrap();
+        let held_cli = published.files().1.try_clone().unwrap();
+        assert!(published.restore_files().is_err());
+        drop(held_cli);
+        assert_eq!(
+            std::fs::read(installed.join("treer-agent-server.exe")).unwrap(),
+            OLD
+        );
+        assert_eq!(std::fs::read(installed.join("treer.exe")).unwrap(), NEW);
+        assert_eq!(
+            std::fs::read(installed.join(".treer-controller-update.claim")).unwrap(),
+            b"synthetic platform-only claim"
+        );
+        assert!(installed.join(".treer-update-cli.restore").exists());
+    }
+
     #[test]
     fn windows_update_startup_native_real_store_snapshots_preserve_fences_and_hold_backups() {
         use treer_platform::windows_update_backup::BackupDirectory;
