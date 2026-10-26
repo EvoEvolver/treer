@@ -549,6 +549,45 @@ escape, restart, health or safe claim retirement is supplied by this leaf.
 Named live scope, shared-installation impact and recovery custody remain separate
 requirements. Ordinary capability stays OFF and Host is untouched.
 
+### Next leaf: read-only Windows process observation
+
+`treer-platform::windows_update_process::ProcessObservation` retains a single
+query/synchronize OS process handle, its creation time and a read-only handle to
+the OS-reported executable pathname. Zero-time process waits bracket queries;
+an exited process is refused even if its exit code is 259 (`STILL_ACTIVE`).
+Creation identity and reported-path file IDs are rechecked against the same
+retained handles. Any-Job membership uses that process handle and errors remain
+unknown; `require_outside_jobs` refuses membership in any Job rather than trying
+breakaway. No PID-file/argv/environment lookup, spawn, signal, restart, wire
+constructor or authority to adopt a process is provided.
+
+This is deliberately observation, NOT worker ownership or proof of the originally
+mapped executable's file identity. Windows reports a pathname that may already
+have been replaced before capture. Opening that pathname cannot authenticate
+the old mapped image. The future parent/child handoff must retain the actual
+created Child/process handle and pre-spawn authenticated image custody, bind
+that relationship to the operation/runtime authority, then prove readiness and
+Host/Controller-only restart semantics. A reported-path match or a Job boolean
+must not be substituted for that contract.
+
+The three new native controls cover current identity/reported-file mismatch,
+an owned test child exiting with 259 while its observation handle remains, and
+a real Job-bound owned child refusing escape. The test child only runs a fixed
+ignored helper in the same platform test executable with cleared environment,
+reads its own stdin and exits; its parent retains Child and kills/waits only that
+child on errors. The helper name does not match the parent entry filter.
+Focused entry: `cargo test --locked -p treer-platform windows_update_process_
+-- --nocapture`, exactly three passed/zero failed/zero ignored/exit zero, plus
+independent task TEMP cleanup. Native execution remains NOT_RUN. Windows GNU
+platform all-target strict Clippy typechecks this boundary; no old platform or
+Controller acceptance selector is repeated. The initial cross-check used the
+wrong windows-sys constant spelling; using its actual `PROCESS_SYNCHRONIZE`
+constant fixed that source compile error without changing access rights.
+
+API references: [QueryFullProcessImageNameW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew),
+[IsProcessInJob](https://learn.microsoft.com/en-us/windows/win32/api/jobapi/nf-jobapi-isprocessinjob),
+[WaitForSingleObject](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject).
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

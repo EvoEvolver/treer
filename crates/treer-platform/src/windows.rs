@@ -668,7 +668,7 @@ pub fn create_pipe(
     }
 }
 
-fn open_process(pid: u32, access: u32) -> io::Result<Option<OwnedHandle>> {
+pub(super) fn open_process(pid: u32, access: u32) -> io::Result<Option<OwnedHandle>> {
     unsafe {
         let handle = OpenProcess(access, 0, pid);
         if handle.is_null() {
@@ -682,7 +682,7 @@ fn open_process(pid: u32, access: u32) -> io::Result<Option<OwnedHandle>> {
     }
 }
 
-fn creation_time(handle: &OwnedHandle) -> io::Result<Option<u64>> {
+pub(super) fn creation_time(handle: &OwnedHandle) -> io::Result<Option<u64>> {
     unsafe {
         let mut exit_code = 0;
         checked(GetExitCodeProcess(handle.as_raw_handle(), &mut exit_code))?;

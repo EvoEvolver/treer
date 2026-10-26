@@ -39,6 +39,9 @@ pub mod windows_update_inputs;
 #[cfg(windows)]
 pub mod windows_update_pair;
 #[cfg(windows)]
+#[allow(unsafe_code)]
+pub mod windows_update_process;
+#[cfg(windows)]
 pub mod windows_update_store;
 #[cfg(windows)]
 pub use windows::{
