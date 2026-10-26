@@ -579,3 +579,47 @@ pass in a closed native Windows fixture. Pending native tests are not evidence
 of success; a failing job blocks release rather than being retried into green.
 The operator then updates win_native explicitly and checks its App/UI Agent;
 release automation must not update that machine or restart existing Agents.
+
+## Independent launcher latest channel
+
+`treer-agent update --latest` uses a launcher-only GitHub prerelease pointer at
+`https://github.com/EvoEvolver/treer/releases/download/launcher-stable/launcher-latest.json`.
+This does not move the Core release `latest` tag or activate any Controller,
+Host, provider, or existing Agent. The pointer is mutable; version objects are
+published under `launcher-<full-source-SHA>` and never intentionally overwritten.
+Trust is the repository publisher over HTTPS plus pinned SHA256, not an asserted
+signature or GitHub immutable-release setting.
+
+Release prepares an exact ordinary native and a matching `prepare-bundle.mjs`
+payload without `native-runtime.json`. The native may be reused only with its
+original source and build evidence; matching platform alone does not prove tool
+compatibility. Its compiled tool paths and existing installed provider bindings
+must match. Unsupported bindings refuse; providers are not downloaded. The
+consumer derives the local runtime manifest and installer content hash after
+verification, keeping upstream package and locally generated bundle identities
+separate.
+
+Stage with `node scripts/launcher-release.mjs stage --payload ABS --native ABS
+--binding ABS --build ABS --source FULL_SHA --platform PLATFORM --output ABS`.
+The binding is the accepted native-runtime metadata. The build evidence uses
+`treer.launcher-native-build/v1` with `source_commit`, `platform`, `ordinary:true`,
+`fixture_harness:false`, `sha256`, `bytes`, and `tool_paths`; those fields must
+match retained actual ordinary-build receipts, never synthetic fixtures.
+
+The platform asset is a bounded `treer.launcher-package/v1` JSON filemap. It
+contains the exact payload manifest and its declared files plus one native
+image, with per-file lengths and SHA256. It carries no credentials or provider
+binaries. The `treer.launcher-latest/v1` channel pins each platform's
+`package_url`, `package_sha256`, and `package_size`. Payload and native source
+commits are recorded separately. Channel metadata is at most 64 KiB, the package
+256 MiB, each file 32 MiB, and decoded contents 192 MiB with at most 1024 files.
+
+After the exact source is delivered and publication is authorized, run
+`node scripts/launcher-release.mjs publish ABS_OUTPUT ABS_STAGE_JSON...` once.
+The publisher records exclusive intents, verifies version objects through the
+public HTTPS download path, then writes the launcher-only pointer and verifies
+it. A failed or lost result requires inspecting the retained operation and
+actual GitHub objects; do not retry blindly or overwrite version assets. A
+pointer replacement can briefly return unavailable; the client must fail
+without silently choosing an older Controller payload. GitHub HTTPS redirects
+are bounded and host-restricted; temporary signed redirect URLs are not logged.
