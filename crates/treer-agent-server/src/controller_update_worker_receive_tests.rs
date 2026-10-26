@@ -21,13 +21,16 @@ async fn worker_input_fixture_child() {
         &key,
     )
     .await;
-    if mode != "valid" {
+    if mode != "valid" && mode != "state-current" {
         if result.is_ok() {
             std::process::exit(81);
         }
         return;
     }
-    let custody = result.unwrap_or_else(|_| std::process::exit(82));
+    let mut custody = result.unwrap_or_else(|_| std::process::exit(82));
+    if mode == "state-current" {
+        custody.inspect_snapshot().unwrap();
+    }
     std::fs::write(root.join("receiver-held"), []).unwrap();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
     while !root.join("receiver-release").exists() {
@@ -35,6 +38,16 @@ async fn worker_input_fixture_child() {
             std::process::exit(83);
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    if mode == "state-current" {
+        assert!(custody.inspect_snapshot().is_err());
+        std::fs::write(root.join("receiver-poisoned"), []).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !root.join("receiver-restored").exists() {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(custody.inspect_snapshot().is_err());
     }
     drop(custody);
 }
@@ -225,6 +238,78 @@ async fn windows_update_worker_receive_native_tampered_signature_identity_state_
             .is_err());
         drop(child);
     }
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_worker_state_current_native_real_fence_change_poison_keeps_custody() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let reserved = reserve(&runtime, &root, &catalog);
+    let binding = reserved.binding().clone();
+    let selector = Uuid::new_v4().simple().to_string();
+    let pipe = treer_platform::windows_update_pipe::CreatedChildPipe::bind(&selector).unwrap();
+    let mut command = command(&reserved, &selector, &root, "state-current");
+    let mut child = reserved.spawn_owned_child(&runtime, &mut command).unwrap();
+    drop(command);
+    child
+        .accept_worker_pipe(&runtime, &binding, pipe)
+        .await
+        .unwrap();
+    let fixture = Fixture::new(|_| {});
+    child
+        .exchange_worker_inputs(&runtime, &binding, &fixture.documents())
+        .await
+        .unwrap();
+    let wait_marker = |name: &'static str| {
+        let path = root.join(name);
+        async move {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+            while !path.exists() {
+                assert!(tokio::time::Instant::now() < deadline, "missing {name}");
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }
+    };
+    wait_marker("receiver-held").await;
+    let startup = root.join("configured-state/srv_fixture-agent-startup.json");
+    let original = std::fs::read(&startup).unwrap();
+    let saved = root.join("startup-original");
+    std::fs::rename(&startup, &saved).unwrap();
+    runtime.inner.startup_store.deny_absent("ag_later").unwrap();
+    std::fs::write(root.join("receiver-release"), []).unwrap();
+    wait_marker("receiver-poisoned").await;
+    // Only this disposable test restores the ORIGINAL file identity AND bytes
+    // to prove poison is irreversible, not merely another inode mismatch.
+    // Product code has no startup restoration or resume API.
+    std::fs::rename(&startup, root.join("startup-changed")).unwrap();
+    std::fs::rename(saved, &startup).unwrap();
+    assert_eq!(std::fs::read(&startup).unwrap(), original);
+    assert!(child.poll(&runtime, &binding).unwrap().is_none());
+    assert!(std::fs::rename(root.join("configured-state"), root.join("moved-state")).is_err());
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("target/treer.exe"))
+        .is_err());
+    assert!(
+        treer_platform::windows_update_inputs::PinnedPair::open(&root.join("installed"))
+            .unwrap()
+            .lock_installation()
+            .is_err()
+    );
+    assert!(root
+        .join("installed/.treer-controller-update.claim")
+        .is_file());
+    std::fs::write(root.join("receiver-restored"), []).unwrap();
+    exited(&mut child, &runtime, &binding).await;
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("target/treer.exe"))
+        .is_err());
+    drop(child);
     drop(runtime);
     task.abort();
     std::fs::remove_dir_all(root).unwrap();

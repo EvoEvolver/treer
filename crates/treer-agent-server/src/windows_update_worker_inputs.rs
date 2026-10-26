@@ -20,6 +20,29 @@ fn receipt(offer: &InputOffer, bytes: &[u8]) -> InputReceipt {
     })
 }
 
+#[cfg(any(windows, test))]
+fn check_snapshot(
+    expected: &Option<treer_protocol::controller_update_worker_inputs::Snapshot>,
+    observed: Option<(u64, Vec<u8>)>,
+    binding: &crate::windows_update_intent::Binding,
+) -> Result<()> {
+    match (observed, expected) {
+        (None, None) => Ok(()),
+        (Some((id, bytes)), Some(expected)) => {
+            let digest =
+                super::backup::startup_digest(&bytes, &binding.workspace_id, &binding.server_id)?;
+            if id != expected.file_id
+                || digest.size != expected.size
+                || digest.sha256 != expected.sha256
+            {
+                return Err(refused());
+            }
+            Ok(())
+        }
+        _ => Err(refused()),
+    }
+}
+
 async fn read_offer<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(InputOffer, Vec<u8>)> {
     let mut header = [0; INPUT_HEADER_BYTES];
     stream
@@ -176,6 +199,38 @@ pub(crate) mod native {
         binding: crate::windows_update_intent::Binding,
         snapshot: Option<Snapshot>,
         runtime_context_sha256: [u8; 32],
+        snapshot_invalidated: bool,
+    }
+
+    #[allow(dead_code)] // Internal continuation; production coordinator is not wired.
+    impl WorkerReceivedInputs {
+        /// Read-only point-in-time recheck against this custody's original raw
+        /// snapshot, never a freeze, CAS, authorization or release permit. Any
+        /// observation error permanently poisons this object, even if a later
+        /// caller restores the old bytes. Custody itself remains held on error.
+        pub(crate) fn inspect_snapshot(&mut self) -> Result<()> {
+            if self.snapshot_invalidated {
+                return Err(refused());
+            }
+            let check = || -> Result<()> {
+                if !self.stream.creator_is_live()? {
+                    return Err(refused());
+                }
+                let observed = self
+                    .state
+                    .startup_snapshot(&format!("{}-agent-startup.json", self.binding.server_id))?;
+                check_snapshot(&self.snapshot, observed, &self.binding)?;
+                if !self.stream.creator_is_live()? {
+                    return Err(refused());
+                }
+                Ok(())
+            };
+            if check().is_err() {
+                self.snapshot_invalidated = true;
+                return Err(refused());
+            }
+            Ok(())
+        }
     }
 
     fn open_pair(location: &PairLocation) -> Result<PinnedPair> {
@@ -249,23 +304,7 @@ pub(crate) mod native {
         }
         let observed =
             state.startup_snapshot(&format!("{}-agent-startup.json", binding.server_id))?;
-        match (observed, &offer.state.snapshot) {
-            (None, None) => {}
-            (Some((id, bytes)), Some(expected)) => {
-                let digest = super::super::backup::startup_digest(
-                    &bytes,
-                    &binding.workspace_id,
-                    &binding.server_id,
-                )?;
-                if id != expected.file_id
-                    || digest.size != expected.size
-                    || digest.sha256 != expected.sha256
-                {
-                    return Err(refused());
-                }
-            }
-            _ => return Err(refused()),
-        }
+        check_snapshot(&offer.state.snapshot, observed, &binding)?;
         Ok((installed, target, state, binding))
     }
 
@@ -309,6 +348,7 @@ pub(crate) mod native {
                 binding,
                 snapshot: offer.state.snapshot,
                 runtime_context_sha256: offer.runtime_context_sha256,
+                snapshot_invalidated: false,
             })
         })
         .await
@@ -320,6 +360,43 @@ pub(crate) mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_update_worker_state_current_raw_fences_identity_and_absence() {
+        use treer_protocol::controller_update_worker_inputs::Snapshot;
+        let binding = crate::windows_update_intent::Binding {
+            operation_id: uuid::Uuid::new_v4(),
+            workspace_id: "ws_fixture".into(),
+            server_id: "srv_fixture".into(),
+            installation_volume: 1,
+            installation_file_id: 2,
+            old_controller_sha256: "a".repeat(64),
+            old_cli_sha256: "b".repeat(64),
+            controller_sha256: "c".repeat(64),
+            cli_sha256: "d".repeat(64),
+            signed_manifest_sha256: "e".repeat(64),
+        };
+        let raw = br#"{"version":2,"entries":[],"denied_agent_ids":["ag_deleted"]}"#;
+        let expected = Some(Snapshot {
+            file_id: 9,
+            size: raw.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(raw)),
+        });
+        assert!(check_snapshot(&expected, Some((9, raw.to_vec())), &binding).is_ok());
+        assert!(check_snapshot(&expected, Some((8, raw.to_vec())), &binding).is_err());
+        assert!(check_snapshot(&expected, None, &binding).is_err());
+        assert!(check_snapshot(&None, None, &binding).is_ok());
+        assert!(check_snapshot(&None, Some((9, raw.to_vec())), &binding).is_err());
+        for changed in [
+            br#"{"version":2,"entries":[],"denied_agent_ids":["ag_deleted","ag_later"]}"#
+                .as_slice(),
+            br#"{"version":1,"entries":[],"denied_agent_ids":["ag_deleted"]}"#,
+            br#"{"version":2,"entries":[],"denied_agent_ids":["ag_deleted","ag_deleted"]}"#,
+        ] {
+            assert!(check_snapshot(&expected, Some((9, changed.to_vec())), &binding).is_err());
+        }
+    }
+
     fn offer() -> InputOffer {
         use treer_protocol::{
             controller_update::{Identity, Platform, Target},

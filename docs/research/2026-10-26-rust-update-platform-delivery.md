@@ -1882,6 +1882,61 @@ These controls used a separate task-owned testexe helper; they did not run an
 admitted image or production worker entry, confer lifecycle authority, or
 exercise restart health, Job survival or the complete updater.
 
+## Retained worker startup observation and permanent invalidation
+
+The child-side `WorkerReceivedInputs::inspect_snapshot` rechecks only the
+snapshot already bound to its original received custody. It reads the fixed
+server startup file through the retained physical state directory, applies the
+same raw inode/size/SHA and real v1/v2 denial-fence checks as initial reception,
+and checks its retained original creator's liveness before and after the read.
+It does not accept a replacement path, snapshot, operation, key or command.
+Any observation failure permanently invalidates this object. Restoring the
+original inode and bytes later does not resume it; guards remain owned until
+explicit owner drop. A successful read is only a point-in-time observation,
+not startup freeze/CAS, independent runtime authorization, continuing creator
+survival, sender-release permission or a lifecycle action. Synchronous OS reads
+are not forcibly interruptible. No production worker entry is wired here.
+
+The snapshot comparison helper is shared with initial worker reception, whose
+checks are otherwise unchanged. The new narrow selector is
+`windows_update_worker_state_current_`, not the prior receiver selector. Its
+portable control covers identity/raw fences/absence. The new separate-process
+native control retains the real received custody, applies a normal loaded-store
+denial fence write, observes permanent invalidation, then restores the original
+file identity and bytes in the disposable fixture and verifies refusal remains.
+It also checks creator-side pins/lease/claim remain held after that error and
+after natural helper exit. The fixture-only raw restoration is not a product
+restore or resume API. No admitted/installed image or Host runs.
+
+Author macOS execution passed one new portable test, zero failed/ignored,
+516 filtered. Strict macOS Server bins/tests Clippy with the existing acceptance
+feature, formatting, docs and diff checks passed. The native contract reuses
+the existing normal-compiler/direct-testexe isolation contract with the
+fresh selector, default Server tests, exact2 (portable1/native1), both exit codes,
+binary hashes and private TEMP cleanup. No old leaf or matrix is rerun.
+
+The sole independent source review accepted exact `c94d225e` within this scope
+(#111:9753). It verified that initial reception's extracted snapshot comparison
+is equivalent, retained guards survive observation errors, and irreversible
+invalidation does not confer lifecycle or release authority. No source finding
+required a successor or an additional review layer.
+
+The sole Windows run `40379393520` accepted exact `c94d225e`, wrapper
+`92dc1b25` (#111:9757). Windows 2022/Rust 1.90 on fixed NTFS image
+`20261022.344.1`: normal-environment default Server compilation exited zero,
+with one exact local bin/test artifact of 44,130,816 bytes. Isolated direct
+execution passed exactly two tests (portable1/native1), zero failed/ignored,
+322 filtered, exit zero. Binary SHA-256 before/after matched
+`9eb6545cfe6d0bad2646bb982963235aab36c9bace15a06b0c36061612950c05`.
+The temporary inventory was empty, cleanup proven, and empty root removed.
+Core independently read RESULT, platform, compiler-artifact binding and both
+test names. RESULT SHA-256 was
+`c787ad657255e3cf29074866e77fed5b5be11c5984009c824f7ad265ffd74f05`;
+safe receipts remain under the ignored
+`.treer/reviews/core111-windows-worker-state-current-c94d225e/actual/` directory.
+This result is limited to the read-only observation/poison leaf, not production
+entry, independent child authorization, sender release, recovery or lifecycle.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,
