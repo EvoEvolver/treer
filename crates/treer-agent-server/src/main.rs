@@ -26,6 +26,8 @@ pub mod windows_update_admission;
 #[cfg(test)]
 mod windows_update_envelope;
 #[cfg(any(windows, test))]
+mod windows_update_handshake;
+#[cfg(any(windows, test))]
 pub mod windows_update_intent;
 mod workload_proxy;
 

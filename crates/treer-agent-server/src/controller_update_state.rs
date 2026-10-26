@@ -153,6 +153,7 @@ pub(crate) struct ControllerUpdateChild {
     stop_attempted: bool,
     job_check_attempted: bool,
     pipe_attempted: bool,
+    handshake_attempted: bool,
     #[cfg(windows)]
     _worker_pipe: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
     #[cfg(windows)]
@@ -184,6 +185,7 @@ impl ControllerUpdateChild {
             stop_attempted: false,
             job_check_attempted: false,
             pipe_attempted: false,
+            handshake_attempted: false,
             _worker_pipe: None,
             _reservation: Some(reservation),
         })
@@ -208,6 +210,7 @@ impl ControllerUpdateChild {
             stop_attempted: false,
             job_check_attempted: false,
             pipe_attempted: false,
+            handshake_attempted: false,
             _worker_pipe: None,
             _reservation: Some(reservation),
         })
@@ -230,6 +233,7 @@ impl ControllerUpdateChild {
             stop_attempted: false,
             job_check_attempted: false,
             pipe_attempted: false,
+            handshake_attempted: false,
             #[cfg(windows)]
             _worker_pipe: None,
             #[cfg(windows)]
@@ -339,6 +343,72 @@ impl ControllerUpdateChild {
                 .map_err(|_| anyhow::anyhow!("windows_update_child_pipe_unconfirmed"))?,
         );
         Ok(())
+    }
+
+    fn begin_handshake(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+    ) -> Result<treer_protocol::controller_update_worker::WorkerBindingFrame> {
+        self.matches(selected, binding)?;
+        if self.stop_attempted || !self.pipe_attempted || self.handshake_attempted {
+            bail!("windows_update_handshake_already_attempted");
+        }
+        // Latch before any fallible encoding or await. No cancellation or
+        // unknown ACK permits another exchange on this owner.
+        self.handshake_attempted = true;
+        let mut digest = Sha256::new();
+        digest.update(b"treer-windows-worker-binding-v1\0");
+        digest.update(serde_json::to_vec(&(&self.binding, &self.evidence))?);
+        Ok(
+            treer_protocol::controller_update_worker::WorkerBindingFrame {
+                operation: *self.binding.operation_id.as_bytes(),
+                context_sha256: digest.finalize().into(),
+                challenge: *Uuid::new_v4().as_bytes(),
+            },
+        )
+    }
+
+    /// Bind one ACK to the already selected runtime/evidence/full inputs and a
+    /// fresh challenge. The original Child/lease/pins/claim remain retained.
+    /// This agreement does not grant a command, readiness or restart authority.
+    #[cfg(windows)]
+    pub(crate) async fn exchange_worker_binding(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+    ) -> Result<()> {
+        let request = self.begin_handshake(selected, binding)?;
+        // Taking before await closes the only transport on error/cancellation;
+        // success also consumes it. No post-handshake command parser is exposed.
+        let stream = self
+            ._worker_pipe
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("windows_update_handshake_transport_unavailable"))?;
+        crate::windows_update_handshake::exchange(stream, request).await
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture_handshake_request(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+    ) -> Result<treer_protocol::controller_update_worker::WorkerBindingFrame> {
+        self.begin_handshake(selected, binding)
+    }
+
+    #[cfg(test)]
+    pub(super) async fn fixture_binding_exchange<S>(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+        stream: S,
+    ) -> Result<()>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let request = self.begin_handshake(selected, binding)?;
+        crate::windows_update_handshake::exchange(stream, request).await
     }
 
     /// One teardown attempt, on the original Child handle only. Set the latch

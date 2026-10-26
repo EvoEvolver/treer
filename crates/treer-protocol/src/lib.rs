@@ -18,6 +18,7 @@ mod provider_cli_observation;
 pub use provider_cli_observation::*;
 pub mod controller_update;
 pub mod controller_update_runtime;
+pub mod controller_update_worker;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

@@ -109,6 +109,16 @@ or configuration contents. Failed launch retains the newly saved specification.
   the default update. This does not cover
   bootstrap installers, Windows in-place updates, or replay/downgrade protection.
 
+  The internal Windows worker bootstrap additionally has a one-use, bounded
+  binding exchange on the original Child's private transport. Its fixed ACK
+  agrees to an operation, fresh challenge and digest of the retained selected
+  runtime/input evidence. Child-side creator-handle checking proves transport
+  origin only; echoing the context is not independent runtime authorization.
+  Neither an ACK nor its wire data constructs admission, transfers locks,
+  permits lifecycle commands or proves readiness. The production Windows worker
+  entry/coordinator and capability remain unwired; normal identity/Policy and
+  signed admission are still required.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

@@ -903,6 +903,78 @@ API contracts: [DuplicateHandle](https://learn.microsoft.com/en-us/windows/win32
 [GetStdHandle](https://learn.microsoft.com/en-us/windows/console/getstdhandle),
 [GetNamedPipeServerProcessId](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeserverprocessid).
 
+### Implemented leaf: selected-runtime/operation binding exchange
+
+Shared wire models live in `treer-protocol/controller_update_worker.rs`: exactly
+72 bytes contain a versioned request/ACK role, UUIDv4 operation, SHA256 context
+and a fresh UUIDv4 challenge. There are no variable lengths, executable paths,
+credentials, commands or raw errors. Exact decoder input lengths, role/version
+and RFC UUID variants are checked. A stream reads only one fixed frame; trailing
+bytes are never dispatched and the transport closes after this exchange.
+
+`ControllerUpdateChild::exchange_worker_binding` first matches the retained
+full Binding, selected runtime instance, workspace/server and Host epoch digest.
+It requires a prior pipe attempt and sets a distinct one-use latch before
+encoding/taking the held pipe or awaiting anything. A domain-separated SHA256
+of the retained full Binding plus ControllerStateEvidence binds the request;
+the challenge is freshly generated from UUIDv4. The parent accepts only an ACK
+matching all bytes of that request under a separate ACK role. Encoding errors,
+missing pipe, wrong/partial/unknown replies, deadline or cancellation never reset
+the latch. The original Child, reservation, installation lease, image/state pins
+and durable claim remain with their existing owner. Its independent one-attempt
+teardown remains available; unknown Drop still does not prove Child exit.
+
+The child-side helper connects only through the already implemented inherited
+creator-handle/same-pipe-server check, compares the private bootstrap operation,
+then echoes the opaque context/challenge. Its context is a statement by the
+creator, not independently authenticated runtime configuration. This is an
+agreement bound to the selected parent owner, not a new grant to that creator
+or child. Both sides have one three-second write/read budget and own/close the
+transport on success, error or cancellation. No post-ACK command channel, lock
+transfer, ownership transfer, worker early-entry, selector delivery, Job survival,
+Controller restart or health/readiness behavior is introduced. Production
+capability and Host policy remain unchanged. Normal identity/Policy and signed
+admission remain prerequisites to the future production coordinator.
+
+Author Mac focused checks: two new `windows_update_handshake_` tests passed,
+covering a real in-memory duplex exchange, wrong role/operation/context/challenge,
+wrong child operation, a silent peer's own deadline, exact runtime/input digest,
+foreign runtime/operation refusal before consuming the owner, and cancellation
+consuming its one-use attempt while leaving independent teardown available.
+The shared protocol's one focused frame-control test passed. The first author
+compile found a test-only missing `sha2::Digest` import; it was corrected before
+these passing checks. Controller/protocol strict Clippy, formatting, documentation
+and diff checks passed. No old selector or platform matrix is repeated.
+
+Windows entry (accepted within the scope below):
+`cargo test --locked -p treer-agent-server --bin treer-agent-server windows_update_handshake_ -- --nocapture`.
+Require exactly four passed/zero failed/zero ignored/exit zero: the two portable
+controls above plus two native controls. The positive native fixture uses signed
+admission/reservation with inert target bytes but executes only the SAME test
+executable, verifies actual creator/Child transport and a complete ACK, checks
+pins/lease/claim retention, and refuses a second exchange. The negative native
+fixture covers wrong context, a partial ACK held open to the internal deadline,
+and externally cancelled silence, followed by refusal of a second attempt and
+independent original-Child teardown. Require fixed NTFS and independent empty
+task TEMP/cleanup proof. No admitted image or installed process runs.
+
+#### Native binding-exchange acceptance
+
+Unique run `40325342444`, exact source `fc26c95963237f01737e3eb44d087c7070403635`
+and wrapper `a41774d16d479b8d61572d5590e97215d2ca8f22`, passed the entry above
+on Windows 2022/Rust 1.90/fixed NTFS image `20261022.344.1`: exactly four
+passed, zero failed, zero ignored, exit zero (280 filtered). Both new native
+controls and both portable controls executed. Independent task TEMP had no
+remaining entries, cleanup was proven, and its empty root was removed. Core
+independently matched RESULT source/command/names, test log, platform and SHA256
+`4c15fe61edbc4947294ee99d224958fac51193ca5e748cc5945170bb083a9e13`.
+Receipts: `.treer/reviews/core111-windows-handshake-fc26c959/artifact/`.
+
+This proves the finite context agreement and refusal/retention controls only;
+it does not prove independent child authorization, worker readiness, continued
+Job survival, Controller-only restart/health or a complete updater. No admitted
+image, installation, Host, live process, capability or publisher changed.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

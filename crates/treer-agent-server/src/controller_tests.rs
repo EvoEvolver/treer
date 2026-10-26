@@ -3032,6 +3032,246 @@ fn update_custody_fixture_child() {
 }
 
 #[tokio::test]
+async fn windows_update_handshake_scope_digest_and_cancellation_are_single_use() {
+    use sha2::Digest;
+    use treer_protocol::controller_update_worker::WorkerBindingFrame;
+    let (runtime, root, task) = update_state_fixture().await;
+    let (other, other_root, other_task) = update_state_fixture().await;
+    let binding = update_state_binding(Uuid::new_v4());
+    let state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    let mut child = update_state::ControllerUpdateChild::spawn_fixture(
+        &state,
+        &runtime,
+        &binding,
+        &mut update_custody_command(),
+    )
+    .unwrap();
+    assert!(child.fixture_handshake_request(&runtime, &binding).is_err());
+    child.begin_fixture_pipe_accept(&runtime, &binding).unwrap();
+    assert!(child.fixture_handshake_request(&other, &binding).is_err());
+    let mut foreign = binding.clone();
+    foreign.operation_id = Uuid::new_v4();
+    assert!(child.fixture_handshake_request(&runtime, &foreign).is_err());
+    let request: WorkerBindingFrame = child.fixture_handshake_request(&runtime, &binding).unwrap();
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"treer-windows-worker-binding-v1\0");
+    digest.update(serde_json::to_vec(&(&binding, state.evidence())).unwrap());
+    let expected_digest: [u8; 32] = digest.finalize().into();
+    assert_eq!(request.context_sha256, expected_digest);
+    assert_eq!(request.operation, *binding.operation_id.as_bytes());
+    assert_eq!(Uuid::from_bytes(request.challenge).get_version_num(), 4);
+    assert!(child.fixture_handshake_request(&runtime, &binding).is_err());
+    child.stop(&runtime, &binding).unwrap();
+    drop(child);
+
+    let mut cancelled = update_state::ControllerUpdateChild::spawn_fixture(
+        &state,
+        &runtime,
+        &binding,
+        &mut update_custody_command(),
+    )
+    .unwrap();
+    cancelled
+        .begin_fixture_pipe_accept(&runtime, &binding)
+        .unwrap();
+    let (stream, _silent) = tokio::io::duplex(256);
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(10),
+        cancelled.fixture_binding_exchange(&runtime, &binding, stream)
+    )
+    .await
+    .is_err());
+    assert!(cancelled
+        .fixture_handshake_request(&runtime, &binding)
+        .is_err());
+    assert!(cancelled.poll(&runtime, &binding).unwrap().is_none());
+    cancelled.stop(&runtime, &binding).unwrap();
+    drop(cancelled);
+    drop(state);
+    drop(runtime);
+    drop(other);
+    task.abort();
+    other_task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(other_root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "owned binding helper invoked only by the focused parent controls"]
+async fn update_handshake_fixture_child() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use treer_protocol::controller_update_worker::{
+        WorkerBindingFrame, WorkerBindingKind, WORKER_BINDING_FRAME_BYTES,
+    };
+    let selector = std::env::var("TREER_TEST_HANDSHAKE_SELECTOR").unwrap();
+    let operation =
+        Uuid::parse_str(&std::env::var("TREER_TEST_HANDSHAKE_OPERATION").unwrap()).unwrap();
+    let mode = std::env::var("TREER_TEST_HANDSHAKE_MODE").unwrap();
+    if mode == "valid" {
+        if crate::windows_update_handshake::acknowledge_creator(&selector, *operation.as_bytes())
+            .await
+            .is_err()
+        {
+            std::process::exit(81);
+        }
+    } else {
+        let Ok(mut stream) =
+            treer_platform::windows_update_pipe::connect_creation_parent_pipe(&selector)
+        else {
+            std::process::exit(82);
+        };
+        let mut bytes = [0; WORKER_BINDING_FRAME_BYTES];
+        if stream.read_exact(&mut bytes).await.is_err() {
+            std::process::exit(83);
+        }
+        let Some(mut request) = WorkerBindingFrame::decode(&bytes, WorkerBindingKind::Request)
+        else {
+            std::process::exit(84);
+        };
+        if mode == "mismatch" {
+            request.context_sha256[0] ^= 1;
+            stream
+                .write_all(&request.encode(WorkerBindingKind::Ack).unwrap())
+                .await
+                .unwrap();
+        } else if mode == "partial" {
+            stream.write_all(b"TRWACK01").await.unwrap();
+        }
+        // Hold a partial/silent peer until the parent's finite deadline or
+        // cancellation, without closing early and turning this into EOF-only.
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        return;
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+}
+
+#[cfg(windows)]
+fn update_handshake_command(selector: &str, operation: Uuid, mode: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .env_clear()
+        .env("TREER_TEST_HANDSHAKE_SELECTOR", selector)
+        .env("TREER_TEST_HANDSHAKE_OPERATION", operation.to_string())
+        .env("TREER_TEST_HANDSHAKE_MODE", mode)
+        .args([
+            "--exact",
+            "controller::tests::update_handshake_fixture_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .stdin(treer_platform::windows_update_pipe::creator_process_stdio().unwrap())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_handshake_native_creator_ack_retains_scoped_owner() {
+    use crate::windows_update_admission::tests::{NEW, OLD};
+    use treer_platform::windows_update_inputs::PinnedPair;
+    use treer_platform::windows_update_pipe::CreatedChildPipe;
+    let (runtime, root, task) = update_state_fixture().await;
+    let reservation = update_launch_reservation(&runtime, &root, NEW);
+    let binding = reservation.binding().clone();
+    let selector = Uuid::new_v4().simple().to_string();
+    let pipe = CreatedChildPipe::bind(&selector).unwrap();
+    let mut child = reservation
+        .spawn_owned_child(
+            &runtime,
+            &mut update_handshake_command(&selector, binding.operation_id, "valid"),
+        )
+        .unwrap();
+    child
+        .accept_worker_pipe(&runtime, &binding, pipe)
+        .await
+        .unwrap();
+    child
+        .exchange_worker_binding(&runtime, &binding)
+        .await
+        .unwrap();
+    assert!(child
+        .exchange_worker_binding(&runtime, &binding)
+        .await
+        .is_err());
+    assert!(child.poll(&runtime, &binding).unwrap().is_none());
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("installed/treer-agent-server.exe"))
+        .is_err());
+    assert!(PinnedPair::open(&root.join("installed"))
+        .unwrap()
+        .lock_installation()
+        .is_err());
+    assert!(std::fs::rename(root.join("configured-state"), root.join("moved-state")).is_err());
+    child.stop(&runtime, &binding).unwrap();
+    drop(child);
+    assert!(root
+        .join("installed/.treer-controller-update.claim")
+        .exists());
+    assert_eq!(
+        std::fs::read(root.join("installed/treer-agent-server.exe")).unwrap(),
+        OLD
+    );
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_handshake_native_mismatch_partial_and_cancel_refuse_replay() {
+    use treer_platform::windows_update_pipe::CreatedChildPipe;
+    let (runtime, root, task) = update_state_fixture().await;
+    let binding = update_state_binding(Uuid::new_v4());
+    let state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    for mode in ["mismatch", "partial", "silent"] {
+        let selector = Uuid::new_v4().simple().to_string();
+        let pipe = CreatedChildPipe::bind(&selector).unwrap();
+        let mut child = update_state::ControllerUpdateChild::spawn_fixture(
+            &state,
+            &runtime,
+            &binding,
+            &mut update_handshake_command(&selector, binding.operation_id, mode),
+        )
+        .unwrap();
+        child
+            .accept_worker_pipe(&runtime, &binding, pipe)
+            .await
+            .unwrap();
+        if mode == "silent" {
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                child.exchange_worker_binding(&runtime, &binding)
+            )
+            .await
+            .is_err());
+        } else {
+            assert!(child
+                .exchange_worker_binding(&runtime, &binding)
+                .await
+                .is_err());
+        }
+        assert!(child
+            .exchange_worker_binding(&runtime, &binding)
+            .await
+            .is_err());
+        assert!(child.poll(&runtime, &binding).unwrap().is_none());
+        child.stop(&runtime, &binding).unwrap();
+        drop(child);
+    }
+    drop(state);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn windows_update_pipe_scope_precedes_accept_and_exact_owner_is_single_use() {
     let (runtime, root, task) = update_state_fixture().await;
     let (other, other_root, other_task) = update_state_fixture().await;
