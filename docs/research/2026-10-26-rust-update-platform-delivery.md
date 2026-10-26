@@ -598,7 +598,7 @@ API references: [QueryFullProcessImageNameW](https://learn.microsoft.com/en-us/w
 [IsProcessInJob](https://learn.microsoft.com/en-us/windows/win32/api/jobapi/nf-jobapi-isprocessinjob),
 [WaitForSingleObject](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject).
 
-### Implemented leaf: created Child custody bound to selected runtime
+### Accepted leaf: created Child custody bound to selected runtime
 
 `ReservedInputs::spawn_owned_child` consumes the existing reservation, checks its
 runtime-owned state against the selected Controller instance, Host epoch,
@@ -640,12 +640,22 @@ The Windows-only third
 control consumes actual signed fixture admission/reservation and verifies pins,
 state-root denial and durable claim retention while owning the helper and after
 its termination. The admitted fixture image bytes remain inert and are never
-executed. Its native acceptance is NOT_RUN until the sole focused entry:
+executed. Sole focused entry:
 
 `cargo test --locked -p treer-agent-server --bin treer-agent-server windows_update_child_ -- --nocapture`
 
-Windows requires exactly three passed, zero failed/ignored, exit zero plus
-independent task TEMP cleanup. No previous acceptance selector is repeated.
+Sole run `40314283329` passed all three (zero failed/ignored, exit zero) on
+Windows 2022/Rust 1.90/fixed NTFS image `20261022.344.1`, exact source
+`c688223b9b9e0672c7ce7f45980dea284313465c`, wrapper
+`bcadca01c1ef19fb5b907aadebfdc1f4c59210b2`, after the single independent
+review #111:9513/9516 and author wording correction. Core independently checked
+the three names, summary, source, platform and empty TEMP/cleanup evidence.
+RESULT SHA256:
+`04cfd2f9a99fa073bc252119ea529217ccc723d13d4e114f4dffe37cd6dc8abd`.
+Receipts: `.treer/reviews/core111-windows-child-81277da4/artifact/`
+(`RESULT.json`, `platform.json`, `tests.log`). Earlier source81277/88e2 inputs
+were never dispatched. No previous acceptance selector is repeated. This accepts
+Child custody only, not executable authentication, Job escape or restart health.
 
 ## Remaining ordered leaves and waiting boundaries
 
