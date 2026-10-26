@@ -1169,10 +1169,26 @@ distinct observations, foreign runtime/operation/workspace/server refuses before
 any request, and changed epoch/PID, nil/noncanonical/wrong-version/variant UUID,
 wrong response kind and private Host error refuse without a second request or
 restart fallback. The fixture is a closed Host responder, not the real supervisor
-or an installed Host. Windows private-pipe/state-root behavior remains NOT_RUN
-until the separate focused native entry; old selectors/matrix are not rerun.
+or an installed Host. Old selectors/matrix are not rerun.
 Strict Controller bins/tests Clippy with the existing acceptance feature,
 formatting, docs and diff checks passed. No real machine or Host was queried.
+
+Sole native run `40334097434` checked out exact source
+`b9b30be4525e7dde808097c1d6f24ca1a27dab74`, wrapper
+`848130365c903bb6d8c94ed82a3c2ff70fe97f61`, on Windows2022/Rust1.90,
+Fixed NTFS image `20261022.344.1`. All three named controls actually passed,
+zero failed/ignored/exit zero (288 filtered). Independent task TEMP inventory
+was empty, cleanup proven and the empty root removed. Core independently
+checked source, command, exact names/counts, platform and cleanup receipts.
+Safe evidence is retained under
+`.treer/reviews/core111-windows-selected-host-b9b30be4/artifact/`;
+`RESULT.json` SHA256 is
+`b917a11bd72a0b30ca5310e91423dbde42142e451da40985fff1d63dcc1554fc`.
+The Windows private NamedPipe and physical state-root fixture is now accepted
+within this closed-responder scope. It is not actual supervisor/installed Host,
+worker authority, conditional restart, health/readiness or complete updater
+evidence. No feature, extra binary build, installed/live process, Host lifecycle,
+publisher or capability change was involved.
 
 ## Remaining ordered leaves and waiting boundaries
 
