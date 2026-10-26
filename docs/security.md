@@ -369,6 +369,15 @@ or configuration contents. Failed launch retains the newly saved specification.
   durable cross-creator recovery. The finite public consumer remains read-only
   and public Windows capability remains OFF.
 
+  Receiver custody includes an independently opened fixed installation claim
+  after normal configured-trust whole-input authentication. Core supplies the
+  exact canonical full operation binding; Platform retains a private regular
+  single-link read-only handle with no write/delete sharing and bounded byte
+  comparison. Receipt is sent only after that check, and later Holding checks
+  reread the same file handle. A matching durable claim remains a denial fence,
+  not independent Policy, takeover permission or sender release. No claim
+  creation, overwrite, recovery or retirement is exposed by this reader.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

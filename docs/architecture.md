@@ -271,6 +271,16 @@ opens a new Store by path. ACK, snapshot acceptance and creator exit still grant
 no sender release, durable lifetime transfer or restart authority. See the
 [CAS boundary and validation](research/2026-10-26-windows-startup-cas.md).
 
+The signed-input receiver now also retains the fixed installation-wide claim.
+After independently authenticating all signed inputs, it derives the canonical
+claim bytes from that full binding and opens an independent private, single-link,
+read-only claim handle without write/delete sharing, before the first receipt.
+The same handle and exact bytes are rechecked during Holding inspections,
+including backup/CAS continuations. Missing, partial or foreign claims cannot
+be repaired or adopted. This is an additional independent custody prerequisite,
+not durable ownership transfer, sender release or claim retirement. See the
+[claim custody scope](research/2026-10-26-windows-worker-claim-custody.md).
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

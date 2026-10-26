@@ -29,7 +29,51 @@ pub struct PairIdentity {
     pub cli: (u64, u64),
 }
 
+/// Independently retained fixed claim, not ownership, recovery or a release
+/// permit. The Controller authenticates expected bytes before construction.
+pub struct ClaimPin {
+    file: File,
+    expected: Vec<u8>,
+}
+
+impl ClaimPin {
+    /// Read the SAME held file, never reopen a pathname or replace its bytes.
+    pub fn verify(&self, expected: &[u8]) -> io::Result<()> {
+        if expected != self.expected || expected.is_empty() || expected.len() > 4096 {
+            return Err(io::Error::other("Windows update claim unconfirmed"));
+        }
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        file.take(4097).read_to_end(&mut bytes)?;
+        if bytes != self.expected {
+            return Err(io::Error::other("Windows update claim unconfirmed"));
+        }
+        Ok(())
+    }
+}
+
 impl PinnedPair {
+    /// Retain the fixed existing private single-link claim under these pinned
+    /// ancestors. No create/adoption/write/cleanup API; no sender release.
+    pub fn retain_claim(&self, expected: &[u8]) -> io::Result<ClaimPin> {
+        if expected.is_empty() || expected.len() > 4096 {
+            return Err(io::Error::other("Windows update claim unconfirmed"));
+        }
+        let file = crate::windows_update_store::open_record(
+            &self.path.join(".treer-controller-update.claim"),
+            false,
+        )?;
+        if lock_identity(&file)?.0 != self.identity()?.0 {
+            return Err(io::Error::other("Windows update claim volume differs"));
+        }
+        let pin = ClaimPin {
+            file,
+            expected: expected.to_vec(),
+        };
+        pin.verify(expected)?;
+        Ok(pin)
+    }
     /// Locator data for a separately authenticated receiver. The caller must
     /// keep these pins held while the receiver opens and compares every ID;
     /// the pathname alone is neither custody nor operation authorization.

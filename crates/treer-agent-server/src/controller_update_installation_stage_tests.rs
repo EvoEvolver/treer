@@ -8,6 +8,104 @@ use ed25519_dalek::pkcs8::EncodePublicKey;
 use sha2::Digest;
 
 #[tokio::test]
+async fn windows_update_worker_claim_same_receiver_pins_full_claim_until_explicit_close() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, false);
+    let mut prepared = Preparation::local(
+        &runtime,
+        input.dispatch.clone(),
+        &input.settings,
+        &input.fixture.documents(),
+        (&input.bytes, &input.bytes),
+        &[],
+    )
+    .unwrap();
+    let path = root.join("installed/.treer-controller-update.claim");
+    let original = std::fs::read(&path).unwrap();
+    // Sender reservation does not hold a claim file reader. This succeeds
+    // before the real independently verified worker acquires its own pin.
+    assert!(std::fs::OpenOptions::new().write(true).open(&path).is_ok());
+    prepared
+        .start(&runtime, &input.fixture.documents())
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        prepared.inspect(&runtime).await.unwrap();
+        assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+        assert!(std::fs::remove_file(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+    prepared.prepare_worker_backup(&runtime).await.unwrap();
+    prepared.inspect(&runtime).await.unwrap();
+    assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+    prepared.close(&runtime).await.unwrap();
+    let custody = prepared.retain_closed(&runtime).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    held(&root, &input);
+    drop(custody);
+    drop(prepared);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_worker_claim_missing_partial_foreign_record_never_receives() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    for kind in 0..3 {
+        let catalog = UpdatePlanCatalogFixture::new();
+        let (runtime, root, task) = update_state_fixture().await;
+        let input = inputs(&root, &catalog, false);
+        let mut prepared = Preparation::local(
+            &runtime,
+            input.dispatch.clone(),
+            &input.settings,
+            &input.fixture.documents(),
+            (&input.bytes, &input.bytes),
+            &[],
+        )
+        .unwrap();
+        let path = root.join("installed/.treer-controller-update.claim");
+        let original = std::fs::read(&path).unwrap();
+        if kind == 0 {
+            std::fs::remove_file(&path).unwrap();
+        } else if kind == 1 {
+            std::fs::write(&path, b"partial").unwrap();
+        } else {
+            let mut value: serde_json::Value = serde_json::from_slice(&original[8..]).unwrap();
+            value["binding"]["operation_id"] = serde_json::json!(uuid::Uuid::new_v4());
+            let mut wrong = original[..8].to_vec();
+            wrong.extend(serde_json::to_vec(&value).unwrap());
+            std::fs::write(&path, wrong).unwrap();
+        }
+        assert!(prepared
+            .start(&runtime, &input.fixture.documents())
+            .await
+            .is_err());
+        assert!(prepared
+            .start(&runtime, &input.fixture.documents())
+            .await
+            .is_err());
+        assert!(prepared.inspect(&runtime).await.is_err());
+        assert!(prepared.retain_closed(&runtime).is_err());
+        if kind == 0 {
+            assert!(!path.exists());
+        } else {
+            assert_ne!(std::fs::read(&path).unwrap(), original);
+        }
+        // No backup/output is repaired or adopted after an unreceived claim.
+        assert!(!stage(&root, &input).join("worker-backup").exists());
+        drop(prepared);
+        drop(runtime);
+        task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+        drop(catalog);
+    }
+}
+
+#[tokio::test]
 async fn windows_update_startup_cas_native_loaded_store_commit_continues_same_worker() {
     let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
     let catalog = UpdatePlanCatalogFixture::new();

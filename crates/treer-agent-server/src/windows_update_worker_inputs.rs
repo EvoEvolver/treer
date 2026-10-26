@@ -108,7 +108,7 @@ pub(crate) mod native {
     };
     use treer_platform::{
         windows_update_backup::BackupDirectory,
-        windows_update_inputs::{InheritedInstallationLock, PairIdentity, PinnedPair},
+        windows_update_inputs::{ClaimPin, InheritedInstallationLock, PairIdentity, PinnedPair},
         windows_update_pipe::CreationParentConnection,
     };
     use treer_protocol::controller_update_worker_inputs::{PairLocation, Snapshot, StateLocation};
@@ -209,6 +209,7 @@ pub(crate) mod native {
     pub(crate) struct WorkerReceivedInputs {
         stream: CreationParentConnection,
         lock: InheritedInstallationLock,
+        claim: ClaimPin,
         installed: PinnedPair,
         target: PinnedPair,
         state: BackupDirectory,
@@ -352,6 +353,8 @@ pub(crate) mod native {
                 if !self.stream.creator_is_live()? {
                     return Err(refused());
                 }
+                self.claim
+                    .verify(&crate::windows_update_intent::encode(&self.binding)?)?;
                 let observed = self
                     .state
                     .startup_snapshot(&format!("{}-agent-startup.json", self.binding.server_id))?;
@@ -469,6 +472,9 @@ pub(crate) mod native {
             }
             let lock = InheritedInstallationLock::retain_from_creator(&stream, offer.lock)?;
             let (installed, target, state, binding) = verify(&offer, key)?;
+            // Only independently verified signed inputs supply these bytes.
+            // A matching claim remains a denial fence, not takeover authority.
+            let claim = installed.retain_claim(&crate::windows_update_intent::encode(&binding)?)?;
             if tokio::time::Instant::now() >= deadline || !stream.creator_is_live()? {
                 return Err(refused());
             }
@@ -483,6 +489,7 @@ pub(crate) mod native {
             Ok(WorkerReceivedInputs {
                 stream,
                 lock,
+                claim,
                 installed,
                 target,
                 state,
