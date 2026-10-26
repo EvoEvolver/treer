@@ -183,6 +183,33 @@ claim remains. Public dispatch/installation selection and capability remain
 unwired; signed private dev-image acceptance does not prove a complete
 transaction, independent child Policy, Job survival or runtime rollback.
 
+Windows installation preparation now resolves the existing local service
+configuration directory, reads bounded Controller/Host projections, and retains
+the actual private NTFS configuration files and their physical ancestors. Saved
+Host `controller_path` plus matching controller-config path/socket/root select
+the installed pair; neither current_exe, PATH nor a caller's staging directory
+selects it. Selection is exact workspace/server and matches the selected loaded
+runtime's machine root. Actual Controller/CLI file identities determine shared
+server IDs; the existing catalog's shared-installation permission and the exact
+confirmed affected-server list must both match. These local snapshots are not
+an OS process identity or independent Policy grant.
+
+`Preparation::local` uses normal local UpdateArgs and the normal official/local/
+explicit self-host trust resolver. Signed documents and complete artifact bytes
+are authenticated before staging. A new exclusive operation directory is
+derived only under the selected runtime's configured startup-state root. New
+files are flushed and reopened with strict physical pins, then the existing
+confirmed admission reauthenticates the SAME held whole inputs before claiming
+and starting the sustained coordinator. Failed/partial staging is retained and
+never adopted or overwritten. Config/catalog and installation pins accompany
+the original reservation when explicit close returns custody. The directory's
+enrollment-name set is checked at phase boundaries; changes permanently poison
+the preparation. This does not prevent a new enrollment appearing between
+observations and is not a global enrollment CAS. Retained config handles may
+temporarily refuse config writers, without fallback or service restarts.
+The internal adapter accepts already fetched signed release inputs; network
+download adaptation and the public Windows dispatch/capability remain unwired.
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

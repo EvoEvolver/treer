@@ -287,6 +287,29 @@ or configuration contents. Failed launch retains the newly saved specification.
   proof of child exit or continued guard ownership; durable claim still fences
   another operation. No public capability or production mutation route is added.
 
+  Windows saved-installation preparation reads only the normal service config
+  root, with fixed safe JSON names, 256 KiB per file, 1024 directory entries and
+  16 MiB aggregate config input. Minimal projections omit credentials from
+  diagnostics; original private single-link files and ancestor handles remain
+  held. Host/controller path, socket and root bindings, exact workspace/server,
+  selected runtime machine root and physical pair identities are checked.
+  Shared physical images require the catalog's existing permission plus the
+  exact confirmed affected-server list. Snapshot identity is not process
+  authority, a freeze of future enrollments, or permission inferred from privacy
+  or same-volume paths. Enrollment-name changes poison phase-boundary checks.
+  Config/catalog writers may be refused while these read pins are held.
+
+  Staging uses verified normal-config trust, both signed documents and complete
+  artifact bytes, never an offer-selected key. Only a fresh exclusive operation
+  directory under runtime-owned state is created. After writing and flushing,
+  strict pinned files are reopened; this initial unadmitted staging boundary
+  makes no continuous-file-custody claim. Existing confirmed admission verifies
+  all held bytes again before claim. Errors keep partial staging/claim evidence,
+  with no automatic cleanup, overwrite, adoption or replay. Closed-session
+  custody returns the original reservation WITH saved-config/installation pins;
+  ACK/creator exit never releases them. This is internal preparation only, not
+  enabled product dispatch, child mutation authorization or a complete updater.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

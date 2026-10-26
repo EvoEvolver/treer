@@ -45,6 +45,21 @@ fn validate_path(path: &Path, server_id: &str) -> Result<()> {
 }
 
 impl ControllerRuntime {
+    #[cfg(windows)]
+    pub(crate) fn check_update_enrollment(
+        &self,
+        workspace: &str,
+        server: &str,
+        root: &Path,
+    ) -> Result<()> {
+        if self.inner.workspace_id != workspace
+            || self.inner.server_id != server
+            || self.inner.root != root
+        {
+            bail!("windows_update_installation_runtime_mismatch");
+        }
+        Ok(())
+    }
     /// Called only after normal caller authentication/Policy and operation
     /// selection. No exposed update command/capability is introduced here.
     #[allow(dead_code)] // Production Windows coordinator is not wired yet.

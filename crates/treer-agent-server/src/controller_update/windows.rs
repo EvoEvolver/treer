@@ -4,6 +4,7 @@ use anyhow::Result;
 use super::catalog::Catalog;
 
 pub(crate) mod coordinator;
+pub(crate) mod preparation;
 
 impl Catalog {
     #[allow(dead_code)] // Admission/coordinator wiring is a separate boundary.

@@ -30,6 +30,8 @@ mod windows_update_envelope;
 #[cfg(any(windows, test))]
 mod windows_update_handshake;
 #[cfg(any(windows, test))]
+mod windows_update_installation;
+#[cfg(any(windows, test))]
 pub mod windows_update_intent;
 #[cfg(any(windows, test))]
 mod windows_update_worker_entry;

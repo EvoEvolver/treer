@@ -12,6 +12,10 @@ mod worker_entry;
 #[path = "controller_update_coordinator_tests.rs"]
 mod coordinator;
 
+#[cfg(all(windows, feature = "native-update-acceptance"))]
+#[path = "controller_update_installation_stage_tests.rs"]
+mod installation_stage;
+
 #[cfg(windows)]
 static UPDATE_PLAN_CONFIG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
