@@ -1414,6 +1414,50 @@ was used. This accepts the lock-reference lifetime boundary only; complete
 input/ancestor/state pin custody, admitted operation handoff, continuous worker
 survival and restart/health reconciliation remain separate source work.
 
+## Selected operation bound to the inherited lock
+
+The internal `exchange_worker_lock_binding` now derives the actual lock-file
+volume/ID from its retained signed reservation, after checking the selected
+runtime and entire operation binding. It sends a separate fixed 88-byte
+`WorkerLockFrame`: distinct request/ACK role/version magic, UUIDv4 operation and
+challenge, existing full binding/runtime context digest and the physical lock
+identity. The legacy 72-byte wire is unchanged and is not accepted as a fallback.
+The same pre-await handshake latch covers both variants, including metadata
+failure and cancellation. Parent closes its one stream and checks full scope
+again after an exact ACK; the reservation/pins/claim never move or release.
+
+`acknowledge_creator_lock` is a separate internal continuation, not a new command
+or a changed terminal bootstrap. It checks the private operation UUID, the
+original live creator and its actual inherited lock identity before writing ACK;
+success returns that same creator connection and non-cloneable retained lock.
+Read/write/decode/identity failures and cancellation drop local custody; borrowed
+stdio remains process-owned. A three-second total deadline covers the exchange,
+with explicit post-inspection and post-write elapsed checks; no late success,
+reconnect, downgrade or second command is provided.
+
+This replaces echo-only evidence for the lock reference, not independent child
+Policy or signed-input admission. The context digest is still creator-supplied;
+no directory/image/state pins or operation authorization have been transferred.
+Creator exit/ACK/lock retention still cannot authorize lifecycle effects. Current
+terminal argv, startup initialization and ordinary capability gate are unchanged.
+
+Author focused controls: one new protocol test verifies exact role/version,
+bounds/UUID/zero-file-ID and separation from legacy frames; one new Server
+portable test verifies exact lock ACK, changed identity refusal and cancellation
+closure. Windows selector `windows_update_lock_binding_` requires three tests
+(that portable control plus two native controls). Native controls use only
+SAMEtestexe and a real signed fixture reservation/runtime-owned state: foreign
+scope before consumption, actual inherited-lock ACK retaining lease/image/state
+pins and claim, shared-latch refusal of both variants, nonfile inheritance and
+cancelled peer refusal without legacy fallback. The admitted inert image is not
+executed. Native execution remains NOT_RUN until one independent source review
+and the sole Release focused Windows entry; no old selector or matrix is needed.
+Both new portable controls passed on the author Mac (protocol: 1 passed/84
+filtered; Server: 1 passed/505 filtered, zero failures/ignored). Strict Controller
+bins/tests with the existing acceptance feature plus shared protocol Clippy,
+formatting, docs and diff checks passed. These do not compile/run the additional
+Windows-only controls; those remain the new native entry's responsibility.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,

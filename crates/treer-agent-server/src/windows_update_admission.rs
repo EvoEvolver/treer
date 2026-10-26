@@ -234,6 +234,18 @@ pub struct ReservedInputs(AdmittedInputs);
 
 #[cfg(windows)]
 impl ReservedInputs {
+    pub(crate) fn installation_lock_identity(&self) -> Result<(u64, u64)> {
+        self.0
+            ._installed
+            .lock_file_identity()
+            .map_err(|_| anyhow::anyhow!("windows_update_lock_unconfirmed"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture_lock_stdio(&self) -> std::process::Stdio {
+        self.0._installed.worker_lock_stdio().unwrap()
+    }
+
     pub fn binding(&self) -> &Binding {
         &self.0.binding
     }

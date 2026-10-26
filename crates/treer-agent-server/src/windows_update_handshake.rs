@@ -2,11 +2,86 @@
 use anyhow::{anyhow, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use treer_protocol::controller_update_worker::{
-    WorkerBindingFrame, WorkerBindingKind, WORKER_BINDING_FRAME_BYTES,
+    WorkerBindingFrame, WorkerBindingKind, WorkerLockFrame, WORKER_BINDING_FRAME_BYTES,
+    WORKER_LOCK_FRAME_BYTES,
 };
 
 fn refused() -> anyhow::Error {
     anyhow!("windows_update_handshake_unconfirmed")
+}
+
+/// Parent-side exact context AND lock-file agreement, closing on every outcome.
+/// No downgrade to the legacy echo-only frame and no retry on a lost ACK.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) async fn exchange_lock<S>(mut stream: S, expected: WorkerLockFrame) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    tokio::time::timeout_at(deadline, async {
+        stream
+            .write_all(
+                &expected
+                    .encode(WorkerBindingKind::Request)
+                    .ok_or_else(refused)?,
+            )
+            .await
+            .map_err(|_| refused())?;
+        let mut bytes = [0; WORKER_LOCK_FRAME_BYTES];
+        stream.read_exact(&mut bytes).await.map_err(|_| refused())?;
+        if tokio::time::Instant::now() >= deadline
+            || WorkerLockFrame::decode(&bytes, WorkerBindingKind::Ack) != Some(expected)
+        {
+            return Err(refused());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| refused())?
+}
+
+/// Separate internal handoff stage; deliberately NOT the terminal bootstrap.
+/// The inherited kernel lock is checked BEFORE ACK. Opaque runtime context is
+/// still creator-supplied; this is not independent Policy/input admission.
+#[cfg(windows)]
+#[allow(dead_code)] // No product worker/transaction coordinator is wired.
+pub(crate) async fn acknowledge_creator_lock(
+    selector: &str,
+    operation: [u8; 16],
+) -> Result<(
+    treer_platform::windows_update_pipe::CreationParentConnection,
+    treer_platform::windows_update_inputs::InheritedInstallationLock,
+)> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut stream = treer_platform::windows_update_pipe::connect_creation_parent_pipe(selector)
+        .map_err(|_| refused())?;
+    let lock = tokio::time::timeout_at(deadline, async {
+        let mut bytes = [0; WORKER_LOCK_FRAME_BYTES];
+        stream.read_exact(&mut bytes).await.map_err(|_| refused())?;
+        let frame = WorkerLockFrame::decode(&bytes, WorkerBindingKind::Request)
+            .filter(|frame| frame.binding.operation == operation)
+            .ok_or_else(refused)?;
+        let lock =
+            treer_platform::windows_update_inputs::InheritedInstallationLock::retain_from_creator(
+                &stream,
+                (frame.volume, frame.file_id),
+            )
+            .map_err(|_| refused())?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(refused());
+        }
+        stream
+            .write_all(&frame.encode(WorkerBindingKind::Ack).ok_or_else(refused)?)
+            .await
+            .map_err(|_| refused())?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(refused());
+        }
+        Ok::<_, anyhow::Error>(lock)
+    })
+    .await
+    .map_err(|_| refused())??;
+    Ok((stream, lock))
 }
 
 /// Strict private argv only. No environment, installed configuration, Host,
@@ -119,6 +194,50 @@ pub(crate) async fn acknowledge_creator_for_handoff(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn windows_update_lock_binding_exact_ack_refuses_changed_lock_and_cancel() {
+        let expected = WorkerLockFrame {
+            binding: WorkerBindingFrame {
+                operation: *uuid::Uuid::new_v4().as_bytes(),
+                context_sha256: [0x37; 32],
+                challenge: *uuid::Uuid::new_v4().as_bytes(),
+            },
+            volume: 12,
+            file_id: 34,
+        };
+        for wrong in [false, true] {
+            let (parent, mut child) = tokio::io::duplex(256);
+            let fixture = async {
+                let mut request = [0; WORKER_LOCK_FRAME_BYTES];
+                child.read_exact(&mut request).await.unwrap();
+                assert_eq!(
+                    WorkerLockFrame::decode(&request, WorkerBindingKind::Request),
+                    Some(expected)
+                );
+                let mut ack = expected;
+                if wrong {
+                    ack.file_id ^= 1;
+                }
+                child
+                    .write_all(&ack.encode(WorkerBindingKind::Ack).unwrap())
+                    .await
+                    .unwrap();
+            };
+            let (result, ()) = tokio::join!(exchange_lock(parent, expected), fixture);
+            assert_eq!(result.is_err(), wrong);
+        }
+        let (parent, mut child) = tokio::io::duplex(256);
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            exchange_lock(parent, expected)
+        )
+        .await
+        .is_err());
+        let mut request = [0; WORKER_LOCK_FRAME_BYTES];
+        child.read_exact(&mut request).await.unwrap();
+        assert_eq!(child.read(&mut [0]).await.unwrap(), 0);
+    }
     use uuid::Uuid;
 
     #[tokio::test]

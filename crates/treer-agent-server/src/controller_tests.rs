@@ -4491,6 +4491,173 @@ async fn windows_update_child_native_reservation_keeps_pins_and_claim_while_chil
 }
 
 #[cfg(windows)]
+#[tokio::test]
+#[ignore = "task-owned lock-binding helper only"]
+async fn update_lock_binding_fixture_child() {
+    let selector = std::env::var("TREER_TEST_LOCK_BINDING_SELECTOR").unwrap();
+    let operation =
+        Uuid::parse_str(&std::env::var("TREER_TEST_LOCK_BINDING_OPERATION").unwrap()).unwrap();
+    let mode = std::env::var("TREER_TEST_LOCK_BINDING_MODE").unwrap();
+    if mode == "silent" {
+        let _creator = treer_platform::windows_update_pipe::connect_creation_parent_pipe(&selector)
+            .unwrap_or_else(|_| std::process::exit(81));
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        return;
+    }
+    let result =
+        crate::windows_update_handshake::acknowledge_creator_lock(&selector, *operation.as_bytes())
+            .await;
+    if mode == "null" {
+        if result.is_ok() {
+            std::process::exit(82);
+        }
+        return;
+    }
+    let _custody = result.unwrap_or_else(|_| std::process::exit(83));
+    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+}
+
+#[cfg(windows)]
+fn update_lock_binding_command(
+    reservation: &crate::windows_update_admission::ReservedInputs,
+    selector: &str,
+    mode: &str,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .env_clear()
+        .env("TREER_TEST_LOCK_BINDING_SELECTOR", selector)
+        .env(
+            "TREER_TEST_LOCK_BINDING_OPERATION",
+            reservation.binding().operation_id.to_string(),
+        )
+        .env("TREER_TEST_LOCK_BINDING_MODE", mode)
+        .args([
+            "--exact",
+            "controller::tests::update_lock_binding_fixture_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .stdin(treer_platform::windows_update_pipe::creator_process_stdio().unwrap())
+        .stdout(std::process::Stdio::null())
+        .stderr(if mode == "null" {
+            std::process::Stdio::null()
+        } else {
+            reservation.fixture_lock_stdio()
+        });
+    command
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_lock_binding_native_selected_scope_and_real_lock_ack() {
+    let (runtime, root, task) = update_state_fixture().await;
+    let reserved =
+        update_launch_reservation(&runtime, &root, crate::windows_update_admission::tests::NEW);
+    let binding = reserved.binding().clone();
+    let selector = Uuid::new_v4().simple().to_string();
+    let pipe = treer_platform::windows_update_pipe::CreatedChildPipe::bind(&selector).unwrap();
+    let mut command = update_lock_binding_command(&reserved, &selector, "valid");
+    let mut child = reserved.spawn_owned_child(&runtime, &mut command).unwrap();
+    drop(command);
+    child
+        .accept_worker_pipe(&runtime, &binding, pipe)
+        .await
+        .unwrap();
+    let mut foreign = binding.clone();
+    foreign.installation_file_id ^= 1;
+    assert!(child
+        .exchange_worker_lock_binding(&runtime, &foreign)
+        .await
+        .is_err());
+    child
+        .exchange_worker_lock_binding(&runtime, &binding)
+        .await
+        .unwrap();
+    assert!(child
+        .exchange_worker_lock_binding(&runtime, &binding)
+        .await
+        .is_err());
+    assert!(child
+        .exchange_worker_binding(&runtime, &binding)
+        .await
+        .is_err());
+    assert!(child.poll(&runtime, &binding).unwrap().is_none());
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("target/treer-agent-server.exe"))
+        .is_err());
+    assert!(
+        treer_platform::windows_update_inputs::PinnedPair::open(&root.join("installed"))
+            .unwrap()
+            .lock_installation()
+            .is_err()
+    );
+    assert!(std::fs::rename(root.join("configured-state"), root.join("moved-state")).is_err());
+    child.stop(&runtime, &binding).unwrap();
+    drop(child);
+    assert!(root
+        .join("installed/.treer-controller-update.claim")
+        .exists());
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_lock_binding_native_nonfile_and_cancel_never_fall_back() {
+    for mode in ["null", "silent"] {
+        let (runtime, root, task) = update_state_fixture().await;
+        let reserved =
+            update_launch_reservation(&runtime, &root, crate::windows_update_admission::tests::NEW);
+        let binding = reserved.binding().clone();
+        let selector = Uuid::new_v4().simple().to_string();
+        let pipe = treer_platform::windows_update_pipe::CreatedChildPipe::bind(&selector).unwrap();
+        let mut command = update_lock_binding_command(&reserved, &selector, mode);
+        let mut child = reserved.spawn_owned_child(&runtime, &mut command).unwrap();
+        drop(command);
+        child
+            .accept_worker_pipe(&runtime, &binding, pipe)
+            .await
+            .unwrap();
+        if mode == "silent" {
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                child.exchange_worker_lock_binding(&runtime, &binding)
+            )
+            .await
+            .is_err());
+        } else {
+            assert!(child
+                .exchange_worker_lock_binding(&runtime, &binding)
+                .await
+                .is_err());
+        }
+        assert!(child
+            .exchange_worker_lock_binding(&runtime, &binding)
+            .await
+            .is_err());
+        assert!(child
+            .exchange_worker_binding(&runtime, &binding)
+            .await
+            .is_err());
+        child.stop(&runtime, &binding).unwrap();
+        drop(child);
+        assert!(root
+            .join("installed/.treer-controller-update.claim")
+            .exists());
+        assert_eq!(
+            std::fs::read(root.join("installed/treer-agent-server.exe")).unwrap(),
+            crate::windows_update_admission::tests::OLD
+        );
+        drop(runtime);
+        task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(windows)]
 fn update_launch_reservation(
     runtime: &ControllerRuntime,
     root: &std::path::Path,

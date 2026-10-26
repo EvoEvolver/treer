@@ -483,6 +483,39 @@ impl ControllerUpdateChild {
         Ok(())
     }
 
+    /// Separate, one-shot agreement requiring a child's actual inherited lock
+    /// reference. Shares the context handshake latch: no legacy fallback or
+    /// second attempt. This does not release the parent's reservation or mint
+    /// a restart permission/complete ownership transfer.
+    #[cfg(windows)]
+    pub(crate) async fn exchange_worker_lock_binding(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+    ) -> Result<()> {
+        let context = self.begin_handshake(selected, binding)?;
+        let (volume, file_id) = self
+            ._reservation
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("windows_update_lock_reservation_missing"))?
+            .installation_lock_identity()?;
+        let expected = treer_protocol::controller_update_worker::WorkerLockFrame {
+            binding: context,
+            volume,
+            file_id,
+        };
+        let stream = self
+            ._worker_pipe
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("windows_update_handshake_transport_unavailable"))?;
+        crate::windows_update_handshake::exchange_lock(stream, expected).await?;
+        self.matches(selected, binding)?;
+        // ACK is still only a context/lock reference agreement. This same flag
+        // permits the existing bounded zero-exit observation, not mutation.
+        self.binding_acknowledged = true;
+        Ok(())
+    }
+
     /// Only the pipe bound by THIS verified creator before CreateProcess.
     /// The private image merely ACKs and exits: no transaction is authorized.
     #[cfg(windows)]

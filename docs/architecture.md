@@ -111,6 +111,16 @@ retained reference is dropped. This preserves only lock-file lifetime: ancestor,
 image and state pins, operation authorization and transaction ownership are not
 transferred by it. Normal Controller startup/stdio is unchanged.
 
+The separate internal lock-binding exchange uses an 88-byte request/ACK with
+distinct role/version magic, the existing full runtime/input context digest,
+operation/challenge and actual held lock volume/file identity. The selected
+creator derives identity from its reservation rather than a caller argument.
+The child compares its private bootstrap operation, verifies the live original
+creator and retains the matching inherited lock before ACK. Parent context-only
+and lock-binding exchanges share one latch; failure/cancellation cannot fall
+back to the other variant. Neither request is a transaction command. The legacy
+terminal bootstrap still uses its original 72-byte exchange and exits.
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

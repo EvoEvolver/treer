@@ -195,6 +195,19 @@ or configuration contents. Failed launch retains the newly saved specification.
   lifetime only: it neither transfers ancestor/image/state pins nor retires a
   claim, permits replay, authorizes restart or enables a production worker.
 
+  The new internal lock-binding variant obtains the expected lock-file identity
+  from the retained reservation, binds it to the selected runtime/input context,
+  operation and fresh challenge, and accepts only the exact separate-role ACK.
+  Child ACK requires a matching actual inherited lock and the private bootstrap
+  operation, not merely echoing a digest. Both sides have a three-second total
+  budget; child checks elapsed time after synchronous lock inspection and before
+  returning success. A late/partial/failed/cancelled exchange consumes the same
+  latch as the legacy binding exchange, with no downgrade/reconnect. Parent
+  scope is rechecked after ACK and its reservation/pins/claim remain held. This
+  proves limited context/lock-reference agreement, not independent child Policy,
+  signed-input admission, all-pins ownership transfer, restart/health authority
+  or production readiness. No normal startup or terminal-bootstrap entry changes.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.
