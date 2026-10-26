@@ -2,7 +2,7 @@
 //! No signature, update phase, process control or image publication occurs here.
 use std::{
     fs::File,
-    io,
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -77,5 +77,47 @@ impl LockedInstallation {
 
     pub fn files(&self) -> (&File, &File) {
         self.pair.files()
+    }
+
+    /// Publish a write-once, bounded opaque installation claim while the lease
+    /// and physical parents remain held. Existing names of ANY kind refuse,
+    /// even identical bytes. Write/flush/readback errors retain partial evidence;
+    /// there is deliberately no remove, overwrite, resume or retry operation.
+    /// The Controller supplies the authenticated binding/schema, not this layer.
+    pub fn claim(&self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.is_empty() || bytes.len() > 4096 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid update claim size",
+            ));
+        }
+        let path = self.pair.path.join(".treer-controller-update.claim");
+        let mut file = crate::windows::create_private_update_file(&path)?;
+        crate::windows_update_store::checked_file(&path, &file)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        file.seek(SeekFrom::Start(0))?;
+        let mut observed = Vec::new();
+        (&mut file).take(4097).read_to_end(&mut observed)?;
+        if observed != bytes {
+            return Err(io::Error::other("update claim readback differs"));
+        }
+        Ok(())
+    }
+
+    /// Read-only observation, never adoption or permission to resume. Only a
+    /// private regular single-link claim is readable; invalid/partial bytes
+    /// still require Controller schema and exact binding validation.
+    pub fn read_claim(&self) -> io::Result<Vec<u8>> {
+        let mut file = crate::windows_update_store::open_record(
+            &self.pair.path.join(".treer-controller-update.claim"),
+            false,
+        )?;
+        let mut bytes = Vec::new();
+        (&mut file).take(4097).read_to_end(&mut bytes)?;
+        if bytes.is_empty() || bytes.len() > 4096 {
+            return Err(io::Error::other("invalid update claim size"));
+        }
+        Ok(bytes)
     }
 }

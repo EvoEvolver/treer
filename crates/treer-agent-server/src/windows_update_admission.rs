@@ -73,7 +73,7 @@ fn verify_inputs(
 /// Keeps the physically checked directories and all four no-write/no-delete-
 /// sharing image handles alive. Fields cannot be constructed from digest claims.
 /// The installed pair retains its exclusive installation lease. Worker handoff
-/// and durable cross-job crash/retry fencing are NOT supplied here.
+/// and image publication are NOT supplied here.
 #[cfg(windows)]
 pub struct AdmittedInputs {
     binding: Binding,
@@ -142,12 +142,23 @@ impl AdmittedInputs {
         &self.binding
     }
 
+    /// A matching claim is only evidence for reconciliation. It cannot be
+    /// adopted, resumed, cleared or used to bypass the single-use reservation.
+    pub fn inspect_installation_claim(&self) -> Result<()> {
+        crate::windows_update_intent::inspect(&self._installed.read_claim()?, &self.binding)
+    }
+
     /// Reservation does not release pinned images; the caller must retain this
-    /// object. It grants no permission to replace, execute or resume the job.
+    /// object. First consume the installation-wide claim, then the job intent.
+    /// Any error may leave either/both records and never grants permission to
+    /// retry under another job root. There is no claim retirement API yet.
+    /// It grants no permission to replace, execute or resume the job.
     pub fn reserve(
         self,
         store: treer_platform::windows_update_store::UpdateStore,
     ) -> Result<ReservedInputs> {
+        self._installed
+            .claim(&crate::windows_update_intent::encode(&self.binding)?)?;
         crate::windows_update_intent::reserve(store, &self.binding)?;
         Ok(ReservedInputs(self))
     }

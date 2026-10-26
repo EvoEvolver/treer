@@ -217,10 +217,51 @@ root was removed. Result SHA256:
 This is native lease acceptance only; no image publication, durable crash
 fencing, Job ownership, health or installation authorization is established.
 
+## Installation-wide single-use claim
+
+The source successor closes the different-job reservation bypass after OS lease
+release. Before a task intent can be reserved, `AdmittedInputs::reserve` encodes
+the already authenticated full `Binding` using the existing strict intent schema
+and exclusively creates `.treer-controller-update.claim` in the physically
+pinned installation. Its lease and image pins remain held throughout creation,
+write, flush, same-handle bounded exact readback and subsequent task reservation.
+The platform layer only stores opaque bytes, bounded to 4 KiB; no signing or
+trust decision moves into it.
+
+Any pre-existing claim name refuses creation, including identical bindings,
+partial/invalid records, reparse points and unreadable names. An error preserves
+the claim and task evidence; neither branch overwrites, deletes or retries. In
+particular a claim created before a task intent failure is still consumed.
+`inspect_installation_claim` permits bounded checked read and exact schema/full
+binding comparison only. A matching observation cannot resume a job. No claim
+retirement/reset/recovery-execution API exists yet: later safe terminal
+retirement must be implemented before an engine can perform subsequent updates.
+
+This is a process-exit fence for cooperating callers while the installation and
+record remain intact, not power-loss/volume durability, rollback, an anti-rollback
+high-water mark, protection from other same-account code or update success.
+Production capabilities and the missing worker/image engine remain unchanged.
+Native controls are pending under `windows_update_claim_`: a child test process
+exits without Rust destructors after reservation, then a fresh owner must reject
+both same-binding and different-binding submissions through a different task
+root; a task-intent failure preserves the consumed install claim; and partial,
+hardlinked or weak-ACL claims refuse without repair or task/image mutation.
+Bounds refuse before file creation. None of the earlier accepted native leaves
+is relabeled as acceptance for this successor.
+Author Controller macOS all-target strict Clippy, platform Windows GNU and Linux
+GNU all-target strict Clippy, formatting, documentation and diff checks passed.
+The Controller's Windows native compilation is pending with the focused entry:
+`cargo test --locked -p treer-agent-server --bin treer-agent-server
+windows_update_claim_ -- --nocapture`, expecting three passed, none failed/
+ignored, exit zero and independent TEMP cleanup. Its child process is only the
+same filtered test executable on fresh task-owned files, never an installed
+Controller or Host. No unavailable cross C compiler was installed locally.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission and lease
-   acceptance are complete within their stated scopes. Next
+   acceptance are complete within their stated scopes. The install-wide claim
+   successor above is implemented with native acceptance pending. Next
    add phase-specific evidence for actual image
    publication, never a generic setter that could manufacture completion.
 2. Implement Windows verified Controller/CLI image backup and two-rename

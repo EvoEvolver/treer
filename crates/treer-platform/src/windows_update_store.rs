@@ -35,7 +35,7 @@ pub struct UpdateStore {
     _lock: File,
 }
 
-fn checked_file(path: &Path, file: &File) -> io::Result<()> {
+pub(super) fn checked_file(path: &Path, file: &File) -> io::Result<()> {
     let (_, _, links, attributes) = crate::windows::transfer_file_identity(file)?;
     if links != 1
         || attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0
