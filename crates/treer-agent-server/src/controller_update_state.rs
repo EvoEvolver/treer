@@ -152,6 +152,9 @@ pub(crate) struct ControllerUpdateChild {
     binding: crate::windows_update_intent::Binding,
     stop_attempted: bool,
     job_check_attempted: bool,
+    pipe_attempted: bool,
+    #[cfg(windows)]
+    _worker_pipe: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
     #[cfg(windows)]
     _reservation: Option<crate::windows_update_admission::ReservedInputs>,
 }
@@ -180,6 +183,8 @@ impl ControllerUpdateChild {
             binding,
             stop_attempted: false,
             job_check_attempted: false,
+            pipe_attempted: false,
+            _worker_pipe: None,
             _reservation: Some(reservation),
         })
     }
@@ -202,6 +207,8 @@ impl ControllerUpdateChild {
             binding,
             stop_attempted: false,
             job_check_attempted: false,
+            pipe_attempted: false,
+            _worker_pipe: None,
             _reservation: Some(reservation),
         })
     }
@@ -222,6 +229,9 @@ impl ControllerUpdateChild {
             binding: binding.clone(),
             stop_attempted: false,
             job_check_attempted: false,
+            pipe_attempted: false,
+            #[cfg(windows)]
+            _worker_pipe: None,
             #[cfg(windows)]
             _reservation: None,
         })
@@ -297,6 +307,40 @@ impl ControllerUpdateChild {
         })
     }
 
+    fn begin_pipe_accept(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+    ) -> Result<()> {
+        self.matches(selected, binding)?;
+        if self.stop_attempted || self.pipe_attempted {
+            bail!("windows_update_child_pipe_already_attempted");
+        }
+        // Before awaiting: cancellation must not make the owner reconnectable.
+        self.pipe_attempted = true;
+        Ok(())
+    }
+
+    /// Parent-side transport peer check only. The selected scope and original
+    /// Child remain owned; no wire value can construct them. This does not
+    /// authenticate the server to the child, transfer locks, parse commands,
+    /// establish outside-Job survival or claim worker readiness.
+    #[cfg(windows)]
+    pub(crate) async fn accept_worker_pipe(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+        pipe: treer_platform::windows_update_pipe::CreatedChildPipe,
+    ) -> Result<()> {
+        self.begin_pipe_accept(selected, binding)?;
+        self._worker_pipe = Some(
+            pipe.connect(&self.child)
+                .await
+                .map_err(|_| anyhow::anyhow!("windows_update_child_pipe_unconfirmed"))?,
+        );
+        Ok(())
+    }
+
     /// One teardown attempt, on the original Child handle only. Set the latch
     /// BEFORE querying/signalling: an error must not cause Drop or a caller to
     /// repeat an uncertain lifecycle mutation. No PID reopen or Host operation.
@@ -322,6 +366,29 @@ impl ControllerUpdateChild {
             }
             Err(_) => bail!("windows_update_child_observation_unknown"),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn begin_fixture_pipe_accept(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+    ) -> Result<()> {
+        self.begin_pipe_accept(selected, binding)
+    }
+
+    #[cfg(all(windows, test))]
+    pub(super) async fn read_fixture_pipe_byte(&mut self) -> u8 {
+        use tokio::io::AsyncReadExt;
+        let mut byte = [0];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self._worker_pipe.as_mut().unwrap().read_exact(&mut byte),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        byte[0]
     }
 
     #[cfg(test)]

@@ -3032,6 +3032,185 @@ fn update_custody_fixture_child() {
 }
 
 #[tokio::test]
+async fn windows_update_pipe_scope_precedes_accept_and_exact_owner_is_single_use() {
+    let (runtime, root, task) = update_state_fixture().await;
+    let (other, other_root, other_task) = update_state_fixture().await;
+    let binding = update_state_binding(Uuid::new_v4());
+    let state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    let mut child = update_state::ControllerUpdateChild::spawn_fixture(
+        &state,
+        &runtime,
+        &binding,
+        &mut update_custody_command(),
+    )
+    .unwrap();
+    assert!(child.begin_fixture_pipe_accept(&other, &binding).is_err());
+    let mut foreign = binding.clone();
+    foreign.operation_id = Uuid::new_v4();
+    assert!(child.begin_fixture_pipe_accept(&runtime, &foreign).is_err());
+    child.begin_fixture_pipe_accept(&runtime, &binding).unwrap();
+    assert!(child.begin_fixture_pipe_accept(&runtime, &binding).is_err());
+    child.stop(&runtime, &binding).unwrap();
+    drop(child);
+    drop(state);
+    drop(runtime);
+    drop(other);
+    task.abort();
+    other_task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(other_root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_pipe_consumed_attempt_survives_interruption_without_consuming_stop() {
+    let (runtime, root, task) = update_state_fixture().await;
+    let binding = update_state_binding(Uuid::new_v4());
+    let state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    let mut child = update_state::ControllerUpdateChild::spawn_fixture(
+        &state,
+        &runtime,
+        &binding,
+        &mut update_custody_command(),
+    )
+    .unwrap();
+    // Isolate the synchronous pre-await transition; no wire/OS result can
+    // undo it, including cancellation before any connection is observed.
+    child.begin_fixture_pipe_accept(&runtime, &binding).unwrap();
+    assert!(child.begin_fixture_pipe_accept(&runtime, &binding).is_err());
+    assert!(child.poll(&runtime, &binding).unwrap().is_none());
+    child.stop(&runtime, &binding).unwrap();
+    assert!(child.begin_fixture_pipe_accept(&runtime, &binding).is_err());
+    drop(child);
+    drop(state);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "owned pipe helper invoked only by the focused parent control"]
+async fn update_pipe_fixture_child() {
+    use std::io::Read;
+    use tokio::io::AsyncWriteExt;
+    let endpoint = std::env::var_os("TREER_TEST_UPDATE_PIPE").unwrap();
+    let mut client = tokio::net::windows::named_pipe::ClientOptions::new()
+        .open(endpoint)
+        .unwrap();
+    client.write_all(&[0x51]).await.unwrap();
+    let mut byte = [0];
+    std::io::stdin().read_exact(&mut byte).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_pipe_native_original_child_peer_and_exclusive_name() {
+    use treer_platform::windows_update_pipe::CreatedChildPipe;
+    let (runtime, root, task) = update_state_fixture().await;
+    let binding = update_state_binding(Uuid::new_v4());
+    let state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    let selector = Uuid::new_v4().simple().to_string();
+    let pipe = CreatedChildPipe::bind(&selector).unwrap();
+    assert!(CreatedChildPipe::bind(&selector).is_err());
+    for invalid in ["", "../pipe", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"] {
+        assert!(CreatedChildPipe::bind(invalid).is_err());
+    }
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .env_clear()
+        .env("TREER_TEST_UPDATE_PIPE", pipe.endpoint())
+        .args([
+            "--exact",
+            "controller::tests::update_pipe_fixture_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = update_state::ControllerUpdateChild::spawn_fixture(
+        &state,
+        &runtime,
+        &binding,
+        &mut command,
+    )
+    .unwrap();
+    child
+        .accept_worker_pipe(&runtime, &binding, pipe)
+        .await
+        .unwrap();
+    assert_eq!(child.read_fixture_pipe_byte().await, 0x51);
+    child.stop(&runtime, &binding).unwrap();
+    drop(child);
+    drop(state);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_pipe_native_foreign_peer_and_cancelled_accept_do_not_reconnect() {
+    use treer_platform::windows_update_pipe::CreatedChildPipe;
+    let (runtime, root, task) = update_state_fixture().await;
+    let binding = update_state_binding(Uuid::new_v4());
+    let state = runtime
+        .windows_update_state_for_operation(binding.operation_id, "ws_fixture", "srv_fixture")
+        .unwrap();
+    for cancelled in [false, true] {
+        let pipe = CreatedChildPipe::bind(&Uuid::new_v4().simple().to_string()).unwrap();
+        let mut child = update_state::ControllerUpdateChild::spawn_fixture(
+            &state,
+            &runtime,
+            &binding,
+            &mut update_custody_command(),
+        )
+        .unwrap();
+        if cancelled {
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                child.accept_worker_pipe(&runtime, &binding, pipe)
+            )
+            .await
+            .is_err());
+        } else {
+            // Parent is a real local peer, but is NOT our created Child.
+            let foreign = tokio::net::windows::named_pipe::ClientOptions::new()
+                .open(pipe.endpoint())
+                .unwrap();
+            let error = child
+                .accept_worker_pipe(&runtime, &binding, pipe)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), "windows_update_child_pipe_unconfirmed");
+            drop(foreign);
+        }
+        let replacement = CreatedChildPipe::bind(&Uuid::new_v4().simple().to_string()).unwrap();
+        let error = child
+            .accept_worker_pipe(&runtime, &binding, replacement)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "windows_update_child_pipe_already_attempted"
+        );
+        assert!(child.poll(&runtime, &binding).unwrap().is_none());
+        child.stop(&runtime, &binding).unwrap();
+        drop(child);
+    }
+    drop(state);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn windows_update_job_boundary_scope_precedes_query_and_check_is_single_use() {
     let (runtime, root, task) = update_state_fixture().await;
     let (other, other_root, other_task) = update_state_fixture().await;

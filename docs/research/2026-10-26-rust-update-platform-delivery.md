@@ -762,6 +762,52 @@ run established compilation and execution for these integration controls.
 API contracts: [IsProcessInJob](https://learn.microsoft.com/en-us/windows/win32/api/jobapi/nf-jobapi-isprocessinjob),
 [WaitForSingleObject](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject).
 
+### Implemented leaf: single-instance pipe bound to the original Child
+
+`CreatedChildPipe` creates exactly one fixed-namespace local named-pipe instance
+using the existing current-user+SYSTEM DACL, remote-client refusal and
+FIRST_PIPE_INSTANCE constructor. It never repairs or adopts an existing name.
+Its selector is a fresh caller-generated UUID's simple lowercase hex spelling;
+the exposed endpoint is nonsecret, not an authentication credential.
+
+The custody owner validates selected runtime/Host epoch/full Binding, consumes
+its accept attempt BEFORE awaiting, and accepts only once. The three-second
+bounded connection verifies the pipe's actual client PID against `GetProcessId`
+on the ORIGINAL Child handle, with original-handle liveness checks before
+connection and after comparison. No PID is opened, adopted or signalled by the
+transport. A foreign client, error, timeout or cancelled future consumes the
+pipe; there is no disconnect/reaccept loop or second owner attempt. On success
+the pipe remains private inside the custody owner alongside the original Child,
+reservation, runtime and image/state pins. Normal one-attempt teardown is still
+available. No parsed wire bytes can construct that authority.
+
+This authenticates only the parent's transport peer to its created Child at
+connection time. It is NOT child-side server authentication, a framed worker
+protocol, lock/claim ownership transfer, Job escape, readiness or permission to
+restart. Same-account handle delegation/injection is outside this OS-owner
+trust boundary. Production signed launch still has no private Windows worker
+entry or pipe selector delivery; it is not wired to this transport. A complete
+worker must add server proof, bounded operation/runtime handshake and one-shot
+ownership transfer before any mutation. Ordinary capability and Host Job policy
+remain unchanged.
+
+New focused entry:
+`cargo test --locked -p treer-agent-server --bin treer-agent-server windows_update_pipe_ -- --nocapture`
+
+Two portable controls isolate scope ordering and the irreversible pre-await
+accept latch while preserving teardown. Two Windows controls use only the SAME
+running test executable: a real original-Child pipe connection plus fixed
+byte read and exclusive-name/selector refusal, and foreign-parent client plus
+actual cancelled accept with replacement refusal. No admitted image or installed
+Controller is executed. Native exact four/zero failed/zero ignored/exit zero and
+independent empty TEMP cleanup remain NOT_RUN. No previous acceptance selector
+is repeated. The two portable author controls, Controller binary/test strict
+Clippy, Windows GNU platform all-target strict Clippy and fmt/docs/diff checks
+passed; local Windows Controller C toolchain remains unavailable.
+
+API contracts: [GetNamedPipeClientProcessId](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeclientprocessid),
+[GetProcessId](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessid).
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,
