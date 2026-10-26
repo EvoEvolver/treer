@@ -407,6 +407,19 @@ public and reusable:
 curl -fsSL 'https://PROXY_HOST/install.sh' | sh
 ```
 
+On the official HTTPS origins `proxy.canary.treer.ai` and `proxy.treer.ai`,
+the Unix script requires Node.js 22+ before creating installation directories.
+It reads the existing `https://releases.treer.ai/channels/stable.json`, verifies
+both detached Ed25519 signatures with the embedded official public key, and
+checks the manifest digest plus all three platform binaries' sizes and SHA-256
+before replacing any installed file. Redirects and oversized inputs refuse;
+there is no fallback to older Proxy artifacts or an unsigned channel. It does
+not execute the downloaded binaries or start/restart services. Like the existing
+installer, file replacement is sequential, not a running-process update or
+transactional whole-install rollback. The signed channel has no persistent
+anti-rollback floor yet. Self-hosted Proxy origins retain their own `/artifacts`
+bootstrap; Windows `/install.ps1` is unchanged by this Unix entry fix.
+
 The script detects the target platform, installs `treer` to `~/.local/bin`, and
 puts the Host and Controller binaries in `~/.local/libexec/treer`. It also exposes
 `treer-agent-server` in `~/.local/bin` as a symlink to the Controller, so both
