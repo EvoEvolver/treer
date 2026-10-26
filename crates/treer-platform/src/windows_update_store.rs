@@ -46,7 +46,7 @@ fn checked_file(path: &Path, file: &File) -> io::Result<()> {
     Ok(())
 }
 
-fn open_record(path: &Path, write: bool) -> io::Result<File> {
+pub(super) fn open_record(path: &Path, write: bool) -> io::Result<File> {
     let file = OpenOptions::new()
         .read(true)
         .write(write)

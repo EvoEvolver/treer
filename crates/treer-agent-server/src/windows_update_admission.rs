@@ -1,0 +1,169 @@
+//! Signed input admission only. No execution, image replacement or capability
+//! activation. Freshness/high-water protection remains a separate missing layer.
+use std::io::Read;
+
+use anyhow::{bail, Result};
+use ed25519_dalek::VerifyingKey;
+use sha2::{Digest, Sha256};
+
+use crate::{release_update, windows_update_intent::Binding};
+
+pub struct Documents<'a> {
+    pub channel: &'a [u8],
+    pub channel_signature: &'a [u8],
+    pub manifest: &'a [u8],
+    pub manifest_signature: &'a [u8],
+    pub channel_name: &'a str,
+}
+
+struct PairReaders<'a> {
+    controller: &'a mut dyn Read,
+    cli: &'a mut dyn Read,
+}
+
+fn digest(reader: &mut dyn Read, expected: Option<&release_update::Artifact>) -> Result<String> {
+    const LIMIT: u64 = 128 * 1024 * 1024;
+    let limit = expected.map_or(LIMIT, |artifact| artifact.size as u64);
+    let mut reader = reader.take(limit + 1);
+    let mut hash = Sha256::new();
+    let mut count = 0;
+    let mut buffer = [0; 16 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        count += read as u64;
+        if count > limit {
+            bail!("windows_update_input_size_refused");
+        }
+        hash.update(&buffer[..read]);
+    }
+    let digest = format!("{:x}", hash.finalize());
+    if count == 0 || expected.is_some_and(|artifact| count != limit || digest != artifact.sha256) {
+        bail!("windows_update_input_digest_refused");
+    }
+    Ok(digest)
+}
+
+fn verify_inputs(
+    documents: &Documents<'_>,
+    key: &VerifyingKey,
+    binding: &mut Binding,
+    old: PairReaders<'_>,
+    target: PairReaders<'_>,
+) -> Result<()> {
+    let release = release_update::authenticate_documents(
+        documents.channel,
+        documents.channel_signature,
+        documents.manifest,
+        documents.manifest_signature,
+        documents.channel_name,
+        key,
+        "windows-x86_64",
+    )?;
+    binding.controller_sha256 = digest(target.controller, Some(&release.controller))?;
+    binding.cli_sha256 = digest(target.cli, Some(&release.cli))?;
+    binding.old_controller_sha256 = digest(old.controller, None)?;
+    binding.old_cli_sha256 = digest(old.cli, None)?;
+    binding.signed_manifest_sha256 = release.manifest_sha256;
+    binding.validate()
+}
+
+/// Keeps the physically checked directories and all four no-write/no-delete-
+/// sharing image handles alive. Fields cannot be constructed from digest claims.
+/// An installation mutation lock and worker handoff are NOT supplied here.
+#[cfg(windows)]
+pub struct AdmittedInputs {
+    binding: Binding,
+    _installed: treer_platform::windows_update_inputs::PinnedPair,
+    _target: treer_platform::windows_update_inputs::PinnedPair,
+}
+
+#[cfg(windows)]
+impl AdmittedInputs {
+    /// Caller identity/Policy and separately configured trust must be resolved
+    /// before this internal API. No key is accepted from the signed documents.
+    pub fn prepare(
+        installed: treer_platform::windows_update_inputs::PinnedPair,
+        target: treer_platform::windows_update_inputs::PinnedPair,
+        documents: &Documents<'_>,
+        key: &VerifyingKey,
+        operation_id: uuid::Uuid,
+        workspace_id: String,
+        server_id: String,
+    ) -> Result<Self> {
+        let (volume, file_id) = installed.identity()?;
+        if target.identity()? == (volume, file_id) {
+            bail!("windows_update_stage_is_installation");
+        }
+        let mut binding = Binding {
+            operation_id,
+            workspace_id,
+            server_id,
+            installation_volume: volume,
+            installation_file_id: file_id,
+            old_controller_sha256: String::new(),
+            old_cli_sha256: String::new(),
+            controller_sha256: String::new(),
+            cli_sha256: String::new(),
+            signed_manifest_sha256: String::new(),
+        };
+        let (mut old_controller, mut old_cli) = installed.files();
+        let (mut controller, mut cli) = target.files();
+        // A caller may have inspected these handles already. Hash the whole
+        // pinned files, never a suffix beginning at a caller-controlled offset.
+        use std::io::{Seek, SeekFrom};
+        for file in [&mut old_controller, &mut old_cli, &mut controller, &mut cli] {
+            file.seek(SeekFrom::Start(0))?;
+        }
+        verify_inputs(
+            documents,
+            key,
+            &mut binding,
+            PairReaders {
+                controller: &mut old_controller,
+                cli: &mut old_cli,
+            },
+            PairReaders {
+                controller: &mut controller,
+                cli: &mut cli,
+            },
+        )?;
+        Ok(Self {
+            binding,
+            _installed: installed,
+            _target: target,
+        })
+    }
+
+    pub fn binding(&self) -> &Binding {
+        &self.binding
+    }
+
+    /// Reservation does not release pinned images; the caller must retain this
+    /// object. It grants no permission to replace, execute or resume the job.
+    pub fn reserve(
+        self,
+        store: treer_platform::windows_update_store::UpdateStore,
+    ) -> Result<ReservedInputs> {
+        crate::windows_update_intent::reserve(store, &self.binding)?;
+        Ok(ReservedInputs(self))
+    }
+}
+
+/// A consumed reservation with pinned inputs, deliberately no execution or
+/// second-reservation method. This is not a successful update receipt.
+#[cfg(windows)]
+pub struct ReservedInputs(AdmittedInputs);
+
+#[cfg(windows)]
+impl ReservedInputs {
+    pub fn binding(&self) -> &Binding {
+        &self.0.binding
+    }
+}
+
+#[cfg(test)]
+#[path = "windows_update_admission_tests.rs"]
+mod tests;

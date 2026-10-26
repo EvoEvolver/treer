@@ -52,6 +52,13 @@ pub struct Root {
     reserved_names: Vec<(Identity, String)>,
 }
 impl Root {
+    /// Identity of the final retained physical directory handle. No path lookup.
+    pub fn identity(&self) -> io::Result<(u64, u64)> {
+        let file = self.guards.last().ok_or_else(denied)?;
+        let (Identity(volume, index), _, _) = metadata(file)?;
+        Ok((volume, index))
+    }
+
     pub fn open(path: &Path, protected_files: &[File]) -> io::Result<Self> {
         let mut parts = path.components();
         let Some(Component::Prefix(prefix)) = parts.next() else {
