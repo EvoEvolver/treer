@@ -137,6 +137,8 @@ mod native {
         source_file_id: Option<u64>,
         backup_file_id: Option<u64>,
         snapshot: Option<StartupDigest>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller_state: Option<crate::controller::ControllerStateEvidence>,
     }
 
     #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -154,9 +156,42 @@ mod native {
     }
 
     impl BackedUpInputs {
+        pub fn backup_configured_startup(self) -> Result<StartupBackedUpInputs> {
+            let state = self
+                .reserved
+                .0
+                .state
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("windows_update_runtime_authority_required"))?;
+            state.matches(self.binding())?;
+            let snapshot = state
+                .directory()
+                .startup_snapshot(&format!("{}-agent-startup.json", self.binding().server_id))
+                .map_err(|_| anyhow::anyhow!("windows_update_startup_source_refused"))?;
+            let state_id = state.directory().identity()?;
+            let authority = state.evidence().clone();
+            self.backup_startup_snapshot(state_id, snapshot, Some(authority))
+        }
+
+        /// Caller-supplied state directories are isolated test observations,
+        /// never a production admission entry.
+        #[cfg(test)]
         pub fn backup_startup(self, state: BackupDirectory) -> Result<StartupBackedUpInputs> {
-            self.inspect_backups()?;
             let state_id = state.identity()?;
+            let name = format!("{}-agent-startup.json", self.binding().server_id);
+            let snapshot = state
+                .startup_snapshot(&name)
+                .map_err(|_| anyhow::anyhow!("windows_update_startup_source_refused"))?;
+            self.backup_startup_snapshot(state_id, snapshot, None)
+        }
+
+        fn backup_startup_snapshot(
+            self,
+            state_id: (u64, u64),
+            snapshot: Option<(u64, Vec<u8>)>,
+            controller_state: Option<crate::controller::ControllerStateEvidence>,
+        ) -> Result<StartupBackedUpInputs> {
+            self.inspect_backups()?;
             if state_id.0 != self.binding().installation_volume
                 || state_id == self.backup.identity()?
                 || state_id == self.reserved.0._installed.identity()?
@@ -164,10 +199,6 @@ mod native {
             {
                 bail!("windows_update_startup_directory_refused");
             }
-            let name = format!("{}-agent-startup.json", self.binding().server_id);
-            let snapshot = state
-                .startup_snapshot(&name)
-                .map_err(|_| anyhow::anyhow!("windows_update_startup_source_refused"))?;
             let digest = snapshot
                 .as_ref()
                 .map(|(_, bytes)| {
@@ -194,6 +225,7 @@ mod native {
                 source_file_id: snapshot.as_ref().map(|(id, _)| *id),
                 backup_file_id,
                 snapshot: digest,
+                controller_state,
             };
             let backed = StartupBackedUpInputs {
                 images: self,
@@ -216,6 +248,21 @@ mod native {
         }
 
         fn verify_startup(&self) -> Result<()> {
+            match (
+                &self.images.reserved.0.state,
+                &self.evidence.controller_state,
+            ) {
+                (Some(state), Some(expected)) => {
+                    state.matches(self.binding())?;
+                    if state.evidence() != expected
+                        || state.directory().identity()? != self.evidence.state_directory
+                    {
+                        bail!("windows_update_runtime_evidence_refused");
+                    }
+                }
+                (None, None) => {}
+                _ => bail!("windows_update_runtime_evidence_refused"),
+            }
             match (self.startup.as_ref(), self.evidence.snapshot.as_ref()) {
                 (Some(mut file), Some(expected)) => {
                     file.seek(SeekFrom::Start(0))?;
@@ -265,6 +312,13 @@ mod native {
             if identity.0 != self.binding().installation_volume
                 || identity == self.0._installed.identity()?
                 || identity == self.0._target.identity()?
+                || self
+                    .0
+                    .state
+                    .as_ref()
+                    .map(|s| s.directory().identity())
+                    .transpose()?
+                    == Some(identity)
             {
                 bail!("windows_update_backup_directory_refused");
             }

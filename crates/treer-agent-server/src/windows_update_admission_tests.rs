@@ -4,15 +4,15 @@ use ed25519_dalek::{pkcs8::EncodePublicKey, Signer, SigningKey};
 use serde_json::json;
 use std::io::Cursor;
 
-const NEW: &[u8] = b"signed target fixture, never executed";
-const OLD: &[u8] = b"installed fixture, never executed";
+pub(crate) const NEW: &[u8] = b"signed target fixture, never executed";
+pub(crate) const OLD: &[u8] = b"installed fixture, never executed";
 
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-struct Fixture {
-    key: SigningKey,
+pub(crate) struct Fixture {
+    pub(crate) key: SigningKey,
     channel: Vec<u8>,
     channel_signature: Vec<u8>,
     manifest: Vec<u8>,
@@ -20,7 +20,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(mutate: impl FnOnce(&mut serde_json::Value)) -> Self {
+    pub(crate) fn new(mutate: impl FnOnce(&mut serde_json::Value)) -> Self {
         let key = SigningKey::from_bytes(&[35; 32]); // synthetic test authority only
         let key_id =
             hash(key.verifying_key().to_public_key_der().unwrap().as_bytes())[..16].to_owned();
@@ -60,7 +60,7 @@ impl Fixture {
         }
     }
 
-    fn documents(&self) -> Documents<'_> {
+    pub(crate) fn documents(&self) -> Documents<'_> {
         Documents {
             channel: &self.channel,
             channel_signature: &self.channel_signature,

@@ -481,27 +481,63 @@ state-root admission was accepted. Windows GNU platform all-target strict Clippy
 and author macOS Controller binary/test strict Clippy cover local compilation;
 no accepted storage/intent/admission/backup leaf or platform matrix is repeated.
 
-### Trusted state-root admission still required
+### Runtime-owned state-root admission
 
 Current `main.rs` supplies `ControllerConfig.startup_store_path` from
 `service::startup_state_path(server_id)`; `controller.rs` loads exactly that
 path into its live StartupStore. On Windows the source resolver uses
 `TREER_STATE_DIR` when configured, otherwise `LOCALAPPDATA/Treer/state`, followed
 by the normal server filename. Those are resolver rules, not observations of a
-deployed Controller's environment. The isolated Windows backup API instead takes
-an internal caller-supplied directory. It verifies its physical/private/NTFS
-properties and the normal server filename, not that live configuration fact.
-No production updater entry currently connects those two contracts.
+deployed Controller's environment.
 
-Before production admission, the coordinator must obtain the selected running
-Controller's authoritative resolved startup path/configuration and Server/workspace
-identity, bind that observation to this operation and pin its physical parent.
-It must use that configuration rather than recomputing a default from the
-updater's environment or accepting an arbitrary empty private directory. Older
-deployed status/ServerInfo responses do not attest the runtime config binding;
-the old Mariana inventory gap remains. This source integration is independently
-actionable when the production coordinator is wired; it is not a publisher,
-missing-package or live-activation prerequisite for the isolated file leaf.
+The next source leaf connects the internal admission to the selected live
+`ControllerRuntime`. Its `windows_update_state_for_operation` derives the path
+from the SAME already-loaded StartupStore and checks the requested operation
+(UUIDv4), workspace and Server against that runtime. The configured path must be
+absolute with the exact normal Server filename and no parent traversal. On
+Windows capture opens/pins its physical private fixed-NTFS parent. A new opaque
+non-Clone/non-Deserialize object retains that runtime, operation/scope, Controller
+instance UUID and Host epoch digest. Safe evidence cannot reconstruct authority.
+It neither accepts a state path nor resolves ambient defaults.
+
+`prepare_for_controller` consumes that authority with the verified image inputs,
+refuses installation/target aliasing and wrong volume before any claim/intent,
+and derives its scope from the selected runtime. The backup destination cannot
+alias this state root. `backup_configured_startup` only snapshots the held
+configured directory; it records the physical directory and runtime-instance
+evidence alongside the existing complete operation binding. Authority and the
+directory pin survive reservation, startup backup and file publication/explicit
+restoration. Whole evidence comparison checks against the retained authority,
+not just a decoded record. Existing direct `prepare`/`backup_startup(directory)`
+entries are now cfg(test) fixtures only. StartupStore writes are not frozen:
+this remains one bounded raw snapshot, not a restore/CAS or quiescence claim.
+
+Three new author portable controls passed (path refusal, scope binding and
+retained distinct runtime instances). An initial fixture used inconsistent Host
+metadata and was correctly refused by the existing identity guard; fixing that
+fixture's config/metadata source produced the three passes without guard changes.
+The new Windows entry is `cargo test --locked -p treer-agent-server --bin
+treer-agent-server windows_update_state_ -- --nocapture`, exactly four tests
+(three portable, one native), zero failed/ignored and exit zero, plus fixed NTFS
+and independent task TEMP cleanup. The native control uses a normal from_sync
+runtime with a closed fixture Host and synthetic signed inert image bytes:
+configured-directory pinning, signed admission, exact configured startup backup
+instead of a same-volume private decoy, and pin retention across file publication.
+It never executes those image bytes or proves deployed configuration. Native
+execution/Windows Controller compilation for this leaf remain NOT_RUN pending
+the sole focused job. Author macOS binary/test strict Clippy passed.
+
+No production updater command or capability entry is wired. Its future
+coordinator must call this internal selected-runtime entry after normal
+authentication/Policy and selection; the context itself grants neither dispatch
+nor restart permission. It is not transferable to a child worker via JSON.
+Older deployed status/ServerInfo responses still do not attest runtime config;
+the old Mariana inventory gap remains. This is not a publisher or missing-package
+dependency. The next boundary is worker custody and a Controller-only handoff
+bound to this operation, the original Controller instance and surviving Host
+epoch. That requires real child/process ownership, exit and identity checks,
+not an argument string or decoded evidence posing as an owner. No worker/Job
+escape, restart, health or safe claim retirement is supplied by this leaf.
 Named live scope, shared-installation impact and recovery custody remain separate
 requirements. Ordinary capability stays OFF and Host is untouched.
 
@@ -510,9 +546,9 @@ requirements. Ordinary capability stays OFF and Host is untouched.
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,
    install-wide claim and verified-image backup acceptance are complete within
    their stated scopes. Private startup snapshot/backup/evidence acceptance is
-   also complete within the limits above. Future production admission must bind
-   the state root to trusted installation/runtime configuration; publication
-   evidence must follow real effects, never a generic setter.
+   also complete within the limits above. Runtime-owned state-root admission is
+   implemented as the next bounded leaf above, with native acceptance pending;
+   publication evidence must follow real effects, never a generic setter.
 2. The Windows Controller/CLI file-pair publication and restoration leaf above
    has passed the four focused native controls above. Never treat restoring
    files alone as successful runtime rollback.

@@ -2914,6 +2914,187 @@ async fn receipt_cap_evicts_failed_receipts_before_the_oldest_committed_one() {
 /// A Controller whose Host inventory holds one running Agent `command`, so
 /// `register_interface` passes `get(agent_id)`; nothing else is spawned.
 async fn agent_fixture() -> (ControllerRuntime, PathBuf, tokio::task::JoinHandle<()>) {
+    agent_fixture_configured(|_| {}).await
+}
+
+async fn update_state_fixture() -> (ControllerRuntime, PathBuf, tokio::task::JoinHandle<()>) {
+    agent_fixture_configured(|config| {
+        config.workspace_id = "ws_fixture".into();
+        config.server_id = "srv_fixture".into();
+        let state = config.root.join("configured-state");
+        std::fs::create_dir(&state).unwrap();
+        treer_platform::secure_directory(&config.root).unwrap();
+        treer_platform::secure_directory(&state).unwrap();
+        config.startup_store_path = state.join("srv_fixture-agent-startup.json");
+        StartupStore::load(config.startup_store_path.clone())
+            .unwrap()
+            .deny_absent("ag_deleted")
+            .unwrap();
+    })
+    .await
+}
+
+fn update_state_binding(operation_id: Uuid) -> crate::windows_update_intent::Binding {
+    crate::windows_update_intent::Binding {
+        operation_id,
+        workspace_id: "ws_fixture".into(),
+        server_id: "srv_fixture".into(),
+        installation_volume: 1,
+        installation_file_id: 2,
+        old_controller_sha256: "a".repeat(64),
+        old_cli_sha256: "b".repeat(64),
+        controller_sha256: "c".repeat(64),
+        cli_sha256: "d".repeat(64),
+        signed_manifest_sha256: "e".repeat(64),
+    }
+}
+
+#[tokio::test]
+async fn windows_update_state_runtime_scope_refuses_foreign_operation_and_machine() {
+    let (runtime, root, task) = update_state_fixture().await;
+    let operation = Uuid::new_v4();
+    for (op, ws, server) in [
+        (Uuid::nil(), "ws_fixture", "srv_fixture"),
+        (operation, "ws_other", "srv_fixture"),
+        (operation, "ws_fixture", "srv_other"),
+    ] {
+        assert!(runtime
+            .windows_update_state_for_operation(op, ws, server)
+            .is_err());
+    }
+    let state = runtime
+        .windows_update_state_for_operation(operation, "ws_fixture", "srv_fixture")
+        .unwrap();
+    let mut binding = update_state_binding(operation);
+    state.matches(&binding).unwrap();
+    binding.operation_id = Uuid::new_v4();
+    assert!(state.matches(&binding).is_err());
+    binding.operation_id = operation;
+    binding.server_id = "srv_other".into();
+    assert!(state.matches(&binding).is_err());
+    drop(state);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_state_retains_exact_loaded_store_and_runtime_instance() {
+    let (runtime, root, task) = update_state_fixture().await;
+    let (other, other_root, other_task) = update_state_fixture().await;
+    let operation = Uuid::new_v4();
+    let state = runtime
+        .windows_update_state_for_operation(operation, "ws_fixture", "srv_fixture")
+        .unwrap();
+    let next = other
+        .windows_update_state_for_operation(operation, "ws_fixture", "srv_fixture")
+        .unwrap();
+    assert_ne!(state.evidence(), next.evidence());
+    let safe = serde_json::to_string(state.evidence()).unwrap();
+    assert!(!safe.contains("configured-state"));
+    assert!(!safe.contains("agent-host"));
+    drop(runtime);
+    state.matches(&update_state_binding(operation)).unwrap();
+    // The in-process authority retains the SAME runtime even after its caller
+    // drops a reference; it is not reconstituted from the safe evidence JSON.
+    drop(state);
+    drop(next);
+    drop(other);
+    task.abort();
+    other_task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(other_root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_update_state_native_admission_uses_pinned_runtime_path_not_private_decoy() {
+    use crate::windows_update_admission::{
+        tests::{Fixture, NEW, OLD},
+        AdmittedInputs,
+    };
+    use treer_platform::{
+        windows_update_backup::BackupDirectory, windows_update_inputs::PinnedPair,
+        windows_update_store::UpdateStore,
+    };
+    let (runtime, root, task) = update_state_fixture().await;
+    let directory = |name: &str| {
+        let path = root.join(name);
+        std::fs::create_dir(&path).unwrap();
+        treer_platform::secure_directory(&path).unwrap();
+        path
+    };
+    let installed = directory("installed");
+    let target = directory("target");
+    let backup = directory("backup");
+    let job = directory("job");
+    let decoy = directory("decoy");
+    StartupStore::load(decoy.join("srv_fixture-agent-startup.json"))
+        .unwrap()
+        .deny_absent("ag_decoy")
+        .unwrap();
+    for (path, bytes) in [(&installed, OLD), (&target, NEW)] {
+        for name in ["treer-agent-server.exe", "treer.exe"] {
+            std::fs::write(path.join(name), bytes).unwrap();
+            treer_platform::secure_file(&path.join(name)).unwrap();
+        }
+    }
+    let configured = root.join("configured-state");
+    let state = runtime
+        .windows_update_state_for_operation(Uuid::new_v4(), "ws_fixture", "srv_fixture")
+        .unwrap();
+    // Physical parent stays pinned against rename from authority capture
+    // through signed admission, reservation, backup and file publication.
+    assert!(std::fs::rename(&configured, root.join("moved-state")).is_err());
+    let fixture = Fixture::new(|_| {});
+    let admitted = AdmittedInputs::prepare_for_controller(
+        PinnedPair::open(&installed)
+            .unwrap()
+            .lock_installation()
+            .unwrap(),
+        PinnedPair::open(&target).unwrap(),
+        &fixture.documents(),
+        &fixture.key.verifying_key(),
+        state,
+    )
+    .unwrap();
+    let binding = admitted.binding().clone();
+    let backed = admitted
+        .reserve(UpdateStore::open(&job).unwrap())
+        .unwrap()
+        .backup(BackupDirectory::open(&backup).unwrap())
+        .unwrap()
+        .backup_configured_startup()
+        .unwrap();
+    backed.inspect_startup().unwrap();
+    let evidence: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(backup.join("startup.evidence")).unwrap()).unwrap();
+    assert!(evidence["controller_state"]["controller_instance_id"].is_string());
+    assert_eq!(
+        evidence["binding"]["operation_id"],
+        binding.operation_id.to_string()
+    );
+    let published = backed.publish_pair().unwrap();
+    assert!(std::fs::rename(&configured, root.join("moved-state")).is_err());
+    drop(published);
+    let raw = std::fs::read(backup.join("startup.backup")).unwrap();
+    assert_eq!(
+        raw,
+        std::fs::read(configured.join("srv_fixture-agent-startup.json")).unwrap()
+    );
+    assert_ne!(
+        raw,
+        std::fs::read(decoy.join("srv_fixture-agent-startup.json")).unwrap()
+    );
+    assert!(installed.join(".treer-controller-update.claim").exists());
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+async fn agent_fixture_configured(
+    configure: impl FnOnce(&mut ControllerConfig),
+) -> (ControllerRuntime, PathBuf, tokio::task::JoinHandle<()>) {
     use tokio::io::AsyncWriteExt;
     use treer_host_protocol::{
         decode_message, encode_message, HostBuildInfo, HostMessage, HostRequest,
@@ -2928,13 +3109,27 @@ async fn agent_fixture() -> (ControllerRuntime, PathBuf, tokio::task::JoinHandle
         &Uuid::new_v4().to_string(),
         &treer_platform::current_user_sid().unwrap(),
     );
+    let mut config = ControllerConfig {
+        protected_paths: vec![],
+        workspace_id: "workspace".into(),
+        server_id: "server".into(),
+        agent_server_url: "http://127.0.0.1:1".into(),
+        proxy_public_url: "https://proxy.example/".into(),
+        treer_binary: None,
+        interface_cache_path: root.join("interfaces.json"),
+        startup_store_path: root.join("startup.json"),
+        private_state_root: root.join("agent-private"),
+        provider_cli_root: root.join("provider-cli"),
+        root: root.clone(),
+    };
+    configure(&mut config);
     let mut listener = treer_platform::LocalListener::bind(&socket).unwrap();
     let now = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
     let metadata = AgentMetadata {
         agent_id: "command".into(),
         run_generation: 1,
-        workspace_id: "workspace".into(),
-        server_id: "server".into(),
+        workspace_id: config.workspace_id.clone(),
+        server_id: config.server_id.clone(),
         kind: "command".into(),
         name: "command".into(),
         cwd: ".".into(),
@@ -2989,19 +3184,6 @@ async fn agent_fixture() -> (ControllerRuntime, PathBuf, tokio::task::JoinHandle
         }
     });
     let (host, events) = HostClient::connect(&socket).await.unwrap();
-    let config = ControllerConfig {
-        protected_paths: vec![],
-        workspace_id: "workspace".into(),
-        server_id: "server".into(),
-        agent_server_url: "http://127.0.0.1:1".into(),
-        proxy_public_url: "https://proxy.example/".into(),
-        treer_binary: None,
-        interface_cache_path: root.join("interfaces.json"),
-        startup_store_path: root.join("startup.json"),
-        private_state_root: root.join("agent-private"),
-        provider_cli_root: root.join("provider-cli"),
-        root: root.clone(),
-    };
     let (runtime, _) = ControllerRuntime::from_sync(host, initial, events, config).unwrap();
     (runtime, root, task)
 }

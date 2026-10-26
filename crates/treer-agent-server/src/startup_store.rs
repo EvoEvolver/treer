@@ -60,6 +60,11 @@ struct StartupStoreInner {
 }
 
 impl StartupStore {
+    #[cfg(any(windows, test))]
+    pub(crate) fn configured_path(&self) -> &Path {
+        &self.inner.path
+    }
+
     pub fn load(path: PathBuf) -> io::Result<Self> {
         let state = read_store(&path)?;
         Ok(Self {

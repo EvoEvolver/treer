@@ -79,13 +79,61 @@ pub struct AdmittedInputs {
     binding: Binding,
     _installed: treer_platform::windows_update_inputs::LockedInstallation,
     _target: treer_platform::windows_update_inputs::PinnedPair,
+    state: Option<crate::controller::ControllerUpdateState>,
 }
 
 #[cfg(windows)]
 impl AdmittedInputs {
+    /// Only a selected live Controller can mint the opaque state authority.
+    /// Validation and physical pinning precede any installation claim/intent.
+    #[allow(dead_code)] // No production Windows coordinator/activation entry yet.
+    pub(crate) fn prepare_for_controller(
+        installed: treer_platform::windows_update_inputs::LockedInstallation,
+        target: treer_platform::windows_update_inputs::PinnedPair,
+        documents: &Documents<'_>,
+        key: &VerifyingKey,
+        state: crate::controller::ControllerUpdateState,
+    ) -> Result<Self> {
+        let (operation, workspace, server) = state.scope();
+        let mut admitted = Self::prepare_inner(
+            installed, target, documents, key, operation, workspace, server,
+        )?;
+        state.matches(&admitted.binding)?;
+        let identity = state.directory().identity()?;
+        if identity.0 != admitted.binding.installation_volume
+            || identity == admitted._installed.identity()?
+            || identity == admitted._target.identity()?
+        {
+            bail!("windows_update_startup_directory_refused");
+        }
+        admitted.state = Some(state);
+        Ok(admitted)
+    }
+
     /// Caller identity/Policy and separately configured trust must be resolved
     /// before this internal API. No key is accepted from the signed documents.
+    #[cfg(test)]
     pub fn prepare(
+        installed: treer_platform::windows_update_inputs::LockedInstallation,
+        target: treer_platform::windows_update_inputs::PinnedPair,
+        documents: &Documents<'_>,
+        key: &VerifyingKey,
+        operation_id: uuid::Uuid,
+        workspace_id: String,
+        server_id: String,
+    ) -> Result<Self> {
+        Self::prepare_inner(
+            installed,
+            target,
+            documents,
+            key,
+            operation_id,
+            workspace_id,
+            server_id,
+        )
+    }
+
+    fn prepare_inner(
         installed: treer_platform::windows_update_inputs::LockedInstallation,
         target: treer_platform::windows_update_inputs::PinnedPair,
         documents: &Documents<'_>,
@@ -135,6 +183,7 @@ impl AdmittedInputs {
             binding,
             _installed: installed,
             _target: target,
+            state: None,
         })
     }
 
@@ -157,6 +206,9 @@ impl AdmittedInputs {
         self,
         store: treer_platform::windows_update_store::UpdateStore,
     ) -> Result<ReservedInputs> {
+        if let Some(state) = &self.state {
+            state.matches(&self.binding)?;
+        }
         self._installed
             .claim(&crate::windows_update_intent::encode(&self.binding)?)?;
         crate::windows_update_intent::reserve(store, &self.binding)?;
@@ -178,7 +230,7 @@ impl ReservedInputs {
 
 #[cfg(test)]
 #[path = "windows_update_admission_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[path = "windows_update_backup.rs"]
 mod backup;

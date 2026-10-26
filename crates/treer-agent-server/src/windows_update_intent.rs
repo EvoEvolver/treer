@@ -27,7 +27,7 @@ pub struct Binding {
     pub signed_manifest_sha256: String,
 }
 
-fn identifier(value: &str, prefix: &str) -> bool {
+pub(crate) fn identifier(value: &str, prefix: &str) -> bool {
     value.strip_prefix(prefix).is_some_and(|rest| {
         !rest.is_empty()
             && rest.len() <= 128

@@ -40,6 +40,7 @@ pub struct PublishedInputs {
     _target: PinnedPair,
     backup: SealedBackup,
     _startup: Option<File>,
+    _state: Option<crate::controller::ControllerUpdateState>,
     restoration_record: bool,
 }
 
@@ -64,6 +65,7 @@ impl StartupBackedUpInputs {
             binding,
             _installed,
             _target,
+            state,
         }) = reserved;
         let mut staging = _installed.stage_pair()?;
         let (mut target_c, mut target_l) = _target.files();
@@ -93,6 +95,7 @@ impl StartupBackedUpInputs {
             _target,
             backup,
             _startup: startup,
+            _state: state,
             restoration_record: false,
         };
         published.verify_current()?;
@@ -163,6 +166,7 @@ impl PublishedInputs {
             _target,
             backup,
             _startup,
+            _state,
             ..
         } = self;
         let restored = Self {
@@ -171,6 +175,7 @@ impl PublishedInputs {
             _target,
             backup,
             _startup,
+            _state,
             restoration_record: true,
         };
         restored.verify_current()?;
