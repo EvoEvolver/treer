@@ -193,12 +193,21 @@ mod native {
     }
 
     fn prepare(installed: &Path, target: &Path, fixture: &Fixture) -> Result<AdmittedInputs> {
+        prepare_operation(installed, target, fixture, uuid::Uuid::new_v4())
+    }
+
+    fn prepare_operation(
+        installed: &Path,
+        target: &Path,
+        fixture: &Fixture,
+        operation: uuid::Uuid,
+    ) -> Result<AdmittedInputs> {
         AdmittedInputs::prepare(
             PinnedPair::open(installed)?.lock_installation()?,
             PinnedPair::open(target)?,
             &fixture.documents(),
             &fixture.key.verifying_key(),
-            uuid::Uuid::new_v4(),
+            operation,
             "ws_fixture".into(),
             "srv_fixture".into(),
         )
@@ -328,5 +337,125 @@ mod native {
         assert_eq!(std::fs::read(&lock).unwrap(), b"retained evidence");
         assert_eq!(std::fs::read_dir(&job).unwrap().count(), 0);
         assert_eq!(std::fs::read(installed.join("treer.exe")).unwrap(), OLD);
+    }
+
+    #[test]
+    fn windows_update_claim_survives_owner_exit_and_refuses_new_job_even_exact_binding() {
+        const CHILD_ROOT: &str = "TREER_TEST_UPDATE_CLAIM_CHILD_ROOT";
+        const CHILD_OPERATION: &str = "TREER_TEST_UPDATE_CLAIM_OPERATION";
+        let fixture = Fixture::new(|_| {});
+        if let Some(path) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(path);
+            let operation = std::env::var(CHILD_OPERATION).unwrap().parse().unwrap();
+            let inputs = prepare_operation(
+                &root.join("installed"),
+                &root.join("target"),
+                &fixture,
+                operation,
+            )
+            .unwrap();
+            let _reserved = inputs
+                .reserve(UpdateStore::open(&root.join("job-a")).unwrap())
+                .unwrap();
+            // Exit without Rust destructors: the kernel releases leases, but
+            // both persisted records must still fence a fresh process owner.
+            std::process::exit(0);
+        }
+        let root = Root::new();
+        let installed = root.pair("installed", OLD);
+        let target = root.pair("target", NEW);
+        let job_a = root.directory("job-a");
+        let job_b = root.directory("job-b");
+        let operation = uuid::Uuid::new_v4();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "windows_update_admission::tests::native::windows_update_claim_survives_owner_exit_and_refuses_new_job_even_exact_binding", "--nocapture"])
+            .env(CHILD_ROOT, &root.0).env(CHILD_OPERATION, operation.to_string())
+            .output().unwrap();
+        assert!(child.status.success());
+        let claim = installed.join(".treer-controller-update.claim");
+        let bytes = std::fs::read(&claim).unwrap();
+        let same = prepare_operation(&installed, &target, &fixture, operation).unwrap();
+        same.inspect_installation_claim().unwrap();
+        crate::windows_update_intent::inspect(
+            &UpdateStore::open(&job_a).unwrap().read().unwrap(),
+            same.binding(),
+        )
+        .unwrap();
+        assert!(same.reserve(UpdateStore::open(&job_b).unwrap()).is_err());
+        let different = prepare(&installed, &target, &fixture).unwrap();
+        assert!(different.inspect_installation_claim().is_err());
+        assert!(different
+            .reserve(UpdateStore::open(&job_b).unwrap())
+            .is_err());
+        assert_eq!(std::fs::read(&claim).unwrap(), bytes);
+        assert!(!job_b.join("receipt.bin").exists());
+        assert!(!job_b.join("receipt.next").exists());
+        assert_eq!(std::fs::read(installed.join("treer.exe")).unwrap(), OLD);
+    }
+
+    #[test]
+    fn windows_update_claim_job_refusal_retains_claim_and_blocks_other_job() {
+        let root = Root::new();
+        let installed = root.pair("installed", OLD);
+        let target = root.pair("target", NEW);
+        let job_a = root.directory("job-a");
+        let job_b = root.directory("job-b");
+        let fixture = Fixture::new(|_| {});
+        UpdateStore::open(&job_a)
+            .unwrap()
+            .publish(b"prior evidence")
+            .unwrap();
+        let inputs = prepare(&installed, &target, &fixture).unwrap();
+        let binding = inputs.binding().clone();
+        assert!(inputs.reserve(UpdateStore::open(&job_a).unwrap()).is_err());
+        let bytes = std::fs::read(installed.join(".treer-controller-update.claim")).unwrap();
+        crate::windows_update_intent::inspect(&bytes, &binding).unwrap();
+        assert_eq!(
+            UpdateStore::open(&job_a).unwrap().read().unwrap(),
+            b"prior evidence"
+        );
+        assert!(prepare(&installed, &target, &fixture)
+            .unwrap()
+            .reserve(UpdateStore::open(&job_b).unwrap())
+            .is_err());
+        assert!(!job_b.join("receipt.bin").exists());
+        assert_eq!(std::fs::read(installed.join("treer.exe")).unwrap(), OLD);
+    }
+
+    #[test]
+    fn windows_update_claim_partial_or_unsafe_record_is_never_repaired_or_adopted() {
+        let root = Root::new();
+        let installed = root.pair("installed", OLD);
+        let target = root.pair("target", NEW);
+        let job = root.directory("job");
+        let fixture = Fixture::new(|_| {});
+        let claim = installed.join(".treer-controller-update.claim");
+        let locked = PinnedPair::open(&installed)
+            .unwrap()
+            .lock_installation()
+            .unwrap();
+        assert!(locked.claim(b"").is_err());
+        assert!(locked.claim(&vec![0; 4097]).is_err());
+        assert!(!claim.exists());
+        drop(locked);
+        std::fs::write(&claim, b"partial claim").unwrap();
+        treer_platform::secure_file(&claim).unwrap();
+        let input = prepare(&installed, &target, &fixture).unwrap();
+        assert!(input.inspect_installation_claim().is_err());
+        assert!(input.reserve(UpdateStore::open(&job).unwrap()).is_err());
+        std::fs::hard_link(&claim, installed.join("claim-alias")).unwrap();
+        let input = prepare(&installed, &target, &fixture).unwrap();
+        assert!(input.inspect_installation_claim().is_err());
+        assert!(input.reserve(UpdateStore::open(&job).unwrap()).is_err());
+        std::fs::remove_file(installed.join("claim-alias")).unwrap();
+        treer_platform::apply_sddl_dacl(&claim, "D:P(A;;GA;;;WD)").unwrap();
+        let input = prepare(&installed, &target, &fixture).unwrap();
+        assert!(input.inspect_installation_claim().is_err());
+        assert!(input.reserve(UpdateStore::open(&job).unwrap()).is_err());
+        assert!(!treer_platform::private_path_is_secure(&claim).unwrap());
+        assert_eq!(std::fs::read(&claim).unwrap(), b"partial claim");
+        assert!(!job.join("receipt.bin").exists());
+        assert!(!job.join("receipt.next").exists());
+        assert_eq!(std::fs::read(target.join("treer.exe")).unwrap(), NEW);
     }
 }
