@@ -390,6 +390,15 @@ not fetch a new trust key, accept an unsigned release, or invent a signing key.
 Publishing an R2 release does not automatically update running machines;
 operators invoke `treer-agent-server update` separately.
 
+For an older Controller that still requires the local PEM, obtain the reviewed
+official source bundle and run `node scripts/install-release-trust.mjs` from it.
+This installs the bundled public key into the Controller's platform configuration
+parent (including `XDG_CONFIG_HOME` on Unix); `--config-dir ABS_CONFIG_DIR` selects
+that parent explicitly. It preserves an identical key and refuses a different,
+invalid, or unsafe existing key. It performs no network request or update.
+See [official signing custody and migration](releases.md#official-release-signing-authority)
+for the publisher and distribution prerequisites.
+
 Open the web UI, select a workspace, and choose **Add machine**. The dialog
 separates installation from workspace enrollment. The installation command is
 public and reusable:
