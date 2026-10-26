@@ -38,7 +38,9 @@ impl PinnedPair {
             .args(args)
             .current_dir(&self.path)
             .env_clear()
-            .stdin(std::process::Stdio::null())
+            // The fixed private worker may authenticate its pipe server using
+            // this explicit creator handle, not an ambient PID/environment.
+            .stdin(crate::windows_update_pipe::creator_process_stdio()?)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()

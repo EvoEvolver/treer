@@ -817,6 +817,92 @@ passed; local Windows Controller C toolchain remains unavailable.
 API contracts: [GetNamedPipeClientProcessId](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeclientprocessid),
 [GetProcessId](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessid).
 
+### Implemented leaf: explicit creator handle and child-side server check
+
+The fixed signed-target creator now supplies an explicit bootstrap-only stdin
+instead of the earlier null stdin: a duplicate of THIS creator's process handle
+with only QUERY_LIMITED_INFORMATION and SYNCHRONIZE access. The duplicate starts
+noninheritable; `Command` owns the Stdio and arranges its exact inheritance into
+the created child. Stdout/stderr remain null, environment is still cleared,
+argv is unchanged and no PID/handle number/credential is passed as text. This
+input is a process handle, NOT a byte stream or normal Controller stdin.
+
+The child-side transport helper borrows its inherited input handle, verifies
+that it denotes a live process, opens the fixed local pipe once and compares
+`GetNamedPipeServerProcessId` on that SAME connection with `GetProcessId` on the
+inherited handle, checking parent liveness again. Invalid input, foreign server,
+missing/busy endpoint or OS error refuses without retry. It never opens a PID or
+uses an environment/argv/JSON claim as parent identity. The existing parent-side
+original-Child check remains independently required.
+
+This is a transport-origin check, not proof that an arbitrary invoker is an
+authorized selected Controller. Same-account launchers can create their own
+parent/child pair; no input handle or matching pipe constructs runtime authority,
+an admission/reservation, update permission or readiness. There is still no
+Windows early worker entry, production selector delivery, bounded operation/
+runtime handshake, lock transfer, continued Job survival or restart/health.
+Neither this helper nor the inherited handle terminates or restarts the creator.
+The normal caller identity/Policy and signed admission remain mandatory for a
+future coordinator. Capability and Host Job policy are unchanged.
+
+New focused entry:
+`cargo test --locked -p treer-platform --lib windows_update_parent_pipe_ -- --nocapture`
+
+Two Windows-only controls run the SAME test executable: the actual inherited
+creator handle and same-connection server proof allow a fixed two-way byte
+exchange; a live sibling server mismatches the inherited creator, and a null
+input cannot impersonate a process handle. Only their own fixture children are
+reaped. No admitted/installed image runs. Exact two/zero failed/zero ignored/
+exit zero plus independent empty TEMP cleanup are required. The original source
+`a6be63f0` compiled on Windows in unique run `40321796787`, but returned one
+passed/one failed/zero ignored/exit 101: the positive exchange passed, while the
+sibling server exited before its ready file. Foreign-peer and invalid-input
+assertions were not reached. The null-stderr fixture did not record the exit
+code or failed stage, so the cause remains UNKNOWN. One task TEMP directory
+remained; cleanup was not proven. RESULT SHA256 is
+`490fd5509fd45e0290ab7cb1737b08f05da4deba99d97e982915bc19f1b34481`.
+That failed run/root is retained and must not be reused or reclassified.
+
+The same-leaf test-only successor replaces wall-clock-only pipe selectors with
+process ID plus an atomic per-process sequence: parallel tests cannot reuse a
+name within the process. This removes a fixture risk, not a proven attribution
+of the actual failure. Fixed helper exit codes now distinguish invalid selector
+(81), pipe creation (82), missing ready input (83), ready creation (84), and
+connection failure (85); the parent reports only the exit code. No raw errors,
+paths, response bodies or stderr are captured. Production bytes are unchanged;
+The changed-source native acceptance below is independently attributed.
+Successor author checks passed: Windows GNU platform all-target strict Clippy,
+workspace formatting, documentation links and diff whitespace. No native test
+execution is inferred from cross-compilation.
+
+Windows GNU platform all-target strict Clippy passed (including these
+test sources); its first run found a test-only wrong module path for secure_path,
+corrected before freeze. No old selector/matrix is repeated.
+
+#### Changed-source native acceptance
+
+Unique run `40323024024` checked out exact `52c1f5039c172fa953cc8af0112af13f8186f7d8`
+with wrapper `145d4c848841d622a10306103d59d01231322348`. On Windows 2022,
+Rust 1.90 and fixed NTFS, the platform-library entry above returned exactly two
+passed, zero failed, zero ignored, exit zero (18 filtered). The positive
+creator/server exchange and the foreign-server/invalid-stdin rejection both
+executed. The separate task TEMP had no remaining entries, cleanup was proven,
+and its empty root was removed. Core independently matched RESULT source,
+command, named tests, test log, platform and SHA256
+`8509cbb64e13018ca9df45179bc6cbbde0b3015ff1cf39c68e3ac1cbd735d7c4`.
+Receipts are under
+`.treer/reviews/core111-windows-parent-pipe-52c1f503/artifact/`.
+
+This accepts creator transport origin only, not selected-runtime authorization,
+operation framing, a complete IPC handshake, ready state or sustained Job
+survival. It does not establish why the previous fixture failed or prove that
+its residual directory was cleaned. No old root/source was retried, and no
+installed/admitted image, Host, live Controller, capability or publisher changed.
+
+API contracts: [DuplicateHandle](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle),
+[GetStdHandle](https://learn.microsoft.com/en-us/windows/console/getstdhandle),
+[GetNamedPipeServerProcessId](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getnamedpipeserverprocessid).
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,
