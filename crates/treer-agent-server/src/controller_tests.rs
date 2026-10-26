@@ -3170,7 +3170,10 @@ async fn windows_update_child_native_reservation_keeps_pins_and_claim_while_chil
         .open(installed.join("treer-agent-server.exe"))
         .is_err());
     assert!(std::fs::rename(root.join("configured-state"), root.join("moved-state")).is_err());
-    assert!(PinnedPair::open(&installed).is_err());
+    assert!(PinnedPair::open(&installed)
+        .unwrap()
+        .lock_installation()
+        .is_err());
     child.stop(&runtime, &binding).unwrap();
     // Pins outlive process termination until this custody object is dropped.
     assert!(std::fs::rename(root.join("configured-state"), root.join("moved-state")).is_err());
