@@ -45,7 +45,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     assert.ok(args.length === 0 || args.length === 2 && args[0] === '--config-dir');
     const defaultDirectory = process.platform === 'win32'
       ? process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'Treer')
-      : join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'treer');
+      : join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'treer');
     assert.ok(args[1] || defaultDirectory, 'LOCALAPPDATA is required on Windows');
     console.log(JSON.stringify(installReleaseTrust(args[1] || defaultDirectory)));
   }

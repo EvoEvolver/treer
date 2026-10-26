@@ -4,6 +4,7 @@ import { createHash, createPublicKey, generateKeyPairSync, verify } from 'node:c
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { installReleaseTrust } from './install-release-trust.mjs';
 import { keychainSigner } from './release-keychain.mjs';
@@ -31,7 +32,7 @@ test('legacy migration installs the shipped public key once and keeps an identic
 test('actual no-argument migration CLI follows platform config home without writing to HOME', t => {
   const root = fixture(t), home = join(root, 'home'), xdg = join(root, 'xdg'), local = join(root, 'local');
   mkdirSync(home);
-  const output = JSON.parse(execFileSync(process.execPath, [new URL('./install-release-trust.mjs', import.meta.url).pathname], {
+  const output = JSON.parse(execFileSync(process.execPath, [fileURLToPath(new URL('./install-release-trust.mjs', import.meta.url))], {
     encoding:'utf8', env:{...process.env, HOME:home, USERPROFILE:home, XDG_CONFIG_HOME:xdg, LOCALAPPDATA:local},
   }));
   const expected = join(process.platform === 'win32' ? local : xdg, process.platform === 'win32' ? 'Treer' : 'treer', 'release-signing-key.pub.pem');
