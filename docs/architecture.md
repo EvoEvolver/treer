@@ -100,6 +100,17 @@ transaction command. The existing terminal bootstrap explicitly drops the
 returned connection and exits as before. Failed, timed-out or cancelled ACK
 still closes the transport and its retained handle.
 
+The fixed Windows worker spawn also inherits a read-attributes/synchronize-only
+duplicate of the original installation lock file through its bootstrap-only
+stderr slot. This slot is not diagnostic output. The duplicate retains the same
+no-sharing kernel file object across creator-local lease release; it does not
+reopen a pathname or transmit a numeric handle. A child with a verified original
+creator connection may retain and compare that lock's physical identity. Its
+inherited standard handle remains held until child exit, even if the extra
+retained reference is dropped. This preserves only lock-file lifetime: ancestor,
+image and state pins, operation authorization and transaction ownership are not
+transferred by it. Normal Controller startup/stdio is unchanged.
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

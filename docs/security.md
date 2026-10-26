@@ -182,6 +182,19 @@ or configuration contents. Failed launch retains the newly saved specification.
   is unchanged. An eventual worker must separately establish admitted input,
   lease/pin ownership, authorization and survival before using any lifecycle API.
 
+  The fixed private worker's stderr slot now explicitly carries a reduced-rights
+  duplicate of the SAME held installation lock file (read attributes and
+  synchronize only), not log output. The child does not deserialize a handle
+  number or reopen a lock pathname. Retention requires an already verified live
+  creator connection and the expected physical lock-file identity, with live
+  checks before/after. That expected identity must eventually come from admitted
+  operation handoff; matching a caller-supplied tuple alone is not authority.
+  Nonfile/changed-identity inputs refuse. The borrowed standard handle is not
+  closed by the receiver, so no ACK, transport cancellation or retained-object
+  drop promises lock release before child exit. This is conservative reference
+  lifetime only: it neither transfers ancestor/image/state pins nor retires a
+  claim, permits replay, authorizes restart or enables a production worker.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

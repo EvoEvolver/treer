@@ -290,11 +290,14 @@ impl ReservedInputs {
         require_worker_image(&mut controller, &self.binding().controller_sha256)?;
         self.0
             ._target
-            .spawn_pinned_controller(&[
-                "--controller-update-worker".into(),
-                self.binding().operation_id.to_string().into(),
-                selector.simple().to_string().into(),
-            ])
+            .spawn_pinned_controller(
+                &self.0._installed,
+                &[
+                    "--controller-update-worker".into(),
+                    self.binding().operation_id.to_string().into(),
+                    selector.simple().to_string().into(),
+                ],
+            )
             .map_err(|_| anyhow::anyhow!("windows_update_worker_spawn_unknown"))
     }
 }

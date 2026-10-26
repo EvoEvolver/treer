@@ -25,6 +25,7 @@ impl PinnedPair {
     /// neither this function nor a successful Child implies worker readiness.
     pub fn spawn_pinned_controller(
         &self,
+        installation: &LockedInstallation,
         args: &[std::ffi::OsString],
     ) -> io::Result<std::process::Child> {
         let path = self.path.join("treer-agent-server.exe");
@@ -42,7 +43,10 @@ impl PinnedPair {
             // this explicit creator handle, not an ambient PID/environment.
             .stdin(crate::windows_update_pipe::creator_process_stdio()?)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            // Bootstrap-only stderr carries a reduced-rights duplicate of the
+            // SAME installation lock object, never a diagnostic byte stream.
+            // Child exit releases this inherited reference; ACK does not.
+            .stderr(installation.worker_lock_stdio()?)
             .spawn()
     }
 
@@ -100,6 +104,23 @@ pub struct LockedInstallation {
 }
 
 impl LockedInstallation {
+    /// Physical identity of the held lock FILE, not its installation directory.
+    /// This observation alone never authorizes adoption of an operation.
+    pub fn lock_file_identity(&self) -> io::Result<(u64, u64)> {
+        lock_identity(&self._lock)
+    }
+
+    /// Explicit bootstrap-only standard error slot. The duplicate has only
+    /// read-attributes/synchronize rights, but retains the SAME no-sharing file
+    /// object. No raw handle value, inheritable ambient handle, pathname reopen
+    /// or lock replacement is involved. Do not use this slot for logging.
+    pub fn worker_lock_stdio(&self) -> io::Result<std::process::Stdio> {
+        use std::os::windows::io::AsRawHandle;
+        Ok(std::process::Stdio::from(duplicate_lock(
+            self._lock.as_raw_handle(),
+        )?))
+    }
+
     pub fn identity(&self) -> io::Result<(u64, u64)> {
         self.pair.identity()
     }
@@ -150,3 +171,85 @@ impl LockedInstallation {
         Ok(bytes)
     }
 }
+
+#[allow(unsafe_code)] // Exact OS-handle duplication; no raw ownership is exposed.
+fn duplicate_lock(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+) -> io::Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::FromRawHandle;
+    use windows_sys::Win32::{
+        Foundation::{DuplicateHandle, INVALID_HANDLE_VALUE},
+        Storage::FileSystem::{FILE_READ_ATTRIBUTES, SYNCHRONIZE},
+        System::Threading::GetCurrentProcess,
+    };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::other("windows_update_lock_unconfirmed"));
+    }
+    let mut result = std::ptr::null_mut();
+    if unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            GetCurrentProcess(),
+            &mut result,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            0,
+            0,
+        )
+    } == 0
+        || result.is_null()
+        || result == INVALID_HANDLE_VALUE
+    {
+        return Err(io::Error::other("windows_update_lock_unconfirmed"));
+    }
+    Ok(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(result) })
+}
+
+fn lock_identity(file: &File) -> io::Result<(u64, u64)> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+    let (volume, id, links, attributes) = crate::transfer_file_identity(file)?;
+    if id == 0
+        || links != 1
+        || attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+    {
+        return Err(io::Error::other("windows_update_lock_unconfirmed"));
+    }
+    Ok((volume, id))
+}
+
+/// Child-side custody of the original creator's explicit lock-file reference.
+/// No Clone/Deserialize/raw-handle constructor. This is not a LockedInstallation:
+/// image/ancestor/state pins and independently admitted operation authority have
+/// NOT been transferred. The borrowed standard handle also remains inherited
+/// until process exit, even when this extra retained reference is dropped.
+pub struct InheritedInstallationLock {
+    _file: File,
+}
+
+impl InheritedInstallationLock {
+    /// Requires an already verified live original-creator connection. Expected
+    /// lock identity must come from future admitted handoff, not an untrusted
+    /// path/JSON claim. This method checks mechanical custody only, not Policy.
+    #[allow(unsafe_code)] // Borrow, never close, the bootstrap standard handle.
+    pub fn retain_from_creator(
+        creator: &crate::windows_update_pipe::CreationParentConnection,
+        expected: (u64, u64),
+    ) -> io::Result<Self> {
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
+        if !creator.creator_is_live()? {
+            return Err(io::Error::other("windows_update_lock_unconfirmed"));
+        }
+        // Borrow stderr; do not close a standard handle owned by runtime.
+        let file = File::from(duplicate_lock(unsafe { GetStdHandle(STD_ERROR_HANDLE) })?);
+        if lock_identity(&file)? != expected || !creator.creator_is_live()? {
+            return Err(io::Error::other("windows_update_lock_unconfirmed"));
+        }
+        Ok(Self { _file: file })
+    }
+}
+
+#[cfg(test)]
+#[path = "windows_update_inputs_tests.rs"]
+mod tests;

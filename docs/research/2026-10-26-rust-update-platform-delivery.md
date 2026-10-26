@@ -1359,6 +1359,51 @@ platform and `RESULT.json` SHA-256
 (#111:9640). Single source review: #111:9636. No old selector or matrix was rerun;
 the custody-only limits above remain unchanged.
 
+## Inherited installation lock reference
+
+Fixed signed-target worker creation now supplies a restricted duplicate of the
+installed lease's SAME kernel lock-file object through bootstrap stderr; stdin
+continues to carry the original creator process handle and stdout remains null.
+Normal Controller startup is unaffected. The duplicate has only read-attributes
+and synchronize rights, is not itself ambient-inheritable, and is explicitly
+arranged by `Command` as the child's standard handle. The fixed private worker
+must not log to stderr. No numeric raw handle, caller path, PID adoption, extra
+environment or general `Command` override crosses this production boundary.
+
+`InheritedInstallationLock` retains another reduced-rights duplicate only after
+an existing creator connection proves the original creator is live, the
+inherited file is regular/single-link/non-reparse and its physical identity
+matches the expected lock-file identity, with another creator-live check. It is
+not `LockedInstallation`: no directory/ancestor, image or runtime state pins
+move into the child, and no operation is admitted by this comparison. The future
+operation handoff must independently provide the expected identity and normal
+authorization; the fixture's identity message is not that production contract.
+The parent still keeps its original reservation. Unknown outcomes retain the
+claim and cannot replay. The borrowed stderr handle remains held until process
+exit even if the extra retained object drops; there is no early lease retirement
+or claim-clear API. Partial spawn/ACK is not an ownership-transfer receipt.
+
+New PLATFORM LIB selector `windows_update_worker_lock_` has two native controls:
+same original file identity and denied write, original creator peer, parent-local
+lease release while the SAMEtestexe child keeps competing lock acquisition
+refused, retained-object drop still refused, then original Child exit permits
+fixture-only reacquisition; wrong identity and null/nonfile stderr refuse while
+the parent's original lease remains held. All children are task-owned and
+bounded/reaped; the inert image pair is never executed. This is a lock lifetime
+test, not real creator exit, admitted image/worker survival, Job isolation,
+runtime restart/health, power-loss durability or complete update acceptance.
+
+Author Windows GNU-target platform lib/tests strict Clippy passed, including
+the new native test source; formatting/docs/diff checks also passed. An initial
+author compilation correctly refused unsafe blocks outside an explicit allowed
+mechanics boundary; the exact duplicate/borrow functions now carry narrow
+allowances rather than enabling unsafe code for the whole module. No native
+test has run yet. One independent source review precedes the sole Release
+Windows entry: Server-bin `cargo check` for the changed fixed-spawn consumer,
+then `cargo test --locked -p treer-platform --lib windows_update_worker_lock_
+-- --nocapture`, exact two passed, zero failed/ignored, exit zero, fixed NTFS and
+independent TEMP cleanup. No old selector/matrix or installed process is needed.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,
