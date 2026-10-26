@@ -106,6 +106,39 @@ skim titles before opening any text.
   titles and then the full text of those that matter, not only the title: a
   title is a pointer, and state still lives in the comment and the ticket status.
 
+## Formal source and feature preservation (#20:9716)
+
+Formal Console, App and native publication must use an exact commit already in
+`origin/main`. A release tag references that exact commit. An isolated preview
+may use a task branch, but is not a formal delivery. Fetch main immediately
+before publication; a task branch or configurable preview ref cannot replace
+this check.
+
+Compare the candidate against the **previous actually deployed source**, not
+only its task base. Record its deployment receipt, the complete component path
+diff, and named delivered features with retained/added/explicitly authorized
+removal outcomes and regression evidence. Historical deployed branch-only
+features must be reconciled individually into main; never overwrite main with
+an entire historical branch. Feature removal or narrowing needs a concrete
+user authorization. Git deletion checks alone cannot establish feature parity.
+
+Run `python3 scripts/release-source-preflight.py --candidate FULL_SHA --review
+/absolute/review.json` before mutation. The JSON schema is
+`treer.release-source-review/v1`, with `candidate`, `previous_live_source`,
+`previous_live_receipt`, `reviewed_by`, `component_paths`, exact ordered
+`changed_paths` rows (`status`, `path`, from `git diff --no-renames --name-status`),
+and `feature_comparison` rows (`feature`, `outcome`, `evidence`; removals also
+`user_authorization`). Deleted paths require a matching
+`deleted_path_authorizations` entry explaining authorized removal or relocation.
+The maintained Canary entry requires this absolute file through
+`TREER_RELEASE_SOURCE_REVIEW`. Narrow component runbooks must invoke the same
+preflight and bind its receipt to their frozen plan. Recheck the actual live
+version before applying: a changed predecessor invalidates the comparison.
+
+Publication receipts record candidate/source SHA, main SHA observed at preflight,
+previous live source and functional differences. This source check is not deploy
+authorization, artifact provenance, or browser acceptance; record those separately.
+
 ## Tiered releases (v1.1)
 
 Developers may test several versions locally before a batch deploy. Three

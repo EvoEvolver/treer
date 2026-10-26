@@ -16,11 +16,10 @@ git diff --quiet && git diff --cached --quiet && \
     echo "release requires a clean worktree" >&2
     exit 1
 }
-release_ref=${TREER_RELEASE_REMOTE_REF:-origin/main}
-git merge-base --is-ancestor "$commit" "$release_ref" || {
-    echo "release commit $commit is not contained in $release_ref" >&2
-    exit 1
-}
+# Formal releases always use origin/main, regardless of preview ref overrides.
+git fetch origin main
+: "${TREER_RELEASE_SOURCE_REVIEW:?set an absolute previous-live source review JSON path}"
+python3 scripts/release-source-preflight.py --candidate "$commit" --review "$TREER_RELEASE_SOURCE_REVIEW"
 
 release_root="$root/.treer/releases/$commit"
 . "$root/scripts/release-timing.sh"

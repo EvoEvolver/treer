@@ -187,6 +187,10 @@ def deploy(root, args):
         lap("prepare_worktree", timings)
         wait_ci(root, commit)
         lap("ci_wait", timings)
+        review = os.environ.get("TREER_RELEASE_SOURCE_REVIEW")
+        if not review or not Path(review).is_absolute():
+            raise RuntimeError("TREER_RELEASE_SOURCE_REVIEW must name an absolute previous-live comparison JSON")
+        run("python3", "scripts/release-source-preflight.py", "--candidate", commit, "--review", review, cwd=root)
         native_ready(checkout, commit)
         lap("native_ready", timings)
         run("pnpm", "--dir", "web", "install", "--frozen-lockfile", cwd=checkout)
