@@ -1256,7 +1256,19 @@ cover fresh identity/exact operation/two-request sequence, foreign scope before
 consumption, fixed error/wrong-kind refusal, and cancellation at both observation
 and submitted mutation boundaries. These are private HostClient fixtures, not
 actual supervisor restart, live Controller, detached worker or health proof.
-Windows focused exact4 is NOT_RUN. The internal method is not reachable through
+Sole native run `40339093180`, exact source
+`5d3f2753874a0d4408486ad4a57e4494cfba8e56`, wrapper
+`1812998e718d948703e333425ff0941f88e24478`, actually passed all four controls,
+zero failed/ignored/exit zero (291 filtered), on Windows2022/Rust1.90,
+Fixed NTFS image `20261022.344.1`. The task TEMP inventory was empty, cleanup
+proven and the empty root removed. Core independently verified source, command,
+exact test names/counts, log, platform and cleanup at
+`.treer/reviews/core111-windows-selected-restart-5d3f2753/artifact/`;
+`RESULT.json` SHA256 is
+`3699142e1af692f95c64d3f38e67ec08fef826254acbeb787cb3da5b8bc12de9`.
+This accepts only the closed HostClient NamedPipe/state-root fixture, not a
+real supervisor restart or installed Controller. No feature or extra binary
+build was used. The internal method is not reachable through
 a public coordinator/capability and does not add authorization: normal identity
 and Policy remain prerequisites for a future entry. Its creator could stop
 before its own ACK; independent worker survival, ownership transfer and final
