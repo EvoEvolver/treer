@@ -100,7 +100,13 @@ or configuration contents. Failed launch retains the newly saved specification.
   against a preconfigured local Ed25519 public key, then verify both binary
   lengths and SHA256 hashes before executing either binary, including `--help`.
   Missing signatures, keys, invalid metadata, or corrupt binaries fail closed.
-  The trust key is never obtained from the download server. This does not cover
+  Explicit and existing local trust keys take precedence; failures reading or
+  parsing them never silently select another key. Only the exact official
+  distributor may use a key pinned by its trusted installation/package when
+  the implicit local key is absent. Custom distributors require separate local
+  trust configuration. The trust key is never obtained from the channel or
+  manifest being verified, and a package without a pinned official key refuses
+  the default update. This does not cover
   bootstrap installers, Windows in-place updates, or replay/downgrade protection.
 
 - Machines enroll once, then authenticate with a workspace-bound credential.

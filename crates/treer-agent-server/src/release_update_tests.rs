@@ -118,6 +118,84 @@ fn client() -> reqwest::Client {
 }
 
 #[test]
+fn release_trust_resolution_preserves_explicit_and_existing_installation_keys() {
+    use ed25519_dalek::pkcs8::EncodePublicKey;
+    let directory =
+        std::env::temp_dir().join(format!("treer-release-trust-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let local = directory.join("release-signing-key.pub.pem");
+    let explicit = directory.join("explicit.pub.pem");
+    let official = Url::parse("https://releases.treer.ai/").unwrap();
+    let custom = Url::parse("https://self-hosted.example/releases/").unwrap();
+    let bundled = signing_key()
+        .verifying_key()
+        .to_public_key_pem(Default::default())
+        .unwrap();
+    let other = SigningKey::from_bytes(&[8; 32]).verifying_key();
+    let other_pem = other.to_public_key_pem(Default::default()).unwrap();
+
+    assert_eq!(
+        resolve_public_key(&official, None, &local, Some(&bundled)).unwrap(),
+        signing_key().verifying_key()
+    );
+    assert!(resolve_public_key(&custom, None, &local, Some(&bundled)).is_err());
+    assert!(resolve_public_key(
+        &Url::parse("https://releases.treer.ai/another-publisher/").unwrap(),
+        None,
+        &local,
+        Some(&bundled),
+    )
+    .is_err());
+    assert!(resolve_public_key(&official, None, &local, None).is_err());
+    assert!(resolve_public_key(&official, None, &local, Some("invalid bundled key")).is_err());
+    assert!(resolve_public_key(&official, Some(&explicit), &local, Some(&bundled)).is_err());
+
+    std::fs::write(&local, &other_pem).unwrap();
+    assert_eq!(
+        resolve_public_key(&official, None, &local, Some(&bundled)).unwrap(),
+        other
+    );
+    assert_eq!(
+        resolve_public_key(&custom, None, &local, Some(&bundled)).unwrap(),
+        other
+    );
+    std::fs::write(&explicit, &bundled).unwrap();
+    assert_eq!(
+        resolve_public_key(&custom, Some(&explicit), &local, None).unwrap(),
+        signing_key().verifying_key()
+    );
+    std::fs::write(&local, "invalid local key").unwrap();
+    assert!(resolve_public_key(&official, None, &local, Some(&bundled)).is_err());
+    std::fs::write(&explicit, "invalid explicit key").unwrap();
+    assert!(resolve_public_key(&official, Some(&explicit), &local, Some(&bundled)).is_err());
+
+    // The bundled key does not confer trust on another publisher's signatures.
+    let selected =
+        resolve_public_key(&official, None, &directory.join("absent"), Some(&other_pem)).unwrap();
+    assert!(verify_signed(b"channel", &signature(b"channel"), &selected).is_err());
+    std::fs::remove_file(local).unwrap();
+    std::fs::remove_file(explicit).unwrap();
+    std::fs::remove_dir(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn release_trust_resolution_does_not_ignore_broken_local_key_links() {
+    let directory =
+        std::env::temp_dir().join(format!("treer-release-trust-link-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let local = directory.join("key.pub.pem");
+    std::os::unix::fs::symlink(directory.join("absent.pem"), &local).unwrap();
+    let official = Url::parse("https://releases.treer.ai/").unwrap();
+    assert!(resolve_public_key(&official, None, &local, None)
+        .unwrap_err()
+        .to_string()
+        .starts_with("cannot read trusted release public key"));
+    std::fs::remove_file(local).unwrap();
+    std::fs::remove_dir(directory).unwrap();
+}
+
+#[test]
 fn release_verifier_accepts_node_crypto_publisher_wire_format() {
     // Generated with Node crypto from the public test seed [7; 32], using the
     // publisher's SPKI key ID and detached signature format (not a release key).

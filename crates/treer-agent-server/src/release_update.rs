@@ -75,6 +75,41 @@ pub(super) fn load_public_key(path: &Path) -> Result<VerifyingKey> {
         .context("release public key must be an Ed25519 SPKI PEM key")
 }
 
+/// Select trust before acquiring update locks or staging executable bytes.
+/// Existing local configuration is authoritative, including read/parse errors;
+/// a missing implicit key alone may use the official distribution's pinned key.
+pub(super) fn resolve_public_key(
+    base: &Url,
+    explicit: Option<&Path>,
+    local: &Path,
+    official_pem: Option<&str>,
+) -> Result<VerifyingKey> {
+    let base = normalize_base_url(base.clone())?;
+    if let Some(path) = explicit {
+        return load_public_key(path);
+    }
+    match std::fs::symlink_metadata(local) {
+        Ok(_) => return load_public_key(local),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "cannot inspect trusted release public key {}",
+                    local.display()
+                )
+            });
+        }
+    }
+    if base.as_str() == "https://releases.treer.ai/" {
+        if let Some(pem) = official_pem {
+            return VerifyingKey::from_public_key_pem(pem)
+                .context("bundled official release public key is invalid");
+        }
+        bail!("this Controller distribution has no bundled official release key; install an official signed-update-enabled Controller package, or supply a separately trusted publisher key with --public-key PATH (TREER_RELEASE_PUBLIC_KEY); no files were changed");
+    }
+    bail!("custom release distributors require a separately trusted publisher key: treer-agent-server update --release-base-url {base} --public-key PATH (or TREER_RELEASE_PUBLIC_KEY); no files were changed");
+}
+
 fn key_id(key: &VerifyingKey) -> Result<String> {
     // Node's publisher hashes the full SPKI DER, not the raw 32-byte key.
     Ok(digest(key.to_public_key_der()?.as_bytes())[..16].to_owned())

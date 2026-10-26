@@ -369,11 +369,19 @@ is rejected. Uploads use Wrangler v4 and its authenticated account. Override
 `TREER_WRANGLER` when publishing to another R2 environment.
 
 The installed Controller updater consumes these signed channels and manifests.
-Before its first update, provision the publisher's SPKI Ed25519 public key from
-a trusted source at `~/.config/treer/release-signing-key.pub.pem` (under
-`XDG_CONFIG_HOME` when set), or pass `--public-key` / `TREER_RELEASE_PUBLIC_KEY`.
-It never downloads its trust key from the distributor. No release key is bundled
-in the repository, and missing keys or unsigned releases fail closed.
+Trust is resolved before update locks, staging, or service activation. An explicit
+`--public-key` / `TREER_RELEASE_PUBLIC_KEY` is authoritative. Otherwise an existing
+`~/.config/treer/release-signing-key.pub.pem` (under `XDG_CONFIG_HOME` when set)
+remains authoritative; an unreadable or malformed configured key is an error,
+not permission to replace it or fall back to another publisher.
+
+Only the exact official distributor `https://releases.treer.ai/` may use an
+official distribution's bundled SPKI Ed25519 key when the implicit local key is
+absent. Custom `--release-base-url` values require a separately trusted publisher
+key. The key must arrive through the trusted installation/package, never from
+the channel or manifest being verified. A distribution without an official key
+refuses the update with an explicit installation/configuration error. It does
+not fetch a new trust key, accept an unsigned release, or invent a signing key.
 Publishing an R2 release does not automatically update running machines;
 operators invoke `treer-agent-server update` separately.
 

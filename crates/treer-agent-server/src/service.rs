@@ -1083,6 +1083,20 @@ pub async fn update(
     if cfg!(windows) {
         bail!("Windows in-place updates are not supported; stop Treer, reinstall the binaries, then run restore");
     }
+    // Trust preflight must precede update-lock creation, staging, or activation.
+    let public_key_path = match &public_key {
+        Some(path) => path.clone(),
+        None => config_dir()?
+            .parent()
+            .context("configuration directory has no parent")?
+            .join("release-signing-key.pub.pem"),
+    };
+    let key = crate::release_update::resolve_public_key(
+        &release_base_url,
+        public_key.as_deref(),
+        &public_key_path,
+        None,
+    )?;
     let services = installed_services()?;
     let (paths, _) = services.first().context(
         "no agent-server services are installed on this host; connect a machine before updating",
@@ -1103,13 +1117,6 @@ pub async fn update(
         &treer_executable,
     )?;
     let platform = artifact_platform(std::env::consts::OS, std::env::consts::ARCH)?;
-    let public_key_path = public_key.unwrap_or(
-        config_dir()?
-            .parent()
-            .context("configuration directory has no parent")?
-            .join("release-signing-key.pub.pem"),
-    );
-    let key = crate::release_update::load_public_key(&public_key_path)?;
     let client = reqwest::Client::builder()
         .timeout(UPDATE_DOWNLOAD_TIMEOUT)
         // Agent terminals inherit Treer's workload HTTP proxy. Updating the
