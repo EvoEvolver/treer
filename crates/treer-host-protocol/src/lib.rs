@@ -141,6 +141,9 @@ pub enum HostCommand {
     RestartController,
     // Append only: existing bincode command discriminants stay unchanged.
     ObserveController,
+    RestartControllerIfCurrent {
+        expected: HostControllerIdentity,
+    },
 }
 
 impl HostCommand {
@@ -152,6 +155,7 @@ impl HostCommand {
                 | Self::Resize { .. }
                 | Self::Stop { .. }
                 | Self::RestartController
+                | Self::RestartControllerIfCurrent { .. }
         )
     }
 }

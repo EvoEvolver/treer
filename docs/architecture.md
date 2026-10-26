@@ -63,6 +63,19 @@ observation reply and never enqueues a restart. Existing Host protocol v2
 command/response tags remain unchanged by append-only variants; an older Host
 rejects the unsupported request rather than falling back to a restart.
 
+The separate internal `RestartControllerIfCurrent` mutation compares the full
+expected epoch/instance/PID with the supervisor's original live Child before
+signalling that handle. It waits at most three seconds for exit and creates one
+replacement from the existing Host configuration, retaining it with a fresh
+instance UUID before acknowledging. The operation ID is bound to this command
+and expected identity in the bounded in-memory result cache. A stale identity
+cannot stop the replacement. An ambiguous stop or failed creation suppresses
+automatic Controller supervision and identity reads until explicit recovery;
+it never retries the conditional mutation. The stable Host and its workload
+handles remain in place. The existing explicit unconditional restart command
+remains separate. This internal primitive is not yet connected to the updater
+coordinator or exposed as a production update capability.
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

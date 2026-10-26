@@ -58,6 +58,58 @@ struct HostState {
 enum ControllerRequest {
     Restart,
     Observe(oneshot::Sender<Result<HostResponse, HostError>>),
+    RestartIfCurrent {
+        expected: HostControllerIdentity,
+        reply: oneshot::Sender<Result<HostResponse, HostError>>,
+    },
+}
+
+async fn restart_controller_if_current<F, Fut>(
+    controller: &mut Child,
+    host_epoch: &str,
+    instance_id: Uuid,
+    unknown: &mut bool,
+    expected: &HostControllerIdentity,
+    spawn: F,
+) -> Result<Uuid, HostError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Child>>,
+{
+    let refused = || {
+        HostError::new(
+            "controller_restart_refused",
+            "Controller instance did not match",
+        )
+    };
+    if *unknown
+        || observe_controller(controller, host_epoch, instance_id)?
+            != (HostResponse::ControllerIdentity {
+                identity: expected.clone(),
+            })
+    {
+        return Err(refused());
+    }
+    // Before any signal: ambiguous stop/spawn cannot be tried again. Keep the
+    // original handle; suppress automatic supervision until explicit recovery.
+    *unknown = true;
+    let unconfirmed = || {
+        HostError::new(
+            "controller_restart_unconfirmed",
+            "Controller restart outcome unconfirmed",
+        )
+    };
+    controller.start_kill().map_err(|_| unconfirmed())?;
+    tokio::time::timeout(Duration::from_secs(3), controller.wait())
+        .await
+        .map_err(|_| unconfirmed())?
+        .map_err(|_| unconfirmed())?;
+    let replacement = spawn().await.map_err(|_| unconfirmed())?;
+    // No fallible operation between successful creation and retained custody.
+    *controller = replacement;
+    let instance = Uuid::new_v4();
+    *unknown = false;
+    Ok(instance)
 }
 
 fn observe_controller(
@@ -91,6 +143,7 @@ fn observe_controller(
 
 struct ResultCache {
     values: HashMap<String, Result<HostResponse, HostError>>,
+    guarded_restarts: HashMap<String, HostControllerIdentity>,
     order: VecDeque<String>,
 }
 
@@ -98,6 +151,7 @@ impl ResultCache {
     fn new() -> Self {
         Self {
             values: HashMap::new(),
+            guarded_restarts: HashMap::new(),
             order: VecDeque::new(),
         }
     }
@@ -109,6 +163,7 @@ impl ResultCache {
         while self.order.len() >= RESULT_CACHE_LIMIT {
             if let Some(oldest) = self.order.pop_front() {
                 self.values.remove(&oldest);
+                self.guarded_restarts.remove(&oldest);
             }
         }
         self.order.push_back(operation_id.clone());
@@ -174,11 +229,12 @@ async fn run_daemon(config: HostDaemonConfig) -> Result<()> {
 
     let mut controller = spawn_controller(&config).await?;
     let mut controller_instance = Uuid::new_v4();
+    let mut controller_restart_unknown = false;
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
-            result = controller.wait() => {
+            result = controller.wait(), if !controller_restart_unknown => {
                 match result {
                     Ok(status) => warn!(%status, "controller exited; restarting"),
                     Err(error) => warn!(%error, "failed to wait for controller; restarting"),
@@ -193,10 +249,25 @@ async fn run_daemon(config: HostDaemonConfig) -> Result<()> {
                     Some(ControllerRequest::Observe(reply)) => {
                         // A cancelled/expired read cannot enqueue a mutation.
                         if !reply.is_closed() {
-                            let _ = reply.send(observe_controller(
+                            let response = if controller_restart_unknown {
+                                Err(HostError::new("controller_unavailable", "Controller restart outcome unconfirmed"))
+                            } else { observe_controller(
                                 &mut controller, state.runtime.host_epoch(), controller_instance,
-                            ));
+                            ) };
+                            let _ = reply.send(response);
                         }
+                        continue;
+                    }
+                    Some(ControllerRequest::RestartIfCurrent { expected, reply }) => {
+                        if reply.is_closed() { continue; }
+                        let response = restart_controller_if_current(
+                            &mut controller, state.runtime.host_epoch(), controller_instance,
+                            &mut controller_restart_unknown, &expected, || spawn_controller(&config),
+                        ).await.map(|instance| {
+                            controller_instance = instance;
+                            HostResponse::Ack
+                        });
+                        let _ = reply.send(response);
                         continue;
                     }
                     Some(ControllerRequest::Restart) => {}
@@ -208,6 +279,7 @@ async fn run_daemon(config: HostDaemonConfig) -> Result<()> {
                 let _ = controller.wait().await;
                 controller = spawn_controller(&config).await?;
                 controller_instance = Uuid::new_v4();
+                controller_restart_unknown = false;
             }
             signal = &mut shutdown => {
                 signal?;
@@ -429,13 +501,62 @@ async fn execute_request(
                 "mutating commands need operation_id",
             )
         })?;
-        if let Some(response) = state.results.lock().await.values.get(operation_id).cloned() {
+        let cache = state.results.lock().await;
+        if let Some(response) = cache.values.get(operation_id).cloned() {
+            match (cache.guarded_restarts.get(operation_id), &request.command) {
+                (Some(bound), HostCommand::RestartControllerIfCurrent { expected })
+                    if bound == expected => {}
+                (None, HostCommand::RestartControllerIfCurrent { .. }) | (Some(_), _) => {
+                    return Err(HostError::new(
+                        "operation_id_conflict",
+                        "operation_id is bound to another command",
+                    ));
+                }
+                _ => {}
+            }
             return response;
         }
+    }
+    if let HostCommand::RestartControllerIfCurrent { expected } = &request.command {
+        let (reply, response) = oneshot::channel();
+        let result = if state
+            .restart_controller
+            .send(ControllerRequest::RestartIfCurrent {
+                expected: expected.clone(),
+                reply,
+            })
+            .is_err()
+        {
+            Err(HostError::new(
+                "supervisor_stopped",
+                "controller supervisor stopped",
+            ))
+        } else {
+            match tokio::time::timeout(Duration::from_secs(5), response).await {
+                Ok(Ok(result)) => result,
+                _ => Err(HostError::new(
+                    "controller_restart_unconfirmed",
+                    "Controller restart outcome unconfirmed",
+                )),
+            }
+        };
+        let operation_id = request
+            .operation_id
+            .clone()
+            .expect("mutation operation checked above");
+        let mut cache = state.results.lock().await;
+        cache.insert(operation_id.clone(), result.clone());
+        cache
+            .guarded_restarts
+            .insert(operation_id, expected.clone());
+        return result;
     }
     let response: Result<HostResponse, HostError> = (|| match &request.command {
         HostCommand::Sync { .. } => unreachable!("sync is handled by the connection"),
         HostCommand::ObserveController => unreachable!("observation is handled above"),
+        HostCommand::RestartControllerIfCurrent { .. } => {
+            unreachable!("conditional restart is handled above")
+        }
         HostCommand::Spawn { request } => Ok(HostResponse::Process {
             process: state
                 .runtime
@@ -661,6 +782,221 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap()
+    }
+
+    fn restart_identity(child: &mut Child, instance: Uuid) -> HostControllerIdentity {
+        let HostResponse::ControllerIdentity { identity } =
+            observe_controller(child, "restart-fixture", instance).unwrap()
+        else {
+            panic!("wrong observation")
+        };
+        identity
+    }
+
+    #[tokio::test]
+    async fn controller_update_restart_scope_refuses_before_lifecycle_or_spawn() {
+        let mut child = observation_child();
+        let instance = Uuid::new_v4();
+        let original = restart_identity(&mut child, instance);
+        let mut unknown = false;
+        for field in 0..3 {
+            let mut expected = original.clone();
+            match field {
+                0 => expected.host_epoch.push('x'),
+                1 => expected.instance_id = Uuid::new_v4().to_string(),
+                _ => expected.pid = expected.pid.wrapping_add(1),
+            }
+            let result = restart_controller_if_current(
+                &mut child,
+                "restart-fixture",
+                instance,
+                &mut unknown,
+                &expected,
+                || async { panic!("mismatched identity attempted spawn") },
+            )
+            .await;
+            assert_eq!(result.unwrap_err().code, "controller_restart_refused");
+            assert!(!unknown);
+            assert_eq!(restart_identity(&mut child, instance), original);
+        }
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn controller_update_restart_original_child_once_then_new_generation() {
+        let mut child = observation_child();
+        let instance = Uuid::new_v4();
+        let original = restart_identity(&mut child, instance);
+        let mut unknown = false;
+        let mut spawns = 0;
+        let next = restart_controller_if_current(
+            &mut child,
+            "restart-fixture",
+            instance,
+            &mut unknown,
+            &original,
+            || {
+                spawns += 1;
+                async { Ok(observation_child()) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(spawns, 1);
+        assert_ne!(next, instance);
+        assert!(!unknown);
+        let replacement = restart_identity(&mut child, next);
+        assert_ne!(replacement.instance_id, original.instance_id);
+        let stale = restart_controller_if_current(
+            &mut child,
+            "restart-fixture",
+            next,
+            &mut unknown,
+            &original,
+            || async { panic!("stale request attempted another spawn") },
+        )
+        .await;
+        assert_eq!(stale.unwrap_err().code, "controller_restart_refused");
+        assert_eq!(restart_identity(&mut child, next), replacement);
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn controller_update_restart_failed_spawn_retains_unknown_and_refuses_replay() {
+        let mut child = observation_child();
+        let instance = Uuid::new_v4();
+        let original = restart_identity(&mut child, instance);
+        let mut unknown = false;
+        let root = std::env::temp_dir().join(format!("treer-host-restart-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let result = restart_controller_if_current(
+            &mut child,
+            "restart-fixture",
+            instance,
+            &mut unknown,
+            &original,
+            || async { Ok(Command::new(root.join("absent-controller.exe")).spawn()?) },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().code, "controller_restart_unconfirmed");
+        assert!(unknown);
+        assert!(child.try_wait().unwrap().is_some());
+        let replay = restart_controller_if_current(
+            &mut child,
+            "restart-fixture",
+            instance,
+            &mut unknown,
+            &original,
+            || async { panic!("unknown attempted another spawn") },
+        )
+        .await;
+        assert_eq!(replay.unwrap_err().code, "controller_restart_refused");
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn controller_update_restart_operation_id_binds_identity_without_legacy_fallback() {
+        let expected = HostControllerIdentity {
+            host_epoch: "restart-fixture".into(),
+            instance_id: Uuid::new_v4().to_string(),
+            pid: 1,
+        };
+        let command = HostCommand::RestartControllerIfCurrent {
+            expected: expected.clone(),
+        };
+        assert!(command.is_mutating());
+        assert_eq!(
+            decode_message::<HostCommand>(&encode_message(&command).unwrap()).unwrap(),
+            command
+        );
+        assert_eq!(
+            encode_message(&HostCommand::RestartController).unwrap(),
+            vec![6]
+        );
+        assert_eq!(encode_message(&HostResponse::Ack).unwrap(), vec![3]);
+        let root = std::env::temp_dir().join(format!("treer-host-restart-{}", Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let (restart_controller, mut incoming) = mpsc::unbounded_channel();
+        let state = HostState {
+            runtime: HostRuntime::new(&root).unwrap(),
+            results: Mutex::new(ResultCache::new()),
+            operation_gate: Mutex::new(()),
+            restart_controller,
+        };
+        let mut request = HostRequest {
+            protocol: HOST_PROTOCOL_VERSION,
+            request_id: "restart".into(),
+            operation_id: None,
+            command,
+        };
+        assert_eq!(
+            execute_request(&state, &request).await.unwrap_err().code,
+            "operation_id_required"
+        );
+        assert!(incoming.try_recv().is_err());
+        request.operation_id = Some("guarded-operation".into());
+        let supervisor = async {
+            let Some(ControllerRequest::RestartIfCurrent {
+                expected: actual,
+                reply,
+            }) = incoming.recv().await
+            else {
+                panic!("conditional request fell back to legacy restart")
+            };
+            assert_eq!(actual, expected);
+            reply.send(Ok(HostResponse::Ack)).unwrap();
+        };
+        let (result, ()) = tokio::join!(execute_request(&state, &request), supervisor);
+        assert_eq!(result.unwrap(), HostResponse::Ack);
+        assert_eq!(
+            execute_request(&state, &request).await.unwrap(),
+            HostResponse::Ack
+        );
+        let mut changed = request.clone();
+        let HostCommand::RestartControllerIfCurrent { expected } = &mut changed.command else {
+            unreachable!()
+        };
+        expected.pid = 2;
+        assert_eq!(
+            execute_request(&state, &changed).await.unwrap_err().code,
+            "operation_id_conflict"
+        );
+        changed.command = HostCommand::RestartController;
+        assert_eq!(
+            execute_request(&state, &changed).await.unwrap_err().code,
+            "operation_id_conflict"
+        );
+        state
+            .results
+            .lock()
+            .await
+            .insert("legacy-operation".into(), Ok(HostResponse::Ack));
+        request.operation_id = Some("legacy-operation".into());
+        assert_eq!(
+            execute_request(&state, &request).await.unwrap_err().code,
+            "operation_id_conflict"
+        );
+        assert!(incoming.try_recv().is_err());
+        request.operation_id = Some("unconfirmed-operation".into());
+        let supervisor = async {
+            let Some(ControllerRequest::RestartIfCurrent { reply, .. }) = incoming.recv().await
+            else {
+                panic!("wrong request")
+            };
+            // Lost completion cannot be converted into a successful replay.
+            drop(reply);
+        };
+        let (result, ()) = tokio::join!(execute_request(&state, &request), supervisor);
+        assert_eq!(result.unwrap_err().code, "controller_restart_unconfirmed");
+        assert_eq!(
+            execute_request(&state, &request).await.unwrap_err().code,
+            "controller_restart_unconfirmed"
+        );
+        assert!(incoming.try_recv().is_err());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

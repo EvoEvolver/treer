@@ -141,6 +141,19 @@ or configuration contents. Failed launch retains the newly saved specification.
   The returned identity is still ordinary observation data: it cannot recreate
   the selected runtime/state authority or authorize a later lifecycle mutation.
 
+  The separate conditional Host restart mutation compares that observation
+  against the original live Child at execution time. It uses the existing
+  local Host socket's OS-owner authorization, not possession of the observation
+  as a credential. Its bounded operation cache binds the expected identity and
+  refuses collisions with the legacy unconditional command. After signalling,
+  uncertainty latches before any further action: no automatic supervision or
+  conditional retry occurs until explicit recovery. This latch and cache are
+  in memory, not a durable cross-Host-restart fence. Explicit legacy operator
+  restart remains available; an updater must not fall back to it. A successful
+  replacement resumes normal existing supervision and proves creation only,
+  not health, workload continuity or update completion. No selected-runtime
+  mutation admission or production coordinator is connected by this primitive.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

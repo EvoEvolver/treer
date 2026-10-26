@@ -1190,6 +1190,42 @@ worker authority, conditional restart, health/readiness or complete updater
 evidence. No feature, extra binary build, installed/live process, Host lifecycle,
 publisher or capability change was involved.
 
+## Conditional original-Child restart primitive
+
+The appended internal Host command `RestartControllerIfCurrent` is a mutation
+requiring an operation ID. The supervisor compares the expected Host epoch,
+spawn-instance UUID and PID against its original live Child immediately before
+signalling that same handle. Wrong identity refuses without a stop or creation.
+After signalling, it waits at most three seconds for exit, then creates one
+replacement using the existing fixed Host configuration. It retains the new
+Child and assigns a fresh instance before ACK. It neither restarts the Host nor
+recreates the HostRuntime or its workload handles.
+
+The operation cache binds the full expected identity, including negative or
+unconfirmed results. A changed identity or legacy command with the same ID
+refuses. Old expected identity cannot target the new generation, even after
+cache eviction. Before signalling, an in-memory unknown latch is set; stop/wait
+or spawn failure leaves it set and suppresses automatic Controller supervision
+and observations. There is no internal retry. Explicit legacy operator restart
+remains a distinct recovery action, never an updater fallback. A successful
+replacement resumes existing normal supervision. Neither this cache nor latch
+is durable across Host restart. The five-second requester reply deadline does
+not roll back a completed effect or preempt an OS process-creation syscall;
+an expired queued request is skipped before mutation when its reply is closed.
+
+Author Mac `controller_update_restart_` passes four focused controls: original
+Child identity refusal, actual owned-helper kill/replacement and stale-generation
+refusal, real absent-executable creation failure with unknown retained, and
+operation-cache identity/legacy conflict plus lost-completion replay refusal.
+The last uses a closed supervisor channel fixture, not a daemon. No installed
+Host, socket daemon, workload continuity, health, durable recovery or Windows
+native result is claimed. The new Windows HOST BIN exact-four entry remains
+NOT_RUN until the sole Release focused run. No old selectors/matrix are rerun.
+The selected runtime mutation admission/coordinator is not yet wired; the
+existing observation remains data, not a lifecycle credential. Normal identity
+and Policy admission must precede any later product entry. Ordinary cap stays
+OFF and no live lifecycle is authorized by this implementation.
+
 ## Remaining ordered leaves and waiting boundaries
 
 1. Native NTFS store, single-use intent, signed pinned-input admission, lease,
