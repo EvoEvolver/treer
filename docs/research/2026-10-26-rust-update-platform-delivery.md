@@ -549,7 +549,7 @@ escape, restart, health or safe claim retirement is supplied by this leaf.
 Named live scope, shared-installation impact and recovery custody remain separate
 requirements. Ordinary capability stays OFF and Host is untouched.
 
-### Next leaf: read-only Windows process observation
+### Accepted leaf: read-only Windows process observation
 
 `treer-platform::windows_update_process::ProcessObservation` retains a single
 query/synchronize OS process handle, its creation time and a read-only handle to
@@ -576,10 +576,20 @@ a real Job-bound owned child refusing escape. The test child only runs a fixed
 ignored helper in the same platform test executable with cleared environment,
 reads its own stdin and exits; its parent retains Child and kills/waits only that
 child on errors. The helper name does not match the parent entry filter.
-Focused entry: `cargo test --locked -p treer-platform windows_update_process_
+Focused entry: `cargo test --locked -p treer-platform --lib windows_update_process_
 -- --nocapture`, exactly three passed/zero failed/zero ignored/exit zero, plus
-independent task TEMP cleanup. Native execution remains NOT_RUN. Windows GNU
-platform all-target strict Clippy typechecks this boundary; no old platform or
+independent task TEMP cleanup. Sole run `40311536049` passed all three tests
+(zero failed/ignored, exit zero), exact source
+`e675c6299844c7f98fefa739d8751ce43699e560`, wrapper
+`ed7de23ff98b97580abc5ccab4b31b936b522d1b`, after independent review #111:9501.
+Windows 2022/Rust 1.90/fixed NTFS image `20261022.344.1`; Core checked all three
+names, summary and platform, empty remaining entries and cleanup evidence.
+RESULT SHA256:
+`07ea4bf36c9b71171c866d0e11279a9165c99c7a3c319f44946c796d8d97503f`.
+Receipts: `.treer/reviews/core111-windows-process-e675c629/artifact/`
+(`RESULT.json`, `platform.json`, `tests.log`). This does not extend the accepted
+scope to mapped-image attestation, actual worker ownership, Job escape or
+restart/health. Windows GNU platform all-target strict Clippy also passed; no old platform or
 Controller acceptance selector is repeated. The initial cross-check used the
 wrong windows-sys constant spelling; using its actual `PROCESS_SYNCHRONIZE`
 constant fixed that source compile error without changing access rights.
