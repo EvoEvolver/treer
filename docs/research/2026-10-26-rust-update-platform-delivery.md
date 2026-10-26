@@ -657,7 +657,7 @@ Receipts: `.treer/reviews/core111-windows-child-81277da4/artifact/`
 were never dispatched. No previous acceptance selector is repeated. This accepts
 Child custody only, not executable authentication, Job escape or restart health.
 
-### Implemented leaf: pinned signed-target launch and fixed worker command
+### Accepted leaf: pinned signed-target launch and fixed worker command
 
 The non-test `ReservedInputs` creator now accepts only the selected runtime;
 the caller no longer supplies a mutable Command. It revalidates the retained
@@ -697,12 +697,22 @@ as real PE bytes reaches owned Child creation and rejects the unsupported privat
 worker switch (deliberately NOT ready), while signed inert bytes fail creation,
 consume the attempt, refuse parent file publication and preserve the installation
 claim without a second spawn or changing installed bytes.
-No production worker or installed Controller is launched. Exactly four passed,
-zero failed/ignored, exit zero plus independent TEMP cleanup are required for
-native acceptance; currently NOT_RUN. Author macOS new portable two-test entry,
+No production worker or installed Controller is launched. Sole run
+`40316916344` passed all four, zero failed/ignored and exit zero on Windows
+2022/Rust 1.90/fixed NTFS image `20261022.344.1`, exact source
+`65bcd5d1f1dcf373749f9a6615d2822b110b0f60`, wrapper
+`4b42f0d227dd9c45749f01f4423ec2b9d1d711e4`, following the single independent
+source review #111:9524. Core independently checked the four names, summary,
+source, platform and empty TEMP/cleanup evidence. RESULT SHA256:
+`ddfcb423c22dea2564ad00a063c87b6be7284a8fffc866ad6a16eb4d61eaa877`.
+Receipts: `.treer/reviews/core111-windows-launch-65bcd5d1/artifact/`
+(`RESULT.json`, `platform.json`, `tests.log`). This accepts the restricted launch
+boundary, not worker readiness, Job escape or restart health.
+Author macOS new portable two-test entry,
 Controller binary/test strict Clippy, Windows GNU platform all-target strict
 Clippy, fmt/docs/diff checks passed. The local Windows Controller C toolchain
-limitation remains, so native compilation/execution is still required. No earlier
+limitation remains; the sole native run established compilation and execution
+for this leaf. No earlier
 selector/matrix is repeated.
 
 ## Remaining ordered leaves and waiting boundaries
