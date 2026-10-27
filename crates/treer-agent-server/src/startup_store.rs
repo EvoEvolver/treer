@@ -49,6 +49,8 @@ struct StoreState {
     denied_agent_ids: BTreeSet<String>,
     revision: u64,
     update_unknown: bool,
+    // Loaded-instance transaction owner only; never persisted as startup data.
+    update_owner: Option<Uuid>,
 }
 
 #[cfg(any(windows, test))]
@@ -72,7 +74,7 @@ impl StartupStore {
             .state
             .lock()
             .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
-        if state.update_unknown {
+        if state.update_unknown || state.update_owner.is_some() {
             return Err(io::Error::other(
                 "Agent startup update requires reconciliation",
             ));

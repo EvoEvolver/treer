@@ -15,6 +15,126 @@ const WORKER_CANDIDATES: [&str; 4] = [
 ];
 
 #[tokio::test]
+async fn windows_update_mutation_fence_same_loaded_store_worker_cas_and_candidates() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, false);
+    let path = root.join("configured-state/srv_fixture-agent-startup.json");
+    let original = std::fs::read(&path).unwrap();
+    let mut next: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    next["denied_agent_ids"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!("ag_fenced"));
+    let mut prepared = Preparation::local(
+        &runtime,
+        input.dispatch.clone(),
+        &input.settings,
+        &input.fixture.documents(),
+        (&input.bytes, &input.bytes),
+        &[],
+    )
+    .unwrap();
+    prepared
+        .start(&runtime, &input.fixture.documents())
+        .await
+        .unwrap();
+    prepared.prepare_worker_backup(&runtime).await.unwrap();
+    prepared
+        .compare_write_startup_fenced(&runtime, Some(&serde_json::to_vec(&next).unwrap()))
+        .await
+        .unwrap();
+    assert!(runtime
+        .inner
+        .startup_store
+        .clone()
+        .deny_absent("ag_concurrent")
+        .is_err());
+    assert!(runtime.inner.startup_store.is_denied("ag_deleted").unwrap());
+    assert!(runtime.inner.startup_store.is_denied("ag_fenced").unwrap());
+    prepared.prepare_worker_candidates(&runtime).await.unwrap();
+    prepared.inspect(&runtime).await.unwrap();
+    held(&root, &input);
+    let after = std::fs::read(&path).unwrap();
+    prepared.close(&runtime).await.unwrap();
+    let custody = prepared.retain_closed(&runtime).unwrap();
+    assert_eq!(
+        std::fs::read(stage(&root, &input).join("worker-backup/startup.backup")).unwrap(),
+        original
+    );
+    for (name, bytes) in WORKER_CANDIDATES.into_iter().zip([
+        input.bytes.as_slice(),
+        input.bytes.as_slice(),
+        OLD,
+        OLD,
+    ]) {
+        assert_eq!(
+            std::fs::read(root.join("installed").join(name)).unwrap(),
+            bytes
+        );
+    }
+    drop(custody);
+    drop(prepared);
+    assert!(runtime
+        .inner
+        .startup_store
+        .clone()
+        .deny_absent("ag_after_drop")
+        .is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), after);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_mutation_fence_post_cas_unknown_never_releases_normal_writers() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, false);
+    let path = root.join("configured-state/srv_fixture-agent-startup.json");
+    let original = std::fs::read(&path).unwrap();
+    let mut prepared = Preparation::local(
+        &runtime,
+        input.dispatch.clone(),
+        &input.settings,
+        &input.fixture.documents(),
+        (&input.bytes, &input.bytes),
+        &[],
+    )
+    .unwrap();
+    prepared
+        .start(&runtime, &input.fixture.documents())
+        .await
+        .unwrap();
+    prepared.prepare_worker_backup(&runtime).await.unwrap();
+    prepared
+        .compare_write_startup_fenced(&runtime, Some(&original))
+        .await
+        .unwrap();
+    let blocker = root.join("installed").join(WORKER_CANDIDATES[1]);
+    std::fs::write(&blocker, b"keep unresolved").unwrap();
+    assert!(prepared.prepare_worker_candidates(&runtime).await.is_err());
+    assert!(prepared.prepare_worker_candidates(&runtime).await.is_err());
+    assert!(prepared.close(&runtime).await.is_err());
+    held(&root, &input);
+    assert_eq!(std::fs::read(&blocker).unwrap(), b"keep unresolved");
+    drop(prepared);
+    assert!(runtime
+        .inner
+        .startup_store
+        .clone()
+        .deny_absent("ag_after_unknown")
+        .is_err());
+    assert!(runtime.inner.startup_store.is_denied("ag_deleted").unwrap());
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn windows_update_worker_candidates_same_holding_full_new_restore_pair_and_custody() {
     let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
     let catalog = UpdatePlanCatalogFixture::new();

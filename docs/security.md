@@ -369,6 +369,20 @@ or configuration contents. Failed launch retains the newly saved specification.
   durable cross-creator recovery. The finite public consumer remains read-only
   and public Windows capability remains OFF.
 
+  An explicit fenced CAS continuation prepares mutation by installing a
+  non-serializable operation owner on that SAME loaded Store under its mutex
+  before persistence can have effects. Successful readback retains the owner;
+  ordinary cloned writers cannot change the accepted startup state during later
+  Holding/candidate work. The coordinator retains the committed owner before
+  awaiting worker acceptance. Unknown/error/cancel/close/Drop do not clear it,
+  and a changed physical/raw snapshot permanently poisons it. Wrong operation
+  queries refuse without poisoning the legitimate owner. The existing ordinary
+  CAS remains unfenced. The new fence is in memory only, not a denial fence in
+  startup JSON, durable takeover, OS-wide exclusion or a sender-release token.
+  A separately loaded Store/process is outside its scope; no reload-by-path or
+  automatic recovery is exposed to reconcile this operation. Public Windows
+  capability remains OFF pending durable transfer and outcome acceptance.
+
   Receiver custody includes an independently opened fixed installation claim
   after normal configured-trust whole-input authentication. Core supplies the
   exact canonical full operation binding; Platform retains a private regular

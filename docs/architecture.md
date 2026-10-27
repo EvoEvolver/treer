@@ -271,6 +271,22 @@ opens a new Store by path. ACK, snapshot acceptance and creator exit still grant
 no sender release, durable lifetime transfer or restart authority. See the
 [CAS boundary and validation](research/2026-10-26-windows-startup-cas.md).
 
+The explicit `compare_write_startup_fenced` mutation-preparation continuation
+shares that same compare/persist/readback implementation but records an
+operation-owned writer fence on the loaded Arc under its existing mutex before
+the first potential write. Ordinary writers, including other clones, refuse
+while the fence exists. The non-wire committed owner is stored in the original
+coordinator before worker acceptance awaits and rechecked during later work.
+The SAME Holding worker can accept this CAS and prepare all new/restore
+candidates while both sides retain their input/backup custody. Close, cancelled
+acceptance and owner Drop never unfreeze normal writers. A changed physical/raw
+snapshot permanently poisons this owner, even if bytes are restored later.
+The older ordinary CAS entry keeps its unfenced behavior. This is a
+loaded-instance fence, not durable ownership or an OS-wide lock: separate Store
+loads/processes and direct filesystem writers remain outside that mutex. There
+is no generic clear/recovery API; release requires the future reconciled durable
+outcome protocol. See [writer custody](research/2026-10-26-windows-mutation-writer-fence.md).
+
 The signed-input receiver now also retains the fixed installation-wide claim.
 After independently authenticating all signed inputs, it derives the canonical
 claim bytes from that full binding and opens an independent private, single-link,

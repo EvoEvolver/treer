@@ -123,6 +123,7 @@ pub(crate) struct Committed {
     revision: u64,
     snapshot: Option<Snapshot>,
     operation: Uuid,
+    fenced: bool,
 }
 
 impl StartupStore {
@@ -165,10 +166,27 @@ impl Compare {
         self.commit_with(replacement, persist)
     }
 
+    /// Explicit mutation preparation: install the SAME loaded-instance writer
+    /// fence under the CAS mutex before any possible write. No Drop/unfreeze or
+    /// wire constructor exists; unknown requires explicit future reconciliation.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn commit_fenced(&mut self, replacement: Option<&[u8]>) -> io::Result<Committed> {
+        self.commit_using(replacement, persist, true)
+    }
+
     fn commit_with(
         &mut self,
         replacement: Option<&[u8]>,
         write: impl FnOnce(&Path, &StoreState) -> io::Result<()>,
+    ) -> io::Result<Committed> {
+        self.commit_using(replacement, write, false)
+    }
+
+    fn commit_using(
+        &mut self,
+        replacement: Option<&[u8]>,
+        write: impl FnOnce(&Path, &StoreState) -> io::Result<()>,
+        fenced: bool,
     ) -> io::Result<Committed> {
         if self.attempted {
             return Err(refused());
@@ -186,6 +204,10 @@ impl Compare {
             return Err(refused());
         }
         updated.revision = state.revision.checked_add(1).ok_or_else(refused)?;
+        if fenced {
+            state.update_owner = Some(self.operation);
+            updated.update_owner = Some(self.operation);
+        }
         // Once persist can have effects, an IO/readback failure also fences all
         // normal writers on THIS loaded instance; no blind overwrite after unknown.
         state.update_unknown = true;
@@ -204,6 +226,7 @@ impl Compare {
             revision,
             snapshot,
             operation: self.operation,
+            fenced,
         })
     }
 }
@@ -213,8 +236,20 @@ impl Committed {
         if operation != *self.operation.as_bytes() {
             return Err(refused());
         }
-        let state = self.store.write_state()?;
-        if state.revision != self.revision || read(&self.store.inner.path)?.0 != self.snapshot {
+        let mut state = self.store.inner.state.lock().map_err(|_| refused())?;
+        if state.update_unknown || state.update_owner != self.fenced.then_some(self.operation) {
+            return Err(refused());
+        }
+        let check = || -> io::Result<()> {
+            if state.revision != self.revision || read(&self.store.inner.path)?.0 != self.snapshot {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        if check().is_err() {
+            if self.fenced {
+                state.update_unknown = true;
+            }
             return Err(refused());
         }
         Ok(&self.snapshot)
@@ -224,6 +259,100 @@ impl Committed {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn windows_update_mutation_fence_committed_owner_blocks_clone_writers_after_drop() {
+        let f = Fixture::new();
+        f.store.deny_absent("ag_deleted").unwrap();
+        let mut compare = f.compare();
+        let operation = *compare.operation.as_bytes();
+        let committed = compare
+            .commit_fenced(Some(&raw(&["ag_deleted", "ag_added"])))
+            .unwrap();
+        assert!(committed.snapshot(operation).unwrap().is_some());
+        assert!(committed.snapshot(*Uuid::new_v4().as_bytes()).is_err());
+        assert!(
+            committed.snapshot(operation).is_ok(),
+            "foreign scope cannot poison the owner"
+        );
+        assert!(f.store.clone().is_denied("ag_added").unwrap());
+        let disk: serde_json::Value =
+            serde_json::from_slice(&fs::read(&f.store.inner.path).unwrap()).unwrap();
+        assert_eq!(disk["version"], 2);
+        assert!(
+            disk.get("update_owner").is_none(),
+            "memory fence is not startup wire data"
+        );
+        for _ in 0..2 {
+            assert!(f.store.clone().deny_absent("ag_later").is_err());
+            assert!(f.store.upsert(entry()).is_err());
+            assert!(f.store.remove_deleted("ag_deleted").is_err());
+            assert!(f.store.remove("ag_missing").is_err());
+            assert!(f
+                .store
+                .update("ag_missing", |_| panic!("fenced writer callback"))
+                .is_err());
+            assert!(f
+                .store
+                .update_compare(Uuid::new_v4(), "ws_fixture", "srv_fixture", &None)
+                .is_err());
+        }
+        drop(committed);
+        assert!(f.store.clone().deny_absent("ag_after_drop").is_err());
+        assert!(f.store.is_denied("ag_deleted").unwrap());
+    }
+
+    #[test]
+    fn windows_update_mutation_fence_prewrite_refusal_or_io_unknown_has_distinct_custody() {
+        // A rejected monotone compare has no effect and must not acquire a fence.
+        let f = Fixture::new();
+        f.store.deny_absent("ag_deleted").unwrap();
+        let mut compare = f.compare();
+        assert!(compare.commit_fenced(Some(&raw(&[]))).is_err());
+        assert!(compare.commit_fenced(Some(&raw(&["ag_deleted"]))).is_err());
+        f.store.deny_absent("ag_normal").unwrap();
+        assert!(f.store.inner.state.lock().unwrap().update_owner.is_none());
+        for readback_failure in [false, true] {
+            let f = Fixture::new();
+            let mut compare = f.compare();
+            let operation = compare.operation;
+            assert!(compare
+                .commit_using(
+                    Some(&raw(&["ag_kept"])),
+                    |path, state| {
+                        if readback_failure {
+                            persist(path, state)?;
+                            fs::write(path, b"injected unknown")?;
+                            Ok(())
+                        } else {
+                            Err(io::Error::other("injected persistence failure"))
+                        }
+                    },
+                    true
+                )
+                .is_err());
+            drop(compare);
+            let state = f.store.inner.state.lock().unwrap();
+            assert_eq!(state.update_owner, Some(operation));
+            assert!(state.update_unknown);
+            drop(state);
+            assert!(f.store.clone().deny_absent("ag_later").is_err());
+        }
+    }
+
+    #[test]
+    fn windows_update_mutation_fence_changed_raw_permanently_poisoned_not_repaired() {
+        let f = Fixture::new();
+        let mut compare = f.compare();
+        let operation = *compare.operation.as_bytes();
+        let committed = compare.commit_fenced(Some(&raw(&["ag_kept"]))).unwrap();
+        let original = fs::read(&f.store.inner.path).unwrap();
+        fs::write(&f.store.inner.path, raw(&["ag_foreign"])).unwrap();
+        assert!(committed.snapshot(operation).is_err());
+        fs::write(&f.store.inner.path, original).unwrap();
+        assert!(committed.snapshot(operation).is_err());
+        assert!(f.store.clone().deny_absent("ag_later").is_err());
+        assert!(f.store.is_denied("ag_kept").unwrap());
+    }
     struct Fixture {
         root: PathBuf,
         store: StartupStore,

@@ -182,6 +182,23 @@ impl Preparation {
         self.poisoned = false;
         Ok(())
     }
+    pub(crate) async fn compare_write_startup_fenced(
+        &mut self,
+        runtime: &ControllerRuntime,
+        replacement: Option<&[u8]>,
+    ) -> Result<()> {
+        self.check(runtime)?;
+        self.poisoned = true;
+        self.coordinator
+            .compare_write_startup_fenced(runtime, replacement)
+            .await?;
+        self.selection
+            .as_ref()
+            .ok_or_else(refused)?
+            .check(runtime)?;
+        self.poisoned = false;
+        Ok(())
+    }
     /// Explicit backup-only mutation while the SAME receiver remains Holding.
     pub(crate) async fn prepare_worker_backup(
         &mut self,

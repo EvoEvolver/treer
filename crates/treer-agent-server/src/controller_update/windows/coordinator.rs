@@ -33,6 +33,7 @@ pub(crate) struct Coordinator {
     phase: Phase,
     backup_prepared: bool,
     startup_attempted: bool,
+    startup_committed: Option<crate::startup_store::update::Committed>,
 }
 
 #[allow(dead_code)] // Public capability remains OFF until full transaction acceptance.
@@ -101,6 +102,25 @@ impl Coordinator {
         selected: &ControllerRuntime,
         replacement: Option<&[u8]>,
     ) -> Result<()> {
+        self.write_startup(selected, replacement, false).await
+    }
+
+    /// Mutation preparation keeps an operation-owned writer fence on the SAME
+    /// loaded Store through worker acceptance and subsequent candidate work.
+    pub(crate) async fn compare_write_startup_fenced(
+        &mut self,
+        selected: &ControllerRuntime,
+        replacement: Option<&[u8]>,
+    ) -> Result<()> {
+        self.write_startup(selected, replacement, true).await
+    }
+
+    async fn write_startup(
+        &mut self,
+        selected: &ControllerRuntime,
+        replacement: Option<&[u8]>,
+        fenced: bool,
+    ) -> Result<()> {
         self.scope(selected)?;
         if self.phase != Phase::Holding || !self.backup_prepared || self.startup_attempted {
             return Err(refused());
@@ -121,12 +141,20 @@ impl Coordinator {
             .startup()?
             .clone();
         let mut compare = permit.startup_compare(&expected)?;
-        let committed = compare.commit(replacement)?;
+        let committed = if fenced {
+            compare.commit_fenced(replacement)?
+        } else {
+            compare.commit(replacement)?
+        };
+        // Save the exact loaded owner BEFORE any acceptance await. Cancellation
+        // neither loses custody nor silently unfreezes ordinary writers.
+        self.startup_committed = Some(committed);
         permit.check(*self.binding.operation_id.as_bytes())?;
+        let committed = self.startup_committed.as_ref().ok_or_else(refused)?;
         self.channel
             .as_mut()
             .ok_or_else(refused)?
-            .accept_startup(&committed)
+            .accept_startup(committed)
             .await?;
         committed.snapshot(*self.binding.operation_id.as_bytes())?;
         self.require_live(selected)?;
@@ -164,6 +192,7 @@ impl Coordinator {
             phase: Phase::Prepared,
             backup_prepared: false,
             startup_attempted: false,
+            startup_committed: None,
         })
     }
 
@@ -217,6 +246,9 @@ impl Coordinator {
     }
 
     fn require_live(&mut self, selected: &ControllerRuntime) -> Result<()> {
+        if let Some(committed) = &self.startup_committed {
+            committed.snapshot(*self.binding.operation_id.as_bytes())?;
+        }
         match self
             .child
             .as_mut()
