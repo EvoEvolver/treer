@@ -22,6 +22,17 @@ pub struct StateLocation {
     pub snapshot: Option<Snapshot>,
 }
 
+/// Locators and a reduced-rights handle value local to the original Child.
+/// Neither deserialization nor identity equality grants transaction authority.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobLocation {
+    pub directory: String,
+    pub identity: (u64, u64),
+    pub lock: (u64, u64),
+    pub child_handle: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
@@ -45,6 +56,7 @@ pub struct InputOffer {
     pub installed: PairLocation,
     pub target: PairLocation,
     pub state: StateLocation,
+    pub job: JobLocation,
     pub channel_name: String,
     pub channel: Vec<u8>,
     pub channel_signature: Vec<u8>,
@@ -83,6 +95,13 @@ impl InputOffer {
             && self.state.snapshot.as_ref().is_none_or(|s| {
                 s.file_id != 0 && s.size > 0 && s.size <= 16 * 1024 * 1024 && hash(&s.sha256)
             })
+            && path(&self.job.directory)
+            && self.job.identity.1 != 0
+            && self.job.identity.0 == self.lock.0
+            && self.job.lock.1 != 0
+            && self.job.lock.0 == self.lock.0
+            && self.job.child_handle != 0
+            && self.job.child_handle != u64::MAX
             && !self.channel_name.is_empty()
             && self.channel_name.len() <= 32
             && !self.channel.is_empty()

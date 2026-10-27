@@ -645,7 +645,7 @@ impl ControllerUpdateChild {
             ._reservation
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("windows_update_worker_receive_refused"))?
-            .worker_input_offer(selected, context, documents)?;
+            .worker_input_offer(selected, context, documents, &self.child)?;
         crate::windows_update_admission::worker_inputs::exchange(stream, offer).await?;
         self.matches(selected, binding)?;
         // Deliberately do not set binding_acknowledged or any readiness flag.
@@ -666,11 +666,12 @@ impl ControllerUpdateChild {
             ._worker_pipe
             .take()
             .ok_or_else(|| anyhow::anyhow!("fixture transport missing"))?;
-        let mut offer = self
-            ._reservation
-            .as_ref()
-            .unwrap()
-            .worker_input_offer(selected, context, documents)?;
+        let mut offer = self._reservation.as_ref().unwrap().worker_input_offer(
+            selected,
+            context,
+            documents,
+            &self.child,
+        )?;
         mutate(&mut offer);
         crate::windows_update_admission::worker_inputs::exchange(stream, offer).await
     }
@@ -790,7 +791,7 @@ impl ControllerUpdateChild {
             ._reservation
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("windows_update_receiver_custody_missing"))?
-            .worker_input_offer(selected, context, documents)?;
+            .worker_input_offer(selected, context, documents, &self.child)?;
         let snapshot = offer.state.snapshot.clone();
         let context =
             crate::windows_update_admission::worker_inputs::exchange_retained(&mut stream, offer)

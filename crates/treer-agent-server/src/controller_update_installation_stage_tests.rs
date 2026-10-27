@@ -8,6 +8,62 @@ use ed25519_dalek::pkcs8::EncodePublicKey;
 use sha2::Digest;
 
 #[tokio::test]
+async fn windows_update_worker_job_same_holding_receiver_pins_intent_until_explicit_close() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, false);
+    let mut prepared = Preparation::local(
+        &runtime,
+        input.dispatch.clone(),
+        &input.settings,
+        &input.fixture.documents(),
+        (&input.bytes, &input.bytes),
+        &[],
+    )
+    .unwrap();
+    let job = stage(&root, &input).join("job");
+    let intent = job.join("receipt.bin");
+    let original = std::fs::read(&intent).unwrap();
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(&intent)
+        .is_ok());
+    prepared
+        .start(&runtime, &input.fixture.documents())
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        prepared.inspect(&runtime).await.unwrap();
+        assert!(std::fs::OpenOptions::new()
+            .write(true)
+            .open(&intent)
+            .is_err());
+        assert!(std::fs::remove_file(&intent).is_err());
+        assert!(treer_platform::windows_update_store::UpdateStore::open(&job).is_err());
+    }
+    prepared.prepare_worker_backup(&runtime).await.unwrap();
+    prepared.inspect(&runtime).await.unwrap();
+    assert_eq!(std::fs::read(&intent).unwrap(), original);
+    prepared.close(&runtime).await.unwrap();
+    let custody = prepared.retain_closed(&runtime).unwrap();
+    // Child exit drops the independent receipt pin; sender still owns its job
+    // holder and all original guards. Neither fact grants product release.
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(&intent)
+        .is_ok());
+    assert!(treer_platform::windows_update_store::UpdateStore::open(&job).is_err());
+    assert_eq!(std::fs::read(&intent).unwrap(), original);
+    held(&root, &input);
+    drop(custody);
+    drop(prepared);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn windows_update_worker_claim_same_receiver_pins_full_claim_until_explicit_close() {
     let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
     let catalog = UpdatePlanCatalogFixture::new();

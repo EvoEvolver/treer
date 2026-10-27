@@ -288,6 +288,17 @@ but never retires its durable intent or installation claim. This closes an
 original-owner lifetime gap; independent worker transfer and sender release
 remain separate. See [job holder scope](research/2026-10-26-windows-job-holder-lifetime.md).
 
+The same Holding worker also receives a reduced-rights reference to the original
+job lock through its original Child handle. Only the already scoped single-use
+input exchange mints the bounded job locator. After independent normal-trust
+whole-input verification, the receiver checks job directory/lock physical IDs,
+pins the exact full intent and keeps independent ancestors/lock/receipt guards.
+The whole-offer receipt binds this locator; later Holding checks reuse the same
+receipt handle. Sender custody remains held. A remote reference created before
+an uncertain exchange lasts until child exit and is never remotely closed by
+numeric value. This is custody, not a mutation/lifetime or sender-release grant;
+see [receiver job custody](research/2026-10-26-windows-worker-job-custody.md).
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

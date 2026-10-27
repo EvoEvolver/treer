@@ -279,7 +279,7 @@ impl LockedInstallation {
 }
 
 #[allow(unsafe_code)] // Exact OS-handle duplication; no raw ownership is exposed.
-fn duplicate_lock(
+pub(super) fn duplicate_lock(
     handle: windows_sys::Win32::Foundation::HANDLE,
 ) -> io::Result<std::os::windows::io::OwnedHandle> {
     use std::os::windows::io::FromRawHandle;
@@ -311,7 +311,7 @@ fn duplicate_lock(
     Ok(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(result) })
 }
 
-fn lock_identity(file: &File) -> io::Result<(u64, u64)> {
+pub(super) fn lock_identity(file: &File) -> io::Result<(u64, u64)> {
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
     };

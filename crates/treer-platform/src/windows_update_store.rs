@@ -4,7 +4,7 @@
 //! One OS account remains one trust domain. No existing ACL is repaired here.
 use std::{
     fs::{File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     os::windows::fs::OpenOptionsExt,
     path::{Path, PathBuf},
 };
@@ -70,6 +70,54 @@ pub(super) fn exclusive_lock(path: &Path) -> io::Result<File> {
 }
 
 impl UpdateStore {
+    pub fn directory_path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn identity(&self) -> io::Result<(u64, u64)> {
+        self._parents.identity()
+    }
+
+    pub fn lock_identity(&self) -> io::Result<(u64, u64)> {
+        crate::windows_update_inputs::lock_identity(&self._lock)
+    }
+
+    /// Duplicate only into the ORIGINAL owned Child, never a PID lookup. The
+    /// new remote reference has no write/delete rights. Its numeric value is
+    /// local to that child and carries no operation authority. On any later
+    /// unknown exchange it remains until child exit: remotely closing it could
+    /// close a reused handle after the receiver has run. Sender keeps all pins.
+    #[allow(unsafe_code)]
+    pub fn share_lock_with_child(&self, child: &std::process::Child) -> io::Result<u64> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::{
+            Foundation::{DuplicateHandle, INVALID_HANDLE_VALUE, WAIT_TIMEOUT},
+            Storage::FileSystem::{FILE_READ_ATTRIBUTES, SYNCHRONIZE},
+            System::Threading::{GetCurrentProcess, WaitForSingleObject},
+        };
+        if unsafe { WaitForSingleObject(child.as_raw_handle(), 0) } != WAIT_TIMEOUT {
+            return Err(refused());
+        }
+        let mut remote = std::ptr::null_mut();
+        if unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                self._lock.as_raw_handle(),
+                child.as_raw_handle(),
+                &mut remote,
+                FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                0,
+                0,
+            )
+        } == 0
+            || remote.is_null()
+            || remote == INVALID_HANDLE_VALUE
+        {
+            return Err(refused());
+        }
+        Ok(remote as usize as u64)
+    }
+
     /// Existing physical directory only. The owner explicitly creates/seals a
     /// fresh job directory beforehand; opening never chmods or adopts a weak ACL.
     pub fn open(path: &Path) -> io::Result<Self> {
@@ -129,6 +177,84 @@ impl UpdateStore {
         drop(file);
         crate::windows::publish_transfer_file(&next, &target, exists)?;
         if self.read()? != bytes {
+            return Err(refused());
+        }
+        Ok(())
+    }
+}
+
+/// Independent receiver guards for a fixed job directory, original exclusive
+/// lock object and pinned intent. No publish, recovery or sender-release API.
+pub struct ReceivedJob {
+    _parents: crate::machine_file::Root,
+    _lock: File,
+    receipt: File,
+    expected: Vec<u8>,
+}
+
+impl ReceivedJob {
+    /// Creator connection and independently authenticated expected intent are
+    /// prerequisites. Borrow the remote handle value, duplicate locally with
+    /// reduced rights, never adopt/close an arbitrary numeric source handle.
+    #[allow(unsafe_code)]
+    pub fn retain_from_creator(
+        creator: &crate::windows_update_pipe::CreationParentConnection,
+        directory: &Path,
+        expected_directory: (u64, u64),
+        expected_lock: (u64, u64),
+        remote: u64,
+        expected: &[u8],
+    ) -> io::Result<Self> {
+        if expected.is_empty() || expected.len() as u64 > LIMIT || !creator.creator_is_live()? {
+            return Err(refused());
+        }
+        let remote = usize::try_from(remote).map_err(|_| refused())?;
+        if remote == 0 || remote == usize::MAX {
+            return Err(refused());
+        }
+        let parents = crate::machine_file::Root::open(directory, &[])?;
+        if parents.identity()? != expected_directory
+            || expected_lock.0 != expected_directory.0
+            || !crate::private_path_is_secure(directory)?
+        {
+            return Err(refused());
+        }
+        crate::windows::require_update_ntfs(directory)?;
+        let lock = File::from(crate::windows_update_inputs::duplicate_lock(
+            remote as *mut _,
+        )?);
+        checked_file(&directory.join(LOCK), &lock)?;
+        if crate::windows_update_inputs::lock_identity(&lock)? != expected_lock {
+            return Err(refused());
+        }
+        let receipt = open_record(&directory.join(RECORD), false)?;
+        if crate::transfer_file_identity(&receipt)?.0 != expected_directory.0 {
+            return Err(refused());
+        }
+        let received = Self {
+            _parents: parents,
+            _lock: lock,
+            receipt,
+            expected: expected.to_vec(),
+        };
+        received.verify(expected)?;
+        if !creator.creator_is_live()? {
+            return Err(refused());
+        }
+        Ok(received)
+    }
+
+    /// Compare full bytes from the SAME read-only, non-write/delete-sharing
+    /// receipt. A successful comparison is not a durable takeover record.
+    pub fn verify(&self, expected: &[u8]) -> io::Result<()> {
+        if expected != self.expected || expected.is_empty() || expected.len() as u64 > LIMIT {
+            return Err(refused());
+        }
+        let mut file = &self.receipt;
+        file.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        file.take(LIMIT + 1).read_to_end(&mut bytes)?;
+        if bytes != expected {
             return Err(refused());
         }
         Ok(())

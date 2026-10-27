@@ -115,6 +115,63 @@ async fn exited(
 }
 
 #[tokio::test]
+async fn windows_update_worker_job_foreign_locator_handle_and_partial_intent_refuse() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    for case in 0..4 {
+        let directory = root.join(format!("job-receive-{case}"));
+        treer_platform::secure_directory(&directory).unwrap();
+        let reserved = reserve(&runtime, &directory, &catalog);
+        let binding = reserved.binding().clone();
+        let selector = Uuid::new_v4().simple().to_string();
+        let pipe = treer_platform::windows_update_pipe::CreatedChildPipe::bind(&selector).unwrap();
+        let mut command = command(&reserved, &selector, &directory, "refuse");
+        let mut child = reserved.spawn_owned_child(&runtime, &mut command).unwrap();
+        drop(command);
+        child
+            .accept_worker_pipe(&runtime, &binding, pipe)
+            .await
+            .unwrap();
+        let fixture = Fixture::new(|_| {});
+        assert!(child
+            .exchange_fixture_worker_inputs(&runtime, &binding, &fixture.documents(), |offer| {
+                match case {
+                    0 => offer.job.lock.1 ^= 1,
+                    1 => offer.job.identity.1 ^= 1,
+                    2 => offer.job.child_handle = u64::MAX - 1,
+                    _ => std::fs::write(directory.join("job/receipt.bin"), b"partial").unwrap(),
+                }
+            },)
+            .await
+            .is_err());
+        assert!(child
+            .exchange_worker_inputs(&runtime, &binding, &fixture.documents())
+            .await
+            .is_err());
+        exited(&mut child, &runtime, &binding).await;
+        assert!(!directory.join("receiver-held").exists());
+        assert!(directory
+            .join("installed/.treer-controller-update.claim")
+            .exists());
+        assert!(std::fs::OpenOptions::new()
+            .write(true)
+            .open(directory.join("target/treer.exe"))
+            .is_err());
+        if case == 3 {
+            assert_eq!(
+                std::fs::read(directory.join("job/receipt.bin")).unwrap(),
+                b"partial"
+            );
+        }
+        drop(child);
+    }
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn windows_update_worker_receive_native_signed_inputs_state_and_retained_sender() {
     let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
     let catalog = UpdatePlanCatalogFixture::new();

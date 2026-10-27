@@ -110,8 +110,11 @@ pub(crate) mod native {
         windows_update_backup::BackupDirectory,
         windows_update_inputs::{ClaimPin, InheritedInstallationLock, PairIdentity, PinnedPair},
         windows_update_pipe::CreationParentConnection,
+        windows_update_store::ReceivedJob,
     };
-    use treer_protocol::controller_update_worker_inputs::{PairLocation, Snapshot, StateLocation};
+    use treer_protocol::controller_update_worker_inputs::{
+        JobLocation, PairLocation, Snapshot, StateLocation,
+    };
 
     fn pair(pair: &PinnedPair) -> Result<PairLocation> {
         let id = pair.pair_identity()?;
@@ -130,6 +133,7 @@ pub(crate) mod native {
             selected: &ControllerRuntime,
             context: WorkerBindingFrame,
             documents: &Documents<'_>,
+            child: &std::process::Child,
         ) -> Result<InputOffer> {
             let mint = || -> Result<_> {
                 let state = self.controller_state()?;
@@ -171,6 +175,17 @@ pub(crate) mod native {
                     })
                     .transpose()?;
                 state.matches_selected(selected, self.binding())?;
+                let job_directory = self
+                    .1
+                    .directory_path()
+                    .to_str()
+                    .ok_or_else(refused)?
+                    .to_owned();
+                let job_identity = self.1.identity()?;
+                let job_lock = self.1.lock_identity()?;
+                // The caller's scoped, pre-await handshake latch is already
+                // consumed. A failed offer never duplicates into a second child.
+                let child_handle = self.1.share_lock_with_child(child)?;
                 Ok(InputOffer {
                     schema_version: 1,
                     operation: context.operation,
@@ -191,6 +206,12 @@ pub(crate) mod native {
                         identity: state.directory().identity()?,
                         snapshot,
                     },
+                    job: JobLocation {
+                        directory: job_directory,
+                        identity: job_identity,
+                        lock: job_lock,
+                        child_handle,
+                    },
                     channel_name: documents.channel_name.into(),
                     channel: documents.channel.into(),
                     channel_signature: documents.channel_signature.into(),
@@ -210,6 +231,7 @@ pub(crate) mod native {
         stream: CreationParentConnection,
         lock: InheritedInstallationLock,
         claim: ClaimPin,
+        job: ReceivedJob,
         installed: PinnedPair,
         target: PinnedPair,
         state: BackupDirectory,
@@ -355,6 +377,8 @@ pub(crate) mod native {
                 }
                 self.claim
                     .verify(&crate::windows_update_intent::encode(&self.binding)?)?;
+                self.job
+                    .verify(&crate::windows_update_intent::encode(&self.binding)?)?;
                 let observed = self
                     .state
                     .startup_snapshot(&format!("{}-agent-startup.json", self.binding.server_id))?;
@@ -475,6 +499,19 @@ pub(crate) mod native {
             // Only independently verified signed inputs supply these bytes.
             // A matching claim remains a denial fence, not takeover authority.
             let claim = installed.retain_claim(&crate::windows_update_intent::encode(&binding)?)?;
+            if [installed.identity()?, target.identity()?, state.identity()?]
+                .contains(&offer.job.identity)
+            {
+                return Err(refused());
+            }
+            let job = ReceivedJob::retain_from_creator(
+                &stream,
+                std::path::Path::new(&offer.job.directory),
+                offer.job.identity,
+                offer.job.lock,
+                offer.job.child_handle,
+                &crate::windows_update_intent::encode(&binding)?,
+            )?;
             if tokio::time::Instant::now() >= deadline || !stream.creator_is_live()? {
                 return Err(refused());
             }
@@ -490,6 +527,7 @@ pub(crate) mod native {
                 stream,
                 lock,
                 claim,
+                job,
                 installed,
                 target,
                 state,
@@ -600,6 +638,12 @@ mod tests {
                 identity: (1, 9),
                 snapshot: None,
             },
+            job: treer_protocol::controller_update_worker_inputs::JobLocation {
+                directory: "C:/target/job".into(),
+                identity: (1, 10),
+                lock: (1, 11),
+                child_handle: 12,
+            },
             channel_name: "stable".into(),
             channel: vec![1],
             channel_signature: vec![2],
@@ -607,6 +651,33 @@ mod tests {
             manifest_signature: vec![4],
         }
     }
+    #[tokio::test]
+    async fn windows_update_worker_job_offer_shape_and_full_receipt_binding() {
+        let original = offer().encode().unwrap();
+        let expected = receipt(&InputOffer::decode(&original).unwrap(), &original).0;
+        for case in 0..4 {
+            let mut value = InputOffer::decode(&original).unwrap();
+            match case {
+                0 => value.job.child_handle = 0,
+                1 => value.job.child_handle = u64::MAX,
+                2 => value.job.identity.1 = 0,
+                _ => value.job.lock.0 += 1,
+            }
+            assert!(value.encode().is_none());
+        }
+        for case in 0..4 {
+            let mut value = InputOffer::decode(&original).unwrap();
+            match case {
+                0 => value.job.directory.push_str("-foreign"),
+                1 => value.job.identity.1 += 1,
+                2 => value.job.lock.1 += 1,
+                _ => value.job.child_handle += 4,
+            }
+            let bytes = value.encode().unwrap();
+            assert_ne!(receipt(&value, &bytes).0, expected);
+        }
+    }
+
     #[tokio::test]
     async fn windows_update_worker_receive_partial_header_deadline_closes_transport() {
         for wrong in [false, true] {

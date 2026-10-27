@@ -378,6 +378,18 @@ or configuration contents. Failed launch retains the newly saved specification.
   not independent Policy, takeover permission or sender release. No claim
   creation, overwrite, recovery or retirement is exposed by this reader.
 
+  Receiver job custody duplicates only the original sender's job lock into its
+  original held Child, with read-attributes/synchronize rights and no inheritance
+  flag, PID lookup or write/delete rights. The borrowed child-local handle value
+  is duplicated locally rather than adopted or closed. After independent signed
+  input verification, physical directory/lock IDs and the complete canonical
+  intent must match; the receiver retains private ancestor and receipt pins and
+  rechecks the same receipt during Holding. Offer locators/receipt hashes do not
+  grant Policy or mutation authority. A failed/unknown offer leaves any remote
+  reference until child exit; remote-close could otherwise target a reused handle.
+  Sender originals remain held. Creator liveness, finite session and unknown
+  no-replay constraints remain; this does not permit creator exit or sender release.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.
