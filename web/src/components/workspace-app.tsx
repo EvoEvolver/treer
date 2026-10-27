@@ -1,5 +1,7 @@
 import { observePreparedAgent } from '@/lib/session-orchestration'
 import { preparedClaudeArgs } from "@/lib/prepared-claude"
+import { AppNodeRoute } from "@/components/app-node-route"
+import type { AppNodeSelection } from "@/lib/app-tree"
 import { useAgentEmbedPrewarm } from "@/components/use-agent-embed-prewarm"
 import { useAgentOriginCapability } from "@/components/use-agent-origin-capability"
 import { agentOriginUrl, interfaceSignature } from "@/lib/agent-origin"
@@ -96,6 +98,7 @@ function WorkspaceAppContent() {
   const uploadMachine = snapshot?.servers.find((machine) => machine.server_id === uploadAgent?.server_id)
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
+  const [appNodeIntent, setAppNodeIntent] = useState<{ workspaceId: string | null; ownerId: string; endpoint: string } | null>(null)
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null)
   const [preparedCreated, setPreparedCreated] = useState(false)
   const [preparedObservation, setPreparedObservation] = useState<{ workspace: string; agent: Agent; session: string }>()
@@ -282,7 +285,7 @@ function WorkspaceAppContent() {
       // Inventory can finish after a phone user has already opened the Tree.
       // Restore the URL's selection without reversing that explicit gesture.
       const keepTreeOpen = isMobile && mobileTreeOpen
-      showAgentTerminal(routeWorkloadId)
+      showAgentTerminal(routeWorkloadId, undefined, true)
       if (keepTreeOpen) { setMobileTerminalOpen(false); setMobileTreeOpen(true) }
     } else { setError(t("app.workload_not_found")); replaceWorkloadRoute(null) }
     // showAgentTerminal is recreated every render; the workspace marker makes this run once per workspace.
@@ -324,6 +327,20 @@ function WorkspaceAppContent() {
   useAgentUiFallback(`${uiProbeScope}${probeAgent?.agent_id}`,
     preview ? undefined : probePath, user?.user_id)
   for (const id of agentOwnUrls.keys()) if (agentOriginMode === "legacy" && agentUiIsRefused(`${uiProbeScope}${id}`)) agentOwnUrls.delete(id)
+  const appEndpoint = appNodeIntent?.workspaceId === workspaceId && appNodeIntent?.ownerId === selectedAgentId ? appNodeIntent.endpoint : new URLSearchParams(location.search).get("app_node")
+  const selectedNodeApp = appEndpoint !== null ? apps.find(app => (app.runtime_agent_id ?? app.app_id) === selectedAgentId) : undefined
+  const appNodeHref = (selection: AppNodeSelection) => `${workloadPath(organizationId, workspaceId, selection.ownerId).split("?")[0]}?app_node=${encodeURIComponent(selection.path.join("/"))}`
+  const openAppNode = (selection: AppNodeSelection) => {
+    setAppNodeIntent({ workspaceId, ownerId: selection.ownerId, endpoint: selection.path.join("/") })
+    showAgentTerminal(selection.ownerId, undefined, true)
+    routingRef.current.navigate(appNodeHref(selection))
+  }
+  useEffect(() => {
+    if (!appNodeIntent || appNodeIntent.workspaceId !== workspaceId || appNodeIntent.ownerId !== selectedAgentId || mainView !== "terminal") return
+    const href = `${workloadPath(organizationId, workspaceId, appNodeIntent.ownerId).split("?")[0]}?app_node=${encodeURIComponent(appNodeIntent.endpoint)}`
+    if (location.pathname + location.search !== href) routingRef.current.navigate(href, { replace: true })
+    else setAppNodeIntent(null)
+  }, [appNodeIntent, workspaceId, selectedAgentId, mainView, organizationId, location.pathname, location.search])
   const workloadHref = (id: string) => appOwnUrls.get(id) ?? agentOwnUrls.get(id) ?? workloadPath(organizationId, workspaceId, id)
   // Synchronous to preserve the user gesture; session authentication stays in
   // cookies. No credential or caller-supplied navigation URL is added.
@@ -404,6 +421,7 @@ function WorkspaceAppContent() {
   }
 
   function showOverview() {
+    setAppNodeIntent(null)
     // Clear the reload target in the same turn as the navigation gesture; the
     // selection-following effect can run after an immediate reload or URL copy.
     if (!preview && isWorkloadDeepLink(window.location.pathname)) replaceWorkloadRoute(null)
@@ -473,7 +491,13 @@ function WorkspaceAppContent() {
     setCtrlModifier(false)
   }, [isMobile, mobileTerminalOpen])
 
-  function showAgentTerminal(agentId: string, logs?: boolean) {
+  function showAgentTerminal(agentId: string, logs?: boolean, keepAppNode = false) {
+    if (!keepAppNode) setAppNodeIntent(null)
+    if (!keepAppNode && new URLSearchParams(routingRef.current.search).has("app_node")) {
+      const parameters = new URLSearchParams(routingRef.current.search)
+      parameters.delete("app_node")
+      routingRef.current.navigate({ pathname: workloadPath(organizationId, workspaceId, agentId).split("?")[0], search: parameters.toString() })
+    }
     const previous = tabs.tabs.find((tab) => tab.id === agentId)
     if (previous && !previous.live) setTabNotice(t("app.reloaded", { path: tabLabels.get(agentId)?.path ?? agentId }))
     else setTabNotice("")
@@ -1095,7 +1119,7 @@ function WorkspaceAppContent() {
           <span data-tour="create-workspace"><IconButton label={workspace ? t("app.workspace_settings") : t("org.create_workspace")} disabled={!organizationId} className={cn("max-md:size-11", mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
         </div>
         <button type="button" aria-label={t("app.workspace_overview")} onClick={showOverview} className={cn("mx-3 mb-2 flex min-h-10 items-center gap-2 rounded-md px-2 text-left text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", mainView === "overview" && "bg-accent")}><LayoutDashboard aria-hidden="true" className="size-3.5" />{t("app.overview")}</button>
-        <WorkloadTree prewarm={embedPrewarm} pins={pins} key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} workloadHref={workloadHref} onOpenInNewTab={openInNewTab} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} onAddMachine={() => void openInstall()} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
+        <WorkloadTree appTree={{ scope: JSON.stringify([user.user_id, authEpoch, workspaceId]), selected: selectedNodeApp && appEndpoint !== null ? { ownerId: selectedAgentId!, path: appEndpoint.split("/") } : null, open: openAppNode, href: appNodeHref }} prewarm={embedPrewarm} pins={pins} key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} workloadHref={workloadHref} onOpenInNewTab={openInNewTab} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} onAddMachine={() => void openInstall()} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
 
         <UserMenu user={user} role={roleLabel(currentRole)} preview={preview} collapseRef={treeWidth.collapseRef} onCollapse={treeWidth.toggle} onSettings={openSettings} onTour={replayFirstRunTour} onLogout={logout} />
       </aside>
@@ -1123,7 +1147,7 @@ function WorkspaceAppContent() {
             const app = apps.find((entry) => (entry.runtime_agent_id ?? entry.app_id) === tab.id)
             const machine = snapshot?.servers.find((entry) => entry.server_id === label.agent.server_id)
             return <div key={`${workspaceId}:${tab.id}`} id={`workspace-panel-${tab.id}`} role="tabpanel" aria-labelledby={isMobile ? undefined : `workspace-tab-${tab.id}`} aria-label={isMobile ? label.path : undefined} hidden={!visible} className="absolute inset-0 min-h-0 overflow-hidden">
-              {tab.live ? <WorkloadSurface ref={visible ? terminalPaneRef : undefined} workspaceId={workspaceId} agent={label.agent} app={app} machine={machine} path={label.path} tab={tab} embedMode={agentCapabilities.embed} embedOrigin={agentOriginMode === "isolated" ? agentOwnUrls.get(tab.id) : undefined} visible={visible} mobile={isMobile && mobileTerminalOpen} theme={theme} ctrlArmed={ctrlArmed} transformInput={transformTerminalInput} onToggleCtrl={() => setCtrlModifier(!ctrlArmedRef.current)} onCopy={copy} onLogs={(logs) => setShowWorkloadLogs(logs)} /> : <div className="grid size-full place-content-center gap-3 p-6 text-center"><p className="text-sm font-medium">{t("app.page_unloaded")}</p><p className="max-w-sm text-xs text-muted-foreground">{t("app.this_browser_page_was_unloaded")}</p><Button onClick={() => showAgentTerminal(tab.id)}>{t("app.reload_tab")}</Button></div>}
+              {selectedNodeApp && appEndpoint !== null && selectedAgentId === tab.id ? <div className="h-full overflow-auto"><AppNodeRoute key={JSON.stringify([user.user_id, authEpoch, workspaceId, selectedNodeApp.app_id, appEndpoint])} workspaceId={workspaceId} appId={selectedNodeApp.app_id} ownerId={tab.id} endpoint={appEndpoint} /></div> : tab.live ? <WorkloadSurface ref={visible ? terminalPaneRef : undefined} workspaceId={workspaceId} agent={label.agent} app={app} machine={machine} path={label.path} tab={tab} embedMode={agentCapabilities.embed} embedOrigin={agentOriginMode === "isolated" ? agentOwnUrls.get(tab.id) : undefined} visible={visible} mobile={isMobile && mobileTerminalOpen} theme={theme} ctrlArmed={ctrlArmed} transformInput={transformTerminalInput} onToggleCtrl={() => setCtrlModifier(!ctrlArmedRef.current)} onCopy={copy} onLogs={(logs) => setShowWorkloadLogs(logs)} /> : <div className="grid size-full place-content-center gap-3 p-6 text-center"><p className="text-sm font-medium">{t("app.page_unloaded")}</p><p className="max-w-sm text-xs text-muted-foreground">{t("app.this_browser_page_was_unloaded")}</p><Button onClick={() => showAgentTerminal(tab.id)}>{t("app.reload_tab")}</Button></div>}
             </div>
           })}
         </div>

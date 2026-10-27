@@ -1,3 +1,4 @@
+import { clickTreeActions } from './fixtures/tree-actions'
 import { openTabMenu, tabAction, backToWorkloads } from "./fixtures/tab-actions"
 import { test, expect, type Page, type WebSocketRoute } from '@playwright/test'
 import { mapSnapshot, mockTreeMapApi } from './fixtures/treemap'
@@ -139,7 +140,7 @@ test('overview opens an Agent Interface first, with its existing terminal fallba
   await page.getByRole('link', { name: 'Open /Research/reviewer', exact: true }).click()
   await expect(page.frameLocator('iframe').getByRole('heading', { name: 'Overview agent interface' })).toBeVisible()
   expect(backend.terminals).toEqual([])
-  await page.locator('[data-agent-id=reviewer-a]').getByRole('button', { name: 'Actions for reviewer', exact: true }).click()
+  await clickTreeActions(page.locator('[data-agent-id=reviewer-a]').getByRole('button', { name: 'Actions for reviewer', exact: true }))
   await page.getByRole('menuitem', { name: 'Logs', exact: true }).click()
   await expect(page.locator('.xterm')).toBeVisible()
   await expect(page.locator('iframe')).toHaveCount(0)
@@ -262,7 +263,7 @@ test.describe('Tree Stop and Delete are at the bottom and confirm first', () => 
     if ((await folder.getAttribute('aria-expanded')) !== 'true') await folder.getByRole('button').first().click()
   }
   async function openMenu(page: Page, how: 'button' | 'right-click') {
-    if (how === 'button') await page.getByRole('button', { name: 'Actions for reviewer', exact: true }).first().click()
+    if (how === 'button') await clickTreeActions(page.getByRole('button', { name: 'Actions for reviewer', exact: true }).first())
     else await page.getByRole('tree').getByRole('link', { name: /^reviewer/ }).first().click({ button: 'right' })
   }
   for (const how of ['button', 'right-click'] as const) {

@@ -20,14 +20,16 @@ export function useWorkspaceRoute() {
     const current = routeSelectionRef.current
     const sameWorkspace = organizationId === current.organizationId && workspaceId === current.workspaceId
     const keep = sameWorkspace ? workloadIdFromSplat(/\/workloads\/[^/]+\/?$/.exec(routing.pathname)?.[0].slice(1)) : null
-    if (!sameWorkspace) parameters.delete("focus")
+    if (!sameWorkspace) { parameters.delete("focus"); parameters.delete("app_node") }
     routing.navigate({ pathname: workloadPath(organizationId, workspaceId, keep).split("?")[0], search: parameters.toString(), hash: routing.hash }, { replace: true })
   }, [])
   // Keeps the address bar on the selected workload (replace, no history entry) so the URL can be copied or reloaded.
   const replaceWorkloadRoute = useCallback((workloadId: string | null) => {
     const routing = routingRef.current
     const { organizationId, workspaceId } = routeSelectionRef.current
-    routing.navigate({ pathname: workloadPath(organizationId, workspaceId, workloadId).split("?")[0], search: routing.search, hash: routing.hash }, { replace: true })
+    const parameters = new URLSearchParams(routing.search)
+    if (!workloadId || !routing.pathname.endsWith(`/workloads/${encodeURIComponent(workloadId)}`)) parameters.delete("app_node")
+    routing.navigate({ pathname: workloadPath(organizationId, workspaceId, workloadId).split("?")[0], search: parameters.toString(), hash: routing.hash }, { replace: true })
   }, [])
   const routeWorkloadId = workloadIdFromSplat(route["*"])
   const focusMode = new URLSearchParams(location.search).get("focus") === "1"

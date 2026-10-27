@@ -1,3 +1,4 @@
+import { clickTreeActions } from './fixtures/tree-actions'
 import { openTabMenu, tabAction, backToWorkloads } from "./fixtures/tab-actions"
 import { test, expect, type Page, type Route } from "@playwright/test"
 import { browseTreeOnMobile } from './fixtures/navigation'
@@ -215,7 +216,7 @@ for (const mobile of [false, true]) {
       backend.setApps([backend.app]); backend.hold()
       backend.send('agent.updated', backend.runtime)
       await expect(page.getByRole('treeitem', { name: 'app:Late App', exact: true })).toBeVisible()
-      await page.getByRole('button', { name: 'Actions for app:Late App', exact: true }).click()
+      await clickTreeActions(page.getByRole('button', { name: 'Actions for app:Late App', exact: true }))
       await page.getByRole('menuitem', { name: 'Logs', exact: true }).click()
       await expect(page.locator('.xterm')).toBeVisible()
       backend.release()
@@ -225,7 +226,7 @@ for (const mobile of [false, true]) {
       await expect(page.frameLocator("iframe[title='/Late App interface']").getByRole('heading', { name: 'Late human interface' })).toBeVisible()
       if (mobile) await backToWorkloads(page)
       if (mobile) {
-        await page.getByRole('button', { name: 'Actions for Late App', exact: true }).click()
+        await clickTreeActions(page.getByRole('button', { name: 'Actions for Late App', exact: true }))
         await page.getByRole('menuitem', { name: 'Logs', exact: true }).click()
       } else await tabAction(page, 'Show logs')
       await expect(page.locator('.xterm')).toBeVisible()
@@ -312,7 +313,7 @@ for (const mobile of [false, true]) {
       const before = backend.requests()
       await page.evaluate(() => { dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')) })
       await expect.poll(() => backend.requests()).toBe(before + 1)
-      await page.getByRole('button', { name: 'Actions for Late App', exact: true }).click()
+      await clickTreeActions(page.getByRole('button', { name: 'Actions for Late App', exact: true }))
       await page.getByRole('menuitem', { name: 'App settings', exact: true }).click()
       await expect(page.getByText('https://foreground.apps.example.com/', { exact: true })).toBeVisible()
     })
@@ -340,7 +341,7 @@ for (const runtimeId of ["app-runtime", "app-1"]) {
     await tabAction(page, 'Show App')
     await expect(frame).toBeVisible()
 
-    await page.getByRole("button", { name: "Actions for Soul Archive", exact: true }).click()
+    await clickTreeActions(page.getByRole("button", { name: "Actions for Soul Archive", exact: true }))
     await page.getByRole("menuitem", { name: "Logs", exact: true }).click()
     await expect(frame).toBeHidden()
     await expect(page.locator(".xterm")).toBeVisible()

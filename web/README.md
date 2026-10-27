@@ -1290,3 +1290,31 @@ not install or start anything. `tree-add-machine.spec.ts` covers this entry in
 English/Chinese at desktop/390px with online, offline and empty inventory, plus
 keyboard selection and Escape focus return. These are closed browser controls,
 not actual machine enrollment or deployed acceptance.
+
+
+### Tree row and App subtree integration (#256)
+
+The primary link/button fills each painted Agent/App/folder row; a sibling
+positioned menu preserves native links, drag targets and keyboard actions without
+nesting controls. Current no-tooltip behavior and Tree Add machine are retained.
+An App can lazily expose its own immediate app/agent children through authenticated
+`/api/workspaces/:workspace/apps/:app/ui/api/tree?path=...`. Nodes have stable
+single-segment keys and explicit `tree.read`, `message.read`, `message.send`
+capabilities; internal nodes are App-owned, not Host processes. Pages are bounded
+to 64 KiB, 100 children and depth 8, with explicit loading/empty/denied/unavailable
+states. Full endpoint paths are rooted at the owning App; no App-supplied URLs are
+followed. Deep links use the owner workload plus `app_node`, revalidate each level,
+and clear on workspace/normal-workload navigation. Auth/workspace changes reset
+cached branches and conversations.
+
+Conversations use existing Core Message routes, filter owner plus full endpoint,
+show the parent and child sender identity, and retain an immutable body, recipient,
+context and idempotency key after an uncertain send. They do not create a second
+inbox or claim message acceptance is final delivery. The final #230 Web fixes and
+caller-owned `e2e/app-tree-direct.mjs` entry are retained from `27d67e30`.
+
+Focused local browser checks: `PW_PORT=19256 pnpm exec playwright test -c
+playwright.tree-integration.config.ts`. These use closed HTTP/WebSocket fixtures,
+not a deployed human session or a fresh native/Core acceptance. Historical #230
+real native acceptance remains historical evidence; this integration does not
+deploy, enroll, restart workloads or enable periodic inspection.

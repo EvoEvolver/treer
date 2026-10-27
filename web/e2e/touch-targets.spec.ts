@@ -1,3 +1,4 @@
+import { clickTreeActions } from './fixtures/tree-actions'
 import { test, expect, type Page } from '@playwright/test'
 import { mockTreeMapApi } from './fixtures/treemap'
 import { browseTreeOnMobile } from './fixtures/navigation'
@@ -38,7 +39,7 @@ for (const theme of ['light', 'dark']) test(`Tree sidebar controls and menu rows
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   // The 44px "Add to tree" button must fit inside its own header row.
   await expect.poll(() => sidebar.getByRole('button', { name: 'Add to tree', exact: true }).evaluate((button) => { const row = button.parentElement!.parentElement!.getBoundingClientRect(), box = button.getBoundingClientRect(); return box.top >= row.top - 0.5 && box.bottom <= row.bottom + 0.5 })).toBe(true)
-  await sidebar.getByRole('button', { name: 'Actions for Product', exact: true }).click()
+  await clickTreeActions(sidebar.getByRole('button', { name: 'Actions for Product', exact: true }))
   const items = page.getByRole('menuitem')
   await expect(items.first()).toBeVisible()
   for (const item of await items.all()) await expectTouch(item, ['height'])
@@ -72,7 +73,7 @@ for (const theme of ['light', 'dark']) test(`Overview and the phone top bar cont
 test('the full Agent menu stays reachable on a short 390px viewport', async ({ page }) => {
   await open(page, 390)
   await page.setViewportSize({ width: 390, height: 420 })
-  await page.locator('#tree-sidebar').getByRole('button', { name: 'Actions for coordinator', exact: true }).click()
+  await clickTreeActions(page.locator('#tree-sidebar').getByRole('button', { name: 'Actions for coordinator', exact: true }))
   const last = page.getByRole('menuitem', { name: 'Delete', exact: true })
   await expect(last).toBeVisible()
   await last.scrollIntoViewIfNeeded()
