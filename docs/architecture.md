@@ -281,6 +281,13 @@ be repaired or adopted. This is an additional independent custody prerequisite,
 not durable ownership transfer, sender release or claim retirement. See the
 [claim custody scope](research/2026-10-26-windows-worker-claim-custody.md).
 
+Successful intent reservation retains the SAME exclusive job-store holder with
+ReservedInputs, including existing Holding owners. File publication and explicit
+pair restoration retain that holder too. Dropping a holder releases OS handles
+but never retires its durable intent or installation claim. This closes an
+original-owner lifetime gap; independent worker transfer and sender release
+remain separate. See [job holder scope](research/2026-10-26-windows-job-holder-lifetime.md).
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

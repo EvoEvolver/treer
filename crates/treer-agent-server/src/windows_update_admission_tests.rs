@@ -359,6 +359,71 @@ mod native {
     }
 
     #[test]
+    fn windows_update_job_holder_native_retained_through_backup_publication_and_restore() {
+        let root = Root::new();
+        let installed = root.pair("installed", OLD);
+        let target = root.pair("target", NEW);
+        let fixture = Fixture::new(|_| {});
+        let (ready, _) = pair_ready(&root, &installed, &target, &fixture);
+        let job = root.0.join("pair-job");
+        let binding = ready.binding().clone();
+        let intent = std::fs::read(job.join("receipt.bin")).unwrap();
+        assert!(UpdateStore::open(&job).is_err());
+        let published = ready.publish_pair().unwrap();
+        published.inspect_pair().unwrap();
+        assert!(UpdateStore::open(&job).is_err());
+        let restored = published.restore_files().unwrap();
+        restored.inspect_pair().unwrap();
+        assert!(UpdateStore::open(&job).is_err());
+        assert_eq!(std::fs::read(job.join("receipt.bin")).unwrap(), intent);
+        drop(restored);
+        let owner = UpdateStore::open(&job).unwrap();
+        crate::windows_update_intent::inspect(&owner.read().unwrap(), &binding).unwrap();
+        assert_eq!(owner.read().unwrap(), intent);
+        // Holder release never retires the durable denial record.
+        assert!(crate::windows_update_intent::reserve(owner, &binding).is_err());
+        assert!(installed.join(".treer-controller-update.claim").exists());
+    }
+
+    #[test]
+    fn windows_update_job_holder_native_failed_backup_releases_lock_not_replay_fences() {
+        use treer_platform::windows_update_backup::BackupDirectory;
+        let root = Root::new();
+        let installed = root.pair("installed", OLD);
+        let target = root.pair("target", NEW);
+        let job = root.directory("job");
+        let destination = root.directory("backup");
+        let fixture = Fixture::new(|_| {});
+        let reserved = prepare(&installed, &target, &fixture)
+            .unwrap()
+            .reserve(UpdateStore::open(&job).unwrap())
+            .unwrap();
+        let binding = reserved.binding().clone();
+        let intent = reserved.1.read().unwrap();
+        let claim = std::fs::read(installed.join(".treer-controller-update.claim")).unwrap();
+        assert!(UpdateStore::open(&job).is_err());
+        std::fs::write(destination.join("backup.evidence"), b"prior").unwrap();
+        treer_platform::secure_file(&destination.join("backup.evidence")).unwrap();
+        assert!(reserved
+            .backup(BackupDirectory::open(&destination).unwrap())
+            .is_err());
+        let owner = UpdateStore::open(&job).unwrap();
+        assert_eq!(owner.read().unwrap(), intent);
+        assert!(crate::windows_update_intent::reserve(owner, &binding).is_err());
+        assert_eq!(
+            std::fs::read(installed.join(".treer-controller-update.claim")).unwrap(),
+            claim
+        );
+        let again = prepare(&installed, &target, &fixture).unwrap();
+        assert!(again.reserve(UpdateStore::open(&job).unwrap()).is_err());
+        assert_eq!(
+            std::fs::read(destination.join("backup.evidence")).unwrap(),
+            b"prior"
+        );
+        assert!(!job.join("receipt.next").exists());
+    }
+
+    #[test]
     fn windows_update_pair_native_publishes_and_explicitly_restores_complete_files() {
         for restore in [false, true] {
             let root = Root::new();
@@ -716,11 +781,8 @@ mod native {
             );
         }
         let reserved = inputs.reserve(UpdateStore::open(&job).unwrap()).unwrap();
-        crate::windows_update_intent::inspect(
-            &UpdateStore::open(&job).unwrap().read().unwrap(),
-            reserved.binding(),
-        )
-        .unwrap();
+        crate::windows_update_intent::inspect(&reserved.1.read().unwrap(), reserved.binding())
+            .unwrap();
         assert_eq!(std::fs::read(installed.join("treer.exe")).unwrap(), OLD);
         assert_eq!(std::fs::read(target.join("treer.exe")).unwrap(), NEW);
         drop(reserved);

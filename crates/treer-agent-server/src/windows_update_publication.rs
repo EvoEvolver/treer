@@ -41,6 +41,7 @@ pub struct PublishedInputs {
     backup: SealedBackup,
     _startup: Option<File>,
     _state: Option<crate::controller::ControllerUpdateState>,
+    job: treer_platform::windows_update_store::UpdateStore,
     restoration_record: bool,
 }
 
@@ -61,15 +62,19 @@ impl StartupBackedUpInputs {
         let BackedUpInputs { reserved, backup } = images;
         backup.require_pair_evidence_absent(false)?;
         backup.require_pair_evidence_absent(true)?;
-        let ReservedInputs(AdmittedInputs {
-            binding,
-            _installed,
-            _target,
-            state,
-            worker_attempted,
-            receiver_attempted,
-            ..
-        }) = reserved;
+        let ReservedInputs(
+            AdmittedInputs {
+                binding,
+                _installed,
+                _target,
+                state,
+                worker_attempted,
+                receiver_attempted,
+                ..
+            },
+            job,
+        ) = reserved;
+        crate::windows_update_intent::inspect(&job.read()?, &binding)?;
         if worker_attempted || receiver_attempted {
             bail!("windows_update_worker_already_attempted");
         }
@@ -102,6 +107,7 @@ impl StartupBackedUpInputs {
             backup,
             _startup: startup,
             _state: state,
+            job,
             restoration_record: false,
         };
         published.verify_current()?;
@@ -126,6 +132,7 @@ impl PublishedInputs {
     }
 
     fn verify_current(&self) -> Result<()> {
+        crate::windows_update_intent::inspect(&self.job.read()?, &self.binding)?;
         self.pair.identities()?;
         let (controller, cli) = self.pair.files();
         let hashes = if self.pair.state() == PairState::Published {
@@ -173,6 +180,7 @@ impl PublishedInputs {
             backup,
             _startup,
             _state,
+            job,
             ..
         } = self;
         let restored = Self {
@@ -182,6 +190,7 @@ impl PublishedInputs {
             backup,
             _startup,
             _state,
+            job,
             restoration_record: true,
         };
         restored.verify_current()?;

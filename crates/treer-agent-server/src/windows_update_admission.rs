@@ -239,16 +239,20 @@ impl AdmittedInputs {
         }
         self._installed
             .claim(&crate::windows_update_intent::encode(&self.binding)?)?;
-        crate::windows_update_intent::reserve(store, &self.binding)?;
-        Ok(ReservedInputs(self))
+        let store = crate::windows_update_intent::reserve(store, &self.binding)?;
+        Ok(ReservedInputs(self, store))
     }
 }
 
-/// A consumed reservation with pinned inputs and no second-reservation method.
+/// A consumed reservation retaining the SAME exclusive job holder and pinned
+/// inputs, with no second-reservation method.
 /// Its internal child-custody transfer is not authenticated worker admission or
 /// a successful update receipt.
 #[cfg(windows)]
-pub struct ReservedInputs(AdmittedInputs);
+pub struct ReservedInputs(
+    AdmittedInputs,
+    treer_platform::windows_update_store::UpdateStore,
+);
 
 /// Borrowed from the SAME held confirmed reservation/runtime. Not wire data,
 /// a general mutation grant, sender release or a way to adopt another job.
@@ -346,6 +350,7 @@ impl ReservedInputs {
     }
 
     pub(crate) fn controller_state(&self) -> Result<&crate::controller::ControllerUpdateState> {
+        crate::windows_update_intent::inspect(&self.1.read()?, self.binding())?;
         self.0
             .state
             .as_ref()

@@ -111,7 +111,8 @@ pub fn inspect(bytes: &[u8], expected: &Binding) -> Result<()> {
     Ok(())
 }
 
-/// Consume the private store's exclusive holder for a single reservation. An
+/// Return the SAME private store's exclusive holder after one reservation. The
+/// caller must retain it through the transaction, not reopen another owner. An
 /// existing record (including a matching one) is never resubmitted. An error
 /// after publication begins has unknown outcome: retain all evidence, do not
 /// retry. Reopening is for inspect only, not a recovery execution entry.
@@ -119,14 +120,15 @@ pub fn inspect(bytes: &[u8], expected: &Binding) -> Result<()> {
 pub fn reserve(
     store: treer_platform::windows_update_store::UpdateStore,
     binding: &Binding,
-) -> Result<()> {
+) -> Result<treer_platform::windows_update_store::UpdateStore> {
     let bytes = encode(binding)?;
     match store.read() {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         _ => bail!("windows_update_intent_exists_or_unreadable"),
     }
     store.publish(&bytes)?;
-    inspect(&store.read()?, binding)
+    inspect(&store.read()?, binding)?;
+    Ok(store)
 }
 
 #[cfg(test)]
