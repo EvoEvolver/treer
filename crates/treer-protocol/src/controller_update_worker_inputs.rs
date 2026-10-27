@@ -184,6 +184,9 @@ pub enum CustodyKind {
     /// Explicit acceptance of a loaded-store CAS on the SAME Holding session.
     StartupCommitted,
     StartupAccepted,
+    /// Explicit fixed-candidate preparation only; installed names stay pinned.
+    PrepareCandidates,
+    CandidatesPrepared,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -220,6 +223,8 @@ impl CustodyFrame {
             CustodyKind::BackupPrepared => b"TRWCBA01",
             CustodyKind::StartupCommitted => b"TRWCSC01",
             CustodyKind::StartupAccepted => b"TRWCSA01",
+            CustodyKind::PrepareCandidates => b"TRWCNP01",
+            CustodyKind::CandidatesPrepared => b"TRWCNA01",
         });
         bytes[WORKER_BINDING_FRAME_BYTES..].copy_from_slice(&self.sequence.to_le_bytes());
         Some(bytes)

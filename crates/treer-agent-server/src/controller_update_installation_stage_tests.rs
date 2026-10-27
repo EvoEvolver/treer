@@ -7,6 +7,126 @@ use crate::{
 use ed25519_dalek::pkcs8::EncodePublicKey;
 use sha2::Digest;
 
+const WORKER_CANDIDATES: [&str; 4] = [
+    ".treer-update-controller.new",
+    ".treer-update-cli.new",
+    ".treer-update-controller.restore",
+    ".treer-update-cli.restore",
+];
+
+#[tokio::test]
+async fn windows_update_worker_candidates_same_holding_full_new_restore_pair_and_custody() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, false);
+    let mut prepared = Preparation::local(
+        &runtime,
+        input.dispatch.clone(),
+        &input.settings,
+        &input.fixture.documents(),
+        (&input.bytes, &input.bytes),
+        &[],
+    )
+    .unwrap();
+    prepared
+        .start(&runtime, &input.fixture.documents())
+        .await
+        .unwrap();
+    prepared.prepare_worker_backup(&runtime).await.unwrap();
+    let installed = root.join("installed");
+    for name in WORKER_CANDIDATES {
+        assert!(!installed.join(name).exists());
+    }
+    let job = stage(&root, &input).join("job");
+    let intent = std::fs::read(job.join("receipt.bin")).unwrap();
+    prepared.prepare_worker_candidates(&runtime).await.unwrap();
+    prepared.inspect(&runtime).await.unwrap();
+    for name in WORKER_CANDIDATES {
+        let path = installed.join(name);
+        assert!(path.is_file());
+        assert!(
+            std::fs::read(&path).is_err(),
+            "receiver holds exclusive candidate handles"
+        );
+        assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+        assert!(std::fs::remove_file(&path).is_err());
+    }
+    held(&root, &input);
+    assert_eq!(std::fs::read(job.join("receipt.bin")).unwrap(), intent);
+    prepared.close(&runtime).await.unwrap();
+    let custody = prepared.retain_closed(&runtime).unwrap();
+    for (name, expected) in WORKER_CANDIDATES.into_iter().zip([
+        input.bytes.as_slice(),
+        input.bytes.as_slice(),
+        OLD,
+        OLD,
+    ]) {
+        assert_eq!(std::fs::read(installed.join(name)).unwrap(), expected);
+    }
+    held(&root, &input);
+    assert!(treer_platform::windows_update_store::UpdateStore::open(&job).is_err());
+    assert!(prepared.prepare_worker_candidates(&runtime).await.is_err());
+    drop(custody);
+    drop(prepared);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_worker_candidates_partial_destination_or_changed_state_keeps_unknown() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    for changed_state in [false, true] {
+        let catalog = UpdatePlanCatalogFixture::new();
+        let (runtime, root, task) = update_state_fixture().await;
+        let input = inputs(&root, &catalog, false);
+        let mut prepared = Preparation::local(
+            &runtime,
+            input.dispatch.clone(),
+            &input.settings,
+            &input.fixture.documents(),
+            (&input.bytes, &input.bytes),
+            &[],
+        )
+        .unwrap();
+        prepared
+            .start(&runtime, &input.fixture.documents())
+            .await
+            .unwrap();
+        prepared.prepare_worker_backup(&runtime).await.unwrap();
+        let installed = root.join("installed");
+        if changed_state {
+            runtime.inner.startup_store.deny_absent("ag_later").unwrap();
+        } else {
+            // Real CREATE_NEW collision after one file was already created.
+            std::fs::write(installed.join(WORKER_CANDIDATES[1]), b"unresolved").unwrap();
+        }
+        assert!(prepared.prepare_worker_candidates(&runtime).await.is_err());
+        assert!(prepared.prepare_worker_candidates(&runtime).await.is_err());
+        assert!(prepared.close(&runtime).await.is_err());
+        assert!(prepared.retain_closed(&runtime).is_err());
+        if changed_state {
+            for name in WORKER_CANDIDATES {
+                assert!(!installed.join(name).exists());
+            }
+        } else {
+            assert!(installed.join(WORKER_CANDIDATES[0]).is_file());
+            assert_eq!(
+                std::fs::read(installed.join(WORKER_CANDIDATES[1])).unwrap(),
+                b"unresolved"
+            );
+            assert!(!installed.join(WORKER_CANDIDATES[2]).exists());
+        }
+        held(&root, &input);
+        drop(prepared);
+        drop(runtime);
+        task.abort();
+        std::fs::remove_dir_all(root).unwrap();
+        drop(catalog);
+    }
+}
+
 #[tokio::test]
 async fn windows_update_worker_job_same_holding_receiver_pins_intent_until_explicit_close() {
     let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;

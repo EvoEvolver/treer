@@ -24,6 +24,7 @@ pub(crate) struct Channel<S> {
     sequence: u32,
     phase: Phase,
     backup_attempted: bool,
+    candidates_attempted: bool,
     #[cfg(windows)]
     startup: Option<Option<treer_protocol::controller_update_worker_inputs::Snapshot>>,
     #[cfg(windows)]
@@ -39,6 +40,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Channel<S> {
             sequence: 1,
             phase: Phase::Holding,
             backup_attempted: false,
+            candidates_attempted: false,
             #[cfg(windows)]
             startup: None,
             #[cfg(windows)]
@@ -130,6 +132,30 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Channel<S> {
         .await
     }
 
+    #[cfg(windows)]
+    pub(crate) async fn prepare_candidates(
+        &mut self,
+        permit: &crate::windows_update_admission::ConfirmedCandidatePermit<'_>,
+    ) -> Result<()> {
+        permit.check(self.context.operation)?;
+        self.request_candidates().await?;
+        permit.check(self.context.operation)
+    }
+
+    #[cfg(any(windows, test))]
+    async fn request_candidates(&mut self) -> Result<()> {
+        if !self.backup_attempted || self.candidates_attempted || self.phase != Phase::Holding {
+            return Err(refused());
+        }
+        self.candidates_attempted = true;
+        self.exchange(
+            CustodyKind::PrepareCandidates,
+            CustodyKind::CandidatesPrepared,
+            false,
+        )
+        .await
+    }
+
     async fn exchange(
         &mut self,
         request: CustodyKind,
@@ -196,6 +222,64 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Channel<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn windows_update_worker_candidates_order_reply_and_cancel_are_single_use() {
+        for outcome in 0..3 {
+            let context = context();
+            let (a, mut b) = tokio::io::duplex(1024);
+            let (sent, received) = tokio::sync::oneshot::channel();
+            let peer = tokio::spawn(async move {
+                let mut bytes = [0; CUSTODY_BYTES];
+                b.read_exact(&mut bytes).await.unwrap();
+                let backup = CustodyFrame::decode(&bytes, CustodyKind::PrepareBackup).unwrap();
+                b.write_all(&backup.encode(CustodyKind::BackupPrepared).unwrap())
+                    .await
+                    .unwrap();
+                b.read_exact(&mut bytes).await.unwrap();
+                let frame = CustodyFrame::decode(&bytes, CustodyKind::PrepareCandidates).unwrap();
+                assert_eq!(frame.context, context);
+                assert_eq!(frame.sequence, 2);
+                sent.send(()).unwrap();
+                if outcome == 2 {
+                    std::future::pending::<()>().await;
+                } else {
+                    b.write_all(
+                        &frame
+                            .encode(if outcome == 0 {
+                                CustodyKind::CandidatesPrepared
+                            } else {
+                                CustodyKind::BackupPrepared
+                            })
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                }
+            });
+            let mut channel = Channel::new(a, context);
+            assert!(channel.request_candidates().await.is_err());
+            assert!(
+                !channel.candidates_attempted,
+                "wrong order does not consume grant"
+            );
+            channel.request_backup().await.unwrap();
+            if outcome == 2 {
+                let mut request = std::pin::pin!(channel.request_candidates());
+                tokio::select! {
+                    _ = &mut request => panic!("peer has not replied"),
+                    _ = received => (),
+                }
+            } else {
+                assert_eq!(channel.request_candidates().await.is_ok(), outcome == 0);
+            }
+            assert!(channel.candidates_attempted);
+            assert!(channel.request_candidates().await.is_err());
+            if outcome != 0 {
+                assert!(channel.request(true).await.is_err());
+            }
+            peer.abort();
+        }
+    }
     fn context() -> WorkerBindingFrame {
         WorkerBindingFrame {
             operation: *uuid::Uuid::new_v4().as_bytes(),

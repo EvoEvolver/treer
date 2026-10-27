@@ -299,6 +299,22 @@ an uncertain exchange lasts until child exit and is never remotely closed by
 numeric value. This is custody, not a mutation/lifetime or sender-release grant;
 see [receiver job custody](research/2026-10-26-windows-worker-job-custody.md).
 
+After explicit backup, the SAME Holding coordinator can grant one fixed-pair
+candidate preparation. The non-wire grant reuses the original confirmed
+reservation, loaded runtime, catalog/claim and configured trust. The worker
+retains its original independently authenticated inputs, backup and state while
+reusing Platform's CREATE_NEW/seal mechanics for the four installed-directory
+new/restore candidates. It copies complete target and old-backup bytes, flushes
+and hashes every held candidate before acknowledgement, and retains candidate
+handles plus independent ancestors and a reduced installation-lock reference.
+Later inspections recheck all four complete hashes. Existing/partial files are
+never adopted or overwritten; error/cancellation is unknown and cannot replay.
+The old installed pair stays pinned and unchanged. No candidate-ready type can
+publish or release image pins; explicit close leaves the files and retains
+original sender custody. Durable mutation/lifetime transfer and sender release
+remain prerequisites for worker publication, not consequences of this ACK.
+See [candidate preparation](research/2026-10-26-windows-worker-candidates.md).
+
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,

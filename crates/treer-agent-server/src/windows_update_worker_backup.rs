@@ -93,6 +93,52 @@ pub(super) fn prepare(
 }
 
 impl WorkerBackup {
+    /// Real fixed installed-directory candidates from already authenticated held
+    /// inputs and the independent old backup. No rename or image-pin release.
+    pub(super) fn stage_candidates(
+        &self,
+        installed: &PinnedPair,
+        target: &PinnedPair,
+        lock: &treer_platform::windows_update_inputs::InheritedInstallationLock,
+        binding: &Binding,
+        snapshot: &Option<Snapshot>,
+    ) -> Result<treer_platform::windows_update_pair::WorkerReadyPair> {
+        self.inspect(binding, snapshot)?;
+        let mut staging = installed.stage_worker_pair(lock)?;
+        let (mut next_c, mut next_l) = target.files();
+        let (mut old_c, mut old_l) = self.backup.files();
+        let [c, l, rc, rl] = staging.files();
+        for (source, destination, expected) in [
+            (&mut next_c, c, &binding.controller_sha256),
+            (&mut next_l, l, &binding.cli_sha256),
+            (&mut old_c, rc, &binding.old_controller_sha256),
+            (&mut old_l, rl, &binding.old_cli_sha256),
+        ] {
+            source.seek(SeekFrom::Start(0))?;
+            super::super::backup::copy_checked(source, destination, expected, 128 * 1024 * 1024)?;
+        }
+        let ready = staging.seal()?;
+        Self::inspect_candidates(&ready, binding)?;
+        Ok(ready)
+    }
+
+    pub(super) fn inspect_candidates(
+        ready: &treer_platform::windows_update_pair::WorkerReadyPair,
+        binding: &Binding,
+    ) -> Result<()> {
+        for (mut file, expected) in ready.files().into_iter().zip([
+            &binding.controller_sha256,
+            &binding.cli_sha256,
+            &binding.old_controller_sha256,
+            &binding.old_cli_sha256,
+        ]) {
+            file.seek(SeekFrom::Start(0))?;
+            if super::super::digest(&mut file, None)? != *expected {
+                return Err(refused());
+            }
+        }
+        Ok(())
+    }
     pub(super) fn preserves_fences(&self, next: Option<&[u8]>) -> Result<()> {
         #[derive(serde::Deserialize)]
         struct Fences {

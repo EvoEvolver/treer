@@ -46,22 +46,100 @@ pub struct StagingPair {
     files: [File; 4],
 }
 
+fn create_candidates(directory: &Path) -> io::Result<[File; 4]> {
+    let mut files = Vec::new();
+    for name in CANDIDATES {
+        let path = directory.join(name);
+        let file = crate::windows::create_private_update_candidate(&path)?;
+        crate::windows_update_store::checked_file(&path, &file)?;
+        files.push(file);
+    }
+    files
+        .try_into()
+        .map_err(|_| io::Error::other("invalid pair candidates"))
+}
+
+fn seal_candidates(directory: &Path, files: &[File; 4]) -> io::Result<()> {
+    for (name, file) in CANDIDATES.into_iter().zip(files) {
+        file.sync_all()?;
+        crate::windows_update_store::checked_file(&directory.join(name), file)?;
+        if file.metadata()?.len() == 0 {
+            return Err(io::Error::other("empty pair candidate"));
+        }
+    }
+    Ok(())
+}
+
+/// Candidate preparation only. Independent physical parents and a reduced
+/// reference to the original installation lease stay held. This type has no
+/// publication/conversion/release API. Core supplies the explicit operation
+/// grant, authenticated whole inputs and backup verification.
+pub struct WorkerReadyPair {
+    _root: crate::machine_file::Root,
+    _lock: File,
+    path: PathBuf,
+    files: [File; 4],
+}
+
+pub struct WorkerStagingPair(WorkerReadyPair);
+
+impl PinnedPair {
+    pub fn stage_worker_pair(
+        &self,
+        lock: &crate::windows_update_inputs::InheritedInstallationLock,
+    ) -> io::Result<WorkerStagingPair> {
+        use std::os::windows::io::AsRawHandle;
+        let root = crate::machine_file::Root::open(&self.path, &[])?;
+        let expected = crate::windows_update_inputs::lock_identity(&lock._file)?;
+        if root.identity()? != self.identity()?
+            || expected.0 != self.identity()?.0
+            || named_identity(&self.path.join(".treer-controller-update.lock"))? != expected
+        {
+            return Err(io::Error::other("worker candidate installation differs"));
+        }
+        let retained = File::from(crate::windows_update_inputs::duplicate_lock(
+            lock._file.as_raw_handle(),
+        )?);
+        let files = create_candidates(&self.path)?;
+        Ok(WorkerStagingPair(WorkerReadyPair {
+            _root: root,
+            _lock: retained,
+            path: self.path.clone(),
+            files,
+        }))
+    }
+}
+
+impl WorkerStagingPair {
+    pub fn files(&mut self) -> [&mut File; 4] {
+        let [a, b, c, d] = &mut self.0.files;
+        [a, b, c, d]
+    }
+    pub fn seal(self) -> io::Result<WorkerReadyPair> {
+        seal_candidates(&self.0.path, &self.0.files)?;
+        Ok(self.0)
+    }
+}
+
+impl WorkerReadyPair {
+    pub fn files(&self) -> [&File; 4] {
+        [
+            &self.files[0],
+            &self.files[1],
+            &self.files[2],
+            &self.files[3],
+        ]
+    }
+}
+
 impl LockedInstallation {
     /// Four fixed CREATE_NEW candidates. A partial failure retains every file
     /// and the existing claim; there is no overwrite or automatic retry.
     pub fn stage_pair(self) -> io::Result<StagingPair> {
-        let mut files = Vec::new();
-        for name in CANDIDATES {
-            let path = self.pair.path.join(name);
-            let file = crate::windows::create_private_update_candidate(&path)?;
-            crate::windows_update_store::checked_file(&path, &file)?;
-            files.push(file);
-        }
+        let files = create_candidates(&self.pair.path)?;
         Ok(StagingPair {
             installation: self,
-            files: files
-                .try_into()
-                .map_err(|_| io::Error::other("invalid pair candidates"))?,
+            files,
         })
     }
 }
@@ -73,16 +151,7 @@ impl StagingPair {
     }
 
     pub fn seal(self) -> io::Result<ReadyPair> {
-        for (name, file) in CANDIDATES.into_iter().zip(&self.files) {
-            file.sync_all()?;
-            crate::windows_update_store::checked_file(
-                &self.installation.pair.path.join(name),
-                file,
-            )?;
-            if file.metadata()?.len() == 0 {
-                return Err(io::Error::other("empty pair candidate"));
-            }
-        }
+        seal_candidates(&self.installation.pair.path, &self.files)?;
         Ok(ReadyPair {
             installation: self.installation,
             files: self.files,

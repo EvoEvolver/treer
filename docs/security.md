@@ -390,6 +390,20 @@ or configuration contents. Failed launch retains the newly saved specification.
   Sender originals remain held. Creator liveness, finite session and unknown
   no-replay constraints remain; this does not permit creator exit or sender release.
 
+  A distinct, explicitly requested fixed-candidate grant on the SAME Holding
+  connection follows backup preparation. Its non-wire constructor rechecks the
+  original confirmed/runtime/claim contract and normal trust, not offer-selected
+  keys or creator identity as authorization. Worker creation is restricted to
+  four fixed CREATE_NEW candidate names under the independently pinned saved
+  installation. New images come from held signed inputs; restoration images
+  come from independently verified backups. Whole hashes, flush and retained
+  physical handles precede ACK; existing names and partial outcomes refuse
+  replay. Reduced lock custody and all original image/state/job/claim pins stay
+  held. This is candidate-file mutation only: no installed-image rename,
+  publication, sender release, cross-creator lifetime, ready or update outcome.
+  Close does not clean/reuse candidates, and the public consumer/capability
+  behavior remains unchanged.
+
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
   Controller and Proxy and bound to one Agent, machine, and workspace.

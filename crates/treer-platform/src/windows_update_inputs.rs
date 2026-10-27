@@ -331,7 +331,7 @@ pub(super) fn lock_identity(file: &File) -> io::Result<(u64, u64)> {
 /// NOT been transferred. The borrowed standard handle also remains inherited
 /// until process exit, even when this extra retained reference is dropped.
 pub struct InheritedInstallationLock {
-    _file: File,
+    pub(super) _file: File,
 }
 
 impl InheritedInstallationLock {

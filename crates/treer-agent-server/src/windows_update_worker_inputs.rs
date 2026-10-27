@@ -244,6 +244,8 @@ pub(crate) mod native {
         backup_attempted: bool,
         startup_attempted: bool,
         backup: Option<super::backup_preparation::WorkerBackup>,
+        candidates_attempted: bool,
+        candidates: Option<treer_platform::windows_update_pair::WorkerReadyPair>,
     }
 
     #[allow(dead_code)] // Internal continuation; production coordinator is not wired.
@@ -263,20 +265,45 @@ pub(crate) mod native {
                         .read_exact(&mut bytes)
                         .await
                         .map_err(|_| refused())?;
-                    let (frame, reply, close, backup, adopt) = if let Some(frame) =
+                    let (frame, reply, close, backup, adopt, candidates) = if let Some(frame) =
                         CustodyFrame::decode(&bytes, CustodyKind::Inspect)
                     {
-                        (frame, CustodyKind::Inspected, false, false, false)
+                        (frame, CustodyKind::Inspected, false, false, false, false)
                     } else if let Some(frame) = CustodyFrame::decode(&bytes, CustodyKind::Close) {
-                        (frame, CustodyKind::Closed, true, false, false)
+                        (frame, CustodyKind::Closed, true, false, false, false)
                     } else if let Some(frame) =
                         CustodyFrame::decode(&bytes, CustodyKind::PrepareBackup)
                     {
-                        (frame, CustodyKind::BackupPrepared, false, true, false)
+                        (
+                            frame,
+                            CustodyKind::BackupPrepared,
+                            false,
+                            true,
+                            false,
+                            false,
+                        )
                     } else if let Some(frame) =
                         CustodyFrame::decode(&bytes, CustodyKind::StartupCommitted)
                     {
-                        (frame, CustodyKind::StartupAccepted, false, false, true)
+                        (
+                            frame,
+                            CustodyKind::StartupAccepted,
+                            false,
+                            false,
+                            true,
+                            false,
+                        )
+                    } else if let Some(frame) =
+                        CustodyFrame::decode(&bytes, CustodyKind::PrepareCandidates)
+                    {
+                        (
+                            frame,
+                            CustodyKind::CandidatesPrepared,
+                            false,
+                            false,
+                            false,
+                            true,
+                        )
                     } else {
                         return Err(refused());
                     };
@@ -286,6 +313,28 @@ pub(crate) mod native {
                     if adopt {
                         self.accept_committed_startup().await?;
                     } else {
+                        self.inspect_snapshot()?;
+                    }
+                    if candidates {
+                        if self.candidates_attempted {
+                            return Err(refused());
+                        }
+                        self.candidates_attempted = true;
+                        let prepared = self
+                            .backup
+                            .as_ref()
+                            .ok_or_else(refused)?
+                            .stage_candidates(
+                                &self.installed,
+                                &self.target,
+                                &self.lock,
+                                &self.binding,
+                                &self.snapshot,
+                            )
+                            .map_err(|_| refused())?;
+                        // Retain real candidate handles before the ACK await.
+                        // Neither ACK nor close transfers/releases sender pins.
+                        self.candidates = Some(prepared);
                         self.inspect_snapshot()?;
                     }
                     if backup {
@@ -385,6 +434,12 @@ pub(crate) mod native {
                 check_snapshot(&self.current_snapshot, observed, &self.binding)?;
                 if let Some(backup) = &self.backup {
                     backup.inspect(&self.binding, &self.snapshot)?;
+                }
+                if let Some(candidates) = &self.candidates {
+                    super::backup_preparation::WorkerBackup::inspect_candidates(
+                        candidates,
+                        &self.binding,
+                    )?;
                 }
                 if !self.stream.creator_is_live()? {
                     return Err(refused());
@@ -540,6 +595,8 @@ pub(crate) mod native {
                 backup_attempted: false,
                 startup_attempted: false,
                 backup: None,
+                candidates_attempted: false,
+                candidates: None,
             })
         })
         .await

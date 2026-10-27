@@ -262,8 +262,24 @@ pub(crate) struct ConfirmedBackupPermit<'a> {
     selected: &'a crate::controller::ControllerRuntime,
 }
 
+/// Explicit fixed-candidate preparation grant from the original confirmed
+/// reservation. No installed-image replacement, takeover or sender release.
 #[cfg(windows)]
-impl ConfirmedBackupPermit<'_> {
+pub(crate) struct ConfirmedCandidatePermit<'a>(ConfirmedBackupPermit<'a>);
+
+#[cfg(windows)]
+impl ConfirmedCandidatePermit<'_> {
+    pub(crate) fn check(&self, operation: [u8; 16]) -> Result<()> {
+        self.0.check(operation)
+    }
+}
+
+#[cfg(windows)]
+impl<'a> ConfirmedBackupPermit<'a> {
+    pub(crate) fn for_candidates(self) -> Result<ConfirmedCandidatePermit<'a>> {
+        self.check(*self.reserved.binding().operation_id.as_bytes())?;
+        Ok(ConfirmedCandidatePermit(self))
+    }
     pub(crate) fn startup_compare(
         &self,
         expected: &Option<treer_protocol::controller_update_worker_inputs::Snapshot>,

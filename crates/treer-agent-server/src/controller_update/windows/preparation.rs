@@ -197,6 +197,20 @@ impl Preparation {
         self.poisoned = false;
         Ok(())
     }
+    pub(crate) async fn prepare_worker_candidates(
+        &mut self,
+        runtime: &ControllerRuntime,
+    ) -> Result<()> {
+        self.check(runtime)?;
+        self.poisoned = true;
+        self.coordinator.prepare_worker_candidates(runtime).await?;
+        self.selection
+            .as_ref()
+            .ok_or_else(refused)?
+            .check(runtime)?;
+        self.poisoned = false;
+        Ok(())
+    }
     /// Uses the retained, actually downloaded envelopes. ACK does not release
     /// any original sender pins/lease/claim or authorize installation mutation.
     pub(crate) async fn start_downloaded(&mut self, runtime: &ControllerRuntime) -> Result<()> {

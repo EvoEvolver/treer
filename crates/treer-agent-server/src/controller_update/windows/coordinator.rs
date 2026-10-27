@@ -37,6 +37,34 @@ pub(crate) struct Coordinator {
 
 #[allow(dead_code)] // Public capability remains OFF until full transaction acceptance.
 impl Coordinator {
+    /// Stage the authenticated new/restore pair in the SAME Holding worker.
+    /// All original image pins remain held; this cannot replace installed files.
+    pub(crate) async fn prepare_worker_candidates(
+        &mut self,
+        selected: &ControllerRuntime,
+    ) -> Result<()> {
+        self.scope(selected)?;
+        if self.phase != Phase::Holding || !self.backup_prepared {
+            return Err(refused());
+        }
+        self.phase = Phase::Unknown;
+        self.require_live(selected)?;
+        self.trust.recheck()?;
+        let permit = self
+            .child
+            .as_ref()
+            .ok_or_else(refused)?
+            .backup_permit(selected, &self.binding, self.trust.verification_key())?
+            .for_candidates()?;
+        self.channel
+            .as_mut()
+            .ok_or_else(refused)?
+            .prepare_candidates(&permit)
+            .await?;
+        self.require_live(selected)?;
+        self.phase = Phase::Holding;
+        Ok(())
+    }
     /// One explicit limited write grant on the SAME Holding worker connection.
     /// Independent receiver backups are not installation/creator-exit authority.
     pub(crate) async fn prepare_worker_backup(
