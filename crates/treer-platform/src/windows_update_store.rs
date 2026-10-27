@@ -20,6 +20,21 @@ const LOCK: &str = "receipt.lock";
 const LIMIT: u64 = 64 * 1024;
 const TRANSFER: &str = "worker-transfer.bin";
 
+pub enum PairPhase {
+    Started,
+    Published,
+    Refused,
+}
+impl PairPhase {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Started => "worker-pair-started.bin",
+            Self::Published => "worker-pair-published.bin",
+            Self::Refused => "worker-pair-refused.bin",
+        }
+    }
+}
+
 /// SAME held immutable transfer record. Its bytes alone grant no authority.
 pub struct TransferRecord {
     file: File,
@@ -242,14 +257,22 @@ pub struct ReceivedJob {
 }
 
 impl ReceivedJob {
+    /// Fixed EXCL append-only phase names. Bytes are evidence, never a resume
+    /// constructor or permission. Original intent and job lock remain held.
+    pub fn record_pair_phase(&self, phase: PairPhase, bytes: &[u8]) -> io::Result<TransferRecord> {
+        self.record_once(phase.name(), bytes)
+    }
     /// One fixed CREATE_NEW/flush/readback record under retained original job
     /// parents and lock. Partial/error names remain; no overwrite or retry.
     pub fn record_transfer(&self, bytes: &[u8]) -> io::Result<TransferRecord> {
+        self.record_once(TRANSFER, bytes)
+    }
+    fn record_once(&self, name: &str, bytes: &[u8]) -> io::Result<TransferRecord> {
         self.verify(&self.expected)?;
         if bytes.is_empty() || bytes.len() as u64 > LIMIT {
             return Err(refused());
         }
-        let path = self.path.join(TRANSFER);
+        let path = self.path.join(name);
         let mut file = crate::windows::create_private_transfer_record(&path)?;
         checked_file(&path, &file)?;
         file.write_all(bytes)?;

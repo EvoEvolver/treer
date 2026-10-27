@@ -72,13 +72,15 @@ fn seal_candidates(directory: &Path, files: &[File; 4]) -> io::Result<()> {
 
 /// Candidate preparation only. Independent physical parents and a reduced
 /// reference to the original installation lease stay held. This type has no
-/// publication/conversion/release API. Core supplies the explicit operation
+/// lifecycle authority. Core supplies the explicit operation
 /// grant, authenticated whole inputs and backup verification.
 pub struct WorkerReadyPair {
-    _root: crate::machine_file::Root,
-    _lock: File,
-    path: PathBuf,
-    files: [File; 4],
+    guard: Guard,
+    files: [Option<File>; 4],
+    old: [Identity; 2],
+    bridges: Vec<File>,
+    attempted: bool,
+    state: Option<PairState>,
 }
 
 pub struct WorkerStagingPair(WorkerReadyPair);
@@ -100,12 +102,28 @@ impl PinnedPair {
         let retained = File::from(crate::windows_update_inputs::duplicate_lock(
             lock._file.as_raw_handle(),
         )?);
-        let files = create_candidates(&self.path)?;
+        // Save the actual installed IDs while the original receiver pins are
+        // still held. A later pathname observation is not this baseline.
+        let old = [identity(&self.controller)?, identity(&self.cli)?];
+        let mut files = Vec::new();
+        for name in CANDIDATES {
+            files.push(Some(crate::windows::create_private_worker_candidate(
+                &self.path.join(name),
+            )?));
+        }
         Ok(WorkerStagingPair(WorkerReadyPair {
-            _root: root,
-            _lock: retained,
-            path: self.path.clone(),
-            files,
+            guard: Guard {
+                _root: root,
+                _lock: retained,
+                path: self.path.clone(),
+            },
+            files: files
+                .try_into()
+                .map_err(|_| io::Error::other("invalid candidates"))?,
+            old,
+            bridges: Vec::new(),
+            attempted: false,
+            state: None,
         }))
     }
 }
@@ -113,22 +131,111 @@ impl PinnedPair {
 impl WorkerStagingPair {
     pub fn files(&mut self) -> [&mut File; 4] {
         let [a, b, c, d] = &mut self.0.files;
-        [a, b, c, d]
+        [
+            a.as_mut().unwrap(),
+            b.as_mut().unwrap(),
+            c.as_mut().unwrap(),
+            d.as_mut().unwrap(),
+        ]
     }
     pub fn seal(self) -> io::Result<WorkerReadyPair> {
-        seal_candidates(&self.0.path, &self.0.files)?;
+        for (name, file) in CANDIDATES.into_iter().zip(self.0.files()?) {
+            file.sync_all()?;
+            crate::windows_update_store::checked_file(&self.0.guard.path.join(name), file)?;
+            if file.metadata()?.len() == 0 {
+                return Err(io::Error::other("empty candidate"));
+            }
+        }
         Ok(self.0)
     }
 }
 
 impl WorkerReadyPair {
-    pub fn files(&self) -> [&File; 4] {
-        [
-            &self.files[0],
-            &self.files[1],
-            &self.files[2],
-            &self.files[3],
-        ]
+    pub fn files(&self) -> io::Result<[&File; 4]> {
+        let missing = || io::Error::other("unknown worker pair custody");
+        Ok([
+            self.files[0].as_ref().ok_or_else(missing)?,
+            self.files[1].as_ref().ok_or_else(missing)?,
+            self.files[2].as_ref().ok_or_else(missing)?,
+            self.files[3].as_ref().ok_or_else(missing)?,
+        ])
+    }
+    pub fn old_identities(&self) -> [Identity; 2] {
+        self.old
+    }
+    pub fn state(&self) -> Option<PairState> {
+        self.state
+    }
+    pub fn verify_published(&self) -> io::Result<()> {
+        if self.state != Some(PairState::Published) {
+            return Err(io::Error::other("pair not published"));
+        }
+        self.guard.require(self.identities()?)
+    }
+    pub fn identities(&self) -> io::Result<[Identity; 2]> {
+        let files = self.files()?;
+        Ok([identity(files[0])?, identity(files[1])?])
+    }
+    /// Replace write-capable file objects with fresh restrictive read objects.
+    /// DuplicateHandle alone leaves FileObject write access/sharing in force
+    /// and can prevent PE mapping. Keep an identity bridge across the reopen;
+    /// Core MUST rehash all bytes under the final restrictive handles.
+    fn executable_pin(&mut self, index: usize) -> io::Result<()> {
+        let expected = identity(
+            self.files[index]
+                .as_ref()
+                .ok_or_else(|| io::Error::other("missing candidate"))?,
+        )?;
+        let path = self.guard.path.join(NAMES[index]);
+        let bridge = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&path)?;
+        crate::windows_update_store::checked_file(&path, &bridge)?;
+        if identity(&bridge)? != expected {
+            return Err(io::Error::other("candidate changed"));
+        }
+        self.bridges.push(bridge);
+        self.files[index].take();
+        let file = crate::windows_update_store::open_record(&path, false)?;
+        if identity(&file)? != expected {
+            return Err(io::Error::other("candidate changed"));
+        }
+        self.files[index] = Some(file);
+        Ok(())
+    }
+    /// In-place single attempt: even Err retains parents/lease and every
+    /// remaining candidate/bridge. No consuming-error path drops custody.
+    /// Caller records a durable started phase BEFORE entering this method.
+    pub fn publish(
+        &mut self,
+        mut before_effect: impl FnMut() -> io::Result<()>,
+    ) -> io::Result<PairState> {
+        if self.attempted {
+            return Err(io::Error::other("pair already attempted"));
+        }
+        self.attempted = true;
+        self.guard.require(self.old)?;
+        let new = self.identities()?;
+        before_effect()?;
+        if self.guard.replace(self.files()?[0], 0).is_err() {
+            self.guard.require(self.old)?;
+            self.state = Some(PairState::Refused);
+            return Ok(PairState::Refused);
+        }
+        self.guard.require([new[0], self.old[1]])?;
+        // A failure after the first rename is explicitly unknown. Retain all
+        // guards; no second attempt or guessed compensation is permitted.
+        before_effect()?;
+        self.guard.replace(self.files()?[1], 1)?;
+        self.guard.require(new)?;
+        before_effect()?;
+        self.executable_pin(0)?;
+        self.executable_pin(1)?;
+        self.guard.require(new)?;
+        self.state = Some(PairState::Published);
+        Ok(PairState::Published)
     }
 }
 

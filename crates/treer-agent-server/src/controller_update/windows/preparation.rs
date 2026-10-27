@@ -43,6 +43,17 @@ pub(crate) struct SelectedCustody {
 
 #[allow(dead_code)] // Public capability/Policy route stays OFF.
 impl Preparation {
+    pub(crate) async fn publish_worker_pair(&mut self, runtime: &ControllerRuntime) -> Result<()> {
+        self.check(runtime)?;
+        self.poisoned = true;
+        self.coordinator.publish_worker_pair(runtime).await?;
+        self.selection
+            .as_ref()
+            .ok_or_else(refused)?
+            .check(runtime)?;
+        self.poisoned = false;
+        Ok(())
+    }
     #[cfg(test)]
     pub(crate) fn fixture_disconnect_and_drop_sender(&mut self) {
         self.coordinator.fixture_disconnect_and_drop_sender();

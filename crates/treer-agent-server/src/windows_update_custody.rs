@@ -25,6 +25,8 @@ pub(crate) struct Channel<S> {
     phase: Phase,
     backup_attempted: bool,
     candidates_attempted: bool,
+    #[cfg(any(windows, test))]
+    publication_attempted: bool,
     #[cfg(windows)]
     startup: Option<Option<treer_protocol::controller_update_worker_inputs::Snapshot>>,
     #[cfg(windows)]
@@ -33,6 +35,33 @@ pub(crate) struct Channel<S> {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 impl<S: AsyncRead + AsyncWrite + Unpin> Channel<S> {
+    #[cfg(windows)]
+    pub(crate) async fn publish_pair(
+        &mut self,
+        permit: &crate::windows_update_admission::ConfirmedPublicationPermit<'_>,
+        transfer: &crate::windows_update_transfer::Transfer,
+    ) -> Result<()> {
+        permit.check(self.context.operation)?;
+        transfer.remaining(chrono::Utc::now().timestamp_millis())?;
+        self.request_publication(&transfer.encode()?).await?;
+        permit.check(self.context.operation)?;
+        transfer.remaining(chrono::Utc::now().timestamp_millis())?;
+        Ok(())
+    }
+    #[cfg(any(windows, test))]
+    async fn request_publication(&mut self, payload: &[u8]) -> Result<()> {
+        if self.phase != Phase::Holding || self.publication_attempted {
+            return Err(refused());
+        }
+        self.publication_attempted = true;
+        self.exchange_payload(
+            CustodyKind::PublishPair,
+            CustodyKind::PairPublished,
+            false,
+            Some(payload),
+        )
+        .await
+    }
     #[cfg(windows)]
     pub(crate) async fn transfer_custody(
         &mut self,
@@ -71,6 +100,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Channel<S> {
             phase: Phase::Holding,
             backup_attempted: false,
             candidates_attempted: false,
+            #[cfg(any(windows, test))]
+            publication_attempted: false,
             #[cfg(windows)]
             startup: None,
             #[cfg(windows)]
@@ -249,6 +280,64 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Channel<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn windows_update_worker_publication_sequenced_payload_ack_is_single_use() {
+        let context = context();
+        let (a, mut b) = tokio::io::duplex(1024);
+        let mut channel = Channel::new(a, context);
+        let peer = tokio::spawn(async move {
+            let mut raw = [0; CUSTODY_BYTES];
+            b.read_exact(&mut raw).await.unwrap();
+            let frame = CustodyFrame::decode(&raw, CustodyKind::PublishPair).unwrap();
+            assert_eq!(frame.context, context);
+            assert!(CustodyFrame::decode(&raw, CustodyKind::TransferCustody).is_none());
+            assert_eq!(b.read_u32_le().await.unwrap(), 4);
+            let mut payload = [0; 4];
+            b.read_exact(&mut payload).await.unwrap();
+            assert_eq!(&payload, b"test");
+            b.write_all(&frame.encode(CustodyKind::PairPublished).unwrap())
+                .await
+                .unwrap();
+        });
+        channel.request_publication(b"test").await.unwrap();
+        assert!(channel.request_publication(b"test").await.is_err());
+        peer.await.unwrap();
+    }
+    #[tokio::test]
+    async fn windows_update_worker_publication_cancel_or_foreign_ack_never_replays() {
+        for cancel in [true, false] {
+            let context = context();
+            let (a, mut b) = tokio::io::duplex(1024);
+            let mut channel = Channel::new(a, context);
+            let (sent, received) = tokio::sync::oneshot::channel();
+            let peer = tokio::spawn(async move {
+                let mut raw = [0; CUSTODY_BYTES];
+                b.read_exact(&mut raw).await.unwrap();
+                let mut frame = CustodyFrame::decode(&raw, CustodyKind::PublishPair).unwrap();
+                let size = b.read_u32_le().await.unwrap();
+                let mut payload = vec![0; size as usize];
+                b.read_exact(&mut payload).await.unwrap();
+                sent.send(()).unwrap();
+                if cancel {
+                    std::future::pending::<()>().await;
+                }
+                frame.sequence += 1;
+                b.write_all(&frame.encode(CustodyKind::PairPublished).unwrap())
+                    .await
+                    .unwrap();
+            });
+            if cancel {
+                let future = channel.request_publication(b"test");
+                tokio::pin!(future);
+                tokio::select! { _ = received => {}, _ = &mut future => panic!("unexpected completion") }
+            } else {
+                assert!(channel.request_publication(b"test").await.is_err());
+            }
+            assert!(channel.request_publication(b"test").await.is_err());
+            assert!(channel.request(true).await.is_err());
+            peer.abort();
+        }
+    }
     #[tokio::test]
     async fn windows_update_transfer_cancel_and_foreign_ack_consume_original_exchange() {
         for cancel in [false, true] {

@@ -126,7 +126,7 @@ impl WorkerBackup {
         ready: &treer_platform::windows_update_pair::WorkerReadyPair,
         binding: &Binding,
     ) -> Result<()> {
-        for (mut file, expected) in ready.files().into_iter().zip([
+        for (mut file, expected) in ready.files()?.into_iter().zip([
             &binding.controller_sha256,
             &binding.cli_sha256,
             &binding.old_controller_sha256,

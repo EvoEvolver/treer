@@ -294,6 +294,14 @@ pub(super) fn create_private_update_candidate(path: &Path) -> io::Result<std::fs
     )
 }
 
+pub(super) fn create_private_worker_candidate(path: &Path) -> io::Result<std::fs::File> {
+    create_private_update_file_access(
+        path,
+        GENERIC_READ | GENERIC_WRITE | windows_sys::Win32::Storage::FileSystem::DELETE,
+        windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+    )
+}
+
 fn create_private_update_file_access(
     path: &Path,
     access: u32,

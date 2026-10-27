@@ -14,6 +14,162 @@ const WORKER_CANDIDATES: [&str; 4] = [
     ".treer-update-cli.restore",
 ];
 
+#[tokio::test]
+async fn windows_update_worker_publication_same_holding_publishes_executable_pe_and_phase() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, true);
+    let mut prepared = transfer_prepared(&runtime, &root, &input, &["srv_other".into()]).await;
+    for (name, expected) in WORKER_CANDIDATES.into_iter().zip([
+        input.bytes.as_slice(),
+        input.bytes.as_slice(),
+        OLD,
+        OLD,
+    ]) {
+        let path = root.join("installed").join(name);
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+        assert!(std::fs::remove_file(&path).is_err());
+    }
+    prepared.transfer_custody(&runtime).await.unwrap();
+    prepared.release_sender_images(&runtime).unwrap();
+    prepared.publish_worker_pair(&runtime).await.unwrap();
+    for name in ["treer-agent-server.exe", "treer.exe"] {
+        let path = root.join("installed").join(name);
+        assert_eq!(std::fs::read(&path).unwrap(), input.bytes);
+        assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+        // Actual task-owned signed PE mapping/execution under receiver pins.
+        // --version is terminal; this starts neither Host nor Controller.
+        let mut child = std::process::Command::new(&path)
+            .arg("--version")
+            .env_clear()
+            .current_dir(root.join("installed"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("task PE deadline");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        assert!(status.success());
+    }
+    let job = stage(&root, &input).join("job");
+    let started: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(job.join("worker-pair-started.bin")).unwrap())
+            .unwrap();
+    let published: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(job.join("worker-pair-published.bin")).unwrap())
+            .unwrap();
+    assert_eq!(published["phase"], "worker_pair_published");
+    assert_eq!(started["old_physical_ids"], published["old_physical_ids"]);
+    assert_ne!(started["old_physical_ids"], published["new_physical_ids"]);
+    assert!(runtime.inner.startup_store.deny_absent("ag_later").is_err());
+    prepared.inspect(&runtime).await.unwrap();
+    prepared.close(&runtime).await.unwrap();
+    drop(prepared);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_worker_publication_without_explicit_release_refuses_before_phase() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, false);
+    let mut prepared = transfer_prepared(&runtime, &root, &input, &[]).await;
+    prepared.transfer_custody(&runtime).await.unwrap();
+    assert!(prepared.publish_worker_pair(&runtime).await.is_err());
+    assert!(!stage(&root, &input)
+        .join("job/worker-pair-started.bin")
+        .exists());
+    assert!(prepared.publish_worker_pair(&runtime).await.is_err());
+    held(&root, &input);
+    prepared.fixture_stop(&runtime).unwrap();
+    drop(prepared);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_worker_publication_second_locked_image_keeps_mixed_unknown_guards() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, false);
+    let mut prepared = transfer_prepared(&runtime, &root, &input, &[]).await;
+    prepared.transfer_custody(&runtime).await.unwrap();
+    prepared.release_sender_images(&runtime).unwrap();
+    use std::os::windows::fs::OpenOptionsExt;
+    let reader = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(root.join("installed/treer.exe"))
+        .unwrap();
+    assert!(prepared.publish_worker_pair(&runtime).await.is_err());
+    assert_eq!(
+        std::fs::read(root.join("installed/treer-agent-server.exe")).unwrap(),
+        input.bytes
+    );
+    assert_eq!(
+        std::fs::read(root.join("installed/treer.exe")).unwrap(),
+        OLD
+    );
+    let job = stage(&root, &input).join("job");
+    assert!(job.join("worker-pair-started.bin").exists());
+    assert!(!job.join("worker-pair-published.bin").exists());
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("installed/treer-agent-server.exe"))
+        .is_err());
+    assert!(runtime.inner.startup_store.deny_absent("ag_later").is_err());
+    drop(reader);
+    assert!(prepared.publish_worker_pair(&runtime).await.is_err());
+    assert!(prepared.close(&runtime).await.is_err());
+    prepared.fixture_live(&runtime).unwrap();
+    prepared.fixture_stop(&runtime).unwrap();
+    drop(prepared);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_worker_publication_existing_phase_refuses_without_replacing_pair() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, false);
+    let mut prepared = transfer_prepared(&runtime, &root, &input, &[]).await;
+    prepared.transfer_custody(&runtime).await.unwrap();
+    prepared.release_sender_images(&runtime).unwrap();
+    let phase = stage(&root, &input).join("job/worker-pair-started.bin");
+    std::fs::write(&phase, b"unresolved").unwrap();
+    treer_platform::secure_file(&phase).unwrap();
+    assert!(prepared.publish_worker_pair(&runtime).await.is_err());
+    assert_eq!(std::fs::read(&phase).unwrap(), b"unresolved");
+    held(&root, &input);
+    assert!(prepared.publish_worker_pair(&runtime).await.is_err());
+    prepared.fixture_stop(&runtime).unwrap();
+    drop(prepared);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 async fn transfer_prepared(
     runtime: &ControllerRuntime,
     root: &Path,
@@ -321,13 +477,17 @@ async fn windows_update_worker_candidates_same_holding_full_new_restore_pair_and
     let intent = std::fs::read(job.join("receipt.bin")).unwrap();
     prepared.prepare_worker_candidates(&runtime).await.unwrap();
     prepared.inspect(&runtime).await.unwrap();
-    for name in WORKER_CANDIDATES {
+    for (name, expected) in WORKER_CANDIDATES.into_iter().zip([
+        input.bytes.as_slice(),
+        input.bytes.as_slice(),
+        OLD,
+        OLD,
+    ]) {
         let path = installed.join(name);
         assert!(path.is_file());
-        assert!(
-            std::fs::read(&path).is_err(),
-            "receiver holds exclusive candidate handles"
-        );
+        // Compatible readers are permitted for the later identity bridge;
+        // receiver still denies new writers/deleters and verifies all bytes.
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
         assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
         assert!(std::fs::remove_file(&path).is_err());
     }

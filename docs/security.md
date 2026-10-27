@@ -116,6 +116,20 @@ or configuration contents. Failed launch retains the newly saved specification.
   CAS, measured running-image provenance or production Windows updater enablement.
   The runtime's loaded StartupStore remains the separate state-root authority.
 
+  The internal same-Holding worker publication continuation additionally requires
+  explicit sender image release, the original released custody, normal Trust,
+  confirmed catalog, selected runtime and loaded writer fence. The receiver
+  retains its independent job/lease/claim/backup/state guards, records an
+  exclusive started phase before either rename, and verifies physical identities
+  plus all four complete hashes before recording publication. Two renames are
+  not pair-atomic: a second-rename failure leaves a mixed pair and unknown with
+  guards retained for the original bounded lifetime; it never retries or guesses
+  rollback. Candidate write objects are replaced through retained identity
+  bridges by restrictive read objects, then rehashed before acceptance. File
+  publication and terminal PE execution are not Controller restart, health,
+  startup recovery, durable terminal outcome or claim retirement. The public
+  Windows capability remains off.
+
   The internal worker-side input receiver verifies both signatures with an
   independently supplied trust key and all four whole-image digests under
   independently opened physical pins. Its state snapshot is compared with the

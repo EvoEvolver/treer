@@ -40,6 +40,40 @@ pub(crate) struct Coordinator {
 
 #[allow(dead_code)] // Public capability remains OFF until full transaction acceptance.
 impl Coordinator {
+    /// The SAME Holding session after explicit image release. Normal Trust,
+    /// selected runtime, loaded fence and original released owner stay held.
+    pub(crate) async fn publish_worker_pair(&mut self, selected: &ControllerRuntime) -> Result<()> {
+        self.scope(selected)?;
+        if self.phase != Phase::Holding {
+            return Err(refused());
+        }
+        self.phase = Phase::Unknown;
+        self.require_live(selected)?;
+        self.trust.recheck()?;
+        let transfer = self.transfer.as_ref().ok_or_else(refused)?;
+        self.startup_committed
+            .as_ref()
+            .ok_or_else(refused)?
+            .fenced_snapshot(*self.binding.operation_id.as_bytes())?;
+        let permit = self
+            .released
+            .as_ref()
+            .ok_or_else(refused)?
+            .publication_permit(
+                selected,
+                &self.binding,
+                self.trust.verification_key(),
+                transfer,
+            )?;
+        self.channel
+            .as_mut()
+            .ok_or_else(refused)?
+            .publish_pair(&permit, transfer)
+            .await?;
+        self.require_live(selected)?;
+        self.phase = Phase::Holding;
+        Ok(())
+    }
     #[cfg(test)]
     pub(crate) fn fixture_disconnect_and_drop_sender(&mut self) {
         self.phase = Phase::Unknown;

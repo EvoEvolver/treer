@@ -256,12 +256,69 @@ pub struct ReservedInputs(
 
 #[cfg(windows)]
 pub(crate) struct ReleasedSenderCustody {
+    binding: Binding,
+    key: [u8; 32],
     _lease: treer_platform::windows_update_inputs::InstallationLease,
     _target: treer_platform::windows_update_inputs::PinnedPair,
     _state: Option<crate::controller::ControllerUpdateState>,
     _plan: Option<confirmed::ConfiguredPlan>,
     _job: treer_platform::windows_update_store::UpdateStore,
     _record: treer_platform::windows_update_store::TransferRecord,
+}
+
+/// Borrowed continuation of the ORIGINAL explicitly released owner. Public
+/// transfer bytes or creator observations cannot construct this grant.
+#[cfg(windows)]
+pub(crate) struct ConfirmedPublicationPermit<'a> {
+    custody: &'a ReleasedSenderCustody,
+    selected: &'a crate::controller::ControllerRuntime,
+}
+#[cfg(windows)]
+impl ConfirmedPublicationPermit<'_> {
+    pub(crate) fn check(&self, operation: [u8; 16]) -> Result<()> {
+        let binding = &self.custody.binding;
+        if operation != *binding.operation_id.as_bytes() {
+            bail!("windows_update_publication_permit_refused");
+        }
+        self.custody
+            ._state
+            .as_ref()
+            .ok_or_else(confirmed::refused)?
+            .matches_selected(self.selected, binding)?;
+        self.custody
+            ._plan
+            .as_ref()
+            .ok_or_else(confirmed::refused)?
+            .recheck(
+                &crate::controller_update::catalog::Catalog::local()?,
+                binding,
+                chrono::Utc::now(),
+            )?;
+        crate::windows_update_intent::inspect(&self.custody._job.read()?, binding)?;
+        Ok(())
+    }
+}
+#[cfg(windows)]
+impl ReleasedSenderCustody {
+    pub(crate) fn publication_permit<'a>(
+        &'a self,
+        selected: &'a crate::controller::ControllerRuntime,
+        binding: &Binding,
+        key: &VerifyingKey,
+        transfer: &crate::windows_update_transfer::Transfer,
+    ) -> Result<ConfirmedPublicationPermit<'a>> {
+        if binding != &self.binding || key.to_bytes() != self.key {
+            bail!("windows_update_publication_permit_refused");
+        }
+        transfer.remaining(chrono::Utc::now().timestamp_millis())?;
+        self._record.verify(&transfer.encode()?)?;
+        let permit = ConfirmedPublicationPermit {
+            custody: self,
+            selected,
+        };
+        permit.check(*binding.operation_id.as_bytes())?;
+        Ok(permit)
+    }
 }
 
 /// Borrowed from the SAME held confirmed reservation/runtime. Not wire data,
@@ -337,6 +394,8 @@ impl ReservedInputs {
         record: treer_platform::windows_update_store::TransferRecord,
     ) -> ReleasedSenderCustody {
         ReleasedSenderCustody {
+            binding: self.0.binding,
+            key: self.0.verifying_key,
             _lease: self.0._installed.into_lease(),
             _target: self.0._target,
             _state: self.0.state,

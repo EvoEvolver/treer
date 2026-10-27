@@ -246,6 +246,11 @@ pub(crate) mod native {
         backup: Option<super::backup_preparation::WorkerBackup>,
         candidates_attempted: bool,
         candidates: Option<treer_platform::windows_update_pair::WorkerReadyPair>,
+        publication_attempted: bool,
+        pair_phases: Vec<(
+            Vec<u8>,
+            treer_platform::windows_update_store::TransferRecord,
+        )>,
         transferred: Option<(
             crate::windows_update_transfer::Transfer,
             treer_platform::windows_update_store::TransferRecord,
@@ -270,12 +275,22 @@ pub(crate) mod native {
                         .map_err(|_| refused())?
                         .map_err(|_| refused())?;
                     let transfer = CustodyFrame::decode(&bytes, CustodyKind::TransferCustody);
+                    let publication = CustodyFrame::decode(&bytes, CustodyKind::PublishPair);
                     let (frame, reply, close, backup, adopt, candidates) = if let Some(frame) =
                         transfer
                     {
                         (
                             frame,
                             CustodyKind::CustodyTransferred,
+                            false,
+                            false,
+                            false,
+                            false,
+                        )
+                    } else if let Some(frame) = publication {
+                        (
+                            frame,
+                            CustodyKind::PairPublished,
                             false,
                             false,
                             false,
@@ -338,6 +353,16 @@ pub(crate) mod native {
                             .0
                             .retention_deadline()
                             .ok_or_else(refused)?;
+                    }
+                    if publication.is_some() {
+                        tokio::time::timeout_at(
+                            deadline.min(
+                                tokio::time::Instant::now() + std::time::Duration::from_secs(3),
+                            ),
+                            self.publish_pair(),
+                        )
+                        .await
+                        .map_err(|_| refused())??;
                     }
                     if adopt {
                         self.accept_committed_startup().await?;
@@ -461,6 +486,85 @@ pub(crate) mod native {
             self.inspect_snapshot()
         }
 
+        async fn publish_pair(&mut self) -> Result<()> {
+            use treer_platform::{windows_update_pair::PairState, windows_update_store::PairPhase};
+            if self.publication_attempted || !self.stream.creator_is_live()? {
+                return Err(refused());
+            }
+            // Latch before payload await, phase writes or any rename. Neither
+            // EOF nor transfer evidence is this explicit same-session command.
+            self.publication_attempted = true;
+            self.inspect_snapshot()?;
+            let size = self.stream.read_u32_le().await.map_err(|_| refused())? as usize;
+            if size == 0 || size > crate::windows_update_transfer::LIMIT {
+                return Err(refused());
+            }
+            let mut raw = vec![0; size];
+            self.stream
+                .read_exact(&mut raw)
+                .await
+                .map_err(|_| refused())?;
+            let (transfer, record) = self.transferred.as_ref().ok_or_else(refused)?;
+            transfer.remaining(chrono::Utc::now().timestamp_millis())?;
+            if raw != transfer.encode()? {
+                return Err(refused());
+            }
+            record.verify(&raw)?;
+            if !self.stream.creator_is_live()? {
+                return Err(refused());
+            }
+            self.inspect_snapshot()?;
+            let ready = self.candidates.as_ref().ok_or_else(refused)?;
+            let evidence = |phase: &str| -> Result<Vec<u8>> {
+                Ok(serde_json::to_vec(&serde_json::json!({
+                    "schema_version":1, "phase":phase, "binding":self.binding,
+                    "operation":self.custody_context.operation,
+                    "challenge":self.custody_context.challenge,
+                    "offer_sha256":self.custody_context.context_sha256,
+                    "snapshot":self.current_snapshot,
+                    "old_physical_ids":ready.old_identities(),
+                    "new_physical_ids":ready.identities()?,
+                }))?)
+            };
+            let started = evidence("worker_pair_started")?;
+            let published = evidence("worker_pair_published")?;
+            let refused_phase = evidence("worker_pair_refused")?;
+            let record = self.job.record_pair_phase(PairPhase::Started, &started)?;
+            self.pair_phases.push((started, record));
+            // No consuming operation: an error retains all remaining handles
+            // in this receiver through its ORIGINAL bounded custody deadline.
+            let transfer = &self.transferred.as_ref().ok_or_else(refused)?.0;
+            let stream = &self.stream;
+            let state = self.candidates.as_mut().ok_or_else(refused)?.publish(|| {
+                transfer
+                    .remaining(chrono::Utc::now().timestamp_millis())
+                    .map_err(|_| std::io::Error::other("publication deadline"))?;
+                if !stream.creator_is_live()? {
+                    return Err(std::io::Error::other("creator not live"));
+                }
+                Ok(())
+            })?;
+            if state != PairState::Published {
+                let record = self
+                    .job
+                    .record_pair_phase(PairPhase::Refused, &refused_phase)?;
+                self.pair_phases.push((refused_phase, record));
+                return Err(refused());
+            }
+            // Fresh restrictive read objects must match every complete signed
+            // hash after the identity bridge/reopen, before evidence or ACK.
+            self.inspect_snapshot()?;
+            self.candidates
+                .as_ref()
+                .ok_or_else(refused)?
+                .verify_published()?;
+            let record = self
+                .job
+                .record_pair_phase(PairPhase::Published, &published)?;
+            self.pair_phases.push((published, record));
+            self.inspect_snapshot()
+        }
+
         async fn accept_committed_startup(&mut self) -> Result<()> {
             use treer_protocol::controller_update_worker_inputs::{
                 StartupTransition, STARTUP_TRANSITION_LIMIT,
@@ -511,6 +615,9 @@ pub(crate) mod native {
                     .verify(&crate::windows_update_intent::encode(&self.binding)?)?;
                 self.job
                     .verify(&crate::windows_update_intent::encode(&self.binding)?)?;
+                for (raw, record) in &self.pair_phases {
+                    record.verify(raw)?;
+                }
                 if let Some((transfer, record)) = &self.transferred {
                     transfer.remaining(chrono::Utc::now().timestamp_millis())?;
                     record.verify(&transfer.encode()?)?;
@@ -527,6 +634,11 @@ pub(crate) mod native {
                         candidates,
                         &self.binding,
                     )?;
+                    if candidates.state()
+                        == Some(treer_platform::windows_update_pair::PairState::Published)
+                    {
+                        candidates.verify_published()?;
+                    }
                 }
                 if self.transferred.is_none() && !self.stream.creator_is_live()? {
                     return Err(refused());
@@ -684,6 +796,8 @@ pub(crate) mod native {
                 backup: None,
                 candidates_attempted: false,
                 candidates: None,
+                publication_attempted: false,
+                pair_phases: Vec::new(),
                 transferred: None,
             })
         })

@@ -170,7 +170,8 @@ impl InputReceipt {
 
 /// Bounded custody control on the SAME received-input connection. Inspection
 /// and close confer no write authority; PrepareBackup is a distinct, one-use
-/// backup-only grant. No role permits sender release or installation changes.
+/// backup-only grant. PublishPair is a distinct original-owner continuation;
+/// wire data alone never permits sender release or installation changes.
 /// Neither inspection nor close ACK permits sender release or an update.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CustodyKind {
@@ -190,6 +191,9 @@ pub enum CustodyKind {
     /// Explicit bounded custody transfer; ACK alone is not sender release.
     TransferCustody,
     CustodyTransferred,
+    /// Explicit original same-session publication, after sender image release.
+    PublishPair,
+    PairPublished,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -230,6 +234,8 @@ impl CustodyFrame {
             CustodyKind::CandidatesPrepared => b"TRWCNA01",
             CustodyKind::TransferCustody => b"TRWCTF01",
             CustodyKind::CustodyTransferred => b"TRWCTA01",
+            CustodyKind::PublishPair => b"TRWCPP01",
+            CustodyKind::PairPublished => b"TRWCPA01",
         });
         bytes[WORKER_BINDING_FRAME_BYTES..].copy_from_slice(&self.sequence.to_le_bytes());
         Some(bytes)
