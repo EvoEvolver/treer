@@ -483,6 +483,49 @@ impl ControllerUpdateChild {
     }
 
     #[cfg(windows)]
+    pub(crate) fn verify_transfer_record(
+        &self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+        raw: &[u8],
+    ) -> Result<()> {
+        self.matches(selected, binding)?;
+        treer_platform::windows_update_process::require_created_child_live(&self.child)?;
+        self._reservation
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("windows_update_transfer_unconfirmed"))?
+            .verify_transfer(raw)?
+            .verify(raw)?;
+        treer_platform::windows_update_process::require_created_child_live(&self.child)?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn release_sender_images(
+        &mut self,
+        selected: &ControllerRuntime,
+        binding: &crate::windows_update_intent::Binding,
+        transfer: &crate::windows_update_transfer::Transfer,
+        committed: &crate::startup_store::update::Committed,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<crate::windows_update_admission::ReleasedSenderCustody> {
+        self.matches(selected, binding)?;
+        committed.fenced_snapshot(*binding.operation_id.as_bytes())?;
+        self.backup_permit(selected, binding, key)?
+            .check(*binding.operation_id.as_bytes())?;
+        transfer.remaining(chrono::Utc::now().timestamp_millis())?;
+        let raw = transfer.encode()?;
+        self.verify_transfer_record(selected, binding, &raw)?;
+        let reservation = self
+            ._reservation
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("windows_update_transfer_unconfirmed"))?;
+        let record = reservation.verify_transfer(&raw)?;
+        // No await or fallible operation after detaching original image pins.
+        Ok(self._reservation.take().unwrap().release_image_pins(record))
+    }
+
+    #[cfg(windows)]
     pub(crate) fn backup_permit<'a>(
         &'a self,
         selected: &'a ControllerRuntime,

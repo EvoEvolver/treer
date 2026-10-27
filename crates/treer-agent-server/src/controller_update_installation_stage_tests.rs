@@ -14,6 +14,165 @@ const WORKER_CANDIDATES: [&str; 4] = [
     ".treer-update-cli.restore",
 ];
 
+async fn transfer_prepared(
+    runtime: &ControllerRuntime,
+    root: &Path,
+    input: &Inputs,
+    shared: &[String],
+) -> Preparation {
+    let mut prepared = Preparation::local(
+        runtime,
+        input.dispatch.clone(),
+        &input.settings,
+        &input.fixture.documents(),
+        (&input.bytes, &input.bytes),
+        shared,
+    )
+    .unwrap();
+    prepared
+        .start(runtime, &input.fixture.documents())
+        .await
+        .unwrap();
+    prepared.prepare_worker_backup(runtime).await.unwrap();
+    let raw = std::fs::read(root.join("configured-state/srv_fixture-agent-startup.json")).unwrap();
+    prepared
+        .compare_write_startup_fenced(runtime, Some(&raw))
+        .await
+        .unwrap();
+    prepared.prepare_worker_candidates(runtime).await.unwrap();
+    prepared
+}
+
+#[tokio::test]
+async fn windows_update_transfer_same_holding_durable_record_then_explicit_all_sender_images() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, true);
+    let mut prepared = transfer_prepared(&runtime, &root, &input, &["srv_other".into()]).await;
+    let installed = root.join("installed/treer-agent-server.exe");
+    prepared.transfer_custody(&runtime).await.unwrap();
+    // Even a real transfer ACK/durable record does not release sender images.
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(&installed)
+        .is_err());
+    let record = stage(&root, &input).join("job/worker-transfer.bin");
+    let accepted = std::fs::read(&record).unwrap();
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(&record)
+        .is_err());
+    prepared.release_sender_images(&runtime).unwrap();
+    // Includes every saved inventory image pin, not just ReservedInputs.
+    drop(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&installed)
+            .unwrap(),
+    );
+    assert_eq!(std::fs::read(&installed).unwrap(), OLD);
+    assert!(runtime.inner.startup_store.deny_absent("ag_later").is_err());
+    held(&root, &input);
+    prepared.inspect(&runtime).await.unwrap();
+    prepared.close(&runtime).await.unwrap();
+    assert!(prepared.retain_closed(&runtime).is_err());
+    assert_eq!(std::fs::read(record).unwrap(), accepted);
+    drop(prepared);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_transfer_dead_original_child_never_releases_sender_images() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, false);
+    let mut prepared = transfer_prepared(&runtime, &root, &input, &[]).await;
+    prepared.transfer_custody(&runtime).await.unwrap();
+    let record = stage(&root, &input).join("job/worker-transfer.bin");
+    let raw = std::fs::read(&record).unwrap();
+    // A genuine record/ACK plus ORIGINAL Child exit is still not release.
+    prepared.fixture_stop(&runtime).unwrap();
+    assert!(prepared.release_sender_images(&runtime).is_err());
+    assert!(prepared.release_sender_images(&runtime).is_err());
+    assert!(prepared.close(&runtime).await.is_err());
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("installed/treer-agent-server.exe"))
+        .is_err());
+    assert_eq!(std::fs::read(record).unwrap(), raw);
+    held(&root, &input);
+    assert!(runtime.inner.startup_store.deny_absent("ag_later").is_err());
+    drop(prepared);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_transfer_record_conflict_retains_original_pins_and_unknown() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, false);
+    let mut prepared = transfer_prepared(&runtime, &root, &input, &[]).await;
+    let record = stage(&root, &input).join("job/worker-transfer.bin");
+    std::fs::write(&record, b"unresolved transfer").unwrap();
+    assert!(prepared.transfer_custody(&runtime).await.is_err());
+    assert!(prepared.transfer_custody(&runtime).await.is_err());
+    assert!(prepared.release_sender_images(&runtime).is_err());
+    assert!(prepared.close(&runtime).await.is_err());
+    assert_eq!(std::fs::read(record).unwrap(), b"unresolved transfer");
+    assert!(std::fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("installed/treer-agent-server.exe"))
+        .is_err());
+    held(&root, &input);
+    assert!(runtime.inner.startup_store.deny_absent("ag_later").is_err());
+    // Test-only teardown of the original owned child, not a retry or recovery.
+    prepared.fixture_stop(&runtime).unwrap();
+    drop(prepared);
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn windows_update_transfer_disconnected_owner_retains_worker_lifetime_and_lease() {
+    let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;
+    let catalog = UpdatePlanCatalogFixture::new();
+    let (runtime, root, task) = update_state_fixture().await;
+    let input = inputs(&root, &catalog, false);
+    let mut prepared = transfer_prepared(&runtime, &root, &input, &[]).await;
+    prepared.transfer_custody(&runtime).await.unwrap();
+    prepared.release_sender_images(&runtime).unwrap();
+    prepared.fixture_disconnect_and_drop_sender();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    prepared.fixture_live(&runtime).unwrap();
+    // Original sender lease/job owners are dropped. Only the original Child's
+    // inherited/independent receiver custody keeps these locks and claim held.
+    held(&root, &input);
+    assert!(treer_platform::windows_update_store::UpdateStore::open(
+        &stage(&root, &input).join("job")
+    )
+    .is_err());
+    assert!(prepared.transfer_custody(&runtime).await.is_err());
+    prepared.fixture_stop(&runtime).unwrap();
+    drop(prepared);
+    assert!(
+        treer_platform::windows_update_inputs::PinnedPair::open(&root.join("installed"))
+            .unwrap()
+            .lock_installation()
+            .is_ok()
+    );
+    drop(runtime);
+    task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn windows_update_mutation_fence_same_loaded_store_worker_cas_and_candidates() {
     let _serial = UPDATE_PLAN_CONFIG_LOCK.lock().await;

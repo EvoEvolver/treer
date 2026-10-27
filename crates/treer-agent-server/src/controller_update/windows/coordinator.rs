@@ -34,10 +34,76 @@ pub(crate) struct Coordinator {
     backup_prepared: bool,
     startup_attempted: bool,
     startup_committed: Option<crate::startup_store::update::Committed>,
+    transfer: Option<crate::windows_update_transfer::Transfer>,
+    released: Option<crate::windows_update_admission::ReleasedSenderCustody>,
 }
 
 #[allow(dead_code)] // Public capability remains OFF until full transaction acceptance.
 impl Coordinator {
+    #[cfg(test)]
+    pub(crate) fn fixture_disconnect_and_drop_sender(&mut self) {
+        self.phase = Phase::Unknown;
+        self.channel.take();
+        self.released.take();
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_live(&mut self, selected: &ControllerRuntime) -> Result<()> {
+        self.require_live(selected)
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_stop(&mut self, selected: &ControllerRuntime) -> Result<()> {
+        self.child
+            .as_mut()
+            .ok_or_else(refused)?
+            .stop(selected, &self.binding)?;
+        Ok(())
+    }
+    pub(crate) async fn transfer_custody(&mut self, selected: &ControllerRuntime) -> Result<()> {
+        self.scope(selected)?;
+        if self.phase != Phase::Holding || self.transfer.is_some() {
+            return Err(refused());
+        }
+        self.phase = Phase::Unknown;
+        self.require_live(selected)?;
+        self.trust.recheck()?;
+        let committed = self.startup_committed.as_ref().ok_or_else(refused)?;
+        let transfer = self
+            .channel
+            .as_mut()
+            .ok_or_else(refused)?
+            .transfer_custody(&self.binding, committed)
+            .await?;
+        self.child
+            .as_ref()
+            .ok_or_else(refused)?
+            .verify_transfer_record(selected, &self.binding, &transfer.encode()?)?;
+        self.transfer = Some(transfer);
+        self.require_live(selected)?;
+        self.phase = Phase::Holding;
+        Ok(())
+    }
+    pub(crate) fn release_sender_images(&mut self, selected: &ControllerRuntime) -> Result<()> {
+        self.scope(selected)?;
+        if self.phase != Phase::Holding || self.released.is_some() {
+            return Err(refused());
+        }
+        self.phase = Phase::Unknown;
+        self.trust.recheck()?;
+        self.released = Some(
+            self.child
+                .as_mut()
+                .ok_or_else(refused)?
+                .release_sender_images(
+                    selected,
+                    &self.binding,
+                    self.transfer.as_ref().ok_or_else(refused)?,
+                    self.startup_committed.as_ref().ok_or_else(refused)?,
+                    self.trust.verification_key(),
+                )?,
+        );
+        self.phase = Phase::Holding;
+        Ok(())
+    }
     /// Stage the authenticated new/restore pair in the SAME Holding worker.
     /// All original image pins remain held; this cannot replace installed files.
     pub(crate) async fn prepare_worker_candidates(
@@ -193,6 +259,8 @@ impl Coordinator {
             backup_prepared: false,
             startup_attempted: false,
             startup_committed: None,
+            transfer: None,
+            released: None,
         })
     }
 
@@ -225,7 +293,14 @@ impl Coordinator {
             &self.trust,
         ) {
             Ok(child) => child,
-            Err((_, reserved)) => {
+            Err((error, reserved)) => {
+                #[cfg(test)]
+                eprintln!(
+                    "windows_update_receiver_start stage=create child_created=false static_spawn_unknown={}",
+                    error.to_string() == "windows_update_worker_spawn_unknown"
+                );
+                #[cfg(not(test))]
+                let _ = error;
                 self.reserved = Some(*reserved);
                 return Err(refused());
             }

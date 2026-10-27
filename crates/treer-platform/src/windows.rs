@@ -275,17 +275,30 @@ pub fn secure_path(path: &Path) -> io::Result<()> {
 /// Exclusive, non-inherited handle and private DACL from the first instant.
 /// The caller retains checked physical parent handles for the complete write.
 pub(super) fn create_private_update_file(path: &Path) -> io::Result<std::fs::File> {
-    create_private_update_file_access(path, GENERIC_READ | GENERIC_WRITE)
+    create_private_update_file_access(path, GENERIC_READ | GENERIC_WRITE, 0)
+}
+
+pub(super) fn create_private_transfer_record(path: &Path) -> io::Result<std::fs::File> {
+    create_private_update_file_access(
+        path,
+        GENERIC_READ | GENERIC_WRITE,
+        windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ,
+    )
 }
 
 pub(super) fn create_private_update_candidate(path: &Path) -> io::Result<std::fs::File> {
     create_private_update_file_access(
         path,
         GENERIC_READ | GENERIC_WRITE | windows_sys::Win32::Storage::FileSystem::DELETE,
+        0,
     )
 }
 
-fn create_private_update_file_access(path: &Path, access: u32) -> io::Result<std::fs::File> {
+fn create_private_update_file_access(
+    path: &Path,
+    access: u32,
+    sharing: u32,
+) -> io::Result<std::fs::File> {
     use windows_sys::Win32::Storage::FileSystem::*;
     let descriptor = descriptor(false)?;
     let attributes = SECURITY_ATTRIBUTES {
@@ -298,7 +311,7 @@ fn create_private_update_file_access(path: &Path, access: u32) -> io::Result<std
         let handle = CreateFileW(
             path.as_ptr(),
             access,
-            0,
+            sharing,
             &attributes,
             CREATE_NEW,
             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,

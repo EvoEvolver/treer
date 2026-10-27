@@ -75,7 +75,8 @@ pub(crate) mod native {
         directory: ConfigDirectory,
         names: Vec<String>,
         _snapshots: Vec<ConfigSnapshot>,
-        entries: Vec<(Enrollment, PinnedPair)>,
+        entries: Vec<(Enrollment, Option<PinnedPair>)>,
+        image_parents: Vec<treer_platform::windows_update_inputs::ImageParents>,
         selected: usize,
         shared: Vec<String>,
         catalog: crate::controller_update::catalog::Catalog,
@@ -129,7 +130,7 @@ pub(crate) mod native {
                             return Err(refused());
                         }
                         let pair = PinnedPair::open(path.parent().ok_or_else(refused)?)?;
-                        entries.push((enrollment, pair));
+                        entries.push((enrollment, Some(pair)));
                     }
                     snapshots.extend([controller, host]);
                 }
@@ -145,10 +146,14 @@ pub(crate) mod native {
                     return Err(refused());
                 }
                 let selected = matches[0];
-                let identity = entries[selected].1.pair_identity()?;
+                let identity = entries[selected]
+                    .1
+                    .as_ref()
+                    .ok_or_else(refused)?
+                    .pair_identity()?;
                 let mut shared = Vec::new();
                 for (index, (entry, pair)) in entries.iter().enumerate() {
-                    let other = pair.pair_identity()?;
+                    let other = pair.as_ref().ok_or_else(refused)?.pair_identity()?;
                     if index != selected
                         && (identity.controller == other.controller || identity.cli == other.cli)
                     {
@@ -162,6 +167,7 @@ pub(crate) mod native {
                     names,
                     _snapshots: snapshots,
                     entries,
+                    image_parents: Vec::new(),
                     selected,
                     shared,
                     catalog,
@@ -197,10 +203,19 @@ pub(crate) mod native {
         }
         pub(crate) fn lock(&self) -> Result<LockedInstallation> {
             // Independently pin exact physical identities under the originals.
-            let pair = &self.entries[self.selected].1;
+            let pair = self.entries[self.selected].1.as_ref().ok_or_else(refused)?;
             let reopened = PinnedPair::open_matching(pair.directory_path(), pair.pair_identity()?)
                 .map_err(|_| refused())?;
             reopened.lock_installation().map_err(|_| refused())
+        }
+        /// Called synchronously after this operation's explicit durable sender
+        /// release. Keep configuration snapshots and every physical parent.
+        pub(crate) fn release_images(&mut self) {
+            for (_, pair) in &mut self.entries {
+                if let Some(pair) = pair.take() {
+                    self.image_parents.push(pair.into_image_parents());
+                }
+            }
         }
     }
 }

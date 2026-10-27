@@ -43,6 +43,40 @@ pub(crate) struct SelectedCustody {
 
 #[allow(dead_code)] // Public capability/Policy route stays OFF.
 impl Preparation {
+    #[cfg(test)]
+    pub(crate) fn fixture_disconnect_and_drop_sender(&mut self) {
+        self.coordinator.fixture_disconnect_and_drop_sender();
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_live(&mut self, runtime: &ControllerRuntime) -> Result<()> {
+        self.coordinator.fixture_live(runtime)
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture_stop(&mut self, runtime: &ControllerRuntime) -> Result<()> {
+        self.coordinator.fixture_stop(runtime)
+    }
+    pub(crate) async fn transfer_custody(&mut self, runtime: &ControllerRuntime) -> Result<()> {
+        self.check(runtime)?;
+        self.poisoned = true;
+        self.coordinator.transfer_custody(runtime).await?;
+        self.selection
+            .as_ref()
+            .ok_or_else(refused)?
+            .check(runtime)?;
+        self.poisoned = false;
+        Ok(())
+    }
+    pub(crate) fn release_sender_images(&mut self, runtime: &ControllerRuntime) -> Result<()> {
+        self.check(runtime)?;
+        self.poisoned = true;
+        self.coordinator.release_sender_images(runtime)?;
+        self.selection
+            .as_mut()
+            .ok_or_else(refused)?
+            .release_images();
+        self.poisoned = false;
+        Ok(())
+    }
     /// After normal identity/Policy and confirmation, use only normal local
     /// release settings. No locks/staging/claim exist while awaiting downloads.
     pub(crate) async fn download(

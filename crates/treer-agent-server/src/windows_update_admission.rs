@@ -254,6 +254,16 @@ pub struct ReservedInputs(
     treer_platform::windows_update_store::UpdateStore,
 );
 
+#[cfg(windows)]
+pub(crate) struct ReleasedSenderCustody {
+    _lease: treer_platform::windows_update_inputs::InstallationLease,
+    _target: treer_platform::windows_update_inputs::PinnedPair,
+    _state: Option<crate::controller::ControllerUpdateState>,
+    _plan: Option<confirmed::ConfiguredPlan>,
+    _job: treer_platform::windows_update_store::UpdateStore,
+    _record: treer_platform::windows_update_store::TransferRecord,
+}
+
 /// Borrowed from the SAME held confirmed reservation/runtime. Not wire data,
 /// a general mutation grant, sender release or a way to adopt another job.
 #[cfg(windows)]
@@ -314,6 +324,27 @@ impl<'a> ConfirmedBackupPermit<'a> {
 
 #[cfg(windows)]
 impl ReservedInputs {
+    pub(crate) fn verify_transfer(
+        &self,
+        expected: &[u8],
+    ) -> Result<treer_platform::windows_update_store::TransferRecord> {
+        Ok(self.1.read_transfer(expected)?)
+    }
+    /// Consuming internal continuation only AFTER the original live Child,
+    /// exact loaded fence, normal Trust/plan and durable record are checked.
+    pub(crate) fn release_image_pins(
+        self,
+        record: treer_platform::windows_update_store::TransferRecord,
+    ) -> ReleasedSenderCustody {
+        ReleasedSenderCustody {
+            _lease: self.0._installed.into_lease(),
+            _target: self.0._target,
+            _state: self.0.state,
+            _plan: self.0.confirmed_plan,
+            _job: self.1,
+            _record: record,
+        }
+    }
     pub(crate) fn backup_permit<'a>(
         &'a self,
         selected: &'a crate::controller::ControllerRuntime,
@@ -475,7 +506,19 @@ impl ReservedInputs {
         self.0
             ._target
             .spawn_pinned_controller(&self.0._installed, &arguments)
-            .map_err(|_| anyhow::anyhow!("windows_update_worker_spawn_unknown"))
+            .map_err(|error| {
+                // Native fixture evidence only: never print an OS message,
+                // command, pathname, arguments, configuration or key material.
+                #[cfg(test)]
+                eprintln!(
+                    "windows_update_worker_spawn_unknown os_code={:?} kind={:?}",
+                    error.raw_os_error(),
+                    error.kind()
+                );
+                #[cfg(not(test))]
+                let _ = error;
+                anyhow::anyhow!("windows_update_worker_spawn_unknown")
+            })
     }
 }
 

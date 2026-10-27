@@ -232,7 +232,7 @@ pub(crate) mod native {
         lock: InheritedInstallationLock,
         claim: ClaimPin,
         job: ReceivedJob,
-        installed: PinnedPair,
+        installed: Option<PinnedPair>,
         target: PinnedPair,
         state: BackupDirectory,
         binding: crate::windows_update_intent::Binding,
@@ -246,6 +246,10 @@ pub(crate) mod native {
         backup: Option<super::backup_preparation::WorkerBackup>,
         candidates_attempted: bool,
         candidates: Option<treer_platform::windows_update_pair::WorkerReadyPair>,
+        transferred: Option<(
+            crate::windows_update_transfer::Transfer,
+            treer_platform::windows_update_store::TransferRecord,
+        )>,
     }
 
     #[allow(dead_code)] // Internal continuation; production coordinator is not wired.
@@ -257,17 +261,27 @@ pub(crate) mod native {
             use treer_protocol::controller_update_worker_inputs::{
                 CustodyFrame, CustodyKind, CUSTODY_BYTES, CUSTODY_MAX_STEPS,
             };
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-            tokio::time::timeout_at(deadline, async {
+            let mut deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            let outcome = async {
                 for sequence in 1..=CUSTODY_MAX_STEPS {
                     let mut bytes = [0; CUSTODY_BYTES];
-                    self.stream
-                        .read_exact(&mut bytes)
+                    tokio::time::timeout_at(deadline, self.stream.read_exact(&mut bytes))
                         .await
+                        .map_err(|_| refused())?
                         .map_err(|_| refused())?;
+                    let transfer = CustodyFrame::decode(&bytes, CustodyKind::TransferCustody);
                     let (frame, reply, close, backup, adopt, candidates) = if let Some(frame) =
-                        CustodyFrame::decode(&bytes, CustodyKind::Inspect)
+                        transfer
                     {
+                        (
+                            frame,
+                            CustodyKind::CustodyTransferred,
+                            false,
+                            false,
+                            false,
+                            false,
+                        )
+                    } else if let Some(frame) = CustodyFrame::decode(&bytes, CustodyKind::Inspect) {
                         (frame, CustodyKind::Inspected, false, false, false, false)
                     } else if let Some(frame) = CustodyFrame::decode(&bytes, CustodyKind::Close) {
                         (frame, CustodyKind::Closed, true, false, false, false)
@@ -310,6 +324,21 @@ pub(crate) mod native {
                     if frame.context != self.custody_context || frame.sequence != sequence {
                         return Err(refused());
                     }
+                    if transfer.is_some() {
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(3),
+                            self.accept_transfer(),
+                        )
+                        .await
+                        .map_err(|_| refused())??;
+                        deadline = self
+                            .transferred
+                            .as_ref()
+                            .ok_or_else(refused)?
+                            .0
+                            .retention_deadline()
+                            .ok_or_else(refused)?;
+                    }
                     if adopt {
                         self.accept_committed_startup().await?;
                     } else {
@@ -325,7 +354,7 @@ pub(crate) mod native {
                             .as_ref()
                             .ok_or_else(refused)?
                             .stage_candidates(
-                                &self.installed,
+                                self.installed.as_ref().ok_or_else(refused)?,
                                 &self.target,
                                 &self.lock,
                                 &self.binding,
@@ -345,7 +374,7 @@ pub(crate) mod native {
                         // before the first effect; partial/unknown is not retry.
                         self.backup_attempted = true;
                         let prepared = super::backup_preparation::prepare(
-                            &self.installed,
+                            self.installed.as_ref().ok_or_else(refused)?,
                             &self.target,
                             &self.state,
                             &self.binding,
@@ -361,10 +390,14 @@ pub(crate) mod native {
                     if tokio::time::Instant::now() >= deadline {
                         return Err(refused());
                     }
-                    self.stream
-                        .write_all(&frame.encode(reply).ok_or_else(refused)?)
-                        .await
-                        .map_err(|_| refused())?;
+                    tokio::time::timeout_at(
+                        deadline,
+                        self.stream
+                            .write_all(&frame.encode(reply).ok_or_else(refused)?),
+                    )
+                    .await
+                    .map_err(|_| refused())?
+                    .map_err(|_| refused())?;
                     if tokio::time::Instant::now() >= deadline {
                         return Err(refused());
                     }
@@ -373,9 +406,59 @@ pub(crate) mod native {
                     }
                 }
                 Err(refused())
-            })
+            }
+            .await;
+            // Explicit transferred custody survives EOF/cancellation of its
+            // creator-side connection until the accepted finite deadline. No
+            // replay, mutation or new listener runs during this retention.
+            if outcome.is_err() {
+                if let Some((transfer, _)) = &self.transferred {
+                    if let Some(deadline) = transfer.retention_deadline() {
+                        tokio::time::sleep_until(deadline).await;
+                    }
+                }
+            }
+            outcome
+        }
+
+        async fn accept_transfer(&mut self) -> Result<()> {
+            if self.transferred.is_some()
+                || !self.startup_attempted
+                || self.candidates.is_none()
+                || self.backup.is_none()
+                || !self.stream.creator_is_live()?
+            {
+                return Err(refused());
+            }
+            self.inspect_snapshot()?;
+            let size = self.stream.read_u32_le().await.map_err(|_| refused())? as usize;
+            if size == 0 || size > crate::windows_update_transfer::LIMIT {
+                return Err(refused());
+            }
+            let mut raw = vec![0; size];
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                self.stream.read_exact(&mut raw),
+            )
             .await
             .map_err(|_| refused())?
+            .map_err(|_| refused())?;
+            let mut transfer = crate::windows_update_transfer::Transfer::decode(&raw)?;
+            transfer.check(
+                &self.binding,
+                self.custody_context,
+                &self.current_snapshot,
+                chrono::Utc::now().timestamp_millis(),
+            )?;
+            transfer.arm_receiver_lifetime(chrono::Utc::now().timestamp_millis())?;
+            self.inspect_snapshot()?;
+            let record = self.job.record_transfer(&raw)?;
+            // Retain immutable evidence BEFORE relinquishing only the worker's
+            // old image handles and before ACK. Independent lease, job, claim,
+            // state, backup, target and complete candidates stay in this owner.
+            self.transferred = Some((transfer, record));
+            self.installed.take();
+            self.inspect_snapshot()
         }
 
         async fn accept_committed_startup(&mut self) -> Result<()> {
@@ -421,13 +504,17 @@ pub(crate) mod native {
                 return Err(refused());
             }
             let check = || -> Result<()> {
-                if !self.stream.creator_is_live()? {
+                if self.transferred.is_none() && !self.stream.creator_is_live()? {
                     return Err(refused());
                 }
                 self.claim
                     .verify(&crate::windows_update_intent::encode(&self.binding)?)?;
                 self.job
                     .verify(&crate::windows_update_intent::encode(&self.binding)?)?;
+                if let Some((transfer, record)) = &self.transferred {
+                    transfer.remaining(chrono::Utc::now().timestamp_millis())?;
+                    record.verify(&transfer.encode()?)?;
+                }
                 let observed = self
                     .state
                     .startup_snapshot(&format!("{}-agent-startup.json", self.binding.server_id))?;
@@ -441,7 +528,7 @@ pub(crate) mod native {
                         &self.binding,
                     )?;
                 }
-                if !self.stream.creator_is_live()? {
+                if self.transferred.is_none() && !self.stream.creator_is_live()? {
                     return Err(refused());
                 }
                 Ok(())
@@ -583,7 +670,7 @@ pub(crate) mod native {
                 lock,
                 claim,
                 job,
-                installed,
+                installed: Some(installed),
                 target,
                 state,
                 binding,
@@ -597,6 +684,7 @@ pub(crate) mod native {
                 backup: None,
                 candidates_attempted: false,
                 candidates: None,
+                transferred: None,
             })
         })
         .await

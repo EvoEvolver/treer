@@ -287,6 +287,31 @@ loads/processes and direct filesystem writers remain outside that mutex. There
 is no generic clear/recovery API; release requires the future reconciled durable
 outcome protocol. See [writer custody](research/2026-10-26-windows-mutation-writer-fence.md).
 
+The internal SAME Holding preparation now has an explicit bounded custody
+transfer after fenced CAS and verified backup/candidate preparation. The worker
+checks full binding, whole-offer challenge/digest, accepted startup state and
+deadline, then creates/flushed-readbacks one fixed `worker-transfer.bin` under
+the original independently held job. It keeps a reduced readonly handle to the
+same record object, job/installation lease, claim, state, target, backup and
+candidate handles before ACK; only its old installed image pins are consumed.
+An accepted transfer can retain that custody for up to 120 seconds despite pipe
+EOF or creator exit, with no reconnect/adoption or automatic mutation. Explicit
+close ends the session; expiry/error preserves durable denial records.
+
+Sender image release is a separate synchronous continuation requiring that
+original operation's retained Child, same loaded writer fence, normal configured
+Trust/confirmed plan and exact durable record. It consumes both the original
+reservation's old image handles and saved-inventory image pins, while retaining
+all physical parents/configuration snapshots and original job/lease/state.
+Transfer ACK/record/creator exit alone never triggers this continuation. Private
+worker creation preserves normal enclosing Job policy, including the stable
+Host's process-tree cleanup. The original Child must be live before/after exact
+record verification. This bounded custody contract neither escapes a Job nor
+guarantees survival of Job/Host/OS termination; such loss remains unknown.
+No image publication, restart/health, rollback, durable outcome or claim
+retirement is composed yet; public Windows capability stays OFF. See
+[bounded transfer](research/2026-10-27-windows-custody-transfer.md).
+
 The signed-input receiver now also retains the fixed installation-wide claim.
 After independently authenticating all signed inputs, it derives the canonical
 claim bytes from that full binding and opens an independent private, single-link,

@@ -187,6 +187,9 @@ pub enum CustodyKind {
     /// Explicit fixed-candidate preparation only; installed names stay pinned.
     PrepareCandidates,
     CandidatesPrepared,
+    /// Explicit bounded custody transfer; ACK alone is not sender release.
+    TransferCustody,
+    CustodyTransferred,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -225,6 +228,8 @@ impl CustodyFrame {
             CustodyKind::StartupAccepted => b"TRWCSA01",
             CustodyKind::PrepareCandidates => b"TRWCNP01",
             CustodyKind::CandidatesPrepared => b"TRWCNA01",
+            CustodyKind::TransferCustody => b"TRWCTF01",
+            CustodyKind::CustodyTransferred => b"TRWCTA01",
         });
         bytes[WORKER_BINDING_FRAME_BYTES..].copy_from_slice(&self.sequence.to_le_bytes());
         Some(bytes)

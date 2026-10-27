@@ -383,6 +383,35 @@ or configuration contents. Failed launch retains the newly saved specification.
   automatic recovery is exposed to reconcile this operation. Public Windows
   capability remains OFF pending durable transfer and outcome acceptance.
 
+  A distinct SAME Holding transfer continuation requires the original confirmed
+  reservation/normal Trust, operation-owned loaded writer fence and verified
+  backup plus all new/restore candidates. Its complete strict transfer contract
+  binds operation/workspace/server/installation/digests, whole-offer context and
+  challenge, current raw startup snapshot and a maximum 120-second deadline.
+  The receiver writes one fixed exclusive job record, flushes and reads it back,
+  retains a readonly duplicate of that SAME object (whose sharing denies new
+  writers/deleters), and keeps independent job/lease/claim/target/state/backup/
+  candidate custody before ACK. The sender's readonly observer shares WRITE to
+  coexist with the receiver object's original access; its immutability depends
+  on that live receiver object, not the serialized record after owner exit.
+  Records are denial evidence only; no restart/adoption/replay constructor exists.
+
+  An ACK does not drop original images. A separate explicit synchronous sender
+  release rechecks loaded owner, selected runtime/plan/Trust, original live Child
+  and exact durable record, then consumes only image pins, including saved
+  inventory duplicates. It retains original parents/config snapshots/job/lease/
+  state. The receiver may hold custody after connection loss or creator exit
+  until its accepted deadline; EOF never authorizes mutation or reconnect.
+  Private worker creation preserves enclosing Job policy and stable Host tree
+  cleanup. Original Child liveness is checked before/after record verification;
+  bounded custody does not promise survival of Job/Host/OS termination, reboot
+  or power loss. No Job settings or Host process are changed.
+  Partial/unknown records are preserved and never adopted or retried; expiry/
+  close never clears the loaded writer fence or retires claim. Pair publication,
+  Controller-only restart/health, rollback, durable outcome and safe retirement
+  remain separate. No public capability, production dispatch or Host action is
+  enabled by this finite custody continuation.
+
   Receiver custody includes an independently opened fixed installation claim
   after normal configured-trust whole-input authentication. Core supplies the
   exact canonical full operation binding; Platform retains a private regular

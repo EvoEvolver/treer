@@ -11,13 +11,57 @@ use std::{
 
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_SHARE_READ,
+    FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 
 const RECORD: &str = "receipt.bin";
 const NEXT: &str = "receipt.next";
 const LOCK: &str = "receipt.lock";
 const LIMIT: u64 = 64 * 1024;
+const TRANSFER: &str = "worker-transfer.bin";
+
+/// SAME held immutable transfer record. Its bytes alone grant no authority.
+pub struct TransferRecord {
+    file: File,
+    expected: Vec<u8>,
+}
+impl TransferRecord {
+    pub fn verify(&self, expected: &[u8]) -> io::Result<()> {
+        if expected != self.expected {
+            return Err(refused());
+        }
+        let mut file = &self.file;
+        file.seek(SeekFrom::Start(0))?;
+        let mut raw = Vec::new();
+        file.take(LIMIT + 1).read_to_end(&mut raw)?;
+        if raw != expected {
+            return Err(refused());
+        }
+        Ok(())
+    }
+}
+
+fn read_transfer(directory: &Path, expected: &[u8]) -> io::Result<TransferRecord> {
+    if expected.is_empty() || expected.len() as u64 > LIMIT {
+        return Err(refused());
+    }
+    // Receiver retains its SAME original object, whose sharing denies all new
+    // writers/deleters. This observer must share WRITE to coexist with that
+    // object's original write access; it has no write access of its own.
+    let path = directory.join(TRANSFER);
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&path)?;
+    checked_file(&path, &file)?;
+    let record = TransferRecord {
+        file,
+        expected: expected.into(),
+    };
+    record.verify(expected)?;
+    Ok(record)
+}
 
 fn refused() -> io::Error {
     io::Error::new(
@@ -70,6 +114,10 @@ pub(super) fn exclusive_lock(path: &Path) -> io::Result<File> {
 }
 
 impl UpdateStore {
+    /// Fixed read-only reconciliation under this original holder. Never adopt.
+    pub fn read_transfer(&self, expected: &[u8]) -> io::Result<TransferRecord> {
+        read_transfer(&self.path, expected)
+    }
     pub fn directory_path(&self) -> &Path {
         &self.path
     }
@@ -190,9 +238,35 @@ pub struct ReceivedJob {
     _lock: File,
     receipt: File,
     expected: Vec<u8>,
+    path: PathBuf,
 }
 
 impl ReceivedJob {
+    /// One fixed CREATE_NEW/flush/readback record under retained original job
+    /// parents and lock. Partial/error names remain; no overwrite or retry.
+    pub fn record_transfer(&self, bytes: &[u8]) -> io::Result<TransferRecord> {
+        self.verify(&self.expected)?;
+        if bytes.is_empty() || bytes.len() as u64 > LIMIT {
+            return Err(refused());
+        }
+        let path = self.path.join(TRANSFER);
+        let mut file = crate::windows::create_private_transfer_record(&path)?;
+        checked_file(&path, &file)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        file.seek(SeekFrom::Start(0))?;
+        let mut observed = Vec::new();
+        (&mut file).take(LIMIT + 1).read_to_end(&mut observed)?;
+        if observed != bytes {
+            return Err(refused());
+        }
+        let record = TransferRecord {
+            file: crate::windows::readonly_update_file(file)?,
+            expected: bytes.into(),
+        };
+        record.verify(bytes)?;
+        Ok(record)
+    }
     /// Creator connection and independently authenticated expected intent are
     /// prerequisites. Borrow the remote handle value, duplicate locally with
     /// reduced rights, never adopt/close an arbitrary numeric source handle.
@@ -236,6 +310,7 @@ impl ReceivedJob {
             _lock: lock,
             receipt,
             expected: expected.to_vec(),
+            path: directory.into(),
         };
         received.verify(expected)?;
         if !creator.creator_is_live()? {

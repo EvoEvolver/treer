@@ -34,6 +34,9 @@ mod windows_update_installation;
 #[cfg(any(windows, test))]
 pub mod windows_update_intent;
 #[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod windows_update_transfer;
+#[cfg(any(windows, test))]
 mod windows_update_worker_entry;
 mod workload_proxy;
 

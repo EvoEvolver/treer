@@ -29,6 +29,10 @@ pub struct PairIdentity {
     pub cli: (u64, u64),
 }
 
+pub struct ImageParents {
+    _root: crate::machine_file::Root,
+}
+
 /// Independently retained fixed claim, not ownership, recovery or a release
 /// permit. The Controller authenticates expected bytes before construction.
 pub struct ClaimPin {
@@ -54,6 +58,9 @@ impl ClaimPin {
 }
 
 impl PinnedPair {
+    pub fn into_image_parents(self) -> ImageParents {
+        ImageParents { _root: self.root }
+    }
     /// Retain the fixed existing private single-link claim under these pinned
     /// ancestors. No create/adoption/write/cleanup API; no sender release.
     pub fn retain_claim(&self, expected: &[u8]) -> io::Result<ClaimPin> {
@@ -203,7 +210,27 @@ pub struct LockedInstallation {
     pub(super) _lock: File,
 }
 
+/// Retains physical parents and the ORIGINAL lock after consuming image pins.
+/// Mechanical separation only; the caller must authorize custody transfer.
+pub struct InstallationLease {
+    _root: crate::machine_file::Root,
+    _lock: File,
+}
+
 impl LockedInstallation {
+    pub fn into_lease(self) -> InstallationLease {
+        let PinnedPair {
+            root,
+            controller,
+            cli,
+            path: _,
+        } = self.pair;
+        drop((controller, cli));
+        InstallationLease {
+            _root: root,
+            _lock: self._lock,
+        }
+    }
     /// Retain an independent read-only image pair, never adopt/duplicate its
     /// installation lease or claim. Caller must retain this original owner.
     pub fn repin_images(&self) -> io::Result<PinnedPair> {

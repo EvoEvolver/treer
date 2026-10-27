@@ -33,16 +33,23 @@ fn refused() -> io::Error {
 /// is not a promise that another same-account actor cannot assign a Job later.
 /// No breakaway flags or enclosing Job policy are changed here.
 pub fn require_created_child_outside_jobs(child: &std::process::Child) -> io::Result<()> {
+    require_created_child_live(child)?;
     let handle = child.as_raw_handle();
-    // A process with application-selected exit code 259 is still exited.
-    if unsafe { WaitForSingleObject(handle, 0) } != WAIT_TIMEOUT {
-        return Err(refused());
-    }
     let mut in_job = 0;
     if unsafe { IsProcessInJob(handle, std::ptr::null_mut(), &mut in_job) } == 0
         || in_job != 0
         || unsafe { WaitForSingleObject(handle, 0) } != WAIT_TIMEOUT
     {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+/// Instantaneous liveness of the ORIGINAL owned Child handle only. This does
+/// not infer ownership from a PID or guarantee survival of enclosing Job/OS
+/// termination. Exit code 259 is not confused with a running process.
+pub fn require_created_child_live(child: &std::process::Child) -> io::Result<()> {
+    if unsafe { WaitForSingleObject(child.as_raw_handle(), 0) } != WAIT_TIMEOUT {
         return Err(refused());
     }
     Ok(())

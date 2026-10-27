@@ -33,6 +33,36 @@ pub(crate) struct Channel<S> {
 
 #[cfg_attr(not(windows), allow(dead_code))]
 impl<S: AsyncRead + AsyncWrite + Unpin> Channel<S> {
+    #[cfg(windows)]
+    pub(crate) async fn transfer_custody(
+        &mut self,
+        binding: &crate::windows_update_intent::Binding,
+        committed: &crate::startup_store::update::Committed,
+    ) -> Result<crate::windows_update_transfer::Transfer> {
+        if self.phase != Phase::Holding || !self.candidates_attempted || !self.startup_attempted {
+            return Err(refused());
+        }
+        let snapshot = committed.fenced_snapshot(self.context.operation)?.clone();
+        if self.startup.as_ref() != Some(&snapshot) {
+            return Err(refused());
+        }
+        let transfer = crate::windows_update_transfer::Transfer::new(
+            binding,
+            self.context,
+            snapshot,
+            chrono::Utc::now().timestamp_millis(),
+        );
+        self.exchange_payload(
+            CustodyKind::TransferCustody,
+            CustodyKind::CustodyTransferred,
+            false,
+            Some(&transfer.encode()?),
+        )
+        .await?;
+        committed.fenced_snapshot(self.context.operation)?;
+        transfer.remaining(chrono::Utc::now().timestamp_millis())?;
+        Ok(transfer)
+    }
     pub(crate) fn new(stream: S, context: WorkerBindingFrame) -> Self {
         Self {
             stream,
@@ -184,10 +214,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Channel<S> {
         tokio::time::timeout_at(deadline, async {
             self.stream.write_all(&bytes).await.map_err(|_| refused())?;
             if let Some(payload) = payload {
-                if payload.is_empty()
-                    || payload.len()
-                        > treer_protocol::controller_update_worker_inputs::STARTUP_TRANSITION_LIMIT
-                {
+                if payload.is_empty() || payload.len() > crate::windows_update_transfer::LIMIT {
                     return Err(refused());
                 }
                 self.stream
@@ -222,6 +249,49 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Channel<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn windows_update_transfer_cancel_and_foreign_ack_consume_original_exchange() {
+        for cancel in [false, true] {
+            let context = context();
+            let (a, mut b) = tokio::io::duplex(1024);
+            let mut channel = Channel::new(a, context);
+            let (sent, received) = tokio::sync::oneshot::channel();
+            let peer = tokio::spawn(async move {
+                let mut raw = [0; CUSTODY_BYTES];
+                b.read_exact(&mut raw).await.unwrap();
+                let frame = CustodyFrame::decode(&raw, CustodyKind::TransferCustody).unwrap();
+                sent.send(()).unwrap();
+                if cancel {
+                    std::future::pending::<()>().await;
+                }
+                let mut wrong = frame;
+                wrong.context.challenge = *uuid::Uuid::new_v4().as_bytes();
+                b.write_all(&wrong.encode(CustodyKind::CustodyTransferred).unwrap())
+                    .await
+                    .unwrap();
+            });
+            if cancel {
+                let future = channel.exchange(
+                    CustodyKind::TransferCustody,
+                    CustodyKind::CustodyTransferred,
+                    false,
+                );
+                tokio::pin!(future);
+                tokio::select! { _ = received => {}, _ = &mut future => panic!("unexpected completion") }
+            } else {
+                assert!(channel
+                    .exchange(
+                        CustodyKind::TransferCustody,
+                        CustodyKind::CustodyTransferred,
+                        false
+                    )
+                    .await
+                    .is_err());
+            }
+            assert!(channel.request(false).await.is_err());
+            peer.abort();
+        }
+    }
     #[tokio::test]
     async fn windows_update_worker_candidates_order_reply_and_cancel_are_single_use() {
         for outcome in 0..3 {

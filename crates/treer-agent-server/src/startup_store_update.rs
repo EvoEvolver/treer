@@ -232,6 +232,13 @@ impl Compare {
 }
 
 impl Committed {
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn fenced_snapshot(&self, operation: [u8; 16]) -> io::Result<&Option<Snapshot>> {
+        if !self.fenced {
+            return Err(refused());
+        }
+        self.snapshot(operation)
+    }
     pub(crate) fn snapshot(&self, operation: [u8; 16]) -> io::Result<&Option<Snapshot>> {
         if operation != *self.operation.as_bytes() {
             return Err(refused());
