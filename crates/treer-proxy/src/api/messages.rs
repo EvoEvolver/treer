@@ -1,5 +1,89 @@
 use super::*;
 
+async fn browser_message_principal(
+    auth: &AuthStore,
+    session: &CurrentSession,
+    workspace_id: &str,
+) -> Result<(PolicySubject, MessagePrincipal), ApiFailure> {
+    let role = auth
+        .workspace_member_role(workspace_id, &session.user_id)
+        .await?;
+    Ok((
+        PolicySubject::Human {
+            user_id: session.user_id.clone(),
+        },
+        MessagePrincipal {
+            app_endpoint: None,
+            path: None,
+            kind: MessagePrincipalKind::Human,
+            id: session.user_id.clone(),
+            name: session.preferred_name.clone(),
+            role: Some(role),
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn send_browser_message(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(messages): Extension<MessageStore>,
+    Path(workspace_id): Path<String>,
+    Json(request): Json<SendMessageRequest>,
+) -> Result<Json<treer_protocol::SendMessageResponse>, ApiFailure> {
+    let (subject, principal) = browser_message_principal(&auth, &session, &workspace_id).await?;
+    Ok(Json(
+        send_message_for(
+            &state,
+            &auth,
+            &policy,
+            &messages,
+            &workspace_id,
+            subject,
+            principal,
+            request,
+        )
+        .await?,
+    ))
+}
+
+pub(super) async fn list_browser_messages(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(messages): Extension<MessageStore>,
+    Path(workspace_id): Path<String>,
+    Query(query): Query<ListMessagesQuery>,
+) -> Result<Json<treer_protocol::MessagePage>, ApiFailure> {
+    let (subject, principal) = browser_message_principal(&auth, &session, &workspace_id).await?;
+    Ok(Json(
+        list_messages_for(&policy, &messages, &workspace_id, subject, principal, query).await?,
+    ))
+}
+
+pub(super) async fn get_browser_message(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    Extension(policy): Extension<PolicyEngine>,
+    Extension(messages): Extension<MessageStore>,
+    Path((workspace_id, message_id)): Path<(String, String)>,
+) -> Result<Json<GetMessageResponse>, ApiFailure> {
+    let (subject, principal) = browser_message_principal(&auth, &session, &workspace_id).await?;
+    Ok(Json(
+        get_message_for(
+            &policy,
+            &messages,
+            &workspace_id,
+            subject,
+            principal,
+            &message_id,
+        )
+        .await?,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn send_app_message(
     State(state): State<AppState>,
@@ -173,6 +257,21 @@ pub(super) async fn send_message_for(
     if sender.kind == MessagePrincipalKind::Agent {
         sender.path = Some(tree.workload_path(&sender.id, &sender.name)?);
     }
+    if let Some(endpoint) = request.sender_endpoint.as_deref() {
+        if !treer_protocol::valid_message_app_endpoint(endpoint)
+            || sender.kind != MessagePrincipalKind::Agent
+            || auth
+                .resolve_app_deployment_by_runtime(workspace_id, &sender.id)
+                .await?
+                .is_none()
+        {
+            return Err(ApiFailure::forbidden(
+                "message_app_sender_required",
+                "logical sender requires the owning Managed App",
+            ));
+        }
+        sender.app_endpoint = Some(endpoint.to_string());
+    }
     let mut recipients = Vec::with_capacity(request.recipients.len());
     for target in &request.recipients {
         let target = if matches!(target.trim(), "self" | ".") {
@@ -180,15 +279,51 @@ pub(super) async fn send_message_for(
         } else {
             target.trim()
         };
-        let mut recipient = resolve_tree_principal(&directory, &tree, caller, target)
-            .map(MessagePrincipal::from)
-            .map_err(|error| {
-                if error.code == "agent_not_in_folder" {
-                    ApiFailure::from(error)
-                } else {
-                    message_recipient_unavailable()
+        let resolved = resolve_tree_principal(&directory, &tree, caller, target);
+        let mut recipient = match resolved {
+            Ok(principal) => MessagePrincipal::from(principal),
+            Err(error) => {
+                // Existing Tree nodes win. Otherwise mount a bounded relative
+                // subtree only underneath a real Managed App, never an Agent.
+                let mut addressed = None;
+                for (index, _) in target.match_indices('/').rev() {
+                    let (owner, suffix) = target.split_at(index);
+                    let endpoint = &suffix[1..];
+                    if owner.is_empty() || !treer_protocol::valid_message_app_endpoint(endpoint) {
+                        continue;
+                    }
+                    if let Ok(principal) = resolve_tree_principal(&directory, &tree, caller, owner)
+                    {
+                        if principal.kind == AppPrincipalKind::Agent
+                            && auth
+                                .resolve_app_deployment_by_runtime(workspace_id, &principal.id)
+                                .await?
+                                .is_some()
+                        {
+                            addressed = Some((principal, endpoint));
+                            break;
+                        }
+                    }
                 }
-            })?;
+                if let Some((owner, endpoint)) = addressed {
+                    if owner.kind != AppPrincipalKind::Agent
+                        || auth
+                            .resolve_app_deployment_by_runtime(workspace_id, &owner.id)
+                            .await?
+                            .is_none()
+                    {
+                        return Err(message_recipient_unavailable());
+                    }
+                    let mut principal = MessagePrincipal::from(owner);
+                    principal.app_endpoint = Some(endpoint.to_string());
+                    principal
+                } else if error.code == "agent_not_in_folder" {
+                    return Err(ApiFailure::from(error));
+                } else {
+                    return Err(message_recipient_unavailable());
+                }
+            }
+        };
         if recipient.kind == MessagePrincipalKind::Agent {
             recipient.path = Some(tree.workload_path(&recipient.id, &recipient.name)?);
         }
@@ -305,6 +440,22 @@ pub(super) async fn list_messages_for(
     principal: MessagePrincipal,
     query: ListMessagesQuery,
 ) -> Result<treer_protocol::MessagePage, ApiFailure> {
+    let address = match (query.app_owner_id.as_deref(), query.app_endpoint.as_deref()) {
+        (None, None) => None,
+        (Some(owner), Some(endpoint))
+            if !owner.is_empty()
+                && owner.len() <= 256
+                && treer_protocol::valid_message_app_endpoint(endpoint) =>
+        {
+            Some((owner, endpoint))
+        }
+        _ => {
+            return Err(ApiFailure::bad_request(
+                "message_address_filter_invalid",
+                "App owner and valid subtree path must be supplied together",
+            ))
+        }
+    };
     authorize_control(
         policy,
         workspace_id,
@@ -313,14 +464,29 @@ pub(super) async fn list_messages_for(
         message_mailbox_policy_resource(&principal),
     )
     .await?;
-    Ok(messages
-        .list(
-            workspace_id,
-            &principal,
-            query.before.as_deref(),
-            query.limit,
-        )
-        .await?)
+    Ok(match address {
+        Some(address) => {
+            messages
+                .list_app_conversation(
+                    workspace_id,
+                    &principal,
+                    query.before.as_deref(),
+                    query.limit,
+                    Some(address),
+                )
+                .await?
+        }
+        None => {
+            messages
+                .list(
+                    workspace_id,
+                    &principal,
+                    query.before.as_deref(),
+                    query.limit,
+                )
+                .await?
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -470,6 +636,7 @@ pub(super) async fn import_core_messages(
     )
     .await?;
     let importer = MessagePrincipal {
+        app_endpoint: None,
         path: None,
         kind: MessagePrincipalKind::Machine,
         id: server_id.clone(),
@@ -500,6 +667,7 @@ pub(super) async fn message_request_principal(
     Ok((
         subject,
         MessagePrincipal {
+            app_endpoint: None,
             path: None,
             kind: MessagePrincipalKind::Agent,
             id: agent.agent_id,

@@ -95,6 +95,14 @@ whole workspace. Relative paths start at your containing Tree folder; operators
 start at `/`. A missing bare sibling returns `agent_not_in_folder` with up to ten
 same-name absolute paths in `hint`; it never falls back to a global name match.
 Agent output includes `path`, and Tree **Copy path** can be pasted as a CLI target.
+Managed Apps may provide a recursive App/Agent subtree. Message targets can append
+a validated relative path, for example `/infra/agent_hub/team/tools/agent1`, or use
+`OWNER_WORKLOAD_ID/team/tools/agent1`. These nodes are App-owned logical addresses,
+not Host processes; ordinary Agent lifecycle/transcript commands do not apply.
+The App receives its own mailbox and routes `recipient.app_endpoint`. Only that
+authenticated Managed App may send/reply with `--from-endpoint team/tools/agent1`.
+Replies to a logical sender preserve its full stable address. See
+[App-owned trees](../../docs/app-tree.md) for the directory, retry and trust contract.
 New CLI clients require Controller capability `agent.path-targets.v1`; an older
 Controller returns an upgrade error before dispatch, without disconnecting.
 

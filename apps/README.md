@@ -1,5 +1,9 @@
 # Workspace Apps
 
+Apps can also own a recursive tree of logical Apps and Agents, using their
+existing identity and message mailbox. See [the shared tree/message contract](../docs/app-tree.md)
+and the runnable [Agent Hub example](agent-hub/README.md).
+
 Embedded App interfaces can open unsandboxed browser tabs from a user gesture.
 External links must use `rel="noopener noreferrer"`; external `window.open`
 calls must pass the `noopener,noreferrer` features. A full-page button should

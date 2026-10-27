@@ -30,6 +30,7 @@ pub(super) async fn run_message_command(
 ) -> anyhow::Result<Value> {
     match command {
         MessageCommand::Send {
+            from_endpoint,
             recipients,
             context_ids,
             body,
@@ -51,6 +52,7 @@ pub(super) async fn run_message_command(
                 )
             };
             let request = SendMessageRequest {
+                sender_endpoint: from_endpoint,
                 recipients,
                 context_ids,
                 body,
@@ -71,6 +73,7 @@ pub(super) async fn run_message_command(
                 .await
         }
         MessageCommand::Reply {
+            from_endpoint,
             message_id,
             mut recipients,
             additional_context_ids,
@@ -87,14 +90,18 @@ pub(super) async fn run_message_command(
                     None,
                 )
                 .await?;
+            let reply_target = match &parent.message.sender.app_endpoint {
+                Some(endpoint) => format!("{}/{}", parent.message.sender.id, endpoint),
+                None => parent.message.sender.id.clone(),
+            };
             if recipients.is_empty() {
-                recipients.push(parent.message.sender.id);
+                recipients.push(reply_target.clone());
             } else {
                 recipients = recipients
                     .into_iter()
                     .map(|recipient| {
                         if recipient == "sender" {
-                            parent.message.sender.id.clone()
+                            reply_target.clone()
                         } else {
                             recipient
                         }
@@ -108,6 +115,7 @@ pub(super) async fn run_message_command(
                     Method::POST,
                     "api/messages",
                     Some(serde_json::to_value(SendMessageRequest {
+                        sender_endpoint: from_endpoint,
                         recipients,
                         context_ids,
                         body: read_message_body(body, body_file)?,

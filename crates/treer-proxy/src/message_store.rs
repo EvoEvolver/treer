@@ -83,9 +83,14 @@ impl MessageStore {
     }
 
     async fn initialize(&self) -> Result<(), MessageStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(2307958)")
+            .execute(&mut *transaction)
+            .await?;
         for statement in SCHEMA {
-            sqlx::query(statement).execute(&self.pool).await?;
+            sqlx::query(statement).execute(&mut *transaction).await?;
         }
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -132,15 +137,27 @@ impl MessageStore {
     ) -> Result<SendMessageResponse, MessageStoreError> {
         validate_workspace_and_principal(workspace_id, sender)?;
         validate_send(recipients, request)?;
+        let subtree_addressed = sender.app_endpoint.is_some()
+            || recipients
+                .iter()
+                .any(|recipient| recipient.app_endpoint.is_some());
         let fingerprint_recipients = recipients
             .iter()
             .cloned()
             .map(|mut recipient| {
                 recipient.path = None;
+                // Subtree requests are new wire behavior. Bind their retry to
+                // stable addresses, not mutable parent display snapshots; keep
+                // legacy root fingerprints byte-compatible with prior sends.
+                if subtree_addressed {
+                    recipient.name.clear();
+                    recipient.role = None;
+                }
                 recipient
             })
             .collect::<Vec<_>>();
         let request_hash = request_hash(&SendFingerprint {
+            sender_endpoint: sender.app_endpoint.as_deref(),
             recipients: &fingerprint_recipients,
             context_ids: &request.context_ids,
             body: &request.body,
@@ -214,8 +231,8 @@ impl MessageStore {
         sqlx::query(
             "INSERT INTO core_messages(\
                 message_id, workspace_id, sender_kind, sender_id, sender_name, sender_role, body, \
-                created_at, expires_at, correlation_id, trace_id, external_source, sender_path) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                created_at, expires_at, correlation_id, trace_id, external_source, sender_path, sender_endpoint) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
         .bind(&message_id)
         .bind(workspace_id)
@@ -237,6 +254,7 @@ impl MessageStore {
                 .map_err(|_| MessageStoreError::Corrupt)?,
         )
         .bind(&sender.path)
+        .bind(&sender.app_endpoint)
         .execute(&mut *connection)
         .await?;
 
@@ -246,8 +264,8 @@ impl MessageStore {
             sqlx::query(
                 "INSERT INTO core_message_deliveries(\
                     delivery_id, message_id, workspace_id, recipient_kind, recipient_id, \
-                    recipient_name, recipient_role, position, created_at, expires_at, recipient_path) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                    recipient_name, recipient_role, position, created_at, expires_at, recipient_path, recipient_endpoint) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             )
             .bind(&delivery_id)
             .bind(&message_id)
@@ -260,6 +278,7 @@ impl MessageStore {
             .bind(now.to_rfc3339())
             .bind(request.expires_at.map(|value| value.to_rfc3339()))
             .bind(&recipient.path)
+            .bind(recipient.app_endpoint.as_deref().unwrap_or(""))
             .execute(&mut *connection)
             .await?;
             delivery_ids.push(delivery_id);
@@ -351,45 +370,46 @@ impl MessageStore {
         before: Option<&str>,
         limit: u16,
     ) -> Result<MessagePage, MessageStoreError> {
+        self.list_app_conversation(workspace_id, principal, before, limit, None)
+            .await
+    }
+
+    pub async fn list_app_conversation(
+        &self,
+        workspace_id: &str,
+        principal: &MessagePrincipal,
+        before: Option<&str>,
+        limit: u16,
+        address: Option<(&str, &str)>,
+    ) -> Result<MessagePage, MessageStoreError> {
         validate_page_size(limit)?;
         let cursor = before.map(decode_cursor).transpose()?;
         let mut connection = self.pool.acquire().await?;
-        let rows = if let Some((created_at, message_id)) = cursor {
-            sqlx::query(
+        let rows = sqlx::query(
                 "SELECT m.message_id, m.created_at FROM core_messages m \
                  WHERE m.workspace_id = $1 AND (\
                     (m.sender_kind = $2 AND m.sender_id = $3) OR EXISTS(\
                         SELECT 1 FROM core_message_deliveries d WHERE d.workspace_id = m.workspace_id \
                         AND d.message_id = m.message_id AND d.recipient_kind = $2 \
                         AND d.recipient_id = $3)) \
-                 AND (m.created_at < $4 OR (m.created_at = $4 AND m.message_id < $5)) \
-                 ORDER BY m.created_at DESC, m.message_id DESC LIMIT $6",
+                 AND ($4::text IS NULL OR \
+                     (m.sender_kind='agent' AND m.sender_id=$4 AND m.sender_endpoint=$5) OR EXISTS(\
+                         SELECT 1 FROM core_message_deliveries peer WHERE peer.workspace_id=m.workspace_id \
+                         AND peer.message_id=m.message_id AND peer.recipient_kind='agent' \
+                         AND peer.recipient_id=$4 AND peer.recipient_endpoint=$5)) \
+                 AND ($6::text IS NULL OR m.created_at < $6 OR (m.created_at=$6 AND m.message_id<$7)) \
+                 ORDER BY m.created_at DESC, m.message_id DESC LIMIT $8",
             )
             .bind(workspace_id)
             .bind(principal.kind.as_str())
             .bind(&principal.id)
-            .bind(created_at.to_rfc3339())
-            .bind(message_id)
+            .bind(address.map(|(owner, _)| owner))
+            .bind(address.map(|(_, endpoint)| endpoint))
+            .bind(cursor.as_ref().map(|(at, _)| at.to_rfc3339()))
+            .bind(cursor.as_ref().map(|(_, id)| id.as_str()))
             .bind(i64::from(limit) + 1)
             .fetch_all(&mut *connection)
-            .await?
-        } else {
-            sqlx::query(
-                "SELECT m.message_id, m.created_at FROM core_messages m \
-                 WHERE m.workspace_id = $1 AND (\
-                    (m.sender_kind = $2 AND m.sender_id = $3) OR EXISTS(\
-                        SELECT 1 FROM core_message_deliveries d WHERE d.workspace_id = m.workspace_id \
-                        AND d.message_id = m.message_id AND d.recipient_kind = $2 \
-                        AND d.recipient_id = $3)) \
-                 ORDER BY m.created_at DESC, m.message_id DESC LIMIT $4",
-            )
-            .bind(workspace_id)
-            .bind(principal.kind.as_str())
-            .bind(&principal.id)
-            .bind(i64::from(limit) + 1)
-            .fetch_all(&mut *connection)
-            .await?
-        };
+            .await?;
         let has_more = rows.len() > usize::from(limit);
         let page_rows = rows
             .into_iter()
@@ -460,7 +480,7 @@ impl MessageStore {
         let mut connection = self.pool.acquire().await?;
         let rows = sqlx::query(
             "SELECT delivery_id, message_id, recipient_kind, recipient_id, recipient_name, recipient_path, \
-                    recipient_role, created_at, acknowledged_at, expires_at \
+                    recipient_role, recipient_endpoint, created_at, acknowledged_at, expires_at \
              FROM core_message_deliveries WHERE workspace_id = $1 AND recipient_kind = $2 \
              AND recipient_id = $3 AND acknowledged_at IS NULL \
              AND (expires_at IS NULL OR expires_at > $4) \
@@ -801,6 +821,8 @@ impl MessageStore {
 
 #[derive(Serialize)]
 struct SendFingerprint<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sender_endpoint: Option<&'a str>,
     recipients: &'a [MessagePrincipal],
     context_ids: &'a [String],
     body: &'a str,
@@ -826,6 +848,10 @@ fn validate_workspace_and_principal(
         ));
     }
     if principal.id.len() > MAX_MESSAGE_ID_BYTES
+        || principal.app_endpoint.as_deref().is_some_and(|key| {
+            principal.kind != MessagePrincipalKind::Agent
+                || !treer_protocol::valid_message_app_endpoint(key)
+        })
         || principal.name.is_empty()
         || principal.name.len() > MAX_MESSAGE_SNAPSHOT_NAME_BYTES
         || principal.path.as_ref().is_some_and(|path| {
@@ -881,7 +907,13 @@ fn validate_send(
     }
     let recipient_keys = recipients
         .iter()
-        .map(|principal| (principal.kind, principal.id.as_str()))
+        .map(|principal| {
+            (
+                principal.kind,
+                principal.id.as_str(),
+                principal.app_endpoint.as_deref(),
+            )
+        })
         .collect::<HashSet<_>>();
     if recipient_keys.len() != recipients.len() {
         return Err(MessageStoreError::contract(
@@ -1051,6 +1083,17 @@ fn validate_legacy_message(
     message: &LegacyMailMessage,
 ) -> Result<(), MessageStoreError> {
     validate_workspace_and_principal(workspace_id, &message.sender)?;
+    if message.sender.app_endpoint.is_some()
+        || message
+            .recipients
+            .iter()
+            .any(|recipient| recipient.principal.app_endpoint.is_some())
+    {
+        return Err(MessageStoreError::contract(
+            "message_import_record_invalid",
+            "legacy imports cannot assert App subtree identities",
+        ));
+    }
     if message.message_id.is_empty()
         || message.message_id.len() > 256
         || message.body.trim().is_empty()
@@ -1142,7 +1185,7 @@ async fn load_message(
     message_id: &str,
 ) -> Result<CoreMessage, MessageStoreError> {
     let row = sqlx::query(
-        "SELECT message_id, workspace_id, sender_kind, sender_id, sender_name, sender_role, sender_path, \
+        "SELECT message_id, workspace_id, sender_kind, sender_id, sender_name, sender_role, sender_path, sender_endpoint, \
                 body, created_at, expires_at, correlation_id, trace_id, external_source \
          FROM core_messages WHERE workspace_id = $1 AND message_id = $2",
     )
@@ -1152,7 +1195,7 @@ async fn load_message(
     .await?
     .ok_or_else(|| MessageStoreError::contract("message_not_found", "message does not exist"))?;
     let recipient_rows = sqlx::query(
-        "SELECT recipient_kind, recipient_id, recipient_name, recipient_path, recipient_role \
+        "SELECT recipient_kind, recipient_id, recipient_name, recipient_path, recipient_role, recipient_endpoint \
          FROM core_message_deliveries WHERE workspace_id = $1 AND message_id = $2 \
          ORDER BY position",
     )
@@ -1183,6 +1226,7 @@ async fn load_message(
             row.get("sender_name"),
             row.get("sender_role"),
             row.get("sender_path"),
+            row.get("sender_endpoint"),
         )?,
         recipients: recipient_rows
             .into_iter()
@@ -1193,6 +1237,7 @@ async fn load_message(
                     row.get("recipient_name"),
                     row.get("recipient_role"),
                     row.get("recipient_path"),
+                    Some(row.get("recipient_endpoint")),
                 )
             })
             .collect::<Result<_, _>>()?,
@@ -1221,6 +1266,7 @@ fn delivery_from_row(
             row.get("recipient_name"),
             row.get("recipient_role"),
             row.get("recipient_path"),
+            Some(row.get("recipient_endpoint")),
         )?,
         created_at: parse_timestamp(row.get("created_at"))?,
         acknowledged_at: parse_optional_timestamp(row.get("acknowledged_at"))?,
@@ -1369,7 +1415,7 @@ async fn legacy_message_matches(
         return Ok(false);
     }
     let rows = sqlx::query(
-        "SELECT recipient_kind, recipient_id, recipient_name, recipient_path, recipient_role, position, \
+        "SELECT recipient_kind, recipient_id, recipient_name, recipient_path, recipient_role, recipient_endpoint, position, \
                 acknowledged_at FROM core_message_deliveries \
          WHERE workspace_id = $1 AND message_id = $2 ORDER BY position",
     )
@@ -1387,6 +1433,7 @@ async fn legacy_message_matches(
             row.get("recipient_name"),
             row.get("recipient_role"),
             row.get("recipient_path"),
+            Some(row.get("recipient_endpoint")),
         )?;
         let acknowledged_at = parse_optional_timestamp(row.get("acknowledged_at"))?;
         if principal != expected_recipient.principal
@@ -1426,6 +1473,7 @@ fn principal_from_columns(
     name: String,
     role: Option<String>,
     path: Option<String>,
+    app_endpoint: Option<String>,
 ) -> Result<MessagePrincipal, MessageStoreError> {
     let kind = match kind.as_str() {
         "agent" => MessagePrincipalKind::Agent,
@@ -1435,6 +1483,7 @@ fn principal_from_columns(
         _ => return Err(MessageStoreError::Corrupt),
     };
     Ok(MessagePrincipal {
+        app_endpoint: app_endpoint.filter(|key| !key.is_empty()),
         path,
         kind,
         id,
@@ -1499,7 +1548,6 @@ const SCHEMA: &[&str] = &[
         recipient_kind TEXT NOT NULL, recipient_id TEXT NOT NULL, recipient_name TEXT NOT NULL, \
         recipient_role TEXT, position BIGINT NOT NULL CHECK(position >= 0), created_at TEXT NOT NULL, \
         acknowledged_at TEXT, expires_at TEXT, \
-        UNIQUE(workspace_id, message_id, recipient_kind, recipient_id), \
         UNIQUE(workspace_id, message_id, position), \
         FOREIGN KEY(workspace_id, message_id) REFERENCES core_messages(workspace_id, message_id) \
             ON DELETE CASCADE, \
@@ -1536,6 +1584,10 @@ const SCHEMA: &[&str] = &[
         ON core_message_outbox(created_at, event_id) WHERE dispatched_at IS NULL",
     "ALTER TABLE core_messages ADD COLUMN IF NOT EXISTS sender_path TEXT",
     "ALTER TABLE core_message_deliveries ADD COLUMN IF NOT EXISTS recipient_path TEXT",
+    "ALTER TABLE core_messages ADD COLUMN IF NOT EXISTS sender_endpoint TEXT",
+    "ALTER TABLE core_message_deliveries ADD COLUMN IF NOT EXISTS recipient_endpoint TEXT NOT NULL DEFAULT ''",
+    "DO $$ DECLARE c RECORD; BEGIN FOR c IN SELECT conname FROM pg_constraint WHERE conrelid='core_message_deliveries'::regclass AND contype='u' AND pg_get_constraintdef(oid)='UNIQUE (workspace_id, message_id, recipient_kind, recipient_id)' LOOP EXECUTE format('ALTER TABLE core_message_deliveries DROP CONSTRAINT %I', c.conname); END LOOP; END $$",
+    "CREATE UNIQUE INDEX IF NOT EXISTS core_message_delivery_address ON core_message_deliveries(workspace_id,message_id,recipient_kind,recipient_id,recipient_endpoint)",
 ];
 
 #[cfg(test)]
@@ -1576,6 +1628,7 @@ mod tests {
 
     fn agent(id: &str) -> MessagePrincipal {
         MessagePrincipal {
+            app_endpoint: None,
             path: None,
             kind: MessagePrincipalKind::Agent,
             id: id.to_string(),
@@ -1586,6 +1639,7 @@ mod tests {
 
     fn human(id: &str) -> MessagePrincipal {
         MessagePrincipal {
+            app_endpoint: None,
             path: None,
             kind: MessagePrincipalKind::Human,
             id: id.to_string(),
@@ -1601,6 +1655,7 @@ mod tests {
         idempotency_key: &str,
     ) -> SendMessageRequest {
         SendMessageRequest {
+            sender_endpoint: None,
             recipients: recipients.iter().map(|value| value.to_string()).collect(),
             context_ids: contexts,
             body: body.to_string(),
@@ -1610,6 +1665,123 @@ mod tests {
             trace_id: None,
             external_source: None,
         }
+    }
+
+    #[tokio::test]
+    async fn app_tree_deliveries_and_logical_sender_survive_ack_reopen_and_retry() {
+        let store = test_store().await;
+        // Exercise upgrade from the pre-subaddress schema and its old unique
+        // constraint, not only CREATE TABLE on an empty database.
+        sqlx::raw_sql("ALTER TABLE core_messages DROP COLUMN sender_endpoint; ALTER TABLE core_message_deliveries DROP COLUMN recipient_endpoint; ALTER TABLE core_message_deliveries ADD CONSTRAINT legacy_recipient_unique UNIQUE(workspace_id,message_id,recipient_kind,recipient_id)")
+            .execute(&store.pool).await.unwrap();
+        let store = MessageStore::open(store.pool.clone()).await.unwrap();
+        let sender = human("human-a");
+        let owner = agent("app-a");
+        let mut left = owner.clone();
+        left.app_endpoint = Some("team/tools/agent1".into());
+        let mut right = owner.clone();
+        right.app_endpoint = Some("team/tools/agent2".into());
+        let input = request(
+            &[
+                "app-a/team/tools/agent1",
+                "app-a/team/tools/agent2",
+                "app-a",
+            ],
+            vec![],
+            "hello",
+            "subtrees",
+        );
+        let sent = store
+            .send(
+                "workspace-a",
+                &sender,
+                &[left.clone(), right.clone(), owner.clone()],
+                &input,
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent.delivery_ids.len(), 3);
+        let received = store.receive("workspace-a", &owner, 10, 0).await.unwrap();
+        assert_eq!(received.deliveries.len(), 3);
+        assert_eq!(
+            received
+                .deliveries
+                .iter()
+                .find(|delivery| delivery.delivery_id == sent.delivery_ids[0])
+                .unwrap()
+                .recipient
+                .app_endpoint,
+            left.app_endpoint
+        );
+        let reopened = MessageStore::open(store.pool.clone()).await.unwrap();
+        let mut moved_left = left.clone();
+        moved_left.name = "renamed-parent".into();
+        moved_left.path = Some("/moved/hub".into());
+        let replay = reopened
+            .send(
+                "workspace-a",
+                &sender,
+                &[moved_left, right, owner.clone()],
+                &input,
+            )
+            .await
+            .unwrap();
+        assert!(replay.idempotent_replay);
+        assert_eq!(replay.delivery_ids, sent.delivery_ids);
+        let ack = AcknowledgeMessagesRequest {
+            delivery_ids: vec![sent.delivery_ids[0].clone()],
+            operation_id: "ack-tree".into(),
+        };
+        reopened
+            .acknowledge("workspace-a", &owner, &ack)
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .receive("workspace-a", &owner, 10, 0)
+                .await
+                .unwrap()
+                .deliveries
+                .len(),
+            2
+        );
+        let reply = request(
+            &["human-a"],
+            vec![sent.message.message_id],
+            "reply",
+            "reply-tree",
+        );
+        let answered = reopened
+            .send("workspace-a", &left, std::slice::from_ref(&sender), &reply)
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened
+                .get("workspace-a", &sender, &answered.message.message_id)
+                .await
+                .unwrap()
+                .sender
+                .app_endpoint,
+            left.app_endpoint
+        );
+        let mut other = left.clone();
+        other.app_endpoint = Some("different".into());
+        assert_eq!(
+            reopened
+                .send("workspace-a", &other, &[sender], &reply)
+                .await
+                .unwrap_err()
+                .code(),
+            "message_idempotency_conflict"
+        );
+        assert_eq!(
+            reopened
+                .get("other-workspace", &owner, &answered.message.message_id)
+                .await
+                .unwrap_err()
+                .code(),
+            "message_not_found"
+        );
     }
 
     #[tokio::test]
@@ -2053,6 +2225,7 @@ mod tests {
         assert_eq!(final_messages, baseline_messages);
 
         let importer = MessagePrincipal {
+            app_endpoint: None,
             path: None,
             kind: MessagePrincipalKind::Machine,
             id: "machine-a".to_string(),
@@ -2282,6 +2455,7 @@ mod tests {
     async fn legacy_ids_are_workspace_scoped_and_conflicts_are_rejected() {
         let store = test_store().await;
         let importer = MessagePrincipal {
+            app_endpoint: None,
             path: None,
             kind: MessagePrincipalKind::Machine,
             id: "machine-a".to_string(),

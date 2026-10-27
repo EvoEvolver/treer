@@ -36,6 +36,9 @@ impl From<AppPrincipalKind> for MessagePrincipalKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessagePrincipal {
+    /// App-owned logical address; the authenticated principal remains `kind/id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     pub kind: MessagePrincipalKind,
@@ -48,6 +51,7 @@ pub struct MessagePrincipal {
 impl From<AppPrincipal> for MessagePrincipal {
     fn from(value: AppPrincipal) -> Self {
         Self {
+            app_endpoint: None,
             path: None,
             kind: value.kind.into(),
             id: value.id,
@@ -109,6 +113,8 @@ pub struct MessageDelivery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_endpoint: Option<String>,
     pub recipients: Vec<String>,
     #[serde(default)]
     pub context_ids: Vec<String>,
@@ -123,6 +129,52 @@ pub struct SendMessageRequest {
     pub trace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_source: Option<MessageExternalSource>,
+}
+
+/// One opaque, case-sensitive App address segment. Never a path or principal ID.
+pub fn valid_message_app_endpoint(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 519
+        && value.split('/').count() <= 8
+        && value.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment.len() <= 64
+                && segment
+                    .bytes()
+                    .next()
+                    .is_some_and(|b| b.is_ascii_alphanumeric())
+                && segment
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        })
+}
+
+/// One lazy page of an App-owned subtree, served through its authenticated UI
+/// tunnel at `api/tree?path=<relative/path>`. No node may select a transport URL.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppTreePage {
+    pub schema_version: u32,
+    pub path: Vec<String>,
+    pub nodes: Vec<AppTreeNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppTreeNode {
+    pub key: String,
+    pub name: String,
+    pub kind: AppTreeNodeKind,
+    /// Known actions are tree.read, message.send, message.read. Unknown actions
+    /// grant no behavior; clients must not infer capabilities from node kind.
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppTreeNodeKind {
+    App,
+    Agent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +203,10 @@ pub struct MessagePage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListMessagesQuery {
+    #[serde(default)]
+    pub app_owner_id: Option<String>,
+    #[serde(default)]
+    pub app_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<String>,
     #[serde(default = "default_message_page_size")]

@@ -213,6 +213,11 @@ pub(super) enum MessageCommand {
     #[command(about = "Send a durable Message")]
     Send {
         #[arg(
+            long,
+            help = "App-owned logical sender key; requires this workload to be a Managed App"
+        )]
+        from_endpoint: Option<String>,
+        #[arg(
             long = "to",
             required = true,
             help = "Recipient stable ID, Agent tree path, or sibling Agent name; human display names retain their own namespace"
@@ -243,6 +248,8 @@ pub(super) enum MessageCommand {
     },
     #[command(about = "Reply with a context edge to an existing Message")]
     Reply {
+        #[arg(long, help = "App-owned logical sender key")]
+        from_endpoint: Option<String>,
         message_id: String,
         #[arg(
             long = "to",

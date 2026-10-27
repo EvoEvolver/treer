@@ -56,6 +56,33 @@ fn lifecycle_declaration_defaults_to_starting_missing_for_older_senders() {
 use super::*;
 
 #[test]
+fn app_tree_addresses_are_bounded_relative_paths_not_urls_or_parent_escapes() {
+    for path in ["agent1", "team/tools/agent1", "A_1/B-2"] {
+        assert!(valid_message_app_endpoint(path), "{path}");
+    }
+    for path in [
+        "",
+        "/agent",
+        "agent/",
+        "a//b",
+        ".",
+        "..",
+        "a/../b",
+        "a%2Fb",
+        "http://host",
+        "名字",
+        "a\\b",
+    ] {
+        assert!(!valid_message_app_endpoint(path), "{path}");
+    }
+    assert!(!valid_message_app_endpoint(&["a"; 9].join("/")));
+    assert!(!valid_message_app_endpoint(&"a".repeat(65)));
+    assert!(valid_message_app_endpoint(
+        &vec!["a".repeat(64); 8].join("/")
+    ));
+}
+
+#[test]
 fn app_update_commands_round_trip_and_require_capability() {
     let request = ReplaceAgentStartupRequest {
         cwd: Some("releases/v2".into()),
@@ -875,6 +902,7 @@ fn core_message_wire_shape_round_trips_ordered_contexts() {
         message_id: "msg_1".to_string(),
         workspace_id: "ws_1".to_string(),
         sender: MessagePrincipal {
+            app_endpoint: None,
             path: None,
             kind: MessagePrincipalKind::Agent,
             id: "agent_1".to_string(),
@@ -882,6 +910,7 @@ fn core_message_wire_shape_round_trips_ordered_contexts() {
             role: None,
         },
         recipients: vec![MessagePrincipal {
+            app_endpoint: None,
             path: None,
             kind: MessagePrincipalKind::Human,
             id: "user_1".to_string(),

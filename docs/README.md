@@ -18,6 +18,7 @@ matching the question; follow its source links for implementation detail.
 | [Canary environment](canary.md) | Canary deployment, two-machine tests, and environment operations |
 | [Release process](releases.md) | Immutable release manifests, Cloudflare App deployment, and Production promotion |
 | [Workspace Apps](../apps/README.md) | App trust boundary, ownership, runtime model, and in-tree AIS adapters |
+| [App-owned trees](app-tree.md) | Recursive App/Agent directory, logical message addresses, permissions and local acceptance |
 | [Agent launchers](../launchers/README.md) | Optional profile-driven Agent runtimes and presentation boundaries |
 | [App guidelines](../apps/GUIDELINES.md) | Agent Markdown indexes, JSON data routes, and `/_human/` browser surfaces |
 | [Issues App](../apps/issues/README.md) | Shared human/Agent issue tracker deployment, API, permissions and backup |

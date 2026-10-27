@@ -352,7 +352,7 @@ pub(super) async fn workspace_app_principals(
     let snapshot = state.snapshot(workspace_id).await?;
     let humans = auth.list_workspace_humans(workspace_id).await?;
     let paths = auth.canonical_workload_paths(workspace_id).await?;
-    Ok(snapshot
+    let mut principals = snapshot
         .agents
         .into_iter()
         .map(|agent| {
@@ -374,7 +374,24 @@ pub(super) async fn workspace_app_principals(
             path: None,
             role: Some(human.role),
         }))
-        .collect())
+        .collect::<Vec<_>>();
+    // Managed App mailboxes remain addressable while their runtime is offline.
+    // Durable deployment metadata, not an invented Host child, owns this identity.
+    for app in auth.list_app_deployments(workspace_id).await? {
+        if let Some(id) = app.runtime_agent_id {
+            if !principals.iter().any(|principal| principal.id == id) {
+                let canonical = paths.get(&id);
+                principals.push(AppPrincipal {
+                    kind: AppPrincipalKind::Agent,
+                    path: canonical.map(|(_, path)| path.clone()),
+                    id,
+                    name: app.name,
+                    role: None,
+                });
+            }
+        }
+    }
+    Ok(principals)
 }
 
 /// Do not let a service-audience directory bypass ordinary Core discovery.
@@ -495,6 +512,7 @@ pub(super) async fn app_message_identity(
                 user_id: claims.sub.clone(),
             },
             MessagePrincipal {
+                app_endpoint: None,
                 path: None,
                 kind: MessagePrincipalKind::Human,
                 id: claims.sub,
@@ -530,6 +548,7 @@ pub(super) async fn app_message_identity(
                     agent_id: agent.agent_id.clone(),
                 },
                 MessagePrincipal {
+                    app_endpoint: None,
                     path: None,
                     kind: MessagePrincipalKind::Agent,
                     id: agent.agent_id,

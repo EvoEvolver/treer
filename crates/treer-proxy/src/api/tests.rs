@@ -13,6 +13,241 @@ use treer_protocol::{
 use treer_proxy::policy_store::WorkspacePolicyStore;
 
 #[tokio::test]
+async fn app_tree_browser_and_workload_messages_preserve_owner_and_nested_identity() {
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("default").await;
+    sqlx::raw_sql("INSERT INTO users(id,email,preferred_name,password_hash,created_at) VALUES('owner230','owner230@example.test','Owner230','fixture','now'); INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES('org_default','owner230','owner','now'); INSERT INTO sessions(token,user_id,created_at,expires_at) VALUES('session230','owner230','2026-01-01T00:00:00Z','2999-01-01T00:00:00Z')")
+        .execute(&auth.pool()).await.unwrap();
+    let app = auth
+        .create_app_deployment(
+            "default",
+            "owner230",
+            "machine-a".into(),
+            CreateAppDeploymentRequest {
+                folder_id: None,
+                server_id: Some("machine-a".into()),
+                name: "hub230".into(),
+                command: "fixture".into(),
+                args: vec![],
+                cwd: ".".into(),
+                port: 8081,
+                hostname: String::new(),
+                public: false,
+            },
+        )
+        .await
+        .unwrap();
+    let owner = app.runtime_agent_id.unwrap();
+    let state = state_with_managed_agent().await;
+    let messages = MessageStore::open(auth.pool()).await.unwrap();
+    let identity = IdentityIssuer::load(&auth, &Url::parse("https://treer.example/").unwrap())
+        .await
+        .unwrap();
+    let router = router(
+        state.clone(),
+        test_config(),
+        auth.clone(),
+        PolicyEngine::allow_all(),
+        identity,
+        test_browser_access(),
+        test_ingress_config(),
+        messages.clone(),
+        CapabilityRollout::new(true),
+        crate::updater::UpdaterClient::disabled(),
+        crate::voice::VoiceServices::disabled(),
+    );
+    let input = json!({"recipients":[format!("{owner}/team/tools/agent1"),format!("{owner}/team/tools/agent2"),owner],"body":"nested offline","idempotency_key":"tree230"});
+    let request = |body: Value, cookie: bool| {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/api/workspaces/default/messages")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ORIGIN, "https://app.treer.example");
+        if cookie {
+            builder = builder.header(header::COOKIE, "treer_session=session230");
+        }
+        builder.body(Body::from(body.to_string())).unwrap()
+    };
+    let unauth = router
+        .clone()
+        .oneshot(request(input.clone(), false))
+        .await
+        .unwrap();
+    assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+    // Current cookie-Origin selection remains authoritative for the restored
+    // browser route; a valid session must not bypass it.
+    for origin in [None, Some("https://untrusted.example")] {
+        let mut rejected = request(input.clone(), true);
+        rejected.headers_mut().remove(header::ORIGIN);
+        if let Some(origin) = origin {
+            rejected
+                .headers_mut()
+                .insert(header::ORIGIN, origin.parse().unwrap());
+        }
+        assert_eq!(
+            router.clone().oneshot(rejected).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let sent = router
+        .clone()
+        .oneshot(request(input.clone(), true))
+        .await
+        .unwrap();
+    let status = sent.status();
+    let bytes = axum::body::to_bytes(sent.into_body(), 65536).await.unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let sent: treer_protocol::SendMessageResponse = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(sent.delivery_ids.len(), 3);
+    assert_eq!(sent.message.sender.kind, MessagePrincipalKind::Human);
+    assert_eq!(
+        sent.message.recipients[0].app_endpoint.as_deref(),
+        Some("team/tools/agent1")
+    );
+    let mut spoof = input.clone();
+    spoof["sender_endpoint"] = json!("team/tools/agent1");
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request(spoof, true))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    for target in [
+        "agent-b/team/tools/agent1",
+        "hub230/../agent1",
+        "hub230/a//agent1",
+    ] {
+        let invalid = json!({"recipients":[target],"body":"no","idempotency_key":target});
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(invalid, true))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    let app_principal = MessagePrincipal {
+        app_endpoint: None,
+        path: None,
+        kind: MessagePrincipalKind::Agent,
+        id: owner.clone(),
+        name: "hub230".into(),
+        role: None,
+    };
+    let incoming = messages
+        .receive("default", &app_principal, 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        incoming.deliveries.len(),
+        3,
+        "offline App retains distinct subtree deliveries"
+    );
+    let reply: SendMessageRequest = serde_json::from_value(json!({"recipients":["owner230"],"body":"actual child","context_ids":[sent.message.message_id],"sender_endpoint":"team/tools/agent1","idempotency_key":"reply230"})).unwrap();
+    let answered = send_message_for(
+        &state,
+        &auth,
+        &PolicyEngine::allow_all(),
+        &messages,
+        "default",
+        PolicySubject::Agent {
+            server_id: "machine-a".into(),
+            agent_id: owner.clone(),
+        },
+        app_principal,
+        reply.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        answered.message.sender.app_endpoint.as_deref(),
+        Some("team/tools/agent1")
+    );
+    let non_app = MessagePrincipal {
+        app_endpoint: None,
+        path: None,
+        kind: MessagePrincipalKind::Agent,
+        id: "agent-b".into(),
+        name: "reviewer".into(),
+        role: None,
+    };
+    assert_eq!(
+        send_message_for(
+            &state,
+            &auth,
+            &PolicyEngine::allow_all(),
+            &messages,
+            "default",
+            PolicySubject::Agent {
+                server_id: "machine-a".into(),
+                agent_id: "agent-b".into()
+            },
+            non_app,
+            reply
+        )
+        .await
+        .unwrap_err()
+        .status,
+        StatusCode::FORBIDDEN
+    );
+    let path = format!("/api/workspaces/default/messages?app_owner_id={owner}&app_endpoint=team%2Ftools%2Fagent1&limit=1");
+    let page = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(path.clone())
+                .header(header::COOKIE, "treer_session=session230")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(page.into_body(), 65536).await.unwrap();
+    let page: treer_protocol::MessagePage = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(page.messages[0].message_id, answered.message.message_id);
+    assert!(page.next_cursor.is_some());
+    sqlx::query("DELETE FROM organization_members WHERE user_id='owner230'")
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    // A retained cookie cannot read or mutate after current membership removal.
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request(input, true))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        router
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header(header::COOKIE, "treer_session=session230")
+                    .body(Body::empty())
+                    .unwrap()
+            )
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
 async fn agent_creation_ack_and_validated_inventory_close_reservation_cleanup_scope() {
     for confirmation_fails in [false, true] {
         let auth = AuthStore::for_test("test").await;
@@ -5288,6 +5523,7 @@ async fn message_api_pins_durable_policy_and_hides_recipient_resolution_details(
     headers.insert(AGENT_ID_HEADER, "agent-a".parse().expect("agent header"));
     let secret_body = "api-policy-body-must-not-enter-metadata";
     let request = |recipient: &str, key: &str, body: &str| SendMessageRequest {
+        sender_endpoint: None,
         recipients: vec![recipient.to_string()],
         context_ids: Vec::new(),
         body: body.to_string(),

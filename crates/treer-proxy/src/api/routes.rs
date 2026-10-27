@@ -747,7 +747,29 @@ pub fn router(
             "/api/auth/profile",
             axum::routing::patch(auth::update_profile),
         )
-        .registered_route("/api/auth/logout", post(auth::logout))
+        .registered_route("/api/auth/logout", post(auth::logout));
+    let authenticated = if rollout.core_messages {
+        authenticated
+            .registered_route(
+                "/api/workspaces/{workspace_id}/messages",
+                get(list_browser_messages).post(send_browser_message),
+            )
+            .registered_route(
+                "/api/workspaces/{workspace_id}/messages/{message_id}",
+                get(get_browser_message),
+            )
+    } else {
+        authenticated
+            .registered_route(
+                "/api/workspaces/{workspace_id}/messages",
+                any(core_messages_rollout_disabled),
+            )
+            .registered_route(
+                "/api/workspaces/{workspace_id}/messages/{message_id}",
+                any(core_messages_rollout_disabled),
+            )
+    };
+    let authenticated = authenticated
         .route_layer(middleware::from_fn_with_state(
             auth_store.clone(),
             auth::require_workspace_access,
