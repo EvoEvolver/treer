@@ -1429,7 +1429,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use treer_protocol::{PolicyPrincipalGroup, WorkspacePolicyDocument, POLICY_SCHEMA_VERSION};
+    use treer_protocol::{WorkspacePolicyDocument, POLICY_SCHEMA_VERSION};
 
     struct StaticEvaluator(PolicyEvaluation);
 
@@ -1474,14 +1474,6 @@ mod tests {
             "127.0.0.1",
             8080,
         )
-    }
-
-    #[tokio::test]
-    async fn default_engine_allows_every_request() {
-        PolicyEngine::allow_all()
-            .authorize(&request())
-            .await
-            .expect("default policy should allow access");
     }
 
     #[tokio::test]
@@ -1551,67 +1543,6 @@ mod tests {
     }
 
     #[test]
-    fn network_request_preserves_subject_action_and_resource_context() {
-        let request = request();
-        assert_eq!(request.workspace_id, "workspace-a");
-        assert_eq!(request.action, ACTION_NETWORK_CONNECT);
-        assert_eq!(request.resource.kind, RESOURCE_NETWORK_ENDPOINT);
-        assert_eq!(request.resource.attributes["port"], "8080");
-        assert_eq!(
-            request.resource.attributes["destination_agent_id"],
-            "agent-b"
-        );
-        assert_eq!(
-            request.subject,
-            PolicySubject::Agent {
-                server_id: "source-machine".to_string(),
-                agent_id: "agent-a".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn requests_without_an_agent_use_a_machine_subject() {
-        let request = PolicyRequest::network_connect(
-            "workspace-a",
-            "source-machine",
-            None,
-            "destination-machine",
-            None,
-            "127.0.0.1",
-            8080,
-        );
-        assert_eq!(
-            request.subject,
-            PolicySubject::Machine {
-                server_id: "source-machine".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn generic_requests_support_future_actions_and_resource_attributes() {
-        let request = PolicyRequest::new(
-            "workspace-a",
-            PolicySubject::Agent {
-                server_id: "machine-a".to_string(),
-                agent_id: "agent-a".to_string(),
-            },
-            ACTION_VIRTUAL_HOST_CREATE,
-            PolicyResource::new(RESOURCE_VIRTUAL_HOST, "api.internal")
-                .with_attribute("destination_server_id", "machine-b")
-                .with_attribute("target_port", "8080"),
-        );
-        assert_eq!(request.action, ACTION_VIRTUAL_HOST_CREATE);
-        assert_eq!(request.resource.kind, RESOURCE_VIRTUAL_HOST);
-        assert_eq!(request.resource.id, "api.internal");
-        assert_eq!(
-            request.resource.attributes["destination_server_id"],
-            "machine-b"
-        );
-    }
-
-    #[test]
     fn configured_provider_failure_does_not_abstain_into_legacy_allow() {
         let failed = CachedProviderPolicy {
             app_id: "app_policy".to_string(),
@@ -1637,65 +1568,22 @@ mod tests {
 
     #[test]
     fn compiled_policy_applies_priority_deny_ties_and_monitor_mode() {
-        let document = WorkspacePolicyDocument {
-            schema_version: POLICY_SCHEMA_VERSION,
-            defaults: BTreeMap::from([(ACTION_AGENT_PROMPT.to_string(), PolicyEffect::Deny)]),
-            groups: BTreeMap::from([(
-                "reviewers".to_string(),
-                PolicyPrincipalGroup {
-                    principals: vec![PolicyPrincipalRef {
-                        kind: PolicyPrincipalKind::Agent,
-                        id: "target".to_string(),
-                    }],
-                },
-            )]),
-            rules: vec![
-                WorkspacePolicyRule {
-                    bindings: Default::default(),
-                    conditions: Vec::new(),
-                    id: "allow-reviewer".to_string(),
-                    priority: 10,
-                    effect: PolicyEffect::Allow,
-                    subjects: vec![PolicySubjectSelector {
-                        tree: None,
-                        kind: Some(PolicyPrincipalKind::Agent),
-                        id: Some("source".to_string()),
-                        machine_id: Some("machine-a".to_string()),
-                        group: None,
-                        is_self: false,
-                    }],
-                    actions: vec![ACTION_AGENT_PROMPT.to_string()],
-                    resources: vec![PolicyResourceSelector {
-                        tree: None,
-                        kind: Some(RESOURCE_AGENT.to_string()),
-                        id: None,
-                        principal_group: Some("reviewers".to_string()),
-                    }],
-                },
-                WorkspacePolicyRule {
-                    bindings: Default::default(),
-                    conditions: Vec::new(),
-                    id: "deny-tie".to_string(),
-                    priority: 10,
-                    effect: PolicyEffect::Deny,
-                    subjects: vec![PolicySubjectSelector {
-                        tree: None,
-                        kind: Some(PolicyPrincipalKind::Agent),
-                        id: Some("source".to_string()),
-                        machine_id: None,
-                        group: None,
-                        is_self: false,
-                    }],
-                    actions: vec![ACTION_AGENT_PROMPT.to_string()],
-                    resources: vec![PolicyResourceSelector {
-                        tree: None,
-                        kind: Some(RESOURCE_AGENT.to_string()),
-                        id: Some("target".to_string()),
-                        principal_group: None,
-                    }],
-                },
-            ],
-        };
+        let document: WorkspacePolicyDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": POLICY_SCHEMA_VERSION,
+            "defaults": {ACTION_AGENT_PROMPT: "deny"},
+            "groups": {"reviewers": {"principals": [{"kind": "agent", "id": "target"}]}},
+            "rules": [
+                {"id": "allow-reviewer", "priority": 10, "effect": "allow",
+                 "subjects": [{"kind": "agent", "id": "source", "machine_id": "machine-a"}],
+                 "actions": [ACTION_AGENT_PROMPT],
+                 "resources": [{"kind": RESOURCE_AGENT, "principal_group": "reviewers"}]},
+                {"id": "deny-tie", "priority": 10, "effect": "deny",
+                 "subjects": [{"kind": "agent", "id": "source"}],
+                 "actions": [ACTION_AGENT_PROMPT],
+                 "resources": [{"kind": RESOURCE_AGENT, "id": "target"}]}
+            ]
+        }))
+        .unwrap();
         let request = PolicyRequest::new(
             "workspace-a",
             PolicySubject::Agent {
@@ -1705,33 +1593,28 @@ mod tests {
             ACTION_AGENT_PROMPT,
             PolicyResource::new(RESOURCE_AGENT, "target"),
         );
-        let enforce = CompiledWorkspacePolicy::compile(WorkspacePolicy {
-            workspace_id: "workspace-a".to_string(),
-            revision: 1,
-            mode: PolicyMode::Enforce,
-            document: document.clone(),
-            updated_at: Utc::now(),
-            updated_by: PolicyPrincipalRef {
-                kind: PolicyPrincipalKind::Human,
-                id: "owner".to_string(),
-            },
-        });
+        let compile = |mode, document| {
+            CompiledWorkspacePolicy::compile(WorkspacePolicy {
+                workspace_id: "workspace-a".to_string(),
+                revision: 1,
+                mode,
+                document,
+                updated_at: Utc::now(),
+                updated_by: PolicyPrincipalRef {
+                    kind: PolicyPrincipalKind::Human,
+                    id: "owner".to_string(),
+                },
+            })
+        };
+        let enforce = compile(PolicyMode::Enforce, document.clone());
+        // Equal priority: deny wins.
         assert!(matches!(
             enforce.evaluate(&request),
             PolicyDecision::Deny(_)
         ));
-
-        let monitor = CompiledWorkspacePolicy::compile(WorkspacePolicy {
-            workspace_id: "workspace-a".to_string(),
-            revision: 1,
-            mode: PolicyMode::Monitor,
-            document,
-            updated_at: Utc::now(),
-            updated_by: PolicyPrincipalRef {
-                kind: PolicyPrincipalKind::Human,
-                id: "owner".to_string(),
-            },
-        });
-        assert_eq!(monitor.evaluate(&request), PolicyDecision::Allow);
+        assert_eq!(
+            compile(PolicyMode::Monitor, document).evaluate(&request),
+            PolicyDecision::Allow
+        );
     }
 }

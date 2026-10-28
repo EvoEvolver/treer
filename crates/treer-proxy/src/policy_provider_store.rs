@@ -202,51 +202,33 @@ mod tests {
     #[tokio::test]
     async fn provider_binding_and_revision_hint_are_durable_and_monotonic() {
         let auth = AuthStore::for_test("owner-password").await;
-        let pool = auth.pool();
-        let now = Utc::now().to_rfc3339();
-        sqlx::query(
-            "INSERT INTO organizations(organization_id, name, created_at, created_by) \
-             VALUES('org_policy', 'Policy', $1, 'owner')",
-        )
-        .bind(&now)
-        .execute(&pool)
-        .await
-        .expect("insert organization");
-        sqlx::query(
-            "INSERT INTO workspaces(workspace_id, organization_id, name, created_at, created_by) \
-             VALUES('ws_policy', 'org_policy', 'Policy', $1, 'owner')",
-        )
-        .bind(&now)
-        .execute(&pool)
-        .await
-        .expect("insert workspace");
-        sqlx::query(
-            "INSERT INTO machine_services(service_id, workspace_id, name, server_id, target_host, \
-                target_port, protocol, created_at, created_by, updated_at, updated_by) \
-             VALUES('svc_policy', 'ws_policy', 'policy', 'machine', '127.0.0.1', 8787, 'http', \
-                $1, 'owner', $1, 'owner')",
-        )
-        .bind(&now)
-        .execute(&pool)
-        .await
-        .expect("insert service");
-        sqlx::query(
-            "INSERT INTO app_deployments(app_id, workspace_id, name, server_id, command, args, cwd, \
-                port, hostname, service_id, created_at, created_by, updated_at, updated_by) \
-             VALUES('app_policy', 'ws_policy', 'policy', 'machine', 'python3', '[]'::jsonb, '.', \
-                8787, 'policy.internal', 'svc_policy', $1, 'owner', $1, 'owner')",
-        )
-        .bind(&now)
-        .execute(&pool)
-        .await
-        .expect("insert app");
-
-        let store = PolicyProviderStore::new(pool);
+        auth.seed_test_workspace("ws_policy").await;
+        let app = auth
+            .create_app_deployment(
+                "ws_policy",
+                "owner",
+                "machine".into(),
+                treer_protocol::CreateAppDeploymentRequest {
+                    folder_id: None,
+                    server_id: Some("machine".into()),
+                    name: "policy".into(),
+                    command: "python3".into(),
+                    args: vec![],
+                    cwd: ".".into(),
+                    port: 8787,
+                    hostname: String::new(),
+                    public: false,
+                },
+            )
+            .await
+            .unwrap();
+        let (app_id, service_id) = (app.app_id.as_str(), app.service_id.as_str());
+        let store = PolicyProviderStore::new(auth.pool());
         let configured = store
             .set(
                 "ws_policy",
-                "app_policy",
-                "svc_policy",
+                app_id,
+                service_id,
                 PolicyProviderFailureMode::FailClosed,
                 60,
                 0,
@@ -257,14 +239,14 @@ mod tests {
         assert_eq!(configured.revision_hint, 0);
         assert_eq!(
             store
-                .advance_revision("ws_policy", "app_policy", 9)
+                .advance_revision("ws_policy", app_id, 9)
                 .await
                 .expect("advance revision"),
             Some(9)
         );
         assert_eq!(
             store
-                .advance_revision("ws_policy", "app_policy", 4)
+                .advance_revision("ws_policy", app_id, 4)
                 .await
                 .expect("reject rollback"),
             Some(9)

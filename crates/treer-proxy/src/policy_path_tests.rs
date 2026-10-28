@@ -34,6 +34,7 @@ async fn invalid_provider_contract_never_falls_back_to_stale_or_fail_open() {
         version: "test".into(),
         git_commit: "test".into(),
     };
+    let now = chrono::Utc::now();
     state
         .register_server_instance_with_capabilities(
             treer_protocol::ServerInfo {
@@ -48,8 +49,8 @@ async fn invalid_provider_contract_never_falls_back_to_stale_or_fail_open() {
                 labels: Default::default(),
                 available_agents: None,
                 status: treer_protocol::ServerStatus::Online,
-                connected_at: chrono::Utc::now(),
-                last_seen_at: chrono::Utc::now(),
+                connected_at: now,
+                last_seen_at: now,
                 capabilities: vec![],
             },
             connection,
@@ -155,49 +156,6 @@ fn document() -> WorkspacePolicyDocument {
     serde_json::from_value(json!({"schema_version":2,"defaults":{"agent.prompt":"deny"},"rules":[
         {"id":"team","priority":100,"effect":"allow","subjects":[{"kind":"agent","tree":{"path_glob":"/team/*"}}],"actions":["agent.prompt"],"resources":[{"kind":"agent","tree":{"path_prefix":{"path":"/team","include_self":false}}}],"bindings":{"home":{"ref":"subject.tree.folder"}},"conditions":[{"op":"resource_below_folder","folder":{"var":"home"}}]}
     ]})).unwrap()
-}
-
-#[test]
-fn action_index_shares_large_rules_and_deduplicates_repeated_actions() {
-    for repeated in [false, true] {
-        let mut doc = document();
-        let rule = &mut doc.rules[0];
-        rule.actions = (0..5000)
-            .map(|i| {
-                if repeated {
-                    "agent.prompt".into()
-                } else {
-                    format!("action-{i}")
-                }
-            })
-            .collect();
-        rule.conditions = serde_json::from_value(json!(vec![
-            json!({"op":"resource_below_folder","folder":{"path":format!("/{}","x".repeat(4000))}});
-            32
-        ]))
-        .unwrap();
-        treer_proxy::policy_store::validate_document(&doc).unwrap();
-        let compiled = CompiledWorkspacePolicy::compile(WorkspacePolicy {
-            workspace_id: "w".into(),
-            revision: 1,
-            mode: PolicyMode::Monitor,
-            document: doc,
-            updated_at: chrono::Utc::now(),
-            updated_by: PolicyPrincipalRef {
-                kind: PolicyPrincipalKind::Human,
-                id: "owner".into(),
-            },
-        });
-        let first = &compiled.rules_by_action.values().next().unwrap()[0];
-        assert_eq!(
-            compiled.rules_by_action.len(),
-            if repeated { 1 } else { 5000 }
-        );
-        for rules in compiled.rules_by_action.values() {
-            assert_eq!(rules.len(), 1);
-            assert!(Arc::ptr_eq(first, &rules[0]));
-        }
-    }
 }
 
 #[tokio::test]

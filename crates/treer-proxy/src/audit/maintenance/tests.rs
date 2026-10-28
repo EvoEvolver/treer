@@ -7,6 +7,13 @@ async fn fixture() -> AuthStore {
     auth
 }
 
+async fn pending_count(pool: &sqlx::PgPool) -> i32 {
+    sqlx::query_scalar("SELECT pending FROM audit_maintenance_settings")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 fn actor() -> MutationActor {
     MutationActor {
         kind: "agent",
@@ -44,10 +51,7 @@ async fn durable_admission_is_bounded_across_connections_and_releases_capacity()
     assert_eq!(counters, (3, 17));
     assert_eq!(drain_batch(&pool).await.unwrap(), 3);
     assert_eq!(drain_batch(&pool).await.unwrap(), 0);
-    let pending: i32 = sqlx::query_scalar("SELECT pending FROM audit_maintenance_settings")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let pending = pending_count(&pool).await;
     assert_eq!(pending, 0);
     assert!(enqueue_prompt(&pool, "audit", "ag_target", actor())
         .await
@@ -56,10 +60,7 @@ async fn durable_admission_is_bounded_across_connections_and_releases_capacity()
         .execute(&pool)
         .await
         .unwrap();
-    let pending: i32 = sqlx::query_scalar("SELECT pending FROM audit_maintenance_settings")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let pending = pending_count(&pool).await;
     assert_eq!(pending, 0, "cascade deletion releases capacity too");
 }
 
@@ -220,46 +221,18 @@ async fn failed_insert_does_not_consume_capacity_and_failed_drain_keeps_durable_
     assert!(enqueue_prompt(&pool, "missing", "target", actor())
         .await
         .is_err());
-    let pending: i32 = sqlx::query_scalar("SELECT pending FROM audit_maintenance_settings")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let pending = pending_count(&pool).await;
     assert_eq!(pending, 0);
     enqueue_prompt(&pool, "audit", "target", actor())
         .await
         .unwrap();
     sqlx::query("ALTER TABLE organization_audit_events ADD CONSTRAINT reject_prompt_test CHECK(action<>'agent.prompt') NOT VALID").execute(&pool).await.unwrap();
     assert!(drain_batch(&pool).await.is_err());
-    let pending: i32 = sqlx::query_scalar("SELECT pending FROM audit_maintenance_settings")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let pending = pending_count(&pool).await;
     assert_eq!(pending, 1);
     sqlx::query("ALTER TABLE organization_audit_events DROP CONSTRAINT reject_prompt_test")
         .execute(&pool)
         .await
         .unwrap();
     assert_eq!(drain_batch(&pool).await.unwrap(), 1);
-}
-
-#[tokio::test]
-async fn prompt_audit_latency_measurement() {
-    let auth = fixture().await;
-    let pool = auth.pool();
-    let mut direct = Vec::new();
-    let mut queued = Vec::new();
-    for _ in 0..100 {
-        let started = std::time::Instant::now();
-        mutation_best_effort(&pool, "audit", "agent.prompt", "agent", "target").await;
-        direct.push(started.elapsed().as_micros());
-        let started = std::time::Instant::now();
-        assert!(enqueue_prompt(&pool, "audit", "target", actor())
-            .await
-            .unwrap());
-        queued.push(started.elapsed().as_micros());
-    }
-    direct.sort_unstable();
-    queued.sort_unstable();
-    eprintln!("audit latency local_pg samples=100 direct_p50_us={} direct_p95_us={} enqueue_p50_us={} enqueue_p95_us={}",direct[50],direct[95],queued[50],queued[95]);
-    // Measurements are evidence, not a flaky timing assertion or speed promise.
 }

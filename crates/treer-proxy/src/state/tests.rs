@@ -1,4 +1,144 @@
 use super::*;
+use treer_protocol::AgentStatus;
+
+fn expect_text(frame: SocketFrame) -> String {
+    match frame {
+        SocketFrame::Text(text) => text,
+        other => panic!("expected text socket frame, got {other:?}"),
+    }
+}
+
+fn expect_network(frame: SocketFrame) -> NetworkBinaryFrame {
+    match frame {
+        SocketFrame::Binary(encoded) => {
+            NetworkBinaryFrame::decode(&encoded).expect("decode network frame")
+        }
+        other => panic!("expected binary network frame, got {other:?}"),
+    }
+}
+
+fn expect_envelope(frame: SocketFrame) -> treer_protocol::CommandEnvelope {
+    match serde_json::from_str(&expect_text(frame)).unwrap() {
+        ProxyMessage::Command { envelope } => envelope,
+        other => panic!("expected command, got {other:?}"),
+    }
+}
+
+fn test_server() -> ServerInfo {
+    server_in("alpha", "server")
+}
+
+fn server_in(workspace_id: &str, server_id: &str) -> ServerInfo {
+    let now = Utc::now();
+    let build = treer_protocol::BuildInfo {
+        version: "0.1.2".to_string(),
+        git_commit: "test".to_string(),
+    };
+    ServerInfo {
+        server_id: server_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        name: server_id.to_string(),
+        hostname: "test-host".to_string(),
+        root: "/tmp".to_string(),
+        controller_build: build.clone(),
+        host_build: build,
+        supervision: None,
+        labels: Default::default(),
+        available_agents: None,
+        status: ServerStatus::Online,
+        connected_at: now,
+        last_seen_at: now,
+        capabilities: vec![],
+    }
+}
+
+fn test_agent(agent_id: &str, name: &str) -> AgentInfo {
+    agent_in("alpha", "server", agent_id, name)
+}
+
+fn agent_in(workspace_id: &str, server_id: &str, agent_id: &str, name: &str) -> AgentInfo {
+    let now = Utc::now();
+    AgentInfo {
+        path: None,
+        run_generation: 0,
+        agent_id: agent_id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        server_id: server_id.to_string(),
+        kind: "command".to_string(),
+        name: name.to_string(),
+        cwd: ".".to_string(),
+        status: AgentStatus::Idle,
+        pid: None,
+        started_at: now,
+        updated_at: now,
+        exited_at: None,
+        exit_code: None,
+        output_revision: 0,
+        interface: None,
+    }
+}
+
+fn snapshot_of(server: ServerInfo, agents: Vec<AgentInfo>) -> AgentServerSnapshot {
+    AgentServerSnapshot { server, agents }
+}
+
+/// Registers the standard `alpha/server` Controller with explicit capabilities.
+async fn connect(
+    state: &AppState,
+    capabilities: &[&str],
+) -> (Uuid, mpsc::UnboundedReceiver<SocketFrame>) {
+    let connection = Uuid::new_v4();
+    let (tx, rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            test_server(),
+            connection,
+            "controller".into(),
+            capabilities.iter().map(|c| c.to_string()),
+            tx,
+        )
+        .await
+        .unwrap();
+    (connection, rx)
+}
+
+/// Registers `alpha/server` with the full current capability set.
+async fn connect_current(state: &AppState) -> (Uuid, mpsc::UnboundedReceiver<SocketFrame>) {
+    let connection = Uuid::new_v4();
+    let (tx, rx) = mpsc::unbounded_channel();
+    state
+        .register_server(test_server(), connection, tx)
+        .await
+        .unwrap();
+    (connection, rx)
+}
+
+fn spawn_command(
+    state: &AppState,
+    command: AgentCommand,
+) -> tokio::task::JoinHandle<Result<serde_json::Value, ProtocolError>> {
+    let state = state.clone();
+    tokio::spawn(async move { state.send_command("alpha", "server", command).await })
+}
+
+async fn insert_agent(state: &AppState, agent: AgentInfo) {
+    state
+        .inner
+        .workspaces
+        .write()
+        .await
+        .get_mut(&agent.workspace_id)
+        .expect("workspace")
+        .agents
+        .insert(agent.agent_id.clone(), agent);
+}
+
+fn read_cmd() -> AgentCommand {
+    AgentCommand::Read {
+        agent_id: "agent-1".to_string(),
+        lines: None,
+    }
+}
 
 #[tokio::test]
 async fn durable_creation_guard_rejects_deleted_dispatch_forward_and_replay() {
@@ -18,235 +158,139 @@ async fn durable_creation_guard_rejects_deleted_dispatch_forward_and_replay() {
         }))
         .unwrap(),
     };
-    let (tx, mut first_rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance_with_capabilities(
-            test_server(),
-            Uuid::new_v4(),
-            "first".into(),
-            vec![treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT.into()],
-            tx,
-        )
-        .await
-        .unwrap();
-    let waiting = tokio::spawn({
-        let state = state.clone();
-        let command = create();
-        async move { state.send_command("alpha", "server", command).await }
-    });
-    // Prove it was already queued and sent before adding the durable tombstone.
-    assert!(matches!(
-        serde_json::from_str::<ProxyMessage>(&expect_text(first_rx.recv().await.unwrap())).unwrap(),
-        ProxyMessage::Command { .. }
-    ));
+    let caps = [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT];
+    let (_, mut first_rx) = connect(&state, &caps).await;
+    let waiting = spawn_command(&state, create());
+    // Already queued and sent before the durable tombstone is written.
+    expect_envelope(first_rx.recv().await.unwrap());
     auth.delete_agent("alpha", "agent-reserved").await.unwrap();
-    let replacement_id = Uuid::new_v4();
-    let (tx, mut replacement_rx) = mpsc::unbounded_channel();
+    let (replacement_id, mut replacement_rx) = connect(&state, &caps).await;
     state
-        .register_server_instance_with_capabilities(
-            test_server(),
-            replacement_id,
-            "replacement".into(),
-            vec![treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT.into()],
-            tx,
-        )
+        .apply_snapshot(replacement_id, snapshot_of(test_server(), vec![]))
         .await
         .unwrap();
-    // Registration alone does not replay: the replacement first publishes its
-    // initial inventory, exactly as a real Controller handshake does.
-    state
-        .apply_snapshot(
-            replacement_id,
-            AgentServerSnapshot {
-                server: test_server(),
-                agents: vec![],
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        waiting.await.unwrap().unwrap_err().code,
-        "agent_identity_denied"
-    );
-    assert!(
-        replacement_rx.try_recv().is_err(),
-        "tombstoned Create must not be replayed"
-    );
+    let denied = |r: Result<serde_json::Value, ProtocolError>| r.unwrap_err().code;
+    assert_eq!(denied(waiting.await.unwrap()), "agent_identity_denied");
     assert!(state.inner.pending.lock().await.is_empty());
     assert_eq!(
-        state
-            .send_command("alpha", "server", create())
-            .await
-            .unwrap_err()
-            .code,
+        denied(state.send_command("alpha", "server", create()).await),
         "agent_identity_denied"
     );
     assert_eq!(
-        state
-            .handle_cluster_command(
-                "alpha",
-                "server",
-                replacement_id,
-                "forwarded-create".into(),
-                create()
-            )
-            .await
-            .unwrap_err()
-            .code,
+        denied(
+            state
+                .handle_cluster_command("alpha", "server", replacement_id, "fwd".into(), create())
+                .await
+        ),
         "agent_identity_denied"
-    );
-    assert!(
-        replacement_rx.try_recv().is_err(),
-        "neither local nor cluster-owner dispatch may send revoked Create"
     );
     // PG outages fail closed; do not trust an empty/stale in-memory projection.
     auth.pool().close().await;
     assert_eq!(
-        state
-            .send_command("alpha", "server", create())
-            .await
-            .unwrap_err()
-            .code,
+        denied(state.send_command("alpha", "server", create()).await),
         "identity_check_unavailable"
     );
-    assert!(replacement_rx.try_recv().is_err());
+    assert!(
+        replacement_rx.try_recv().is_err(),
+        "revoked Create must never be replayed or dispatched"
+    );
 }
 
 #[tokio::test]
-async fn interleaved_exec_and_startup_results_use_command_ids_not_arrival_order() {
+async fn command_results_correlate_by_id_and_only_from_the_current_owner() {
     let state = AppState::new();
-    let connection_id = Uuid::new_v4();
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (owner, mut rx) = connect(
+        &state,
+        &[
+            treer_protocol::CAPABILITY_MACHINE_EXEC,
+            treer_protocol::CAPABILITY_AGENT_STARTUP_ADMIN,
+        ],
+    )
+    .await;
+    let (intruder_tx, _intruder_rx) = mpsc::unbounded_channel();
+    let intruder_id = Uuid::new_v4();
     state
-        .register_server_instance_with_capabilities(
-            test_server(),
-            connection_id,
-            "correlation-fixture".into(),
-            vec![
-                treer_protocol::CAPABILITY_MACHINE_EXEC.into(),
-                treer_protocol::CAPABILITY_AGENT_STARTUP_ADMIN.into(),
-            ],
-            tx,
-        )
+        .register_server(server_in("alpha", "intruder"), intruder_id, intruder_tx)
         .await
         .unwrap();
+    let exec = || AgentCommand::Exec {
+        request: treer_protocol::MachineExecRequest {
+            cwd: ".".into(),
+            command: "fixture".into(),
+            args: vec![],
+            timeout_ms: 1000,
+        },
+    };
     let mut waiting = Vec::new();
     let mut ids = Vec::new();
     for command in [
-        AgentCommand::Exec {
-            request: treer_protocol::MachineExecRequest {
-                cwd: ".".into(),
-                command: "fixture".into(),
-                args: vec![],
-                timeout_ms: 1000,
-            },
-        },
-        AgentCommand::Exec {
-            request: treer_protocol::MachineExecRequest {
-                cwd: ".".into(),
-                command: "fixture".into(),
-                args: vec![],
-                timeout_ms: 1000,
-            },
-        },
+        exec(),
+        exec(),
         AgentCommand::StartupAdminGet {
             agent_id: "fixture-agent".into(),
         },
     ] {
-        let state = state.clone();
-        waiting.push(tokio::spawn(async move {
-            state.send_command("alpha", "server", command).await
-        }));
-        let ProxyMessage::Command { envelope } =
-            serde_json::from_str(&expect_text(rx.recv().await.unwrap())).unwrap()
-        else {
-            panic!("expected command");
-        };
-        ids.push(envelope.command_id);
+        waiting.push(spawn_command(&state, command));
+        ids.push(expect_envelope(rx.recv().await.unwrap()).command_id);
     }
-    assert_eq!(state.inner.pending.lock().await.len(), 3);
-    // Startup responds first, then the second exec, then the first exec.
-    // Duplicate and unknown results must not consume another pending request.
+    // Another machine or a stale connection cannot complete the command.
+    let forged = CommandResult::success(ids[0].clone(), serde_json::json!({"fake":true}));
+    assert_eq!(
+        state
+            .complete_command_from("alpha", "intruder", intruder_id, forged.clone())
+            .await
+            .unwrap_err()
+            .code,
+        "command_identity_mismatch"
+    );
+    assert_eq!(
+        state
+            .complete_command_from("alpha", "server", Uuid::new_v4(), forged)
+            .await
+            .unwrap_err()
+            .code,
+        "duplicate_machine_connection"
+    );
+    // Results arrive out of order; duplicates and unknown ids consume nothing.
     for index in [2, 1, 0] {
-        let result = CommandResult::success(
-            ids[index].clone(),
-            serde_json::json!({"request_index":index}),
-        );
-        state
-            .complete_command_from("alpha", "server", connection_id, result.clone())
-            .await
-            .unwrap();
-        state
-            .complete_command_from("alpha", "server", connection_id, result)
-            .await
-            .unwrap();
-        state
-            .complete_command_from(
-                "alpha",
-                "server",
-                connection_id,
-                CommandResult::success("unknown-command", serde_json::json!({"unexpected":true})),
-            )
-            .await
-            .unwrap();
-        let pending = state.inner.pending.lock().await;
-        assert_eq!(pending.len(), index);
-        for remaining in &ids[..index] {
-            assert!(pending.contains_key(remaining));
+        let result = CommandResult::success(ids[index].clone(), serde_json::json!({"i":index}));
+        for result in [
+            result.clone(),
+            result,
+            CommandResult::success("unknown", serde_json::json!({})),
+        ] {
+            state
+                .complete_command_from("alpha", "server", owner, result)
+                .await
+                .unwrap();
         }
+        assert_eq!(state.inner.pending.lock().await.len(), index);
     }
     for (index, result) in waiting.into_iter().enumerate() {
         assert_eq!(
             result.await.unwrap().unwrap(),
-            serde_json::json!({"request_index":index})
+            serde_json::json!({"i":index})
         );
     }
 }
 
 #[tokio::test]
-async fn old_controller_refuses_creation_preflight_without_mutating_or_disconnect() {
-    let state = AppState::new();
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance_with_capabilities(
-            test_server(),
-            Uuid::new_v4(),
-            "old-creation".into(),
-            Vec::<String>::new(),
-            tx,
-        )
-        .await
-        .unwrap();
-    let error = state
-        .send_command("alpha", "server", AgentCommand::CreationPlacementCheck {})
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "unsupported_command");
-    assert!(error
-        .message
-        .contains(treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT));
-    assert!(rx.try_recv().is_err());
-    assert_eq!(state.snapshot("alpha").await.unwrap().servers.len(), 1);
-}
-
-#[tokio::test]
-async fn old_controller_rejects_v2_policy_fetch_before_any_dispatch() {
-    let state = AppState::new();
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance_with_capabilities(
-            test_server(),
-            Uuid::new_v4(),
-            "old-policy".into(),
-            vec![treer_protocol::CAPABILITY_SERVICE_HTTP_FETCH.into()],
-            tx,
-        )
-        .await
-        .unwrap();
-    let error = state
-        .send_command(
-            "alpha",
-            "server",
+async fn controllers_without_a_capability_never_receive_its_commands() {
+    use treer_protocol::*;
+    let startup = || ReplaceAgentStartupRequest {
+        cwd: None,
+        command: "sh".into(),
+        args: vec![],
+    };
+    let target = || "target".to_string();
+    let cases: Vec<(Vec<&str>, AgentCommand, &str)> = vec![
+        (
+            vec![],
+            AgentCommand::CreationPlacementCheck {},
+            CAPABILITY_WORKLOAD_CREATE_PLACEMENT,
+        ),
+        (
+            vec![CAPABILITY_SERVICE_HTTP_FETCH],
             AgentCommand::FetchServiceHttp {
                 port: 8888,
                 path: "/v1/policy/bundle?max_schema_version=2".into(),
@@ -254,314 +298,99 @@ async fn old_controller_rejects_v2_policy_fetch_before_any_dispatch() {
                 timeout_ms: 1000,
                 policy_schema_version: Some(2),
             },
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "unsupported_command");
-    assert!(error
-        .message
-        .contains(treer_protocol::CAPABILITY_POLICY_PATH_RULES));
-    assert!(rx.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn command_results_require_the_target_machine_and_current_connection() {
+            CAPABILITY_POLICY_PATH_RULES,
+        ),
+        (
+            vec![],
+            AgentCommand::SubmitPrompt {
+                agent_id: target(),
+                request: SubmitAgentPromptRequest {
+                    text: "task".into(),
+                    delivery: PromptDelivery::Queue,
+                    notify: None,
+                    require_receipt: false,
+                },
+                sender: None,
+            },
+            CAPABILITY_AGENT_PROMPT_DELIVERY,
+        ),
+        (
+            vec![],
+            AgentCommand::QueueCancel {
+                agent_id: target(),
+                submission_id: "sub-1".into(),
+            },
+            CAPABILITY_AGENT_PROMPT_DELIVERY,
+        ),
+        (
+            vec![CAPABILITY_AGENT_STARTUP, CAPABILITY_AGENT_LIFECYCLE],
+            AgentCommand::StartupAdminSet {
+                agent_id: target(),
+                request: startup(),
+            },
+            CAPABILITY_AGENT_STARTUP_ADMIN,
+        ),
+        (
+            vec![CAPABILITY_AGENT_STARTUP, CAPABILITY_AGENT_LIFECYCLE],
+            AgentCommand::RestartWithStartup {
+                agent_id: target(),
+                request: startup(),
+            },
+            CAPABILITY_AGENT_STARTUP_ADMIN,
+        ),
+        (
+            vec![CAPABILITY_AGENT_LIFECYCLE],
+            AgentCommand::AppStartupUpdate {
+                agent_id: "app_stable".into(),
+                request: startup(),
+                revision: 1,
+            },
+            CAPABILITY_APP_UPDATE,
+        ),
+        (
+            vec![CAPABILITY_AGENT_LIFECYCLE],
+            serde_json::from_value(serde_json::json!({
+                "action":"app_ensure_lifecycle", "agent_id":"app_stable", "workload_credential":null,
+                "enabled":true, "start_missing":true, "revision":1,
+                "request":{"kind":"app", "name":"stable", "cwd":".", "args":["sh"]}
+            }))
+            .unwrap(),
+            CAPABILITY_APP_UPDATE,
+        ),
+        (vec![], AgentCommand::Abort { agent_id: target() }, ""),
+    ];
+    for (capabilities, command, required) in cases {
+        let state = AppState::new();
+        let (_, mut rx) = connect(&state, &capabilities).await;
+        let error = state
+            .send_command("alpha", "server", command.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "unsupported_command", "{command:?}");
+        assert!(error.message.contains(required), "{}", error.message);
+        assert!(rx.try_recv().is_err(), "{command:?} must not be sent");
+        assert_eq!(state.snapshot("alpha").await.unwrap().servers.len(), 1);
+    }
+    // A refused command does not cost the connection its supported commands.
     let state = AppState::new();
-    let owner_id = Uuid::new_v4();
-    let intruder_id = Uuid::new_v4();
-    let (owner_tx, mut owner_rx) = mpsc::unbounded_channel();
-    let (intruder_tx, _intruder_rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance(test_server(), owner_id, "owner".into(), owner_tx)
-        .await
-        .unwrap();
-    let mut intruder = test_server();
-    intruder.server_id = "intruder".into();
-    state
-        .register_server_instance(intruder, intruder_id, "intruder".into(), intruder_tx)
-        .await
-        .unwrap();
-    let waiting = tokio::spawn({
-        let state = state.clone();
-        async move {
-            state
-                .send_command("alpha", "server", AgentCommand::ShutdownMachine)
-                .await
-        }
-    });
-    let ProxyMessage::Command { envelope } =
-        serde_json::from_str(&expect_text(owner_rx.recv().await.unwrap())).unwrap()
-    else {
-        panic!("expected command");
-    };
-    let fake_result = CommandResult::success(
-        envelope.command_id.clone(),
-        serde_json::json!({"fake":true}),
-    );
-    assert_eq!(
-        state
-            .complete_command_from("alpha", "intruder", intruder_id, fake_result)
-            .await
-            .unwrap_err()
-            .code,
-        "command_identity_mismatch"
-    );
+    let (_, mut rx) = connect(&state, &[CAPABILITY_AGENT_STARTUP]).await;
     assert!(state
-        .inner
-        .pending
-        .lock()
-        .await
-        .contains_key(&envelope.command_id));
-    assert_eq!(
-        state
-            .complete_command_from(
-                "alpha",
-                "server",
-                Uuid::new_v4(),
-                CommandResult::success(envelope.command_id.clone(), serde_json::json!({}))
-            )
-            .await
-            .unwrap_err()
-            .code,
-        "duplicate_machine_connection"
-    );
-    state
-        .complete_command_from(
+        .send_command(
             "alpha",
             "server",
-            owner_id,
-            CommandResult::success(envelope.command_id, serde_json::json!({"real":true})),
+            AgentCommand::StartupAdminGet { agent_id: target() }
         )
         .await
-        .unwrap();
-    assert_eq!(
-        waiting.await.unwrap().unwrap(),
-        serde_json::json!({"real":true})
-    );
-}
-
-#[tokio::test]
-async fn old_controller_rejects_prompt_delivery_without_receiving_unknown_frames() {
-    let state = AppState::new();
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance_with_capabilities(
-            test_server(),
-            Uuid::new_v4(),
-            "old".into(),
-            vec![],
-            tx,
-        )
-        .await
-        .unwrap();
-    for command in [
-        AgentCommand::SubmitPrompt {
-            agent_id: "target".into(),
-            request: treer_protocol::SubmitAgentPromptRequest {
-                text: "task".into(),
-                delivery: treer_protocol::PromptDelivery::Queue,
-                notify: None,
-                require_receipt: false,
-            },
-            sender: None,
-        },
-        AgentCommand::QueueRead {
-            agent_id: "target".into(),
-        },
-        AgentCommand::SubmissionRead {
-            agent_id: "target".into(),
-            submission_id: "sub-1".into(),
-        },
-        AgentCommand::QueueCancel {
-            agent_id: "target".into(),
-            submission_id: "sub-1".into(),
-        },
-    ] {
-        let error = state
-            .send_command("alpha", "server", command)
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "unsupported_command");
-        assert!(error
-            .message
-            .contains(treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY));
-        assert!(rx.try_recv().is_err());
-    }
-    assert_eq!(state.snapshot("alpha").await.unwrap().servers.len(), 1);
-}
-
-#[tokio::test]
-async fn legacy_controller_rejects_startup_admin_without_losing_connection() {
-    let state = AppState::new();
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance_with_capabilities(
-            test_server(),
-            Uuid::new_v4(),
-            "old-controller".into(),
-            vec![
-                treer_protocol::CAPABILITY_AGENT_STARTUP.into(),
-                treer_protocol::CAPABILITY_AGENT_LIFECYCLE.into(),
-            ],
-            tx,
-        )
-        .await
-        .unwrap();
-    for command in [
-        AgentCommand::StartupAdminGet {
-            agent_id: "target".into(),
-        },
-        AgentCommand::StartupAdminSet {
-            agent_id: "target".into(),
-            request: treer_protocol::ReplaceAgentStartupRequest {
-                cwd: None,
-                command: "sh".into(),
-                args: vec![],
-            },
-        },
-        AgentCommand::RestartWithStartup {
-            agent_id: "target".into(),
-            request: treer_protocol::ReplaceAgentStartupRequest {
-                cwd: None,
-                command: "sh".into(),
-                args: vec![],
-            },
-        },
-    ] {
-        let error = state
-            .send_command("alpha", "server", command)
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "unsupported_command");
-        assert!(error
-            .message
-            .contains(treer_protocol::CAPABILITY_AGENT_STARTUP_ADMIN));
-        assert!(rx.try_recv().is_err());
-    }
-    let waiting = tokio::spawn({
-        let state = state.clone();
-        async move {
-            state
-                .send_command(
-                    "alpha",
-                    "server",
-                    AgentCommand::StartupGet {
-                        agent_id: "target".into(),
-                    },
-                )
-                .await
-        }
-    });
-    let SocketFrame::Text(frame) = rx.recv().await.unwrap() else {
-        panic!("expected text command")
-    };
-    let ProxyMessage::Command { envelope } = serde_json::from_str(&frame).unwrap() else {
-        panic!("expected command")
-    };
+        .is_err());
+    let waiting = spawn_command(&state, AgentCommand::StartupGet { agent_id: target() });
+    let envelope = expect_envelope(rx.recv().await.unwrap());
     state
         .complete_command(CommandResult::success(
             envelope.command_id,
-            serde_json::json!({"still_connected":true}),
+            serde_json::json!({"ok":true}),
         ))
         .await;
-    assert_eq!(waiting.await.unwrap().unwrap()["still_connected"], true);
-}
-#[tokio::test]
-async fn legacy_controller_rejects_app_update_without_dispatch() {
-    let state = AppState::new();
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance_with_capabilities(
-            test_server(),
-            Uuid::new_v4(),
-            "old".into(),
-            vec![treer_protocol::CAPABILITY_AGENT_LIFECYCLE.into()],
-            tx,
-        )
-        .await
-        .unwrap();
-    let request = treer_protocol::ReplaceAgentStartupRequest {
-        cwd: None,
-        command: "sh".into(),
-        args: vec![],
-    };
-    for command in [
-        serde_json::from_value(serde_json::json!({
-            "action":"app_ensure_lifecycle", "agent_id":"app_stable", "workload_credential":null,
-            "enabled":true, "start_missing":true, "revision":1,
-            "request":{"kind":"app", "name":"stable", "cwd":".", "args":["sh"]}
-        }))
-        .unwrap(),
-        AgentCommand::AppStartupCheck {
-            agent_id: "app_stable".into(),
-            request: request.clone(),
-        },
-        AgentCommand::AppStartupUpdate {
-            agent_id: "app_stable".into(),
-            request,
-            revision: 1,
-        },
-    ] {
-        let error = state
-            .send_command("alpha", "server", command)
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "unsupported_command");
-        assert!(error
-            .message
-            .contains(treer_protocol::CAPABILITY_APP_UPDATE));
-        assert!(rx.try_recv().is_err());
-    }
-    assert_eq!(state.snapshot("alpha").await.unwrap().servers.len(), 1);
-}
-use treer_protocol::AgentStatus;
-
-fn expect_text(frame: SocketFrame) -> String {
-    match frame {
-        SocketFrame::Text(text) => text,
-        SocketFrame::Binary(_) => panic!("expected text socket frame"),
-        SocketFrame::Ping(_) | SocketFrame::Pong(_) | SocketFrame::Close => {
-            panic!("expected text socket frame")
-        }
-    }
-}
-
-fn expect_network(frame: SocketFrame) -> NetworkBinaryFrame {
-    match frame {
-        SocketFrame::Binary(encoded) => {
-            NetworkBinaryFrame::decode(&encoded).expect("decode network frame")
-        }
-        SocketFrame::Text(_) => panic!("expected binary network frame"),
-        SocketFrame::Ping(_) | SocketFrame::Pong(_) | SocketFrame::Close => {
-            panic!("expected binary network frame")
-        }
-    }
-}
-
-fn test_server() -> ServerInfo {
-    let now = Utc::now();
-    ServerInfo {
-        server_id: "server".to_string(),
-        workspace_id: "alpha".to_string(),
-        name: "test-host".to_string(),
-        hostname: "test-host".to_string(),
-        root: "/tmp".to_string(),
-        controller_build: treer_protocol::BuildInfo {
-            version: "0.1.2".to_string(),
-            git_commit: "controller-test".to_string(),
-        },
-        host_build: treer_protocol::BuildInfo {
-            version: "0.1.2".to_string(),
-            git_commit: "host-test".to_string(),
-        },
-        supervision: None,
-        labels: Default::default(),
-        available_agents: None,
-        status: ServerStatus::Online,
-        connected_at: now,
-        last_seen_at: now,
-        capabilities: vec![],
-    }
+    assert_eq!(waiting.await.unwrap().unwrap()["ok"], true);
 }
 
 #[tokio::test]
@@ -573,28 +402,15 @@ async fn workspace_renames_update_snapshots_and_live_events() {
         name: "Renamed".to_string(),
         ..original
     };
-
-    state
-        .rename_workspace_info(renamed.clone())
-        .await
-        .expect("rename workspace");
+    state.rename_workspace_info(renamed.clone()).await.unwrap();
+    let event = events.recv().await.unwrap();
     assert_eq!(
-        state.snapshot("alpha").await.expect("snapshot").workspace,
-        renamed
+        (event.event.as_str(), &event.data["name"]),
+        ("workspace.renamed", &serde_json::json!("Renamed"))
     );
-    let event = events.recv().await.expect("workspace rename event");
-    assert_eq!(event.event, "workspace.renamed");
-    assert_eq!(event.data["name"], "Renamed");
+    // A runtime ensure never reverts the stored name.
     state.ensure_workspace("alpha", "alpha").await;
-    assert_eq!(
-        state
-            .snapshot("alpha")
-            .await
-            .expect("snapshot after runtime ensure")
-            .workspace,
-        renamed
-    );
-
+    assert_eq!(state.snapshot("alpha").await.unwrap().workspace, renamed);
     let replicated = WorkspaceInfo {
         name: "Replicated".to_string(),
         ..renamed
@@ -604,31 +420,19 @@ async fn workspace_renames_update_snapshots_and_live_events() {
             workspace: replicated.clone(),
         })
         .await;
-    assert_eq!(
-        state.snapshot("alpha").await.expect("snapshot").workspace,
-        replicated
-    );
-    assert_eq!(
-        events.recv().await.expect("replicated rename event").event,
-        "workspace.renamed"
-    );
+    assert_eq!(state.snapshot("alpha").await.unwrap().workspace, replicated);
+    assert_eq!(events.recv().await.unwrap().event, "workspace.renamed");
 }
 
 #[tokio::test]
 async fn proxy_messages_broadcast_only_to_their_workspace() {
     let state = AppState::new();
-    let (alpha_tx, mut alpha_rx) = mpsc::unbounded_channel();
-    state
-        .register_server(test_server(), Uuid::new_v4(), alpha_tx)
-        .await
-        .expect("register alpha controller");
-    let mut beta = test_server();
-    beta.workspace_id = "beta".to_string();
+    let (_, mut alpha_rx) = connect_current(&state).await;
     let (beta_tx, mut beta_rx) = mpsc::unbounded_channel();
     state
-        .register_server(beta, Uuid::new_v4(), beta_tx)
+        .register_server(server_in("beta", "server"), Uuid::new_v4(), beta_tx)
         .await
-        .expect("register beta controller");
+        .unwrap();
     let message = ProxyMessage::VirtualNetworkHosts {
         snapshot: treer_protocol::VirtualNetworkHostsSnapshot {
             workspace_id: "alpha".to_string(),
@@ -636,78 +440,11 @@ async fn proxy_messages_broadcast_only_to_their_workspace() {
             hosts: Vec::new(),
         },
     };
-
     state.broadcast_proxy_message("alpha", &message).await;
-
-    let received: ProxyMessage = serde_json::from_str(&expect_text(
-        alpha_rx.recv().await.expect("alpha virtual-host snapshot"),
-    ))
-    .expect("decode virtual-host snapshot");
+    let received: ProxyMessage =
+        serde_json::from_str(&expect_text(alpha_rx.recv().await.unwrap())).unwrap();
     assert_eq!(received, message);
     assert!(beta_rx.try_recv().is_err());
-}
-
-fn test_agent(agent_id: &str, name: &str) -> AgentInfo {
-    let now = Utc::now();
-    AgentInfo {
-        path: None,
-        run_generation: 0,
-        agent_id: agent_id.to_string(),
-        workspace_id: "alpha".to_string(),
-        server_id: "server".to_string(),
-        kind: "command".to_string(),
-        name: name.to_string(),
-        cwd: ".".to_string(),
-        status: AgentStatus::Idle,
-        pid: None,
-        started_at: now,
-        updated_at: now,
-        exited_at: None,
-        exit_code: None,
-        output_revision: 0,
-        interface: None,
-    }
-}
-
-#[tokio::test]
-async fn platform_agent_count_sums_current_workspace_agents() {
-    let state = AppState::new();
-    state.ensure_workspace("alpha", "Alpha").await;
-    state.ensure_workspace("beta", "Beta").await;
-    let mut beta_agent = test_agent("agent-beta", "Beta agent");
-    beta_agent.workspace_id = "beta".to_string();
-    {
-        let mut workspaces = state.inner.workspaces.write().await;
-        workspaces
-            .get_mut("alpha")
-            .expect("alpha workspace")
-            .agents
-            .insert(
-                "agent-alpha".to_string(),
-                test_agent("agent-alpha", "Alpha agent"),
-            );
-        workspaces
-            .get_mut("beta")
-            .expect("beta workspace")
-            .agents
-            .insert("agent-beta".to_string(), beta_agent);
-    }
-
-    assert_eq!(state.platform_agent_count().await, 2);
-}
-
-#[tokio::test]
-async fn workspace_snapshots_are_isolated() {
-    let state = AppState::new();
-    state.ensure_workspace("alpha", "Alpha").await;
-    state.ensure_workspace("beta", "Beta").await;
-
-    let alpha = state.snapshot("alpha").await.expect("alpha snapshot");
-    let beta = state.snapshot("beta").await.expect("beta snapshot");
-    assert_eq!(alpha.workspace.workspace_id, "alpha");
-    assert_eq!(beta.workspace.workspace_id, "beta");
-    assert!(alpha.servers.is_empty());
-    assert!(beta.agents.is_empty());
 }
 
 #[tokio::test]
@@ -716,787 +453,244 @@ async fn workspace_mutations_publish_versioned_domain_events() {
     let mut events = event_bus.subscribe();
     let state = AppState::with_event_bus(event_bus);
     let (outgoing, _incoming) = mpsc::unbounded_channel();
-
     state
         .register_server(test_server(), Uuid::new_v4(), outgoing)
         .await
-        .expect("register server");
-
-    let event = events.recv().await.expect("domain event");
+        .unwrap();
+    let event = events.recv().await.unwrap();
     assert_eq!(event.schema_version, DOMAIN_EVENT_SCHEMA_VERSION);
-    assert_eq!(event.workspace_id, "alpha");
-    assert_eq!(event.action, "server.updated");
-    assert_eq!(event.resource.kind, "workspace");
-    assert_eq!(event.resource.id, "alpha");
+    assert_eq!(
+        (event.workspace_id.as_str(), event.action.as_str()),
+        ("alpha", "server.updated")
+    );
     assert_eq!(event.workspace_revision, Some(1));
     assert_eq!(event.payload["server_id"], "server");
 }
 
 #[tokio::test]
-async fn agent_targets_accept_ids_and_unique_names() {
+async fn agent_targets_accept_ids_and_unique_names_only() {
     let state = AppState::new();
     state.ensure_workspace("alpha", "Alpha").await;
-    {
-        let mut workspaces = state.inner.workspaces.write().await;
-        let workspace = workspaces.get_mut("alpha").expect("workspace");
-        workspace
-            .agents
-            .insert("agent-1".to_string(), test_agent("agent-1", "reviewer"));
-    }
-
+    insert_agent(&state, test_agent("agent-1", "reviewer")).await;
+    insert_agent(&state, test_agent("agent-2", "writer")).await;
     assert_eq!(
-        state
-            .resolve_agent("alpha", "agent-1")
-            .await
-            .expect("id target")
-            .name,
+        state.resolve_agent("alpha", "agent-1").await.unwrap().name,
         "reviewer"
     );
     assert_eq!(
         state
+            .resolve_agent("alpha", "writer")
+            .await
+            .unwrap()
+            .agent_id,
+        "agent-2"
+    );
+    insert_agent(&state, test_agent("agent-3", "reviewer")).await;
+    assert_eq!(
+        state
             .resolve_agent("alpha", "reviewer")
             .await
-            .expect("name target")
-            .agent_id,
-        "agent-1"
+            .unwrap_err()
+            .code,
+        "agent_ambiguous"
     );
 }
 
 #[tokio::test]
-async fn duplicate_agent_names_are_ambiguous() {
+async fn renames_and_deletes_survive_controller_snapshots_and_events() {
     let state = AppState::new();
-    state.ensure_workspace("alpha", "Alpha").await;
-    {
-        let mut workspaces = state.inner.workspaces.write().await;
-        let workspace = workspaces.get_mut("alpha").expect("workspace");
-        workspace
-            .agents
-            .insert("agent-1".to_string(), test_agent("agent-1", "reviewer"));
-        workspace
-            .agents
-            .insert("agent-2".to_string(), test_agent("agent-2", "reviewer"));
-    }
-
-    let error = state
-        .resolve_agent("alpha", "reviewer")
-        .await
-        .expect_err("duplicate names must fail");
-    assert_eq!(error.code, "agent_ambiguous");
-}
-
-#[tokio::test]
-async fn renamed_objects_survive_controller_snapshots_and_events() {
-    let state = AppState::new();
-    let server = test_server();
-    let connection_id = Uuid::new_v4();
-    let (outgoing, _messages) = mpsc::unbounded_channel();
+    let (connection, _rx) = connect_current(&state).await;
+    let agents = || {
+        vec![
+            test_agent("agent-1", "original-agent"),
+            test_agent("agent-2", "doomed"),
+        ]
+    };
     state
-        .register_server(server.clone(), connection_id, outgoing)
+        .apply_snapshot(connection, snapshot_of(test_server(), agents()))
         .await
-        .expect("register server");
-    state
-        .apply_snapshot(
-            connection_id,
-            AgentServerSnapshot {
-                server: server.clone(),
-                agents: vec![test_agent("agent-1", "original-agent")],
-            },
-        )
-        .await
-        .expect("initial snapshot");
-
+        .unwrap();
     state
         .rename_server("alpha", "server", "renamed-machine".to_string())
         .await
-        .expect("rename server");
+        .unwrap();
     state
         .rename_agent("alpha", "agent-1", "renamed-agent".to_string())
         .await
-        .expect("rename agent");
-
+        .unwrap();
+    state.delete_agent("alpha", "agent-2").await.unwrap();
+    // The Controller keeps reporting the old names and the deleted Agent.
     state
-        .apply_snapshot(
-            connection_id,
-            AgentServerSnapshot {
-                server,
-                agents: vec![test_agent("agent-1", "original-agent")],
-            },
-        )
+        .apply_snapshot(connection, snapshot_of(test_server(), agents()))
         .await
-        .expect("replacement snapshot");
-    state
-        .apply_agent_event(connection_id, test_agent("agent-1", "original-agent"))
-        .await
-        .expect("agent event");
-
-    let snapshot = state.snapshot("alpha").await.expect("workspace snapshot");
+        .unwrap();
+    for agent in agents() {
+        state.apply_agent_event(connection, agent).await.unwrap();
+    }
+    let snapshot = state.snapshot("alpha").await.unwrap();
     assert_eq!(snapshot.servers[0].name, "renamed-machine");
+    assert_eq!(snapshot.agents.len(), 1);
     assert_eq!(snapshot.agents[0].name, "renamed-agent");
-}
-
-#[tokio::test]
-async fn deleted_agents_ignore_controller_snapshots_and_events() {
-    let state = AppState::new();
-    let server = test_server();
-    let connection_id = Uuid::new_v4();
-    let (outgoing, _messages) = mpsc::unbounded_channel();
-    state
-        .register_server(server.clone(), connection_id, outgoing)
-        .await
-        .expect("register server");
-    state
-        .apply_snapshot(
-            connection_id,
-            AgentServerSnapshot {
-                server: server.clone(),
-                agents: vec![test_agent("agent-1", "helper")],
-            },
-        )
-        .await
-        .expect("initial snapshot");
-    state
-        .delete_agent("alpha", "agent-1")
-        .await
-        .expect("delete agent");
-
-    state
-        .apply_snapshot(
-            connection_id,
-            AgentServerSnapshot {
-                server,
-                agents: vec![test_agent("agent-1", "helper")],
-            },
-        )
-        .await
-        .expect("replacement snapshot");
-    state
-        .apply_agent_event(connection_id, test_agent("agent-1", "helper"))
-        .await
-        .expect("late agent event");
-
-    assert!(state
-        .snapshot("alpha")
-        .await
-        .expect("workspace snapshot")
-        .agents
-        .is_empty());
     assert_eq!(
         state
-            .resolve_agent("alpha", "agent-1")
+            .resolve_agent("alpha", "agent-2")
             .await
-            .expect_err("deleted agent must stay hidden")
+            .unwrap_err()
             .code,
         "agent_not_found"
     );
 }
 
 #[tokio::test]
-async fn deleting_server_closes_resources_and_blocks_late_reconnects() {
+async fn deleting_server_closes_resources_and_blocks_reconnect_until_reenrollment() {
     let state = AppState::new();
-    let server = test_server();
-    let connection_id = Uuid::new_v4();
-    let (server_tx, mut server_rx) = mpsc::unbounded_channel();
-    state
-        .register_server(server.clone(), connection_id, server_tx)
-        .await
-        .expect("register server");
+    let (connection, mut server_rx) = connect_current(&state).await;
     state
         .apply_snapshot(
-            connection_id,
-            AgentServerSnapshot {
-                server: server.clone(),
-                agents: vec![test_agent("agent-1", "helper")],
-            },
+            connection,
+            snapshot_of(test_server(), vec![test_agent("agent-1", "helper")]),
         )
         .await
-        .expect("apply snapshot");
-
+        .unwrap();
     let (terminal_tx, mut terminal_rx) = mpsc::channel(TERMINAL_BROWSER_QUEUE_CAPACITY);
     state
         .attach_terminal("alpha", "agent-1", 120, 40, None, terminal_tx)
         .await
-        .expect("attach terminal");
-    let attach = server_rx.recv().await.expect("terminal attach");
-    assert!(matches!(attach, SocketFrame::Text(_)));
+        .unwrap();
+    expect_text(server_rx.recv().await.unwrap());
+    let pending = spawn_command(&state, read_cmd());
+    expect_envelope(server_rx.recv().await.unwrap());
 
-    let command_state = state.clone();
-    let pending = tokio::spawn(async move {
-        command_state
-            .send_command(
-                "alpha",
-                "server",
-                AgentCommand::Read {
-                    agent_id: "agent-1".to_string(),
-                    lines: None,
-                },
-            )
-            .await
-    });
-    let command = server_rx.recv().await.expect("pending command");
-    assert!(matches!(command, SocketFrame::Text(_)));
-
-    let (deleted, agents) = state
-        .delete_server("alpha", "server")
-        .await
-        .expect("delete server");
-    assert_eq!(deleted.server_id, "server");
-    assert_eq!(agents.len(), 1);
+    let (deleted, agents) = state.delete_server("alpha", "server").await.unwrap();
+    assert_eq!((deleted.server_id.as_str(), agents.len()), ("server", 1));
     assert_eq!(server_rx.recv().await, Some(SocketFrame::Close));
-
-    let pending_error = pending
-        .await
-        .expect("join pending command")
-        .expect_err("pending command should fail");
-    assert_eq!(pending_error.code, "server_deleted");
-    let terminal_message: TerminalServerMessage = serde_json::from_str(&expect_text(
-        terminal_rx.recv().await.expect("terminal close"),
-    ))
-    .expect("decode terminal close");
+    assert_eq!(pending.await.unwrap().unwrap_err().code, "server_deleted");
+    let closed: TerminalServerMessage =
+        serde_json::from_str(&expect_text(terminal_rx.recv().await.unwrap())).unwrap();
     assert_eq!(
-        terminal_message,
+        closed,
         TerminalServerMessage::Closed {
             reason: Some("machine deleted".to_string()),
             exit_code: None,
         }
     );
+    let snapshot = state.snapshot("alpha").await.unwrap();
+    assert!(snapshot.servers.is_empty() && snapshot.agents.is_empty());
 
-    let snapshot = state.snapshot("alpha").await.expect("workspace snapshot");
-    assert!(snapshot.servers.is_empty());
-    assert!(snapshot.agents.is_empty());
-    let (replacement_tx, _replacement_rx) = mpsc::unbounded_channel();
-    assert_eq!(
+    let reconnect = || async {
+        let (tx, _rx) = mpsc::unbounded_channel();
         state
-            .register_server(server, Uuid::new_v4(), replacement_tx)
+            .register_server(test_server(), Uuid::new_v4(), tx)
             .await
-            .expect_err("deleted server should not reconnect")
-            .code,
-        "server_deleted"
-    );
-}
-
-#[tokio::test]
-async fn reenrollment_clears_a_deleted_machine_tombstone() {
-    let state = AppState::new();
-    let server = test_server();
-    let connection_id = Uuid::new_v4();
-    let (server_tx, _server_rx) = mpsc::unbounded_channel();
-    state
-        .register_server(server.clone(), connection_id, server_tx)
-        .await
-        .expect("register machine");
-    state
-        .delete_server("alpha", "server")
-        .await
-        .expect("delete machine");
-
-    let (blocked_tx, _blocked_rx) = mpsc::unbounded_channel();
-    assert_eq!(
-        state
-            .register_server(server.clone(), Uuid::new_v4(), blocked_tx)
-            .await
-            .expect_err("deleted machine remains blocked")
-            .code,
-        "server_deleted"
-    );
-
+    };
+    assert_eq!(reconnect().await.unwrap_err().code, "server_deleted");
     state.allow_server_reenrollment("alpha", "server").await;
-    let (reenrolled_tx, _reenrolled_rx) = mpsc::unbounded_channel();
-    state
-        .register_server(server, Uuid::new_v4(), reenrolled_tx)
-        .await
-        .expect("reenrolled machine reconnects");
+    reconnect().await.expect("re-enrolled machine reconnects");
 }
 
 #[tokio::test]
-async fn pending_command_is_resent_after_controller_snapshot() {
-    let state = AppState::new();
-    let server = test_server();
-    let first_connection = Uuid::new_v4();
-    let (first_tx, mut first_rx) = mpsc::unbounded_channel();
-    state
-        .register_server(server.clone(), first_connection, first_tx)
-        .await
-        .expect("register first controller");
-
-    let waiting_state = state.clone();
-    let waiting = tokio::spawn(async move {
-        waiting_state
-            .send_command(
-                "alpha",
-                "server",
-                AgentCommand::Read {
-                    agent_id: "agent-1".to_string(),
-                    lines: None,
-                },
-            )
-            .await
-    });
-    let first: ProxyMessage = serde_json::from_str(&expect_text(
-        first_rx.recv().await.expect("first command should be sent"),
-    ))
-    .expect("decode first command");
-    let ProxyMessage::Command {
-        envelope: first_envelope,
-    } = first
-    else {
-        panic!("expected command message");
+async fn pending_commands_replay_to_a_replacement_only_when_safe() {
+    let file_transfer = AgentCommand::FileTransfer {
+        actor: treer_protocol::MachineTransferActor {
+            workspace_id: "alpha".into(),
+            kind: "machine".into(),
+            id: "server".into(),
+        },
+        authorized_path: "result".into(),
+        request: treer_protocol::MachineFileTransferRequest::PutBegin {
+            path: "result".into(),
+            overwrite: false,
+            mode: 0o600,
+            size: Some(3),
+            limit: 64,
+        },
     };
-
-    state
-        .disconnect_server("alpha", "server", first_connection)
-        .await;
-    let second_connection = Uuid::new_v4();
-    let (second_tx, mut second_rx) = mpsc::unbounded_channel();
-    state
-        .register_server(server.clone(), second_connection, second_tx)
-        .await
-        .expect("register replacement controller");
-    state
-        .apply_snapshot(
-            second_connection,
-            AgentServerSnapshot {
-                server,
-                agents: Vec::new(),
+    let file_caps = [treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER];
+    let full_caps: Vec<&str> = treer_protocol::CONTROLLER_CAPABILITIES.to_vec();
+    // (command, replacement capabilities, expected outcome: None = replayed)
+    let cases: [(AgentCommand, &[&str], Option<&str>); 3] = [
+        (read_cmd(), &full_caps, None),
+        (
+            AgentCommand::Abort {
+                agent_id: "agent-1".to_string(),
             },
-        )
-        .await
-        .expect("apply replacement snapshot");
-
-    let second: ProxyMessage = serde_json::from_str(&expect_text(
-        second_rx
-            .recv()
+            &[],
+            Some("unsupported_command"),
+        ),
+        (file_transfer, &file_caps, Some("machine_transfer_stale")),
+    ];
+    for (command, replacement_caps, expected) in cases {
+        let state = AppState::new();
+        let (first, mut first_rx) = connect(&state, &full_caps).await;
+        let waiting = spawn_command(&state, command);
+        let first_envelope = expect_envelope(first_rx.recv().await.unwrap());
+        state.disconnect_server("alpha", "server", first).await;
+        let (second, mut second_rx) = connect(&state, replacement_caps).await;
+        // Registration alone does not replay; the initial snapshot does.
+        assert!(second_rx.try_recv().is_err());
+        state
+            .apply_snapshot(second, snapshot_of(test_server(), vec![]))
             .await
-            .expect("pending command should be resent"),
-    ))
-    .expect("decode resent command");
-    let ProxyMessage::Command {
-        envelope: second_envelope,
-    } = second
-    else {
-        panic!("expected resent command message");
-    };
-    assert_eq!(first_envelope.command_id, second_envelope.command_id);
-
-    state
-        .complete_command(CommandResult::success(
-            second_envelope.command_id,
-            serde_json::json!({"replayed": true}),
-        ))
-        .await;
-    assert_eq!(
-        waiting
-            .await
-            .expect("join command task")
-            .expect("command result"),
-        serde_json::json!({"replayed": true})
-    );
+            .unwrap();
+        match expected {
+            None => {
+                let replayed = expect_envelope(second_rx.recv().await.unwrap());
+                assert_eq!(replayed.command_id, first_envelope.command_id);
+                state
+                    .complete_command(CommandResult::success(
+                        replayed.command_id,
+                        serde_json::json!({"replayed": true}),
+                    ))
+                    .await;
+                assert_eq!(
+                    waiting.await.unwrap().unwrap(),
+                    serde_json::json!({"replayed": true})
+                );
+            }
+            Some(code) => {
+                assert_eq!(waiting.await.unwrap().unwrap_err().code, code);
+                assert!(second_rx.try_recv().is_err());
+            }
+        }
+    }
 }
 
 #[tokio::test]
-async fn machine_file_transfer_is_never_replayed_into_a_new_connection_generation() {
+async fn replacement_controller_fences_the_old_connection_and_original_can_reclaim() {
     let state = AppState::new();
-    let server = test_server();
-    let first = Uuid::new_v4();
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance_with_capabilities(
-            server.clone(),
-            first,
-            "file-controller".into(),
-            vec![treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER.into()],
-            tx,
-        )
-        .await
-        .unwrap();
-    let waiting = tokio::spawn({
+    let register = |instance: &'static str| {
         let state = state.clone();
         async move {
+            let connection = Uuid::new_v4();
+            let (tx, rx) = mpsc::unbounded_channel();
             state
-                .send_command(
-                    "alpha",
-                    "server",
-                    AgentCommand::FileTransfer {
-                        actor: treer_protocol::MachineTransferActor {
-                            workspace_id: "alpha".into(),
-                            kind: "machine".into(),
-                            id: "server".into(),
-                        },
-                        authorized_path: "result".into(),
-                        request: treer_protocol::MachineFileTransferRequest::PutBegin {
-                            path: "result".into(),
-                            overwrite: false,
-                            mode: 0o600,
-                            size: Some(3),
-                            limit: 64,
-                        },
-                    },
-                )
+                .register_server_instance(test_server(), connection, instance.to_string(), tx)
                 .await
+                .unwrap();
+            (connection, rx)
         }
-    });
-    let _ = rx.recv().await.unwrap();
-    state.disconnect_server("alpha", "server", first).await;
-    let second = Uuid::new_v4();
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance_with_capabilities(
-            server.clone(),
-            second,
-            "file-controller".into(),
-            vec![treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER.into()],
-            tx,
-        )
-        .await
-        .unwrap();
-    state
-        .apply_snapshot(
-            second,
-            AgentServerSnapshot {
-                server,
-                agents: vec![],
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        waiting.await.unwrap().unwrap_err().code,
-        "machine_transfer_stale"
-    );
-    assert!(rx.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn nats_machine_file_transfer_routes_without_proxy_local_transfer_state() {
-    let Ok(nats_url) = std::env::var("TREER_TEST_NATS_URL") else {
-        return;
     };
-    let suffix = Uuid::new_v4().simple().to_string();
-    let workspace_id = format!("file-ws-{suffix}");
-    let prefix = format!("treer.test.file.{suffix}");
-    let bus_a = ClusterBus::connect(&nats_url, format!("file-a-{suffix}"), prefix.clone())
-        .await
-        .unwrap();
-    let bus_b = ClusterBus::connect(&nats_url, format!("file-b-{suffix}"), prefix)
-        .await
-        .unwrap();
-    let a = AppState::with_backplanes(EventBus::in_process(), bus_a.clone());
-    let b = AppState::with_backplanes(EventBus::in_process(), bus_b.clone());
-    let workspace = b
-        .ensure_workspace(&workspace_id, "File transfer test")
-        .await;
-    bus_b.start(b.clone()).await.unwrap();
-    bus_b
-        .broadcast_projection(ClusterProjectionUpdate::WorkspaceUpsert { workspace })
-        .await
-        .unwrap();
-    bus_a.start(a.clone()).await.unwrap();
-    let mut server = test_server();
-    server.workspace_id = workspace_id.clone();
-    let connection = Uuid::new_v4();
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    b.register_server_instance_with_capabilities(
-        server.clone(),
-        connection,
-        "file-native-controller".into(),
-        vec![treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER.into()],
-        tx,
-    )
-    .await
-    .unwrap();
-    b.apply_snapshot(
-        connection,
-        AgentServerSnapshot {
-            server,
-            agents: vec![],
-        },
-    )
-    .await
-    .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while a.resolve_server(&workspace_id, "server").await.is_err() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let actor = treer_protocol::MachineTransferActor {
-        workspace_id: workspace_id.clone(),
-        kind: "agent".into(),
-        id: "synthetic-agent".into(),
-    };
-    for (sender, offset) in [(a.clone(), 0_u64), (b.clone(), 65536)] {
-        let command = AgentCommand::FileTransfer {
-            actor: actor.clone(),
-            authorized_path: "result".into(),
-            request: treer_protocol::MachineFileTransferRequest::PutChunk {
-                id: "synthetic-handle".into(),
-                offset,
-                content_base64: "AAAA".repeat(treer_protocol::MACHINE_TRANSFER_CHUNK_BYTES / 3),
-            },
-        };
-        let expected = command.clone();
-        let workspace_id = workspace_id.clone();
-        let waiting =
-            tokio::spawn(
-                async move { sender.send_command(&workspace_id, "server", command).await },
-            );
-        let message = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let ProxyMessage::Command { envelope } =
-            serde_json::from_str(&expect_text(message)).unwrap()
-        else {
-            panic!("expected file command")
-        };
-        assert_eq!(envelope.command, expected);
-        b.complete_command_from(
-            &actor.workspace_id,
-            "server",
-            connection,
-            CommandResult::success(
-                envelope.command_id,
-                serde_json::json!({"offset":offset+65536}),
-            ),
-        )
-        .await
-        .unwrap();
-        assert_eq!(waiting.await.unwrap().unwrap()["offset"], offset + 65536);
-    }
-    b.disconnect_server(&workspace_id, "server", connection)
-        .await;
-}
-
-#[tokio::test]
-async fn pending_command_is_rejected_when_replacement_lacks_its_capability() {
-    let state = AppState::new();
-    let server = test_server();
-    let first_connection = Uuid::new_v4();
-    let (first_tx, mut first_rx) = mpsc::unbounded_channel();
-    state
-        .register_server(server.clone(), first_connection, first_tx)
-        .await
-        .expect("register current controller");
-
-    let waiting_state = state.clone();
-    let waiting = tokio::spawn(async move {
-        waiting_state
-            .send_command(
-                "alpha",
-                "server",
-                AgentCommand::Abort {
-                    agent_id: "agent-1".to_string(),
-                },
-            )
-            .await
-    });
-    let _ = first_rx.recv().await.expect("initial command");
-    state
-        .disconnect_server("alpha", "server", first_connection)
-        .await;
-
-    let replacement_connection = Uuid::new_v4();
-    let (replacement_tx, mut replacement_rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance_with_capabilities(
-            server.clone(),
-            replacement_connection,
-            "ctl_legacy".to_string(),
-            Vec::new(),
-            replacement_tx,
-        )
-        .await
-        .expect("register legacy replacement");
-    state
-        .apply_snapshot(
-            replacement_connection,
-            AgentServerSnapshot {
-                server,
-                agents: Vec::new(),
-            },
-        )
-        .await
-        .expect("apply legacy snapshot");
-
-    let error = waiting
-        .await
-        .expect("join pending command")
-        .expect_err("unsupported pending command must fail");
-    assert_eq!(error.code, "unsupported_command");
-    assert!(replacement_rx.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn replacement_controller_fences_the_old_local_connection() {
-    let state = AppState::new();
-    let server = test_server();
-    let first_connection = Uuid::new_v4();
-    let (first_tx, mut first_rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance(
-            server.clone(),
-            first_connection,
-            "ctl_11111111111111111111111111111111".to_string(),
-            first_tx,
-        )
-        .await
-        .expect("register first controller");
-
-    let second_connection = Uuid::new_v4();
-    let (second_tx, _second_rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance(
-            server,
-            second_connection,
-            "ctl_22222222222222222222222222222222".to_string(),
-            second_tx,
-        )
-        .await
-        .expect("register replacement controller");
-
-    let error: ProxyMessage = serde_json::from_str(&expect_text(
-        first_rx.recv().await.expect("replacement error"),
-    ))
-    .expect("decode replacement error");
+    let (first, mut first_rx) = register("ctl_1").await;
+    let (second, _second_rx) = register("ctl_2").await;
+    let error: ProxyMessage =
+        serde_json::from_str(&expect_text(first_rx.recv().await.unwrap())).unwrap();
     assert!(matches!(
         error,
-        ProxyMessage::Error { error }
-            if error.code == "duplicate_machine_connection"
+        ProxyMessage::Error { error } if error.code == "duplicate_machine_connection"
     ));
     assert_eq!(first_rx.recv().await, Some(SocketFrame::Close));
     assert_eq!(
         state
-            .heartbeat("alpha", "server", first_connection)
+            .heartbeat("alpha", "server", first)
             .await
-            .expect_err("old connection must be fenced")
+            .unwrap_err()
             .code,
         "duplicate_machine_connection"
     );
-    state
-        .heartbeat("alpha", "server", second_connection)
-        .await
-        .expect("replacement owns the machine");
-}
-
-#[tokio::test]
-async fn original_controller_can_reclaim_after_the_replacement_disconnects() {
-    let state = AppState::new();
-    let server = test_server();
-    let first_connection = Uuid::new_v4();
-    let (first_tx, mut first_rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance(
-            server.clone(),
-            first_connection,
-            "ctl_11111111111111111111111111111111".to_string(),
-            first_tx,
-        )
-        .await
-        .expect("register first controller");
-
-    let second_connection = Uuid::new_v4();
-    let (second_tx, _second_rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance(
-            server.clone(),
-            second_connection,
-            "ctl_22222222222222222222222222222222".to_string(),
-            second_tx,
-        )
-        .await
-        .expect("register replacement controller");
-    assert!(first_rx.recv().await.is_some());
-    assert_eq!(first_rx.recv().await, Some(SocketFrame::Close));
-
-    state
-        .disconnect_server("alpha", "server", second_connection)
-        .await;
-
-    let reclaim_connection = Uuid::new_v4();
-    let (reclaim_tx, _reclaim_rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance(
-            server,
-            reclaim_connection,
-            "ctl_11111111111111111111111111111111".to_string(),
-            reclaim_tx,
-        )
-        .await
-        .expect("original controller reclaims the machine");
-    state
-        .heartbeat("alpha", "server", reclaim_connection)
-        .await
-        .expect("reclaimed connection owns the machine");
-}
-
-#[tokio::test]
-async fn machine_shutdown_uses_the_confirmed_command_channel() {
-    let state = AppState::new();
-    let server = test_server();
-    let (server_tx, mut server_rx) = mpsc::unbounded_channel();
-    state
-        .register_server(server, Uuid::new_v4(), server_tx)
-        .await
-        .expect("register controller");
-
-    let waiting_state = state.clone();
-    let waiting = tokio::spawn(async move {
-        waiting_state
-            .send_command("alpha", "server", AgentCommand::ShutdownMachine)
-            .await
-    });
-    let message: ProxyMessage = serde_json::from_str(&expect_text(
-        server_rx.recv().await.expect("shutdown command"),
-    ))
-    .expect("decode shutdown command");
-    let ProxyMessage::Command { envelope } = message else {
-        panic!("expected command message");
-    };
-    assert_eq!(envelope.command, AgentCommand::ShutdownMachine);
-
-    state
-        .complete_command(CommandResult::success(
-            envelope.command_id,
-            serde_json::json!({"accepted": true}),
-        ))
-        .await;
-    assert_eq!(
-        waiting
-            .await
-            .expect("join shutdown command")
-            .expect("shutdown accepted"),
-        serde_json::json!({"accepted": true})
-    );
-}
-
-#[tokio::test]
-async fn legacy_controller_rejects_commands_added_after_its_protocol() {
-    let state = AppState::new();
-    let server = test_server();
-    let (server_tx, mut server_rx) = mpsc::unbounded_channel();
-    state
-        .register_server_instance_with_capabilities(
-            server,
-            Uuid::new_v4(),
-            "ctl_legacy".to_string(),
-            Vec::new(),
-            server_tx,
-        )
-        .await
-        .expect("register legacy controller");
-
-    let error = state
-        .send_command(
-            "alpha",
-            "server",
-            AgentCommand::Abort {
-                agent_id: "agent-1".to_string(),
-            },
-        )
-        .await
-        .expect_err("legacy controller must not receive unsupported command");
-    assert_eq!(error.code, "unsupported_command");
-    assert!(server_rx.try_recv().is_err());
+    state.heartbeat("alpha", "server", second).await.unwrap();
+    state.disconnect_server("alpha", "server", second).await;
+    let (reclaim, _reclaim_rx) = register("ctl_1").await;
+    state.heartbeat("alpha", "server", reclaim).await.unwrap();
 }
 
 #[tokio::test]
@@ -1681,12 +875,12 @@ async fn cluster_terminal_delivery_learns_epoch_without_local_controller() {
         revision: Some(4),
         cursor: false,
         close: false,
-        frame: SocketFrame::Text(serde_json::to_string(&ready).expect("encode ready")),
+        frame: SocketFrame::Text(serde_json::to_string(&ready).unwrap()),
     };
     state
         .handle_cluster_session_delivery(delivery.clone())
         .await
-        .expect("receive ready from Controller's Proxy");
+        .unwrap();
     browser_rx.try_recv().expect("ready reaches browser");
     state
         .handle_cluster_session_delivery(ClusterSessionDelivery {
@@ -1696,15 +890,13 @@ async fn cluster_terminal_delivery_learns_epoch_without_local_controller() {
             ..delivery
         })
         .await
-        .expect("receive output from Controller's Proxy");
+        .unwrap();
     assert_eq!(
-        browser_rx.try_recv().expect("output reaches browser"),
+        browser_rx.try_recv().unwrap(),
         SocketFrame::Binary(b"live".to_vec())
     );
-    let cursor: TerminalServerMessage = serde_json::from_str(&expect_text(
-        browser_rx.try_recv().expect("cursor reaches browser"),
-    ))
-    .expect("decode cursor");
+    let cursor: TerminalServerMessage =
+        serde_json::from_str(&expect_text(browser_rx.try_recv().unwrap())).unwrap();
     assert_eq!(
         cursor,
         TerminalServerMessage::Cursor {
@@ -1714,48 +906,50 @@ async fn cluster_terminal_delivery_learns_epoch_without_local_controller() {
     );
 }
 
+/// A connected `alpha/server` Controller with one shell Agent and an attached
+/// terminal. Returns (connection, controller rx, browser rx, session id).
+async fn attached_terminal(
+    state: &AppState,
+    browser_capacity: usize,
+    cursor: Option<TerminalCursor>,
+) -> (
+    Uuid,
+    mpsc::UnboundedReceiver<SocketFrame>,
+    mpsc::Receiver<SocketFrame>,
+    String,
+) {
+    let (connection, mut server_rx) = connect_current(state).await;
+    insert_agent(state, test_agent("agent-1", "shell")).await;
+    let (browser_tx, browser_rx) = mpsc::channel(browser_capacity);
+    let session_id = state
+        .attach_terminal("alpha", "agent-1", 120, 40, cursor.clone(), browser_tx)
+        .await
+        .unwrap();
+    let attach: ProxyMessage =
+        serde_json::from_str(&expect_text(server_rx.recv().await.unwrap())).unwrap();
+    assert!(matches!(
+        attach,
+        ProxyMessage::TerminalAttach { session_id: ref attached, cursor: ref sent, .. }
+            if attached == &session_id && sent == &cursor
+    ));
+    (connection, server_rx, browser_rx, session_id)
+}
+
 #[tokio::test]
 async fn terminal_routes_raw_binary_and_deduplicates_revisions() {
     let state = AppState::new();
-    let server = test_server();
-    let connection_id = Uuid::new_v4();
-    let (server_tx, mut server_rx) = mpsc::unbounded_channel();
-    state
-        .register_server(server, connection_id, server_tx)
-        .await
-        .expect("register controller");
-    {
-        let mut workspaces = state.inner.workspaces.write().await;
-        workspaces
-            .get_mut("alpha")
-            .expect("workspace")
-            .agents
-            .insert("agent-1".to_string(), test_agent("agent-1", "shell"));
-    }
-    let (browser_tx, mut browser_rx) = mpsc::channel(TERMINAL_BROWSER_QUEUE_CAPACITY);
-    let session_id = state
-        .attach_terminal("alpha", "agent-1", 120, 40, None, browser_tx)
-        .await
-        .expect("attach terminal");
-    let attach: ProxyMessage = serde_json::from_str(&expect_text(
-        server_rx.recv().await.expect("terminal attach message"),
-    ))
-    .expect("decode attach");
-    assert!(matches!(
-        attach,
-        ProxyMessage::TerminalAttach {
-            session_id: ref attached,
-            cursor: None,
-            ..
-        } if attached == &session_id
-    ));
-
+    let cursor = TerminalCursor {
+        stream_epoch: "stream_a".to_string(),
+        revision: 12,
+    };
+    let (connection, mut server_rx, mut browser_rx, session_id) =
+        attached_terminal(&state, TERMINAL_BROWSER_QUEUE_CAPACITY, Some(cursor)).await;
     let replay = vec![b'x'; TERMINAL_REPLAY_CHUNK_BYTES + 1];
     state
         .terminal_ready(
             "alpha",
             "server",
-            connection_id,
+            connection,
             &session_id,
             TerminalReadyPayload {
                 revision: 7,
@@ -1765,10 +959,9 @@ async fn terminal_routes_raw_binary_and_deduplicates_revisions() {
             },
         )
         .await
-        .expect("terminal ready");
+        .unwrap();
     let ready: TerminalServerMessage =
-        serde_json::from_str(&expect_text(browser_rx.recv().await.expect("ready frame")))
-            .expect("decode ready");
+        serde_json::from_str(&expect_text(browser_rx.recv().await.unwrap())).unwrap();
     assert_eq!(
         ready,
         TerminalServerMessage::Ready {
@@ -1779,49 +972,34 @@ async fn terminal_routes_raw_binary_and_deduplicates_revisions() {
             replay_chunks: Some(2),
         }
     );
-    assert_eq!(
-        browser_rx.recv().await,
-        Some(SocketFrame::Binary(
-            replay[..TERMINAL_REPLAY_CHUNK_BYTES].to_vec()
-        ))
-    );
-    assert_eq!(
-        browser_rx.recv().await,
-        Some(SocketFrame::Binary(
-            replay[TERMINAL_REPLAY_CHUNK_BYTES..].to_vec()
-        ))
-    );
-
-    state
-        .terminal_output(
-            "alpha",
-            "server",
-            connection_id,
-            &session_id,
-            7,
-            b"duplicate".to_vec(),
-        )
-        .await
-        .expect("ignore duplicate output");
-    assert!(browser_rx.try_recv().is_err());
-    state
-        .terminal_output(
-            "alpha",
-            "server",
-            connection_id,
-            &session_id,
-            8,
-            b"live".to_vec(),
-        )
-        .await
-        .expect("relay live output");
+    for chunk in [
+        &replay[..TERMINAL_REPLAY_CHUNK_BYTES],
+        &replay[TERMINAL_REPLAY_CHUNK_BYTES..],
+    ] {
+        assert_eq!(
+            browser_rx.recv().await,
+            Some(SocketFrame::Binary(chunk.to_vec()))
+        );
+    }
+    for (revision, output) in [(7, b"duplicate".as_slice()), (8, b"live")] {
+        state
+            .terminal_output(
+                "alpha",
+                "server",
+                connection,
+                &session_id,
+                revision,
+                output.to_vec(),
+            )
+            .await
+            .unwrap();
+    }
     assert_eq!(
         browser_rx.recv().await,
         Some(SocketFrame::Binary(b"live".to_vec()))
     );
     let cursor: TerminalServerMessage =
-        serde_json::from_str(&expect_text(browser_rx.recv().await.expect("cursor frame")))
-            .expect("decode cursor");
+        serde_json::from_str(&expect_text(browser_rx.recv().await.unwrap())).unwrap();
     assert_eq!(
         cursor,
         TerminalServerMessage::Cursor {
@@ -1829,20 +1007,14 @@ async fn terminal_routes_raw_binary_and_deduplicates_revisions() {
             revision: 8,
         }
     );
-
     state
         .terminal_input(&session_id, vec![0, 0xff, b'\r'])
         .await
-        .expect("relay browser input");
-    let input = match server_rx.recv().await.expect("terminal input frame") {
-        SocketFrame::Binary(encoded) => {
-            TerminalBinaryFrame::decode(&encoded).expect("decode terminal input")
-        }
-        SocketFrame::Text(_) => panic!("expected binary terminal input"),
-        SocketFrame::Ping(_) | SocketFrame::Pong(_) | SocketFrame::Close => {
-            panic!("expected binary terminal input")
-        }
+        .unwrap();
+    let SocketFrame::Binary(encoded) = server_rx.recv().await.unwrap() else {
+        panic!("expected binary terminal input")
     };
+    let input = TerminalBinaryFrame::decode(&encoded).unwrap();
     assert_eq!(input.kind, TerminalBinaryKind::Input);
     assert_eq!(input.session_id, session_id);
     assert_eq!(input.payload, vec![0, 0xff, b'\r']);
@@ -1851,48 +1023,27 @@ async fn terminal_routes_raw_binary_and_deduplicates_revisions() {
 #[tokio::test]
 async fn slow_terminal_consumer_is_detached_when_its_queue_fills() {
     let state = AppState::new();
-    let server = test_server();
-    let connection_id = Uuid::new_v4();
-    let (server_tx, mut server_rx) = mpsc::unbounded_channel();
-    state
-        .register_server(server, connection_id, server_tx)
-        .await
-        .expect("register controller");
-    {
-        let mut workspaces = state.inner.workspaces.write().await;
-        workspaces
-            .get_mut("alpha")
-            .expect("workspace")
-            .agents
-            .insert("agent-1".to_string(), test_agent("agent-1", "shell"));
-    }
-    let (browser_tx, mut browser_rx) = mpsc::channel(1);
-    let session_id = state
-        .attach_terminal("alpha", "agent-1", 120, 40, None, browser_tx)
-        .await
-        .expect("attach terminal");
-    let _attach = server_rx.recv().await.expect("terminal attach");
+    let (connection, mut server_rx, mut browser_rx, session_id) =
+        attached_terminal(&state, 1, None).await;
     state
         .inner
         .terminal_sessions
         .lock()
         .await
         .get_mut(&session_id)
-        .expect("terminal session")
+        .unwrap()
         .stream_epoch = Some("stream_a".to_string());
-
     state
         .terminal_output(
             "alpha",
             "server",
-            connection_id,
+            connection,
             &session_id,
             1,
             b"output".to_vec(),
         )
         .await
         .expect("detach overloaded terminal without blocking controller");
-
     assert_eq!(
         browser_rx.recv().await,
         Some(SocketFrame::Binary(b"output".to_vec()))
@@ -1903,56 +1054,9 @@ async fn slow_terminal_consumer_is_detached_when_its_queue_fills() {
         .lock()
         .await
         .contains_key(&session_id));
-    let detach: ProxyMessage = serde_json::from_str(&expect_text(
-        server_rx.recv().await.expect("terminal detach"),
-    ))
-    .expect("decode terminal detach");
-    assert_eq!(
-        detach,
-        ProxyMessage::TerminalDetach {
-            session_id: session_id.clone(),
-        }
-    );
-}
-
-#[tokio::test]
-async fn terminal_attach_forwards_a_stream_cursor() {
-    let state = AppState::new();
-    let server = test_server();
-    let connection_id = Uuid::new_v4();
-    let (server_tx, mut server_rx) = mpsc::unbounded_channel();
-    state
-        .register_server(server, connection_id, server_tx)
-        .await
-        .expect("register controller");
-    {
-        let mut workspaces = state.inner.workspaces.write().await;
-        workspaces
-            .get_mut("alpha")
-            .expect("workspace")
-            .agents
-            .insert("agent-1".to_string(), test_agent("agent-1", "shell"));
-    }
-    let (browser_tx, _browser_rx) = mpsc::channel(TERMINAL_BROWSER_QUEUE_CAPACITY);
-    let cursor = TerminalCursor {
-        stream_epoch: "stream_a".to_string(),
-        revision: 12,
-    };
-    state
-        .attach_terminal("alpha", "agent-1", 80, 24, Some(cursor.clone()), browser_tx)
-        .await
-        .expect("attach terminal");
-    let attach: ProxyMessage = serde_json::from_str(&expect_text(
-        server_rx.recv().await.expect("terminal attach message"),
-    ))
-    .expect("decode attach");
-    match attach {
-        ProxyMessage::TerminalAttach {
-            cursor: Some(attached),
-            ..
-        } => assert_eq!(attached, cursor),
-        other => panic!("expected attach with cursor, got {other:?}"),
-    }
+    let detach: ProxyMessage =
+        serde_json::from_str(&expect_text(server_rx.recv().await.unwrap())).unwrap();
+    assert_eq!(detach, ProxyMessage::TerminalDetach { session_id });
 }
 
 #[tokio::test]
@@ -1973,8 +1077,6 @@ async fn cluster_name_projections_survive_snapshot_replay_ordering() {
             name: "persisted-agent-name".to_string(),
         })
         .await;
-
-    let now = Utc::now();
     state
         .apply_cluster_snapshot(ClusterServerSnapshot {
             owner: crate::cluster::ConnectionOwner {
@@ -1982,46 +1084,30 @@ async fn cluster_name_projections_survive_snapshot_replay_ordering() {
                 connection_id: Uuid::new_v4(),
             },
             revision: 1,
-            snapshot: AgentServerSnapshot {
-                server: test_server(),
-                agents: vec![AgentInfo {
-                    path: None,
-                    run_generation: 0,
-                    agent_id: "agent".to_string(),
-                    workspace_id: "alpha".to_string(),
-                    server_id: "server".to_string(),
-                    kind: "command".to_string(),
-                    name: "stale-agent-name".to_string(),
-                    cwd: ".".to_string(),
-                    status: AgentStatus::Idle,
-                    pid: None,
-                    started_at: now,
-                    updated_at: now,
-                    exited_at: None,
-                    exit_code: None,
-                    output_revision: 0,
-                    interface: None,
-                }],
-            },
+            snapshot: snapshot_of(test_server(), vec![test_agent("agent", "stale-agent-name")]),
         })
         .await;
-
     assert_eq!(
-        state
-            .resolve_server("alpha", "server")
-            .await
-            .expect("replayed server")
-            .name,
+        state.resolve_server("alpha", "server").await.unwrap().name,
         "persisted-server-name"
     );
     assert_eq!(
-        state
-            .resolve_agent("alpha", "agent")
-            .await
-            .expect("replayed agent")
-            .name,
+        state.resolve_agent("alpha", "agent").await.unwrap().name,
         "persisted-agent-name"
     );
+}
+
+async fn wait_until<F: std::future::Future<Output = bool>>(
+    what: &str,
+    mut check: impl FnMut() -> F,
+) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !check().await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
 }
 
 #[tokio::test]
@@ -2033,6 +1119,7 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
     let workspace_id = format!("workspace-{suffix}");
     let source_id = format!("source-{suffix}");
     let destination_id = format!("destination-{suffix}");
+    let agent_id = format!("agent-{suffix}");
     let subject_prefix = format!("treer.test.cluster.{suffix}");
     let bus_a = ClusterBus::connect(
         &nats_url,
@@ -2040,154 +1127,75 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
         subject_prefix.clone(),
     )
     .await
-    .expect("connect proxy A cluster bus");
+    .unwrap();
     let bus_b = ClusterBus::connect(&nats_url, format!("proxy-b-{suffix}"), subject_prefix)
         .await
-        .expect("connect proxy B cluster bus");
+        .unwrap();
     let state_a = AppState::with_backplanes(EventBus::in_process(), bus_a.clone());
     let state_b = AppState::with_backplanes(EventBus::in_process(), bus_b.clone());
     let workspace = state_a
         .ensure_workspace(&workspace_id, "Cluster test")
         .await;
-    bus_a
-        .start(state_a.clone())
-        .await
-        .expect("start proxy A bus");
+    bus_a.start(state_a.clone()).await.unwrap();
     bus_a
         .broadcast_projection(ClusterProjectionUpdate::WorkspaceUpsert { workspace })
         .await
-        .expect("persist workspace projection before proxy B starts");
-    bus_b
-        .start(state_b.clone())
-        .await
-        .expect("start proxy B bus");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if state_b.snapshot(&workspace_id).await.is_ok() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("late proxy replays durable workspace projection");
+        .unwrap();
+    bus_b.start(state_b.clone()).await.unwrap();
+    wait_until(
+        "late proxy replays durable workspace projection",
+        || async { state_b.snapshot(&workspace_id).await.is_ok() },
+    )
+    .await;
 
-    let now = Utc::now();
     let source_connection = Uuid::new_v4();
     let destination_connection = Uuid::new_v4();
     let (source_tx, _source_rx) = mpsc::unbounded_channel();
-    let source = ServerInfo {
-        server_id: source_id.clone(),
-        workspace_id: workspace_id.clone(),
-        name: "source".to_string(),
-        hostname: "source".to_string(),
-        root: "/tmp".to_string(),
-        controller_build: treer_protocol::BuildInfo {
-            version: "0.1.2".to_string(),
-            git_commit: "controller-test".to_string(),
-        },
-        host_build: treer_protocol::BuildInfo {
-            version: "0.1.2".to_string(),
-            git_commit: "host-test".to_string(),
-        },
-        supervision: None,
-        labels: Default::default(),
-        available_agents: None,
-        status: ServerStatus::Online,
-        connected_at: now,
-        last_seen_at: now,
-        capabilities: vec![],
-    };
     state_a
-        .register_server(source, source_connection, source_tx)
+        .register_server(
+            server_in(&workspace_id, &source_id),
+            source_connection,
+            source_tx,
+        )
         .await
-        .expect("register source on proxy A");
-
+        .unwrap();
     let (destination_tx, mut destination_rx) = mpsc::unbounded_channel();
-    let destination = ServerInfo {
-        server_id: destination_id.clone(),
-        workspace_id: workspace_id.clone(),
-        name: "destination".to_string(),
-        hostname: "destination".to_string(),
-        root: "/tmp".to_string(),
-        controller_build: treer_protocol::BuildInfo {
-            version: "0.1.2".to_string(),
-            git_commit: "controller-test".to_string(),
-        },
-        host_build: treer_protocol::BuildInfo {
-            version: "0.1.2".to_string(),
-            git_commit: "host-test".to_string(),
-        },
-        supervision: None,
-        labels: Default::default(),
-        available_agents: None,
-        status: ServerStatus::Online,
-        connected_at: now,
-        last_seen_at: now,
-        capabilities: vec![],
-    };
+    let destination = server_in(&workspace_id, &destination_id);
     state_b
         .register_server(destination.clone(), destination_connection, destination_tx)
         .await
-        .expect("register destination on proxy B");
-    let agent_id = format!("agent-{suffix}");
+        .unwrap();
     state_b
         .apply_snapshot(
             destination_connection,
-            AgentServerSnapshot {
-                server: destination,
-                agents: vec![AgentInfo {
-                    path: None,
-                    run_generation: 0,
-                    agent_id: agent_id.clone(),
-                    workspace_id: workspace_id.clone(),
-                    server_id: destination_id.clone(),
-                    kind: "command".to_string(),
-                    name: "remote-agent".to_string(),
-                    cwd: ".".to_string(),
-                    status: AgentStatus::Idle,
-                    pid: None,
-                    started_at: now,
-                    updated_at: now,
-                    exited_at: None,
-                    exit_code: None,
-                    output_revision: 0,
-                    interface: None,
-                }],
-            },
+            snapshot_of(
+                destination,
+                vec![agent_in(
+                    &workspace_id,
+                    &destination_id,
+                    &agent_id,
+                    "remote-agent",
+                )],
+            ),
         )
         .await
-        .expect("publish destination snapshot");
-
-    let replicated = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if state_a
-                .resolve_agent(&workspace_id, &agent_id)
+        .unwrap();
+    wait_until("live projections replicate", || async {
+        state_a
+            .resolve_agent(&workspace_id, &agent_id)
+            .await
+            .is_ok()
+            && state_b
+                .resolve_server(&workspace_id, &source_id)
                 .await
                 .is_ok()
-                && state_b
-                    .resolve_server(&workspace_id, &source_id)
-                    .await
-                    .is_ok()
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
     })
     .await;
-    if replicated.is_err() {
-        panic!(
-            "replicate live projections: proxy_a={:?}, proxy_b={:?}",
-            state_a.snapshot(&workspace_id).await,
-            state_b.snapshot(&workspace_id).await
-        );
-    }
 
     state_a
         .rename_agent(&workspace_id, &agent_id, "renamed-remote-agent".to_string())
         .await
-        .expect("rename agent through proxy A");
+        .unwrap();
     state_a
         .rename_server(
             &workspace_id,
@@ -2195,47 +1203,32 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
             "renamed-destination".to_string(),
         )
         .await
-        .expect("rename server through proxy A");
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let agent_name = state_b
-                .resolve_agent(&workspace_id, &agent_id)
-                .await
-                .map(|agent| agent.name);
-            let server_name = state_b
+        .unwrap();
+    wait_until("rename projections replicate", || async {
+        state_b
+            .resolve_agent(&workspace_id, &agent_id)
+            .await
+            .is_ok_and(|a| a.name == "renamed-remote-agent")
+            && state_b
                 .resolve_server(&workspace_id, &destination_id)
                 .await
-                .map(|server| server.name);
-            if agent_name.as_deref() == Ok("renamed-remote-agent")
-                && server_name.as_deref() == Ok("renamed-destination")
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+                .is_ok_and(|s| s.name == "renamed-destination")
     })
-    .await
-    .expect("replicate rename projection updates");
+    .await;
 
-    let command_state = state_a.clone();
-    let command_workspace = workspace_id.clone();
-    let command_server = destination_id.clone();
-    let command = tokio::spawn(async move {
-        command_state
-            .send_command(
-                &command_workspace,
-                &command_server,
-                AgentCommand::ShutdownMachine,
-            )
-            .await
+    let command = tokio::spawn({
+        let (state, workspace, server) = (
+            state_a.clone(),
+            workspace_id.clone(),
+            destination_id.clone(),
+        );
+        async move {
+            state
+                .send_command(&workspace, &server, AgentCommand::ShutdownMachine)
+                .await
+        }
     });
-    let command_message: ProxyMessage = serde_json::from_str(&expect_text(
-        destination_rx.recv().await.expect("cross-proxy command"),
-    ))
-    .expect("decode cross-proxy command");
-    let ProxyMessage::Command { envelope } = command_message else {
-        panic!("expected command envelope");
-    };
+    let envelope = expect_envelope(destination_rx.recv().await.unwrap());
     state_b
         .complete_command(CommandResult::success(
             envelope.command_id,
@@ -2243,10 +1236,7 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
         ))
         .await;
     assert_eq!(
-        command
-            .await
-            .expect("join command")
-            .expect("command result"),
+        command.await.unwrap().unwrap(),
         serde_json::json!({"accepted": true})
     );
 
@@ -2254,11 +1244,9 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
     let session_id = state_a
         .attach_terminal(&workspace_id, &agent_id, 100, 30, None, browser_tx)
         .await
-        .expect("attach across proxies");
-    let attach: ProxyMessage = serde_json::from_str(&expect_text(
-        destination_rx.recv().await.expect("remote terminal attach"),
-    ))
-    .expect("decode terminal attach");
+        .unwrap();
+    let attach: ProxyMessage =
+        serde_json::from_str(&expect_text(destination_rx.recv().await.unwrap())).unwrap();
     assert!(
         matches!(attach, ProxyMessage::TerminalAttach { session_id: attached, .. } if attached == session_id)
     );
@@ -2276,7 +1264,7 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
             },
         )
         .await
-        .expect("return terminal replay across proxies");
+        .unwrap();
     assert!(matches!(
         browser_rx.recv().await,
         Some(SocketFrame::Text(_))
@@ -2295,7 +1283,7 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
             b"live".to_vec(),
         )
         .await
-        .expect("return live terminal output across proxies");
+        .unwrap();
     assert_eq!(
         browser_rx.recv().await,
         Some(SocketFrame::Binary(b"live".to_vec()))
@@ -2304,9 +1292,9 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
         tokio::time::timeout(Duration::from_secs(5), browser_rx.recv())
             .await
             .expect("cross-proxy cursor arrives before the connection lease expires")
-            .expect("cross-proxy cursor"),
+            .unwrap(),
     ))
-    .expect("decode cross-proxy cursor");
+    .unwrap();
     assert_eq!(
         cursor,
         TerminalServerMessage::Cursor {
@@ -2317,7 +1305,7 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
     state_a
         .terminal_input(&session_id, b"hello".to_vec())
         .await
-        .expect("route terminal input across proxies");
+        .unwrap();
     assert!(matches!(
         destination_rx.recv().await,
         Some(SocketFrame::Binary(_))
