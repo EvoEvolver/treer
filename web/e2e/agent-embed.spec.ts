@@ -100,7 +100,7 @@ test('v2 reuse probes once, skips mint and ignores Agent controls after navigati
   await expect(page.getByRole('alert')).toHaveCount(0)
   await child.goto(origin + '/')
   await expect(page.frameLocator('iframe').getByRole('heading')).toHaveText('Isolated interface')
-  await expect(page.getByText('Checking interface isolation…', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Connecting to the Agent interface…', { exact: true })).toHaveCount(0)
   await send(page, { treer_embed: 'mint', version: 2, nonce_hash: hash })
   await send(page, { treer_embed: 'ready', version: 2, nonce_hash: hash })
   await send(page, { treer_embed: 'cookies_blocked', nonce_hash: hash })
@@ -152,7 +152,7 @@ test('isolated Agent retains draft and cannot force a shared-origin downgrade', 
   await ui.getByRole('textbox').fill('retained draft')
   const isolated = page.frames().find(f => f.url().startsWith(origin))!
   expect(await isolated.evaluate(() => { try { return Boolean(parent.document) } catch { return false } })).toBe(false)
-  await expect(page.getByText('Checking interface isolation…', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Connecting to the Agent interface…', { exact: true })).toHaveCount(0)
   await send(page, { treer_embed: 'ready', nonce_hash: hash })
   await send(page, { treer_embed: 'cookies_blocked', nonce_hash: hash })
   await page.clock.fastForward(21_000)
@@ -251,7 +251,7 @@ for (const discovery of ['legacy', 'unavailable'] as const) test(`capability dis
   await page.route('**/api/auth/config', r => discovery === 'legacy' ? r.fulfill({ status: 404, json: {} }) : r.fulfill({ status: 500, json: {} }))
   await page.reload(); await gotoWorkspace(page); await open(page, 'Alpha')
   if (discovery === 'legacy') await expect(page.frameLocator('iframe').getByRole('heading')).toHaveText('Compatibility interface')
-  else { await expect(page.getByRole('alert')).toContainText('Cannot check interface isolation'); await expect(page.locator('iframe')).toHaveCount(0) }
+  else { await expect(page.getByRole('alert')).toContainText('Cannot connect to the Agent interface'); await expect(page.locator('iframe')).toHaveCount(0) }
   expect(s.mints()).toBe(0)
 })
 
