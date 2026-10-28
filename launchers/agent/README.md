@@ -276,22 +276,58 @@ creates a new conversation.
 
 For a managed Agent, the session ID and the durable prompt journal live in the
 Controller-provided private state directory (`TREER_AGENT_PRIVATE_STATE_DIR`,
-journal `rust-spike.json`, mode 0600 in a 0700 directory). Managed execution
-requires an available `agent.private-state.v1` status from the bound loopback
-Controller and physical placement outside version control; there is no cwd
-fallback. A saved session cannot be overridden by a different resume ID
-(`private_state_session_mismatch`), and a second writer is refused
+journal `rust-spike.json`, mode 0600 in a 0700 directory). Startup requires an
+available `agent.private-state.v1` status from the bound loopback Controller;
+the directory's owner and mode are checked once when it is opened, and there
+is no cwd fallback. A saved session cannot be overridden by a different resume
+ID (`private_state_session_mismatch`), and a second writer is refused
 (`private_state_in_use`). `agent restart` and Host cold recovery rerun the saved
 command and resume the same session. Keep the working directory and the
 provider's own storage (`CODEX_HOME`/`~/.codex`, `CLAUDE_CONFIG_DIR`/`~/.claude`)
 available.
 
-Journal publication or placement failure makes the runtime read-only, blocks
-dispatch and stops the provider; it does not resume automatically after repair.
-Uncertain dispatches are never replayed on restart. The live checkpoint is
+The launcher does not wait for a human:
+
+- If the provider process or its stdio transport fails (exit, EOF, write
+  error, RPC timeout), the launcher restarts it and resumes the same session
+  automatically, with exponential backoff capped at 60 s and no attempt cap.
+  `/api/state` reports this under `runtime.recovery` (`state`
+  `running`/`restarting`/`storage_failure`, `restarts`,
+  `consecutiveFailures`, `nextRestartInMs`, `lastFailure`);
+  `POST /api/recovery {"action":"recheck"}` restarts a stopped provider now.
+- A prompt in flight when the provider stopped is settled from the resumed
+  session's history: a matching turn settles it with that turn's status; a
+  Codex prompt the history has no turn for was not delivered and is queued
+  again; anything else (an unknown turn, a Claude prompt whose process died)
+  is marked failed or interrupted with an explanation. Nothing that history
+  shows was delivered is replayed, and the rest of the queue continues.
+- A JSON-RPC error reply means the provider did not take the input: that
+  prompt is marked failed, and a refused steer (usually its turn just ended)
+  runs as the next turn.
+- Claude frames the adapter does not understand are logged and skipped;
+  permission requests are answered with allow. Only frames for another
+  session id stop the provider (which is then restarted).
+- Several in-progress turns in provider history: the newest one is live and
+  the older ones are shown as interrupted, with a warning in the log.
+- The Core Message watcher never gives up, including on authentication
+  errors; it retries with capped backoff and reports itself under
+  `runtime.messages`.
+- Provider startup failure and journal write failure exit the launcher
+  non-zero so the Host restarts it.
+
+The live checkpoint is
 bounded at 32 MiB; best-effort plaintext history copies in
 `rust-journal-history` keep total journal/log data under 128 MiB per Agent
-(at most 64 files, oldest first). History is never used as recovery input.
+(at most 64 files, oldest first). These copies are never used as recovery input.
+
+### Git commit identity
+
+So that commits are attributable, a managed launcher sets `GIT_AUTHOR_NAME`
+and `GIT_COMMITTER_NAME` to the Agent's path (from `treer whoami`, falling
+back to its name, then its ID) and `GIT_AUTHOR_EMAIL` and
+`GIT_COMMITTER_EMAIL` to `<agent-id>@agents.treer.local` for the harness and
+every process it starts. A variable the profile or environment already sets
+is left unchanged.
 
 Codex Agents previously run by the removed Node runtime kept state under
 `<cwd>/.treer/agents/<agent-id>/`. Start the native executable directly once with
