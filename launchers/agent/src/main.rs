@@ -11,8 +11,6 @@ mod provider_stream;
 mod http;
 mod image_format;
 mod model;
-#[cfg(unix)] mod node_import;
-#[cfg(windows)] #[path="windows_node_import.rs"] mod node_import;
 mod rpc;
 mod claude;
 mod soul_terminal;
@@ -170,21 +168,7 @@ async fn main() -> Result<()> {
         }
         session_transfer::claim_launch(launch,&private_root,&agent)?;
     }
-    if std::env::args().nth(1).as_deref() == Some("--restore-node-backup") {
-        node_import::restore(&private_root, &cwd, &agent)?;
-        println!("node_state_backup_restored; set startup back to Node before starting it");
-        return Ok(());
-    }
     disk_history::prepare(&private_root, &cwd)?;
-    if harness=="claude" && std::env::args().any(|arg|arg=="--import-node-state") {bail!("claude_requires_explicit_supported_history_import");}
-    if harness=="claude" {
-        let seed=env("RUST_CLAUDE_IMPORT_SNAPSHOT").map(PathBuf::from);
-        let importing=std::env::args().any(|arg|arg=="--import-claude-state");
-        if importing!=seed.is_some(){bail!("claude_import_requires_explicit_snapshot_and_flag");}
-        node_import::prepare_claude(&private_root,&cwd,&agent,env("AGENT_UI_SESSION_ID").as_deref(),seed.as_deref())?;
-    } else {node_import::prepare(&private_root, &cwd, &agent,
-        env("AGENT_UI_SESSION_ID").or_else(|| env("CODEX_UI_THREAD_ID")).as_deref(),
-        std::env::args().any(|arg| arg == "--import-node-state"))?;}
     let attachments = if !agent.is_empty() && !cfg!(windows) {
         Some(Arc::new(tokio::sync::Mutex::new(
             attachments::Attachments::open(

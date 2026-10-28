@@ -204,12 +204,6 @@ back to its name, then its ID) and `GIT_AUTHOR_EMAIL` and
 every process it starts. A variable the profile or environment already sets
 is left unchanged.
 
-Codex Agents previously run by the removed Node runtime kept state under
-`<cwd>/.treer/agents/<agent-id>/`. Start the native executable directly once with
-`--import-node-state` (Agent idle, queue empty) to import it after a byte
-backup to private `node-backup-v1`; `--restore-node-backup` restores those
-bytes. Legacy state is refused by default.
-
 ## Offline session transfer
 
 `treer-launch session ...` exports, inspects, prepares and launches Claude

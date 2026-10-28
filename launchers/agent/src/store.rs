@@ -1,4 +1,4 @@
-//! Private Rust journal and single-writer lease. Node import is in node_import.
+//! Private Rust journal and single-writer lease.
 use anyhow::{bail, Result};
 use serde_json::Value;
 #[cfg(unix)]
