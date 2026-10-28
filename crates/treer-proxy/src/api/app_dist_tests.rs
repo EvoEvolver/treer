@@ -213,6 +213,9 @@ async fn app_build_is_served_only_for_the_app_host_with_the_nginx_contract() {
     let (status, _, body) = get(&app, "proxy.treer.example", "/api/health").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("treer-proxy"));
+    let health: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(health["version"], treer_build_info::VERSION);
+    assert_eq!(health["commit"], treer_build_info::GIT_COMMIT);
     let (status, _, _) = get(&app, "proxy.treer.example", "/config.json").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     // Strict Host allowlist: exact host:port with the scheme's default port.
