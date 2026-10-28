@@ -130,15 +130,14 @@ failed its last request; a successful prompt plus the expected AIS/UI is the
 stronger signal. If the round-trip fails, inspect the chosen Agent/provider,
 report the cause and stop; do not reinstall Core or restart peers to hide it.
 
-## 5. Optional: shared ticket board
+## 5. Optional: shared issue tracker
 
-**If you want a shared ticket board**, deploy the [Issues App](presets.md#minimal-optional-issues-example)
+**If you want a shared issue tracker**, deploy the [Issues App](presets.md#minimal-optional-issues-example)
 and point participants at it. It is not required for Core Message, Agent
 prompts, a folder tree or team health checks. For a new version-directory App,
 the sequence is init → stage → bootstrap → app create; deploy is for subsequent
 upgrades, not a replacement for first creation. Adopt whatever collaboration
-rules the user asks for, rather than imposing this repository's ticket process
-on every workspace.
+rules the user asks for.
 
 ## Pitfalls
 

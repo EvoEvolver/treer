@@ -26,11 +26,11 @@ profile is not an installed/logged-in provider, and a running process is not a
 verified healthy Agent.
 
 Setup instructions do not authorize machine enrollment, credential access,
-Agent creation, upgrades, deployment or restarts beyond the user's request.
-Never infer a Proxy origin or use another Agent's credential. Use the
+Agent creation, deployment or restarts beyond the user's request. Never infer a
+Proxy origin or use another Agent's credential. Use the
 [ordinary Treer skill](../treer/SKILL.md) for managed identity and CLI details;
 read [security boundaries](../../docs/security.md) before promising isolation.
 
-This directory is a repository skill. Do not assume `treer --skill team` is
-available: check `treer --help` on the installed version. The references remain
-usable from a checkout without a new Core release.
+This is a repository-only skill: the Controller does not serve it (`treer
+--skill` offers only `treer`, `install` and `macos-container`). Read it from a
+checkout.

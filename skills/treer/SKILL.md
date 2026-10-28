@@ -5,8 +5,8 @@ description: Coordinate distributed coding agents and run commands on workspace 
 
 # Treer
 
-Treer connects agent servers from multiple machines into one workspace. Use the
-`treer` CLI to discover peers and coordinate work without knowing their machine
+Treer connects agent servers on many machines into one workspace. Use the
+`treer` CLI to discover peers and coordinate work without knowing machine
 addresses.
 
 ## Verify caller context
@@ -18,110 +18,60 @@ test -n "${TREER_AGENT_ID:-}" && test -n "${TREER_WORKLOAD_CREDENTIAL:-}" && tes
 treer whoami
 ```
 
-`treer whoami` returns the current workspace plus the complete `agent` and
-`machine` records. Treat those records as the caller identity; do not infer the
-caller from names. `treer --format json status` also includes the same two records under its
-top-level `self` field alongside all workspace machines and agents.
+`treer whoami` returns the workspace plus the caller's complete `agent` and
+`machine` records; treat those as the caller identity instead of inferring it
+from names. `treer --format json status` returns all machines and agents plus
+the same two records under `self`.
 
-If the environment check fails, do not guess a proxy or local server address.
-Explain that the process is not running inside a managed Treer agent. A human
-may still use `treer --url <agent-server-url> ...` explicitly outside an agent.
+If the check fails, do not guess a Proxy or local server address: explain that
+the process is not running inside a managed Treer agent. Do not print, log,
+persist or send `TREER_WORKLOAD_CREDENTIAL`; only the local Controller consumes
+it.
 
-The Controller supplies the command tree, help, and skills. The thin client
-preserves argv and streams stdin and output. Set `TREER_IDENTITY_MODE=agent`
-for independently configured Agent clients: missing identity or credentials
-fail without reading operator credentials. Connection options belong before
-the business command. With neither `TREER_WORKSPACE_ID` nor
-`TREER_AGENT_SERVER_URL` set, independent clients may explicitly select their
-connection: credentials are sent to the explicit URL, which the caller must
-trust. If either binding exists, explicit connection flags must match their
-corresponding binding; overriding a missing counterpart also fails closed.
-The client displays `status`, `agent ls`, and `machine list` as tables only when
-stdout is a terminal; pipes retain original JSON. Use `--format json` before
-these commands when parsing their full response in an interactive terminal,
-or `--format table` for a compact display. This display flag is not forwarded.
-
-The Controller must be online for business help:
+The Controller supplies the command tree, help and skills; the `treer` binary
+is a thin client that forwards argv and streams. Business help therefore needs
+the Controller online:
 
 ```bash
 treer --help
 treer agent --help
 treer agent admin --help
 treer agent admin profile --help
+treer app --help
 treer machine --help
 treer exec --help
-treer message --help
 treer service --help
-treer runtime --help
 treer interface --help
-treer member --help
+treer message --help
 treer token --help
+treer member --help
 ```
 
-Control commands print JSON. Read IDs and state from the response instead of
-predicting them.
+Control commands print JSON; read IDs and state from the response instead of
+predicting them. `status`, `agent ls` and `machine list` render as tables only
+when stdout is a terminal. Put `--format json` (or `--format table`) before the
+command to choose explicitly; this client-side flag is not forwarded.
+Independently configured Agent clients can set `TREER_IDENTITY_MODE=agent` so
+missing identity fails instead of falling back to operator credentials.
 
-Default launcher installation is a separate local Controller-binary operation:
-`treer-agent-server launcher install|update|status|rollback`. It needs trusted
-Node.js 22+, installs the binary's verified matching payload and saves profiles;
-it never creates/restarts Agents or restarts the Host/Controller. Run
-`treer interface contract` for the authenticated enrolled machine/root and actual
-Controller compatibility. Missing support means update is needed, not permission
-to fall back silently. See the operator guide before legacy/source installation.
-With multiple local enrollments, pass `treer-agent-server launcher --workspace
-WORKSPACE_ID --url http://127.0.0.1:PORT install` (URL is optional if workspace
-alone is unique). Ambiguous discovery fails before installation; all installer
-subprocesses stay bound to the same selected Controller. Existing managed/operator
-identity bindings still cannot be overridden.
+## Identity, targets and the Tree
 
-## Understand identity and scope
-
-Treer injects these values into every managed agent:
-
-```bash
-printf '%s\n' "$TREER_WORKSPACE_ID" "$TREER_SERVER_ID" "$TREER_AGENT_ID"
-```
-
-All discovery and control stays inside `TREER_WORKSPACE_ID`. Agent targets may
-be:
+Treer injects `TREER_WORKSPACE_ID`, `TREER_SERVER_ID` and `TREER_AGENT_ID` into
+every managed agent. All discovery and control stays inside that workspace.
+Agent targets may be:
 
 - an opaque agent ID;
 - an absolute tree path (`/team/reviewer`) or a relative path (`../team/reviewer`);
-- a bare name only for a sibling in the caller's containing folder;
+- a bare name, only for a sibling in the caller's containing folder;
 - `self` or `.` for the calling agent.
 
-Prefer paths for collaboration. Agent names are unique within a folder, not the
-whole workspace. Relative paths start at your containing Tree folder; operators
-start at `/`. A missing bare sibling returns `agent_not_in_folder` with up to ten
-same-name absolute paths in `hint`; it never falls back to a global name match.
-Agent output includes `path`, and Tree **Copy path** can be pasted as a CLI target.
-Managed Apps may provide a recursive App/Agent subtree. Message targets can append
-a validated relative path, for example `/infra/agent_hub/team/tools/agent1`, or use
-`OWNER_WORKLOAD_ID/team/tools/agent1`. These nodes are App-owned logical addresses,
-not Host processes; ordinary Agent lifecycle/transcript commands do not apply.
-The App receives its own mailbox and routes `recipient.app_endpoint`. Only that
-authenticated Managed App may send/reply with `--from-endpoint team/tools/agent1`.
-Replies to a logical sender preserve its full stable address. See
-[App-owned trees](../../docs/app-tree.md) for the directory, retry and trust contract.
-New CLI clients require Controller capability `agent.path-targets.v1`; an older
-Controller returns an upgrade error before dispatch, without disconnecting.
+Prefer paths. Names are unique within a folder, not the workspace. Relative
+paths start at your containing folder; operators start at `/`. A missing bare
+sibling returns `agent_not_in_folder` with up to ten same-name absolute paths in
+`hint`; it never falls back to a global name match. Agent output includes
+`path`, and the Console's **Copy path** value can be pasted as a target.
 
-Agent creation, profile launch and `treer app create` omit `--folder` to inherit
-your authenticated identity's direct Tree folder. Human/operator callers start
-at root. Use `--folder /` for explicit root or `--folder PATH` for another
-authorized destination; `cwd` is unrelated. Proxy reserves identity/name/placement
-atomically before startup. An unplaced caller receives `caller_unplaced`; ask
-the owner to place it or request an authorized explicit destination. Existing
-nodes are not moved. Creation requires `workload.create-placement.v1`; older
-Controller/Proxy versions fail instead of silently placing at root.
-
-Folders and path Deny are not a sandbox or containment boundary. Be cautious
-granting `agent.create` and `agent.tree.manage`: explicit creation elsewhere or
-moving to an Allow path remains possible. Monitor mode never enforces Deny;
-unplaced legacy identities do not match path rules. Use reviewed Policy and
-external OS isolation when needed.
-
-Discover current topology before choosing a peer or server:
+Discover topology before choosing a peer or machine:
 
 ```bash
 treer whoami
@@ -129,463 +79,65 @@ treer --format json status
 treer --format json agent ls -R /
 treer agent show self
 treer agent show /reviewer
+treer member list
 ```
 
-Use stable IDs when renaming an object. `self` and `.` are accepted for both
-the current agent and its machine:
+Organize Agents and Apps in the workspace Tree:
 
 ```bash
+treer agent mkdir -p /research/experiments
+treer agent ls /research
+treer agent mv /reviewer /research/experiments/
+treer agent mv /research/experiments /research/runs
+treer agent rmdir /research/runs
 treer agent admin rename self coordinator
 treer machine rename self build-machine
 ```
 
-Register an explicit command when this Agent should return after a full Treer
-Host restart:
-
-```bash
-treer agent startup set --cwd . -- sh scripts/start-agent.sh
-treer agent startup show
-treer agent startup clear
-```
-
-This is self-only persistence. It does not automatically restart an ordinary
-Agent after a successful exit, and `treer agent stop` disables it. Do not put
-secrets in argv. Explicit start can launch a stopped or completed workload again:
-
-```bash
-treer agent start /reviewer
-treer agent stop /reviewer
-treer agent restart /reviewer
-treer agent read /reviewer --lines 100
-```
-
-These lifecycle commands also accept managed App runtime IDs, paths, and sibling names.
-To repair a stuck peer without deleting its identity, use the separate
-Policy-controlled startup management commands:
-
-```bash
-treer agent admin startup show /reviewer
-treer agent admin startup set /reviewer --cwd repo -- sh scripts/start-agent.sh
-treer agent restart /reviewer
-# Atomically save new argv and restart once:
-treer agent restart /reviewer --cwd repo -- codex --no-daemon resume THREAD_ID
-```
-
-Targets accept ID, tree path, sibling name, or `self`. Omitted `--cwd` keeps the target's
-saved directory. Admin set alone preserves stopped intent and does not launch.
-Admin show/set require `agent.startup.manage` on the target; atomic restart also
-requires ordinary lifecycle permissions. This does not change the self-only
-startup commands above. App runtimes reject startup edits with
-`app_startup_managed`; their command belongs to the App deployment. Controllers
-without `agent.startup-admin.v1` return `unsupported_command` without disconnecting.
-Keep resume/session arguments when switching launchers to retain context. Never
-embed credentials in argv. A failed launch leaves the new command saved for
-repair/retry. The browser Agent menu also offers **Edit startup command**.
-
-`treer app start/stop/restart` and `treer agent admin start/stop/restart` remain
-compatibility commands. Restart keeps the Agent ID and workload credential;
-`run_generation` in Agent output increases for a replacement process. The
-Controller owns startup and recovery for both kinds, adopts surviving Host
-processes after a hot replacement, and validates identities before cold
-recovery. Enabled Apps retry exited processes; ordinary Agents do not restart
-automatically on the same Host. Stop prevents automatic recovery until an
-explicit start or restart.
-
-Edit managed App launch fields through the deployment, preserving its stable
-ID, credential, service and public origin:
-
-```bash
-treer app update /infra/issues --cwd apps-deployed/issues --command sh -- start.sh
-treer app update /infra/issues --command python3 -- issues.py
-```
-
-Omitted fields remain unchanged (even args when only command changes).
-For Agent/App starts and recovery, use an absolute executable or a bare name in
-an absolute PATH directory. Empty/relative PATH entries are ignored; relative
-executable paths (`./start.sh`) are rejected. Use an explicit interpreter with
-script argv instead. Windows bare-name lookup supports only `.exe`/`.com` and
-drive-qualified PATH directories. Missing commands fail with `command_not_found`;
-no shell, cwd search or `$HOME` expansion is implied. Upgrade target Controllers
-before relying on this behavior; older Controllers retain their previous lookup.
-Arguments after `--` replace the full array; `--clear-args` empties it.
-`cwd` must exist beneath the machine root. A running App restarts once; a stopped
-App remains stopped. This requires `agent.startup.manage` plus ordinary restart
-permissions. `app_update_unsupported`, `unsupported_command` / `app.update.v1`, or a missing Proxy route
-means upgrade; do not delete/recreate as a workaround. Failed launch leaves the
-new specification saved for repair/start/restart or explicit rollback. Keep
-secrets/environment in private entry configuration, never argv.
-
-Names are workspace-visible labels; agent IDs and server IDs do not change.
-
-Organize Agents and Apps in the shared workspace tree:
-
-```bash
-treer agent mkdir -p /research/experiments
-treer --format json agent ls /research
-treer --format json agent ls -R /
-treer agent mv /reviewer /research/experiments/
-treer agent mv /research/experiments /research/runs
-treer agent mv /research/experiments/reviewer /
-treer agent rmdir /research/runs
-```
-
-Paths are case-sensitive. For an Agent, relative paths start in the folder
-containing that Agent; for an operator they start at workspace root. `.` and
-`..` traverse from there, while `/` starts at workspace root. `ls` without a
-path lists the current folder and includes a `..` entry outside root. `ls`
-prints JSON `path`, `folders`, and `agents` fields; `ls -R /` lists the entire
-tree. `mkdir -p` creates missing parents and accepts existing folders. `-R`
-includes descendants. `mv` moves an Agent/App by ID, name in the current
-folder, `self`, or tree path into an existing folder. `.` means the current
-folder. It also moves or renames a folder without overwriting another folder.
-To rename an Agent/App, use `treer agent admin rename TARGET NAME`. `rmdir` rejects nonempty folders and
-never stops or deletes workloads. Folder IDs from `ls` are also accepted by
-`ls`, `mv`, and `rmdir` when names are ambiguous. These operations use the
-Agent's existing credential and the `agent.tree.read` / `agent.tree.manage`
-Policy actions; no user session or extra token is needed.
-
-List organization members addressable from the workspace without exposing
-their email addresses:
-
-```bash
-treer member list
-```
-
-## Manage long-running Apps
-
-A Managed App is one supervised command with one HTTP UI endpoint. Its service
-and platform-assigned ingress address remain stable when the runtime exits or the Controller
-reconnects:
-
-```bash
-treer app create --machine build-machine --name docs --cwd . --port 8080 \
-  python3 -- -m http.server 8080
-# Explicitly allow anonymous internet access to this Managed App:
-treer app create --public --machine build-machine --name public-docs --cwd . \
-  --port 8081 python3 -- -m http.server 8081
-treer app list
-treer app show /docs
-treer app stop /docs
-treer app start /docs
-treer app restart /docs
-treer app delete /docs
-```
-
-Read `public_url` and `access` from `treer app create`, `list`, or `show`. Use
-`public_url` as the App's external root when present; `access` is `workspace` or
-`public`. The URL has no control-plane `/proxy/` suffix and preserves
-root-relative assets and redirects. The default managed ingress
-requires Workspace authentication. Pass `--public` only when anonymous internet
-access is intended; the App must provide its own authentication if it needs one.
-Public creation fails, and `public_url` is absent for private Apps, when the
-Proxy has no wildcard ingress configured.
-
-Use this only for a single-process HTTP App. It does not install dependencies,
-store secrets, migrate state, or isolate hostile code. Service and ingress
-records are owned by the Managed App. `--public` selects access for that owned
-ingress. Agents can register and publish their own services under Policy; they
-cannot register unrelated workloads. Use the browser control plane for
-externally supervised or non-HTTP processes.
-
-## Connect to an existing service
-
-Register a running process on your own loopback, then forward its stable service
-ID through an authenticated local listener:
-
-```bash
-treer service register --name database --port 5432
-treer service forward <service-id> --listen 127.0.0.1:15432
-```
-
-Private forwarding is the default. `treer service publish <service-id>`
-allocates a platform-managed HTTP address with workspace authentication;
-`--access public` explicitly removes that ingress authentication. Raw TCP
-publication uses `--tcp --access public` and requires a configured platform
-port range. Treer registers and routes processes; the user owns their runtime
-environment and its isolation. Transparent network proxying is retired.
-Use `treer service unpublish <service-id>` to revoke HTTP ingress while retaining
-the running service, or add `--tcp` to revoke its public TCP listener.
-
-## Use an Agent Interface Server
-
-An Agent-native integration may register a `treer.agent-interface/v1` HTTP
-server on its own private loopback. Registration is self-only and the Controller
-verifies the server manifest before publishing its capabilities:
-
-```bash
-treer interface register --port 4180 --instance-id pi-session-1 \
-  --capability prompt.submit --capability transcript.read \
-  --capability state.observe --ui-path /
-treer interface show
-```
-
-`--ui-path` is optional. When present, Treer replaces the Agent terminal view
-with that page and transparently carries HTTP and WebSocket traffic to the same
-private Interface port. The page must use relative asset, fetch, and WebSocket
-URLs. No machine service, virtual host, or published port is required.
-
-`treer agent prompt` defaults to `delivery:queue`: it sends immediately when
-idle and queues behind a busy turn. It requires `prompt.queue`; a terminal-only
-or older Interface returns `queue_unsupported` rather than inserting text.
-Use `--steer` explicitly for insertion (including legacy PTY input). Interface
-failures after dispatch are never retried through PTY input. Read a structured interface transcript
-with:
-
-```bash
-treer agent transcript /reviewer --page 0
-```
-
-Each page is one conversation turn: a user prompt plus the following entries
-until the next user prompt. `--cursor` is an alias for `--page`. `--limit`
-selects how many turns to return and defaults to 1. The JSON includes
-`page`, `page_count`, and `next_page`.
-
-Transcript requires `transcript.read`; ordinary `treer agent read` continues to
-read terminal replay. Attach, send-keys, resize, stop, and delete remain terminal
-or Host operations. The interface must deduplicate prompts by `operation_id` and
-clear registration during a clean shutdown. The Controller caches a
-process-bound descriptor and revalidates it after a hot restart:
-
-```bash
-treer interface clear
-```
-
-The single `launchers/agent` launcher registers this protocol and serves the
-shared browser UI. Its native Rust runtime speaks Codex app-server or Claude
-stream-json (`--harness codex|claude`). Install/update explicitly with
-`treer-agent-server launcher install|update`, then inspect the saved profile
-with `treer agent admin profile show NAME`. Installation does not create or
-restart an Agent. Each Agent owns one thread/session. New integrations add an
-adapter to that runtime and reuse the server/UI; do not add another AIS App.
-Provider runtimes belong in explicit commands/profiles, not built-in Agent kinds.
-
-## Communicate with another Agent over HTTP
-
-An Agent can expose its own HTTP API with any schema. From the serving Agent's
-runtime, register its primary communication endpoint after starting the server:
-
-```bash
-treer service register --primary --protocol http --name reviewer-api --port 4180
-```
-
-Each Agent has at most one primary HTTP service. Repeating this command updates
-its name and port through the service update API while preserving its service ID.
-If no primary exists, a same-name service owned by this Agent is promoted in
-place; another Agent's service is never adopted.
-Put server startup and registration in the saved launch command so cold recovery
-re-registers the current port. The service record itself does not start a server.
-Primary registration requires a managed Agent identity; it cannot bind another
-Agent's endpoint. Ordinary services remain available alongside the primary.
-
-The calling Agent discovers the address, then uses an ordinary HTTP client:
-
-```bash
-addr=$(treer agent address /reviewer)
-curl --fail-with-body "$addr/openapi.json"
-curl --fail-with-body -X POST "$addr/review" \
-  -H 'Content-Type: application/json' -d @request.json
-treer agent address /reviewer --json
-```
-
-The schema path and request routes above are examples owned by the serving Agent.
-Treer does not interpret its schema. `address` accepts a tree path, sibling name, or ID,
-defaults to `self`, and prints only `http://SERVICE_ID.treer/` with a newline.
-`--json` returns `agent_id`, `service_id`, and `address`. A missing primary is an
-error; other owned services are never selected implicitly. Addresses remain
-stable across Agent restarts and service renames, but deletion/recreation of the
-service assigns a new ID. Calls use the inherited HTTP proxy and source identity
-described below. HTTP delivery requires a running destination; it adds no offline
-queue or automatic retries. An AIS listener may also be registered as the primary
-service, but `treer interface register` alone does not create a service address.
-
-## Authenticate to an identity-aware service
-
-New managed Agents and Apps inherit a dedicated HTTP proxy entry. For ordinary
-HTTP code or curl, use a service name or stable ID from `treer service list`:
-
-```bash
-curl http://example-http.treer/path
-# Or use the stable ID:
-curl http://svc_YOUR_SERVICE_ID.treer/path
-```
-
-Names are unique within the workspace, matched case-insensitively, and resolved
-for each new request. Renaming changes the name address while ID addresses keep
-working. Name addresses accept 1-63 ASCII letters/digits with internal hyphens;
-use the service ID for other display names. CONNECT accepts either form too.
-Replace the entire `svc_YOUR_SERVICE_ID` with the real ID. The proxy-only name
-needs no DNS setup. The proxy authenticates as this Agent and supplies a fresh
-service-audience token through `X-Treer-Identity-Token`, also setting Bearer
-Authorization if no application Authorization was supplied. Subprocesses inherit
-the same `http_proxy`/`https_proxy` environment; clients ignoring these variables
-must explicitly configure `TREER_HTTP_PROXY`. Localhost bypasses the proxy.
-External HTTP/HTTPS pass through without Treer credentials. CONNECT to a
-`SERVICE_ID.treer` or `NAME.treer` address tunnels its registered endpoint
-(including SSH/native TLS), but cannot inject headers inside TLS or replace
-native authentication. Use service forwarding when a client cannot use HTTP
-CONNECT. Entry ports are
-rebound on hot restart and recreated on cold restore; older running processes
-must be relaunched to receive the proxy environment.
-
-For a client that does not use this entry, request a short-lived Bearer token
-using the service ID or unique name:
-
-```bash
-TOKEN="$(treer token create api)"
-curl -H "Authorization: Bearer $TOKEN" http://api.internal/
-```
-
-The token audience is the stable service ID even when the command uses a name.
-Use `treer token create api --json` only when the service ID or expiry metadata
-is needed. Do not print, log, persist, or send the injected
-`TREER_WORKLOAD_CREDENTIAL`; only the local Controller consumes it. Tokens
-expire after 60 seconds, so request one immediately before manual use. Services
-that do not implement Treer identity continue to work through the proxy.
-
-## Exchange durable Messages
-
-Use Core Messages for asynchronous collaboration that must survive Agent,
-Controller, or Proxy restarts. A Message is immutable and may reference one or
-more earlier visible Messages through ordered `context_ids`; those edges form a
-workspace-scoped DAG.
-
-Inspect unacknowledged deliveries without changing their state:
-
-```bash
-treer message receive --wait 30000 --limit 50
-```
-
-Record the returned `delivery_id` and `message.message_id`. The same delivery
-will be returned again until it is explicitly acknowledged. Process and durably
-record any external effect before acknowledging:
-
-```bash
-treer message ack <delivery-id> --operation-id <stable-operation-id>
-```
-
-Send a new Message using a stable recipient ID, tree path, or sibling name. Prefer stdin for
-multiline or generated content so the body is not exposed in process arguments:
-
-```bash
-printf '%s\n' 'Review is complete.' | \
-  treer message send --to /coordinator --idempotency-key task-42-result
-```
-
-Bridges sending an external-channel Message can keep text and attribution out of argv:
-pipe a single JSON object `{"body":"text","external_source":{"channel":"telegram","conversation_id":"chat-id","message_id":"external-id","metadata":{"user_id":"user-id"}}}`
-to `treer message send --to /coordinator --stdin-envelope --idempotency-key telegram-update-42`.
-Generate and pipe this JSON in the bridge process; do not put private text in a
-shell command or an argument to `printf`. The envelope is limited to 1 MiB;
-`external_source` is optional (or null), and ordinary Message limits still apply.
-`--stdin-envelope` conflicts with `--body`, `--body-file` and
-`--external-source-file`. Older Controllers reject this unknown flag; upgrade
-instead of falling back to putting text in argv. Attribution does not replace
-the authenticated sender or grant permissions.
-
-Use a sender-scoped idempotency key whenever a send may be retried. Repeating an
-identical request returns the original Message; reusing the key with different
-content fails. Reply by stable Message ID to preserve conversational context:
-
-```bash
-printf '%s\n' 'I addressed both findings.' | \
-  treer message reply <message-id> --to sender
-```
-
-`reply` reads the parent first, uses its sender when `--to` is omitted or is
-`sender`, and creates an ordinary `message.send` operation with the parent as
-the first context. Read history without acknowledging deliveries:
-
-```bash
-treer message get <message-id>
-treer message list --limit 50
-```
-
-Context edges do not grant access to a parent's body. A missing and an invisible
-Message produce the same external error. Message policy actions are separate:
-`message.send`, `message.read`, `message.receive`, and `message.ack`. Import is
-reserved for a local operator performing an explicit migration.
-
-A Message does not wake or write to another Agent's terminal. When immediate
-attention is required, send the durable Message first and then use
-`treer agent prompt` with only the Message ID. `agent.prompt` is a separate,
-stronger policy action; do not copy the Message body into the prompt.
-
-An operator may run a channel App inside a dedicated managed Agent. Such a
-process uses the same `treer` CLI and identity as the Agent; there is no App
-installer, broker, or sandbox exposed through this skill. Core still evaluates
-the Agent's workspace Policy for each command. App configuration, secrets,
-state, supervision, and isolation are operator workflows documented under
-`apps/`.
-
-Core Message routes have an operator-controlled rollout gate and default off. A
-`core_messages_disabled` result means the deployment is not enabled for the
-workflow; report it instead of inventing another integration path.
-
-Use `treer machine show <machine>` to inspect its enrolled root before file
-transfer. `treer machine put --machine <machine> LOCAL REMOTE` uploads one file;
-`treer machine get --machine <machine> REMOTE LOCAL` downloads one file.
-REMOTE is root-relative, `/` separated, and its parent must already exist.
-LOCAL refers to the CLI machine; `-` reads stdin for put or writes verified
-stdout for get. `--force` permits replacement, otherwise existing destinations
-are preserved. Both directions verify SHA-256 and default to a 64 MiB limit and
-private permissions; optional Unix `--mode` excludes group/other write and
-special bits (Windows only supports 600). Symlinks/reparse points, special
-files, traversal, Core private state and reserved temporary names are refused.
-Use physical local paths rather than macOS `/tmp` or junction aliases.
-`file_transfer_unsupported` means upgrade the relevant CLI/Proxy/Controller;
-never substitute an unchecked upload. A lost completion reply is ambiguous:
-check the destination before retrying, and never automatically add `--force`.
-Policy actions are `machine.file.write` and `machine.file.read`; filesystem
-paths are not workspace Tree path selectors. These operations are not a sandbox.
-
-If a machine shows Offline while Agents still exist, do not re-enroll it.
-Recover on that host with the real workspace ID (`ws_…` from `treer --format json status` or
-the copied web command). `service status` with no `--workspace` lists local
-installs. `service start` is ready only when the Controller reports
-`proxy_connected`; a live loopback API is not a Proxy lease. Duplicate fencing
-and lid-close sleep reconnect automatically; if they do not, copy:
-
-```bash
-treer-agent-server service --workspace "$TREER_WORKSPACE_ID" restart-controller
-treer-agent-server service --workspace "$TREER_WORKSPACE_ID" start
-```
-
-Delete a machine only when it and all of its agents should be removed from the
-workspace. This revokes its credential but does not uninstall the service on
-that machine:
-
-```bash
-treer machine delete <server-id>
-```
-
-## Run a bounded machine command
-
-Use `treer exec` for a short, non-interactive command when creating a persistent
-Agent would add no value. Select the machine explicitly and keep the working
-directory relative to that machine's Host root:
-
-```bash
-treer exec --machine build-machine --cwd packages/api -- git status --short
-treer exec --machine build-machine --cwd . --timeout 10000 -- sh -lc 'make test'
-```
-
-The command is an argv vector; Treer does not interpret shell syntax. Use an
-explicit shell as in the second example when pipes, redirects, or expansion are
-required. The timeout is milliseconds, defaults to 30000, and cannot exceed
-30000. The JSON response contains stdout, stderr, exit code, duration, timeout,
-and truncation state. Each output stream retains at most 64 KiB.
-
-This executes with the selected machine account's authority. It is subject to
-the `machine.exec` Policy action, but it is not an Agent sandbox and receives no
-Agent workload credential. Inspect the machine first and do not run destructive
-commands unless the user explicitly requested them.
-
+Paths are case-sensitive. `ls` without a path lists the current folder and
+prints `path`, `folders` and `agents`; `-R` includes descendants. `mkdir -p`
+creates parents and accepts existing folders. `mv` moves an Agent/App into an
+existing folder, or moves/renames a folder without overwriting another. Rename
+an Agent/App with `agent admin rename TARGET NAME`; IDs, credentials and server
+IDs do not change. `rmdir` rejects nonempty folders and never stops workloads.
+Folder IDs from `ls` are accepted where names are ambiguous. These use the
+Agent's own credential under the `agent.tree.read` / `agent.tree.manage` Policy
+actions.
+
+Creation commands (`agent admin create`, `agent admin profile launch`,
+`app create`) place the new node in the caller's own folder unless `--folder
+PATH` is given; operators default to root, and `--folder /` selects root
+explicitly. `--folder` is independent of `--cwd`. The destination must exist;
+the name and placement are reserved atomically, and sibling name conflicts are
+rejected. Non-root placement requires `agent.tree.manage`. An unplaced caller
+gets `caller_unplaced`: ask the owner to place it or pass an authorized
+`--folder`.
+
+Folders and path Deny rules are not a sandbox. Monitor-mode Policy never
+enforces Deny. Use reviewed Policy plus external OS isolation when containment
+matters.
+
+Managed Apps may expose an App-owned logical subtree. Message targets can
+append a relative path such as `/infra/agent_hub/team/tools/agent1`. These
+nodes are App addresses, not Host processes; lifecycle and transcript commands
+do not apply. See [App-owned trees](../../docs/app-tree.md).
 
 ## Create and coordinate a peer
 
-Use a launch profile when the same executable, working directory, and arguments
-will be reused. Profiles are workspace-scoped and are addressable by stable ID
-or unique name:
+Select an online machine from `treer --format json status`, then create an
+explicit command Agent with `--kind command`; provider-specific and auto kinds
+are retired (`agent_kind_retired`). Native arguments go after `--`, and `--cwd` is relative to the selected machine's Host root:
+
+```bash
+treer agent admin create --machine <server-id> --kind command --name reviewer --cwd . -- codex
+treer agent admin create --kind command --name helper --folder /research --cwd repo -- /bin/sh
+```
+
+`--machine` accepts a server ID or unique machine name (as for `app create`,
+`exec` and `profile launch`).
+
+Use a launch profile when the same executable, directory and arguments are
+reused. Profiles are workspace-scoped and addressed by stable ID or unique name:
 
 ```bash
 treer agent admin profile create reviewer --description "Review current changes" --cwd . \
@@ -593,94 +145,23 @@ treer agent admin profile create reviewer --description "Review current changes"
 treer agent admin profile list
 treer agent admin profile show reviewer
 treer agent admin profile launch reviewer --machine <server-id> \
-  --name review-42 --cwd packages/api
-```
-
-Edit individual fields without replacing the profile. Repeat `--arg` to replace
-the complete argument array, or use `--clear-args` to empty it:
-
-```bash
+  --name review-42 --cwd packages/api --folder ../reviews
 treer agent admin profile update reviewer --cwd packages/api
 treer agent admin profile update reviewer --arg review --arg=--base --arg main
+treer agent admin profile update reviewer --command codex --clear-args
 treer agent admin profile delete reviewer
 ```
 
-The command and arguments are passed directly as an argv vector. Shell syntax
-is not interpreted unless the executable is an explicit shell such as `sh` and
-its arguments request evaluation. Profile fields are stored as plaintext and
-may be read by workspace members and policy-authorized Agents; never put API
-keys, tokens, passwords, or other secrets in a profile.
+Repeating `--arg` replaces the whole argument array; `--clear-args` empties
+it. `launch --cwd` overrides the directory for one Agent without changing the
+profile. Command and arguments are an argv vector; shell syntax is only
+interpreted when the executable is an explicit shell. Profile fields are
+plaintext visible to members and authorized Agents: never put secrets in them.
+Policy actions are `launch_profile.list|read|create|update|delete|use`, and a
+launch also needs `agent.create` on the machine. Inspect a profile before
+launching it.
 
-Profile operations have separate `launch_profile.list`,
-`launch_profile.read`, `launch_profile.create`, `launch_profile.update`,
-`launch_profile.delete`, and `launch_profile.use` policy actions. A launch must
-also pass `agent.create` for its selected machine. Inspect a profile before
-launching it, especially when another principal last updated it.
-
-Use `profile launch --cwd <relative-path>` to override the saved working
-directory for one Agent without changing the profile. The path is relative to
-the selected machine's Host root and must stay inside that root.
-`--machine` accepts a server ID or unique machine name, as with `agent admin
-create`, `app create`, and `exec`.
-
-`agent admin create` and `agent admin profile launch` accept `--folder PATH`
-to choose the new Agent's workspace Tree folder. Without it, a managed Agent
-creates peers in its own Tree folder; an operator defaults to workspace root.
-Relative Tree paths (including `.` and `..`) start at the caller's folder;
-absolute paths start at `/`, and folder IDs are also accepted. Use `--folder /`
-to create at root explicitly. This is independent of the process directory
-selected by `--cwd` or the profile's saved `cwd`.
-
-```bash
-treer agent admin profile launch reviewer --name review-42 --folder ../reviews
-treer agent admin create --kind command --name helper --folder /research --cwd repo -- /bin/sh
-```
-
-The destination must exist and is checked before creating the Agent. Proxy
-reserves the name and placement atomically before starting the process;
-non-root placement requires `agent.tree.manage`. Sibling name conflicts are
-rejected before dispatch, including when two callers create concurrently.
-
-Select an online machine from `treer --format json status`, then create an explicit command
-Agent. Preserve the current working directory unless the task requires a
-different relative directory.
-
-```bash
-treer agent admin create --machine <server-id> --kind command --name reviewer --cwd . -- codex
-```
-
-```bash
-treer agent admin create --machine <server-id> --kind command --name codex-ui --cwd . -- /path/to/codex-agent-ui/scripts/treer-agent.sh
-```
-
-To install a public git recipe, select and launch an explicit installer command
-or saved launch profile. Read the bundled install skill and submit it with the
-recipe URL to that Agent. Automatic provider selection and `--recipe` creation
-are retired.
-
-```bash
-treer --skill install
-treer agent admin create --machine <server-id> --kind command --name installer -- codex
-```
-
-The installer creates a different command Agent and must save a launch
-profile from `treer-agent.json` so Launch can create another Agent of that
-recipe. Each Agent is one thread. A recipe start script may attach to an
-already healthy same-type app server instead of starting another shared
-backend. It must still run and register a per-Agent AIS adapter with a unique
-`instance_id` that binds semantic operations to that Agent's thread. Do not use
-a raw service probe as Interface readiness. Wait until `treer agent show`
-reports the required capabilities; for browser recipes also confirm the
-Interface descriptor's `ui_path`, then confirm
-`treer agent admin profile show`.
-
-Native agent arguments go after `--`:
-
-```bash
-treer agent admin create --machine <server-id> --kind command --name reviewer --cwd . -- codex <agent-args...>
-```
-
-Submit work by path and wait for that submission to finish:
+Submit work and wait for that submission to finish:
 
 ```bash
 treer agent prompt /reviewer \
@@ -688,46 +169,40 @@ treer agent prompt /reviewer \
   --wait --timeout 120000
 ```
 
-With explicit `--notify`, Agent senders receive a Core Message on `done`,
-`failed`, or `interrupted`, including submission/turn IDs and a bounded assistant
-preview. Without it, queued and steering prompts do not request completion
-messages; `--wait` alone polls its receipt without enabling messages.
-Notifications use the target launcher's identity and normal Core Message
-Policy. Queue state and notification retries
-survive launcher restarts. Inspect or cancel pending work with:
+`prompt` defaults to queue delivery: it runs immediately when idle and queues
+behind a busy turn. This needs the target Interface's `prompt.queue`
+capability; a terminal-only Agent returns `queue_unsupported` and accepts only
+`--steer`, which inserts into the current turn (or the PTY). Interface failures
+are never retried through PTY input. `--wait` follows the returned submission
+until `done`, `failed` or `interrupted`, even if other turns run first;
+`--timeout` (milliseconds, requires `--wait`) leaves the submission in place on
+expiry. `--until` is rejected; use `agent wait` for status matching.
+
+`--notify` sends the calling Agent a Core Message when the submission ends,
+with submission/turn IDs and a bounded assistant preview. Queue state and
+notification retries survive launcher restarts.
 
 ```bash
 treer agent queue ls /reviewer
 treer agent queue cancel /reviewer <submission-id>
 treer agent prompt /reviewer "Urgent correction" --steer
-```
-
-`prompt --wait` follows the returned submission ID until `done`, `failed`, or
-`interrupted`, even when other turns run first. `--timeout` is milliseconds;
-timing out leaves the submission queued/running. It requires receipt support
-and rejects `--until`. Use the separate lifecycle wait for status matching:
-
-```bash
 treer agent wait /reviewer --until blocked --timeout 120000
-```
-
-`agent wait` observes lifecycle state/output revisions. It does not prove that
-a particular submission finished; `prompt --wait` does provide that correlation.
-
-Inspect the result after a wait, especially after `blocked` or `failed`:
-
-```bash
 treer agent show /reviewer
 treer agent read /reviewer --lines 120
+treer agent transcript /reviewer --page 0
 ```
 
-`treer agent attach <target>` is reserved for a human using an interactive
-terminal on an Agent Server machine. Agents must use `prompt`, `read`, and
-`send-keys` instead of opening an attached terminal session. A human can press
-`Ctrl-]` to detach without stopping the target.
+`agent wait` observes lifecycle state; it does not prove that a particular
+submission finished. `agent read` returns terminal replay (default 100 lines).
+`agent transcript` needs `transcript.read`: each page is one conversation turn
+(a user prompt plus following entries), `--cursor` aliases `--page`, `--limit`
+returns more turns (default 1), and the JSON includes `page`, `page_count` and
+`next_page`.
 
-Delete an agent only when its process and workspace entry should both be
-removed. Deletion is persistent and is different from merely stopping it:
+`treer agent attach <target>` is only for a human at an interactive terminal
+(`Ctrl-]` detaches). Automated agents use `prompt`, `read` and `send-keys`.
+
+Delete an Agent only when its process and workspace entry should both go:
 
 ```bash
 treer agent admin delete /reviewer
@@ -735,8 +210,8 @@ treer agent admin delete /reviewer
 
 ## Send terminal keys intentionally
 
-Use `prompt` for normal messages. Use `send-keys` only for interactive terminal
-controls, approvals, cancellation, or applications that need individual keys:
+Use `prompt` for normal messages. Use `send-keys` only for terminal controls,
+approvals, cancellation or applications needing individual keys:
 
 ```bash
 treer agent send-keys /reviewer esc
@@ -744,21 +219,286 @@ treer agent send-keys /reviewer ctrl-c
 treer agent send-keys /reviewer y enter
 ```
 
-Supported logical keys include `enter`, `tab`, `backspace`, `esc`, `space`,
-arrow keys, `home`, `end`, `pageup`, `pagedown`, `delete`, `shift-tab`, and
-`ctrl-a` through `ctrl-z`. A single Unicode character is also accepted. Treer
-validates every key before sending any bytes.
+Logical keys: `enter`, `tab`, `backspace`, `esc`, `space`, arrow keys, `home`,
+`end`, `pageup`, `pagedown`, `delete`, `shift-tab`, `ctrl-a` through `ctrl-z`,
+or a single Unicode character. All keys are validated before any bytes are sent.
+
+## Lifecycle and startup commands
+
+```bash
+treer agent start /reviewer
+treer agent stop /reviewer
+treer agent restart /reviewer
+```
+
+These accept Agents and managed Apps. Restart keeps the ID and workload
+credential; `run_generation` increases for the replacement process. Stop
+prevents automatic recovery until an explicit start or restart. Enabled Apps
+retry exited processes; ordinary Agents do not restart automatically.
+
+Register this Agent's own command so it returns after a full Host restart:
+
+```bash
+treer agent startup set --cwd . -- sh scripts/start-agent.sh
+treer agent startup show
+treer agent startup clear
+```
+
+This is self-only; `treer agent stop` disables it. To repair another Agent
+without deleting its identity, use the Policy-controlled admin form (requires
+`agent.startup.manage` on the target):
+
+```bash
+treer agent admin startup show /reviewer
+treer agent admin startup set /reviewer --cwd repo -- sh scripts/start-agent.sh
+# Atomically save new argv and restart once:
+treer agent restart /reviewer --cwd repo -- codex resume THREAD_ID
+```
+
+Omitted `--cwd` keeps the saved directory. Admin `set` alone does not launch.
+Keep resume/session arguments when switching launchers to retain context. A
+failed launch leaves the new command saved for repair. App runtimes reject
+startup edits with `app_startup_managed`; use `treer app update`.
+
+Launch commands need an absolute executable or a bare name found in an absolute
+PATH directory. Relative executables (`./start.sh`) are rejected, missing ones
+fail with `command_not_found`, and no shell, cwd search or `$HOME` expansion is
+implied. Use an explicit interpreter (`sh start.sh`). On Windows bare names
+resolve only `.exe`/`.com`. `cwd` must exist beneath the machine root. Never
+put credentials in argv.
+
+## Manage long-running Apps
+
+A Managed App is one supervised command with one HTTP UI endpoint. Its service
+and ingress address stay stable across runtime exits and Controller reconnects:
+
+```bash
+treer app create --machine build-machine --name docs --cwd . --port 8080 \
+  python3 -- -m http.server 8080
+# Explicitly allow anonymous internet access:
+treer app create --public --machine build-machine --name public-docs --cwd . \
+  --port 8081 python3 -- -m http.server 8081
+treer app list
+treer app show /docs
+treer app stop /docs
+treer app start /docs
+treer app restart /docs
+treer app update /docs --cwd site --command python3 -- -m http.server 8080
+treer app delete /docs
+```
+
+Read `public_url` and `access` (`workspace` or `public`) from create/list/show.
+`public_url` is the App's external root; the default ingress requires workspace
+authentication. Use `--public` only for intended anonymous access; it fails,
+and private Apps have no `public_url`, when the Proxy has no wildcard ingress.
+`--port` tells Treer where to route; the App must listen there itself.
+
+`app update` keeps the App's ID, credential, service and public origin.
+Omitted fields stay unchanged (args too, when only `--command` changes);
+arguments after `--` replace the array and `--clear-args` empties it. A running
+App restarts once; a stopped App stays stopped. It needs `agent.startup.manage`
+plus restart permission. Do not delete/recreate an App to change its command.
+
+Managed Apps do not install dependencies, store secrets, migrate state or
+isolate hostile code. Keep secrets in private configuration, never argv.
+
+## Services and forwarding
+
+Register a process on your own loopback, then forward its stable service ID
+through an authenticated local listener:
+
+```bash
+treer service register --name database --port 5432
+treer service list
+treer service forward <service-id> --listen 127.0.0.1:15432
+treer service publish <service-id>
+treer service unpublish <service-id>
+treer service delete <service-id>
+```
+
+Forwarding is private by default. `service publish` allocates an HTTP address
+with workspace authentication; `--access public` removes that authentication.
+Raw TCP publication uses `--tcp --access public` and needs a configured
+platform port range; `unpublish --tcp` revokes it. Transparent network
+proxying is retired (`treer network connect` only reports that); use services.
+
+### Primary HTTP endpoint between Agents
+
+An Agent can expose its own HTTP API. From the serving Agent, after starting
+the server:
+
+```bash
+treer service register --primary --protocol http --name reviewer-api --port 4180
+```
+
+Each Agent has at most one primary HTTP service; repeating the command updates
+name and port and keeps the service ID. Put server start and registration in
+the saved startup command so recovery re-registers the current port. Callers
+discover the address and use an ordinary HTTP client:
+
+```bash
+addr=$(treer agent address /reviewer)
+curl --fail-with-body "$addr/openapi.json"
+treer agent address /reviewer --json
+```
+
+`address` defaults to `self` and prints `http://SERVICE_ID.treer/`; `--json`
+adds `agent_id` and `service_id`. A missing primary is an error. Treer does not
+interpret the schema, queue offline deliveries or retry.
+
+### Identity-aware HTTP
+
+Managed Agents and Apps inherit an HTTP proxy entry (`http_proxy`,
+`https_proxy`, and `TREER_HTTP_PROXY` for clients that ignore those). Address a
+service by name or stable ID:
+
+```bash
+curl http://example-http.treer/path
+curl http://svc_YOUR_SERVICE_ID.treer/path
+```
+
+Names are workspace-unique, case-insensitive, resolved per request, and limited
+to 1-63 ASCII letters/digits with internal hyphens. The proxy authenticates as
+this Agent and adds a fresh service-audience token in `X-Treer-Identity-Token`
+(and as Bearer `Authorization` if none was set). Localhost bypasses the proxy;
+external HTTP/HTTPS passes through without Treer credentials. CONNECT to a
+`*.treer` address tunnels to the registered endpoint (SSH, native TLS) but
+cannot inject headers inside TLS. Processes started before the proxy entry
+existed must be relaunched.
+
+For a client that cannot use the proxy, request a 60-second Bearer token:
+
+```bash
+TOKEN="$(treer token create api)"
+curl -H "Authorization: Bearer $TOKEN" http://api.internal/
+```
+
+The audience is the stable service ID even when a name is used; `--json` also
+returns the ID and expiry.
+
+## Agent Interface Server
+
+An Agent-native integration may register a `treer.agent-interface/v1` HTTP
+server on its private loopback. Registration is self-only; the Controller
+verifies the manifest before publishing capabilities:
+
+```bash
+treer interface register --port 4180 --instance-id pi-session-1 \
+  --capability prompt.submit --capability transcript.read \
+  --capability state.observe --ui-path /
+treer interface show
+treer interface clear
+treer interface contract
+```
+
+With `--ui-path`, the Console replaces the terminal view with that page and
+carries HTTP and WebSocket traffic to the same private port; the page must use
+relative URLs. No service record or published port is needed, and `interface
+register` alone creates no service address. The Interface must deduplicate
+prompts by `operation_id`, refresh registration after Controller restarts, and
+clear it on clean shutdown. `interface contract` reports the running
+Controller's launcher compatibility contract.
+
+The single launcher at `launchers/agent` implements this protocol, serves the
+shared browser UI and drives Codex app-server or Claude stream-json
+(`--harness codex|claude`). Each Agent owns one thread/session. New harnesses
+are adapters inside that runtime, not new UIs or AIS Apps. The launcher is
+installed with the local Controller binary, not the `treer` CLI:
+
+```bash
+treer-agent-server launcher install    # or: update | status | rollback
+treer agent admin profile list
+```
+
+`launcher install` needs a trusted Node.js 22+ (`--node /abs/path` if not in a
+standard location), saves profiles, and never creates or restarts Agents or
+the Host. With several local enrollments pass `--workspace WORKSPACE_ID` (and
+optionally `--url http://127.0.0.1:PORT`).
+
+## Durable Messages
+
+Core Messages are for asynchronous collaboration that must survive Agent,
+Controller or Proxy restarts. A Message is immutable and may reference earlier
+visible Messages through ordered `context_ids`.
+
+```bash
+treer message receive --wait 30000 --limit 50
+treer message ack <delivery-id> --operation-id <stable-operation-id>
+printf '%s\n' 'Review is complete.' | \
+  treer message send --to /coordinator --idempotency-key task-42-result
+printf '%s\n' 'I addressed both findings.' | \
+  treer message reply <message-id> --to sender
+treer message get <message-id>
+treer message list --limit 50
+```
+
+`receive` does not change state: the same delivery returns until acknowledged,
+so durably record any external effect before `ack`. Send bodies over stdin
+rather than `--body` to keep them out of process arguments. Use a
+sender-scoped `--idempotency-key` whenever a send may be retried; reusing a key
+with different content fails. `reply` uses the parent's sender when `--to` is
+omitted or `sender`, and puts the parent first in context.
+
+Bridges forwarding an external channel can pipe one JSON object
+`{"body":"…","external_source":{"channel":"…","conversation_id":"…","message_id":"…"}}`
+(max 1 MiB) to `treer message send --to TARGET --stdin-envelope
+--idempotency-key …`; it conflicts with `--body`. Attribution never replaces
+the authenticated sender. Only an authenticated Managed App may send with
+`--from-endpoint` for its own logical subtree.
+
+Context edges do not grant access to a parent's body; missing and invisible
+Messages return the same error. Policy actions are `message.send`,
+`message.read`, `message.receive` and `message.ack`. `core_messages_disabled`
+means the deployment has not enabled Messages; report it.
+
+A Message does not wake another Agent. When attention is needed, send the
+Message, then `treer agent prompt TARGET "<message-id>"` with only the ID;
+`agent.prompt` is a separate, stronger Policy action.
+
+## Machines and bounded commands
+
+```bash
+treer machine list
+treer machine show <machine>
+treer machine put --machine <machine> LOCAL REMOTE
+treer machine get --machine <machine> REMOTE LOCAL
+treer exec --machine build-machine --cwd packages/api -- git status --short
+treer exec --machine build-machine --cwd . --timeout 10000 -- sh -lc 'make test'
+```
+
+File transfer: REMOTE is root-relative with `/` separators and an existing
+parent; LOCAL is on the CLI machine, `-` meaning stdin/stdout. Existing
+destinations are kept unless `--force`. Transfers verify SHA-256, default to a
+64 MiB limit and mode 600 (`--mode` excludes group/other write and special
+bits). Symlinks, special files, traversal and Core private state are refused.
+A lost completion reply is ambiguous: check the destination before retrying,
+and never add `--force` automatically. Policy actions are `machine.file.write`
+and `machine.file.read`.
+
+`exec` runs a short non-interactive argv (no shell unless you invoke one) with
+the machine account's authority under `machine.exec` Policy. Timeout is
+milliseconds, default and maximum 30000; each output stream keeps at most
+64 KiB. It is not a sandbox and gets no workload credential; do not run
+destructive commands unless asked.
+
+If a machine shows Offline while its Agents still exist, do not re-enroll it.
+On that host, with the real workspace ID:
+
+```bash
+treer-agent-server service --workspace "$TREER_WORKSPACE_ID" status
+treer-agent-server service --workspace "$TREER_WORKSPACE_ID" restart-controller
+treer-agent-server service --workspace "$TREER_WORKSPACE_ID" start
+```
+
+Ready means the Controller reports `proxy_connected`, not just a live loopback
+API. `treer machine delete <server-id>` revokes the machine and removes every
+Agent on it; it does not uninstall the service.
 
 ## Operational boundaries
 
-- Do not stop agents you did not create unless the user asked for it.
-- Do not create peers on arbitrary machines; select from the current workspace.
-- Use `self` instead of copying the caller's injected ID.
+- Do not stop, restart or delete agents you did not create unless asked.
+- Create peers only on machines from the current workspace.
+- Use `self` instead of copying the injected ID.
 - Read agent output before responding to an unexpected state.
-- Do not use `agent attach` from an automated agent workflow; it requires a
-  human-operated TTY.
-- Terminal-only Agents support explicit `prompt --steer`, not queued receipts or `prompt --wait`.
-- Use `treer agent admin stop <target>` only when terminating that process is intended.
-- Use `treer agent admin delete <target>` only when permanent removal is intended.
-- Use `treer machine delete <server-id>` only when the user explicitly asks to
-  remove that machine; it also removes every agent registered on it.
+- Never use `agent attach` from an automated workflow.
+- Use `agent admin delete` and `machine delete` only for intended permanent removal.

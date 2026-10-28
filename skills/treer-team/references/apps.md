@@ -109,8 +109,7 @@ Use app-deploy on POSIX, locally on the App's enrolled machine; it is not a
 remote installer and does not support Windows. It needs Python 3.11+ and Git.
 Choose private physical paths inside the enrolled root and a trusted absolute
 interpreter. Review a full 40-character commit and test the complete exported
-component, including sibling imports/assets (email endpoint needs component
-`apps` to include shared Mail code).
+component, including sibling imports/assets.
 
 For a **new** App with a single SQLite database honoring `REPORTS_DB`, start with:
 
