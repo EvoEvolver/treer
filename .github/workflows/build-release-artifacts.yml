@@ -61,6 +61,18 @@ jobs:
         run: |
           cargo test --locked -p treer-agent-server --bin treer-agent-server service::tests::machine_
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test treer-launch natively (fixture harness)
+        # Separate target directory: fixture features never reach the release build.
+        working-directory: launchers/agent
+        run: |
+          $env:TREER_TEST_NODE = (Get-Command node).Source
+          cargo test --locked --features fixture-harness --target-dir ../../target/launcher-fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --features fixture-harness --target-dir ../../target/launcher-fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:RUST_SPIKE_BIN = (Resolve-Path ../../target/launcher-fixture/debug/treer-launch.exe).Path
+          node --test tests/windows-native-entry.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build machine binaries
         # /Brepro replaces the linker timestamp with a content hash so the same source
         # on the same pinned image links to the same bytes. It is the only link argument.
