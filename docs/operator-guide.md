@@ -2189,8 +2189,8 @@ python3 apps/telegram/telegram.py
 Telegram's point-of-contact (POC) routing is changed at runtime in the chat (`/poc`)
 or by Core control Messages to the bridge Agent, with no confirmation gate; the
 bridge Agent's Message Policy is therefore the authorization boundary for IM
-conversations, so allow only a minimal set of senders (see "Limits, audit and
-revoking access" in the Telegram guide).
+conversations, so allow only a minimal set of senders (see "Authorization
+boundary" in the Telegram guide).
 
 See the [App contract](../apps/README.md), [Mail guide](../apps/mail/README.md), and
 [Telegram guide](../apps/telegram/README.md). The App process can use every
@@ -2379,12 +2379,8 @@ deadline and bounds successful response bodies to 64 KiB. A category is not proo
 of non-delivery or authorization to retry an uncertain send. Old failures cannot
 be classified retroactively; do not resend solely to obtain a diagnostic.
 
-Deploy [email-endpoint](../apps/email-endpoint/README.md) as a workspace Managed
-App, initially in `outbox` mode. `proxy` mode falls back to local outbox only on
-`email_not_configured`; Policy/recipient failures remain visible retry failures.
-Older Proxies without this route return a visible failure; select outbox
-explicitly until the Proxy upgrade. Real email acceptance requires operator
-coordination after the route is deployed; automated tests use local fakes only.
+No bundled App currently uses this route; any Managed App may call it with its
+own runtime identity.
 
 ### Agent path targets
 

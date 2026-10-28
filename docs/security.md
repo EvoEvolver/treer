@@ -1037,12 +1037,6 @@ to detect encoded or unknown secrets. Deploy critical Apps under separate accoun
 or externally managed containers with minimal mounts and resource limits; the
 shared machine account is not a sandbox.
 
-For the message endpoint hub, processes running under the same UID can read the
-bot token file, SQLite state and held message content, and impersonate the
-endpoint. The hub cannot attest OS/container confinement or Policy isolation.
-An owner's explicit acceptance of unverified isolation records that risk; it
-does not establish or verify an isolation boundary.
-
 Treer does not currently provide deny-by-default workspace permissions. Absent
 an enforcing Policy, the default permits authenticated workspace actions; monitor
 mode does not enforce denials. Use explicit enforce-mode rules and treat workspace
@@ -2027,14 +2021,6 @@ From, and Reply-To are rejected; HTML is generated from escaped text. Credential
 stay in the Proxy. Body-free PostgreSQL audit rows retain App ID, time,
 recipient SHA-256 and sending/sent/failed outcome; hashes are pseudonymous, not
 anonymous. Policy denials also use the ordinary Policy audit path.
-
-The email-endpoint App defaults to workspace access and local outbox. It admits
-only administrator-bound, current workspace human recipients and rechecks thread
-ownership for every read and reply. It forwards Agent/human service tokens to
-Core Message so the actual caller authors the canonical message. Emails contain
-only explicit summaries and links; operators and callers must keep secrets out
-of summaries and subjects. Optional Agent wake requires both administrator
-opt-in and `agent.prompt` Policy. Same-UID App isolation is still not promised.
 
 Queued prompt delivery uses the existing `agent.prompt` authorization. Public
 request bodies cannot supply sender identity: the Proxy resolves the verified
