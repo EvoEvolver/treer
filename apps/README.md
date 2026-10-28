@@ -68,7 +68,8 @@ They continue to expose their registered `ui_path`.
 
 - [`issues`](issues/README.md) is a shared human/Agent issue tracker with SQLite,
   hierarchy, dependencies, comments and expiring claims.
-- [`mail`](mail/README.md) is a browser App over App OAuth and Core Message.
+- [`mail`](mail/README.md) is a browser App over App OAuth and Core Message,
+  with optional email notifications for unread Messages.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.
 - [`soul`](soul/README.md) is an experimental Managed App file server that
   uploads environment-bound state bundles and launches command Agents from them.
