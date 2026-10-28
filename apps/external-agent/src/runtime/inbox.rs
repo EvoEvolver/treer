@@ -131,13 +131,11 @@ impl App {
                 }
                 Request::Poll{after,limit}=> {
                     let endpoint=p.target().ok_or(Error::Denied)?;
-                    let (status,mut v)=self.controller.request(reqwest::Method::POST,"/api/messages/receive",Some(json!({"app_endpoint":endpoint,"after":after,"limit":limit,"wait_milliseconds":0})))?;
+                    let (status,v)=self.controller.request(reqwest::Method::POST,"/api/messages/receive",Some(json!({"app_endpoint":endpoint,"after":after,"limit":limit,"wait_milliseconds":0})))?;
                     if status==200 {
-                        let deliveries=v["deliveries"].as_array_mut().ok_or(Error::Invalid)?;
-                        for d in deliveries.iter_mut() {
-                            if d["message"].get("kind").is_none() {d["message"]["kind"]=json!("message");}
-                        }
-                        if deliveries.len()>usize::from(limit) || deliveries.iter().any(|d| d["recipient"]["id"]!=self.config.agent || d["recipient"]["app_endpoint"]!=endpoint || d["message"]["workspace_id"]!=self.config.workspace || !matches!(d["message"]["kind"].as_str(),Some("message"|"prompt"))) {return Err(Error::Invalid)}
+                        // Core `message.endpoint-inbox.v1` deliveries; the App adds no kind of its own.
+                        let deliveries=v["deliveries"].as_array().ok_or(Error::Invalid)?;
+                        if deliveries.len()>usize::from(limit) || deliveries.iter().any(|d| d["recipient"]["id"]!=self.config.agent || d["recipient"]["app_endpoint"]!=endpoint || d["message"]["workspace_id"]!=self.config.workspace) {return Err(Error::Invalid)}
                     }
                     Ok((status,v))
                 }

@@ -1,6 +1,6 @@
 use super::{
     config::Config,
-    controller::{Controller, Input},
+    controller::{Controller, ResultValue},
     http::{self, Request, Response},
     owner::Verifier,
     preauth::{self, Budget, Lane},
@@ -11,17 +11,18 @@ use serde_json::json;
 use std::{
     net::{TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
 };
 pub struct App {
     pub(super) config: Config,
-    advertisement: Option<super::DataAdvertisement>,
     binding: Binding,
     gateway: Option<super::CliGateway>,
-    gateway_credential: String,
+    credential: String,
+    /// Last observed Controller support for `message.endpoint-inbox.v1`.
+    pub(super) inbox_supported: AtomicBool,
     pub(super) store: Mutex<Store>,
     pub(super) controller: Controller,
     verifier: Verifier,
@@ -59,43 +60,30 @@ impl App {
         self.external
             .store(if full { 8 } else { 0 }, Ordering::Relaxed);
     }
-    /// Startup performs read-only authenticated Controller pin checks before binding a listener.
+    /// Startup performs read-only authenticated Controller identity checks before binding a listener.
+    /// A missing endpoint inbox capability or unusable CLI is reported, not fatal.
     pub fn open(config: Config, credential: String) -> Result<Arc<Self>, Error> {
-        Self::open_advertised(config, credential, None)
-    }
-    pub fn open_advertised(
-        config: Config,
-        credential: String,
-        advertisement: Option<super::DataAdvertisement>,
-    ) -> Result<Arc<Self>, Error> {
-        Self::open_gateway(config, credential, advertisement, None)
-    }
-    pub fn open_gateway(
-        config: Config,
-        credential: String,
-        advertisement: Option<super::DataAdvertisement>,
-        gateway: Option<super::CliGateway>,
-    ) -> Result<Arc<Self>, Error> {
-        if gateway.as_ref().is_some_and(|g| !g.matches(&config)) {
-            return Err(Error::Invalid);
-        }
-        if advertisement
-            .as_ref()
-            .is_some_and(|ad| !ad.matches(&config))
-        {
-            return Err(Error::Invalid);
-        }
-        let binding = config.binding(&credential)?;
         let controller = Controller::new(config.clone(), credential.clone())?;
-        controller.preflight()?;
+        let inbox = controller.preflight()?;
+        if !inbox {
+            eprintln!(
+                "external-agent: Controller lacks {}; /v1/inbox is unavailable until Treer is upgraded",
+                super::controller::ENDPOINT_INBOX
+            );
+        }
+        let gateway = config.treer_cli.clone().map(super::CliGateway::new);
+        if let Some(Err(reason)) = gateway.as_ref().map(|g| g.status()) {
+            eprintln!("external-agent: CLI gateway unavailable: {reason}");
+        }
+        let binding = config.binding();
         let store = Store::open(&config.state, binding.clone(), Limits::default())?;
         let verifier = Verifier::new(config.clone())?;
         Ok(Arc::new(Self {
             config,
-            advertisement,
             binding,
             gateway,
-            gateway_credential: credential,
+            credential,
+            inbox_supported: AtomicBool::new(inbox),
             store: Mutex::new(store),
             controller,
             verifier,
@@ -107,6 +95,27 @@ impl App {
             preauth: Mutex::new(Budget::default()),
             failures: Mutex::new((Instant::now(), 0)),
         }))
+    }
+    /// Owner-visible readiness: what works now and why not.
+    pub(super) fn readiness(&self) -> serde_json::Value {
+        let inbox = self.inbox_supported.load(Ordering::Relaxed) || {
+            let now = self.controller.endpoint_inbox();
+            self.inbox_supported.store(now, Ordering::Relaxed);
+            now
+        };
+        let cli = match self.gateway.as_ref().map(|g| g.status()) {
+            None => json!({"available":false,"reason":"treer_cli is not configured"}),
+            Some(Ok(version)) => json!({"available":true,"version":version}),
+            Some(Err(reason)) => json!({"available":false,"reason":reason}),
+        };
+        json!({
+            "inbox": if inbox {
+                json!({"available":true})
+            } else {
+                json!({"available":false,"reason":format!("Controller does not advertise {}; upgrade Treer", super::controller::ENDPOINT_INBOX)})
+            },
+            "cli": cli,
+        })
     }
     pub fn serve(self: Arc<Self>, listener: TcpListener, owner: bool) -> std::io::Result<()> {
         for stream in listener.incoming() {
@@ -208,10 +217,7 @@ impl App {
                 "/" => Some(root(&r, &self.config)),
                 "/SKILL.md" => Some((
                     "text/markdown; charset=utf-8",
-                    super::integration::manual_at(
-                        &self.config,
-                        self.advertisement.as_ref().map(|a| a.origin()),
-                    ),
+                    super::integration::manual(&self.config),
                 )),
                 "/settings.js" => Some((
                     "text/javascript; charset=utf-8",
@@ -285,23 +291,17 @@ impl App {
         } else {
             None
         };
-        let (op, target) = if let Some(v) = &inbox {
-            (v.operation(), None)
-        } else if cli.is_some() {
-            (Operation::Cli, None)
-        } else {
-            operation(&r.path, &r.method)?
+        let op = match (&inbox, &cli) {
+            (Some(v), _) => v.operation(),
+            (None, Some(_)) => Operation::Cli,
+            (None, None) => return Ok(Response::error(404, "not_found")),
         };
-        let input: Input = if inbox.is_some() || cli.is_some() || r.body.is_empty() {
-            Input::empty()
-        } else {
-            require_json(&r)?;
-            serde_json::from_slice(&r.body).map_err(|_| Error::Invalid)?
-        };
-        input.validate(op)?;
+        if matches!(op, Operation::Inbox | Operation::Ack) && !self.inbox_available() {
+            return Ok(inbox_unsupported());
+        }
         let reserved = {
             let mut store = self.store.lock().map_err(|_| Error::PrivateStorage)?;
-            store.admit_from(credential, op, target, r.peer)
+            store.admit_from(credential, op, r.peer)
         };
         let reserved = match reserved {
             Ok(p) => p,
@@ -334,23 +334,23 @@ impl App {
                 .map_err(|_| Error::PrivateStorage)?
                 .scoped_token(&permit)?;
             if scoped && input.aggregate_mailbox() {
-                super::controller::ResultValue {
+                ResultValue {
                     status: 403,
                     value: json!({"error":{"code":"use_scoped_inbox"}}),
                     outcome: crate::Outcome::Unavailable,
                 }
             } else {
                 match &self.gateway {
-                    Some(g) => g.execute(&self.config, &self.gateway_credential, input),
-                    None => super::controller::ResultValue {
+                    Some(g) => g.execute(&self.config, &self.credential, input),
+                    None => ResultValue {
                         status: 503,
-                        value: json!({"error":{"code":"cli_unavailable"}}),
+                        value: json!({"error":{"code":"cli_unavailable","message":"treer_cli is not configured"}}),
                         outcome: crate::Outcome::Unavailable,
                     },
                 }
             }
         } else {
-            self.controller.execute(&permit, input)
+            return Err(Error::Invalid);
         };
         if self
             .store
@@ -369,25 +369,35 @@ impl App {
             json!({"request_id":request_id,"result":result.value}),
         ))
     }
+    fn inbox_available(&self) -> bool {
+        if self.inbox_supported.load(Ordering::Relaxed) {
+            return true;
+        }
+        // Re-ask a Controller that lacked the capability; it may have been upgraded.
+        let now = self.controller.endpoint_inbox();
+        self.inbox_supported.store(now, Ordering::Relaxed);
+        now
+    }
+    /// Management API shared by the settings page and workspace Agents.
+    ///
+    /// Callers present `X-Treer-Identity-Token` for this App's service. A browser
+    /// gets it from authenticated Console/ingress forwarding (human owner); an Agent
+    /// gets it from its runtime proxy for `http://NAME.treer/` (Core Policy
+    /// `identity.token.issue` on this service). Only the device-code decision stays human.
     fn owner_request(&self, r: &Request) -> Result<Response, Error> {
         if r.header("authorization").is_some() {
             return Err(Error::Denied);
         }
-        if r.method == "POST" {
-            if !r
-                .header("origin")
-                .is_some_and(|o| self.config.origin_allowed(o))
-                || !matches!(
-                    r.header("sec-fetch-site"),
-                    Some("same-origin" | "same-site")
-                )
-                || r.header("x-external-agent-csrf") != Some("1")
-            {
-                return Err(Error::Denied);
-            }
-            require_json(r)?;
-        } else if r.header("sec-fetch-site") == Some("cross-site") {
+        // Browser requests are judged by their own headers; non-browser Agents send none.
+        if r.header("origin")
+            .is_some_and(|o| !self.config.origin_allowed(o))
+            || r.header("sec-fetch-site")
+                .is_some_and(|v| !matches!(v, "same-origin" | "same-site" | "none"))
+        {
             return Err(Error::Denied);
+        }
+        if r.method == "POST" {
+            require_json(r)?;
         }
         // Cheap rejection precedes all network/operation slots. No auth-result cache.
         let assertion = preauth::assertion(r.header("x-treer-identity-token"))?;
@@ -399,6 +409,7 @@ impl App {
                 | "/owner/audit"
                 | "/owner/integration"
                 | "/owner/external-agents"
+                | "/owner/device/requests"
                 | "/api/tree",
             )
             | (
@@ -427,11 +438,31 @@ impl App {
         )?;
         // Verification happens BEFORE taking the Store mutex, with no positive cache.
         let owner = self.verifier.verify(assertion)?;
+        if owner.human && r.method == "POST" {
+            // Ambient browser session: require an explicit same-origin page request.
+            if r.header("origin").is_none()
+                || !matches!(
+                    r.header("sec-fetch-site"),
+                    Some("same-origin" | "same-site")
+                )
+                || r.header("x-external-agent-csrf") != Some("1")
+            {
+                return Err(Error::Denied);
+            }
+        }
+        if !owner.human && r.path == "/owner/device/decision" {
+            return Ok(Response::error(403, "human_owner_required"));
+        }
         let proof = owner.proof(&self.binding);
+        let readiness = matches!(r.path.as_str(), "/owner/state" | "/owner/integration")
+            .then(|| self.readiness());
         let mut store = self.store.lock().map_err(|_| Error::PrivateStorage)?;
         match (r.method.as_str(), r.path.as_str()) {
             ("POST", "/owner/device/lookup" | "/owner/device/decision") => {
                 super::device::owner(&mut store, &proof, r)
+            }
+            ("GET", "/owner/device/requests") => {
+                Ok(Response::json(200, store.device_requests(&proof)?))
             }
             ("GET", "/api/tree") => {
                 let path: serde_json::Value = decode(r)?;
@@ -481,19 +512,25 @@ impl App {
             ("GET", "/owner/audit") => Ok(Response::json(200, store.audit_view(&proof)?)),
             ("GET", "/owner/integration") => {
                 let state = store.state(&proof)?;
-                Ok(Response::json(
-                    200,
-                    super::integration::view_at(
-                        &self.config,
-                        state["enabled"] == true,
-                        self.advertisement.as_ref().map(|a| a.origin()),
-                    ),
-                ))
+                let mut view = super::integration::view(&self.config, state["enabled"] == true);
+                let readiness = readiness.unwrap_or_default();
+                if let Some(blockers) = view["blockers"].as_array_mut() {
+                    for (key, code) in [("inbox", "inbox_unsupported"), ("cli", "cli_unavailable")]
+                    {
+                        if readiness[key]["available"] != true {
+                            blockers.push(json!(code));
+                        }
+                    }
+                }
+                view["readiness"] = readiness;
+                Ok(Response::json(200, view))
             }
             ("GET", "/owner/state") => {
                 let mut v = store.state(&proof)?;
                 v["identity"] = json!({"workspace":self.config.workspace,"app":self.config.app,"agent":self.config.agent});
                 v["activation_available"] = json!(true);
+                v["readiness"] = readiness.unwrap_or_default();
+                v["caller"] = json!({"kind":if owner.human {"human"} else {"agent"}});
                 Ok(Response::json(200, v))
             }
             ("POST", "/owner/tokens") => {
@@ -559,35 +596,11 @@ fn require_json(r: &Request) -> Result<(), Error> {
         Err(Error::Invalid)
     }
 }
-fn operation<'a>(path: &'a str, method: &str) -> Result<(Operation, Option<&'a str>), Error> {
-    if path == "/v1/agents" && method == "GET" {
-        return Ok((Operation::List, None));
-    }
-    let s = path.strip_prefix("/v1/agents/").ok_or(Error::Invalid)?;
-    let mut parts = s.split('/');
-    let id = parts.next().ok_or(Error::Invalid)?;
-    if !id.strip_prefix("ag_").is_some_and(|s| {
-        s.len() == 32
-            && s.bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    }) {
-        return Err(Error::Invalid);
-    }
-    let suffix = parts.next();
-    if parts.next().is_some() {
-        return Err(Error::Invalid);
-    }
-    let op = match (method, suffix) {
-        ("GET", None) => Operation::Status,
-        ("GET", Some("output")) => Operation::Output,
-        ("GET", Some("transcript")) => Operation::Transcript,
-        ("POST", Some("prompt")) => Operation::Prompt,
-        ("POST", Some("stop")) => Operation::Stop,
-        ("POST", Some("start")) => Operation::Start,
-        ("POST", Some("restart")) => Operation::Restart,
-        _ => return Err(Error::Invalid),
-    };
-    Ok((op, Some(id)))
+fn inbox_unsupported() -> Response {
+    Response::json(
+        503,
+        json!({"error":{"code":"inbox_unsupported","message":format!("This Treer Controller does not advertise {}; ask the operator to upgrade Treer", super::controller::ENDPOINT_INBOX)}}),
+    )
 }
 fn appearance_query(query: &str) -> bool {
     if query.is_empty() || query.len() > 2048 {

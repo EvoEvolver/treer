@@ -1,70 +1,44 @@
 use treer_external_agent::{
-    runtime::{App, CliGateway, Config, DataAdvertisement},
+    runtime::{App, Config},
     Error,
 };
-fn run() -> Result<(), Error> {
+fn run() -> Result<(), String> {
     let mut args = std::env::args_os().skip(1);
-    let path = args.next().ok_or(Error::Invalid)?;
-    let mut operator_path = None;
-    let mut advertisement_path = None;
-    let mut gateway_path = None;
-    while let Some(flag) = args.next() {
-        let target = if flag == "--data-advertisement" {
-            &mut advertisement_path
-        } else if flag == "--operator" {
-            &mut operator_path
-        } else if flag == "--cli-gateway" {
-            &mut gateway_path
-        } else {
-            return Err(Error::Invalid);
-        };
-        if target.is_some() {
-            return Err(Error::Invalid);
-        }
-        *target = Some(args.next().ok_or(Error::Invalid)?);
-    }
-    if operator_path.is_some() && (advertisement_path.is_some() || gateway_path.is_some()) {
-        return Err(Error::Invalid);
-    }
-    let (c, digest) = Config::load_with_digest(std::path::Path::new(&path))?;
-    let advertisement = advertisement_path
-        .map(|path| DataAdvertisement::load(std::path::Path::new(&path), &c, &digest))
-        .transpose()?;
-    let gateway = gateway_path
-        .map(|path| CliGateway::load(std::path::Path::new(&path), &c, &digest))
-        .transpose()?;
+    let (Some(path), None) = (args.next(), args.next()) else {
+        return Err("usage: treer-external-agent CONFIG.json".into());
+    };
+    let c = Config::load(std::path::Path::new(&path))
+        .map_err(|_| "config must be a valid private (0600, owner-only) JSON file".to_string())?;
     // Managed identity must match the configured fixed workload; never read operator configuration.
     for (key, want) in [
         ("TREER_WORKSPACE_ID", &c.workspace),
         ("TREER_AGENT_ID", &c.agent),
         ("TREER_SERVER_ID", &c.machine),
-        ("TREER_AGENT_SERVER_URL", &c.controller.to_string()),
     ] {
-        let actual = std::env::var(key).map_err(|_| Error::Denied)?;
-        if key == "TREER_AGENT_SERVER_URL" {
-            if url::Url::parse(&actual).ok().as_ref() != Some(&c.controller) {
-                return Err(Error::Denied);
-            }
-        } else if actual != *want {
-            return Err(Error::Denied);
+        if std::env::var(key).ok().as_ref() != Some(want) {
+            return Err(format!("{key} does not match the config"));
         }
     }
-    let credential = std::env::var("TREER_WORKLOAD_CREDENTIAL").map_err(|_| Error::Denied)?;
-    if let Some(path) = operator_path {
-        let receipt = treer_external_agent::runtime::operator::run(
-            c,
-            &digest,
-            credential,
-            std::path::Path::new(&path),
-        )?;
-        println!("{receipt}");
-        return Ok(());
+    let controller = std::env::var("TREER_AGENT_SERVER_URL")
+        .ok()
+        .and_then(|v| url::Url::parse(&v).ok());
+    if controller.as_ref() != Some(&c.controller) {
+        return Err("TREER_AGENT_SERVER_URL does not match config.controller".into());
     }
-    let address = c.listen;
-    let owner_address = c.owner_listen;
-    let app = App::open_gateway(c, credential, advertisement, gateway)?;
-    let listener = std::net::TcpListener::bind(address).map_err(|_| Error::Invalid)?;
-    let owner_listener = std::net::TcpListener::bind(owner_address).map_err(|_| Error::Invalid)?;
+    let credential = std::env::var("TREER_WORKLOAD_CREDENTIAL")
+        .map_err(|_| "TREER_WORKLOAD_CREDENTIAL is not set")?;
+    let (address, owner_address) = (c.listen, c.owner_listen);
+    let app = App::open(c, credential).map_err(|e| match e {
+        Error::Denied => "Controller identity check failed (workspace/machine/agent mismatch or bad credential)".to_string(),
+        Error::Storage(_) | Error::PrivateStorage | Error::Busy => {
+            "state store unavailable (private 0700 directory, identity mismatch, or locked by another process)".to_string()
+        }
+        e => format!("startup failed: {e}"),
+    })?;
+    let listener =
+        std::net::TcpListener::bind(address).map_err(|e| format!("bind {address}: {e}"))?;
+    let owner_listener = std::net::TcpListener::bind(owner_address)
+        .map_err(|e| format!("bind {owner_address}: {e}"))?;
     // Both sockets bind before either accepts. Losing management terminates this process.
     let owner_app = app.clone();
     std::thread::Builder::new()
@@ -75,17 +49,14 @@ fn run() -> Result<(), Error> {
             }));
             std::process::exit(1);
         })
-        .map_err(|_| Error::Invalid)?;
+        .map_err(|e| e.to_string())?;
     // No request, header, token, prompt or downstream error logging.
-    eprintln!(
-        "external-agent: listening on {}",
-        listener.local_addr().map_err(|_| Error::Invalid)?
-    );
-    app.serve(listener, false).map_err(|_| Error::Invalid)
+    eprintln!("external-agent: listening on {address} (data) and {owner_address} (management)");
+    app.serve(listener, false).map_err(|e| e.to_string())
 }
 fn main() {
-    if run().is_err() {
-        eprintln!("external-agent: startup or service unavailable");
+    if let Err(e) = run() {
+        eprintln!("external-agent: {e}");
         std::process::exit(1);
     }
 }

@@ -1,5 +1,4 @@
 //! Network boundary. Configuration is trusted deployment input, never request data.
-mod advertisement;
 mod config;
 mod controller;
 mod device;
@@ -8,11 +7,9 @@ mod http;
 pub use gateway::CliGateway;
 mod inbox;
 mod integration;
-pub mod operator;
 mod owner;
 mod preauth;
 mod server;
-pub use advertisement::DataAdvertisement;
 pub use config::Config;
 pub use server::App;
 #[cfg(test)]

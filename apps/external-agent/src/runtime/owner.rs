@@ -4,6 +4,7 @@ use serde::Deserialize;
 /// Constructible only by a successful configured Proxy response. Never decoded JWT claims.
 pub(super) struct Verified {
     subject: String,
+    pub human: bool,
 }
 impl Verified {
     pub fn proof<'a>(&'a self, binding: &'a Binding) -> Owner<'a> {
@@ -66,11 +67,18 @@ impl Verifier {
         let r: Reply = serde_json::from_value(v).map_err(|_| Error::Denied)?;
         let c = r.claims.filter(|_| r.active).ok_or(Error::Denied)?;
         let time = now()?;
+        // Humans must be current workspace owners. Agents reach this management service
+        // only with an identity Core issued under its `identity.token.issue` Policy for
+        // this service; that grant is the authorization. This App's own execution
+        // identity is refused: external token holders act as it and must not manage tokens.
+        let human = match c.principal_kind.as_str() {
+            "human" if c.role.as_deref() == Some("owner") => true,
+            "agent" if c.sub != self.config.agent => false,
+            _ => return Err(Error::Denied),
+        };
         if c.aud != self.config.service
             || c.service_id != self.config.service
             || c.workspace_id != self.config.workspace
-            || c.principal_kind != "human"
-            || c.role.as_deref() != Some("owner")
             || c.exp <= time
             || c.iat > time + 30
             || c.iat < time - 90
@@ -87,6 +95,9 @@ impl Verifier {
         {
             return Err(Error::Denied);
         }
-        Ok(Verified { subject: c.sub })
+        Ok(Verified {
+            subject: c.sub,
+            human,
+        })
     }
 }

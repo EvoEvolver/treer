@@ -1,13 +1,12 @@
 use crate::{Binding, Error};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Deserialize;
 use std::{
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
 };
 use url::Url;
 /// A private, operator-owned file. No credentials or client-selected destinations.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub workspace: String,
@@ -26,17 +25,18 @@ pub struct Config {
     /// Workspace-only management socket, isolated from anonymous parser admission.
     pub owner_listen: SocketAddr,
     pub state: PathBuf,
-    /// Legacy metadata retained in serialized Config to preserve existing token binding.
-    /// This field no longer gates owner activation.
-    pub policy_acceptance_sha256: Option<String>,
-    /// Legacy metadata; no longer gates prompt. Keep unchanged on initialized stores.
-    pub prompt_review_sha256: Option<String>,
+    /// Absolute path of the native `treer` CLI for `POST /v1/cli`; omit to disable the gateway.
+    /// Checked by `--version` at startup, never by hash, so Treer updates keep working.
+    #[serde(default)]
+    pub treer_cli: Option<PathBuf>,
+    /// Retired pins from older releases. Accepted so existing config files keep loading; ignored.
+    #[serde(default, rename = "policy_acceptance_sha256")]
+    pub legacy_policy_acceptance_sha256: Option<serde_json::Value>,
+    #[serde(default, rename = "prompt_review_sha256")]
+    pub legacy_prompt_review_sha256: Option<serde_json::Value>,
 }
 impl Config {
     pub fn load(path: &Path) -> Result<Self, Error> {
-        Self::load_with_digest(path).map(|(config, _)| config)
-    }
-    pub fn load_with_digest(path: &Path) -> Result<(Self, String), Error> {
         use std::os::unix::{fs::MetadataExt, fs::OpenOptionsExt};
         // O_NOFOLLOW plus metadata on the opened fd avoids trusting a symlink race.
         let mut f = std::fs::OpenOptions::new()
@@ -63,7 +63,7 @@ impl Config {
         }
         let c: Self = serde_json::from_slice(&b).map_err(|_| Error::Invalid)?;
         c.validate()?;
-        Ok((c, format!("{:x}", Sha256::digest(&b))))
+        Ok(c)
     }
     pub(crate) fn validate(&self) -> Result<(), Error> {
         for id in [
@@ -117,32 +117,17 @@ impl Config {
         {
             return Err(Error::Invalid);
         }
-        for pin in [&self.policy_acceptance_sha256, &self.prompt_review_sha256]
-            .into_iter()
-            .flatten()
-        {
-            if pin.len() != 64
-                || !pin
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            {
-                return Err(Error::Invalid);
-            }
+        if self.treer_cli.as_ref().is_some_and(|p| !p.is_absolute()) {
+            return Err(Error::Invalid);
         }
         Ok(())
     }
-    pub(crate) fn binding(&self, credential: &str) -> Result<Binding, Error> {
-        self.validate()?;
-        let mut h = Sha256::new();
-        h.update(serde_json::to_vec(self).map_err(|_| Error::Invalid)?);
-        h.update(Sha256::digest(credential.as_bytes()));
-        Ok(Binding {
+    pub(crate) fn binding(&self) -> Binding {
+        Binding {
             workspace: self.workspace.clone(),
             app: self.app.clone(),
-            service: self.service.clone(),
             agent: self.agent.clone(),
-            configuration: format!("{:x}", h.finalize()),
-        })
+        }
     }
     pub(crate) fn origin_allowed(&self, s: &str) -> bool {
         [

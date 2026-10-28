@@ -1,28 +1,54 @@
 # External Agent App
 
-A scoped external-program entry point. Tokens act as this App's execution Agent under existing Core Policy, never as a human account. Browsers and `Accept: text/html` receive owner settings.
+Lets programs outside Treer (Claude Code, Codex, scripts, CI) act as this App's
+Treer Agent with an App-issued bearer token, under the App's workspace Policy.
+Browsers and `Accept: text/html` receive the owner settings page.
+`GET /SKILL.md` is the guide to hand to an external program.
 
-## Inspect
+## External programs (data port)
 
-Keep your bearer header in a private curl config file (0600), not a URL, shell history, or Agent prompt. Set APP_URL to this App's configured origin.
+| Route | Use |
+| --- | --- |
+| `GET /health` | Liveness, no credentials |
+| `POST /v1/device/request`, `POST /v1/device/token` | Device-code onboarding, no credentials |
+| `POST /v1/cli` | Run the real `treer` CLI: `{"argv":[...],"stdin":"","timeout_ms":30000}` |
+| `GET /v1/inbox?limit=50[&cursor=]`, `POST /v1/inbox/ack` | Registered agent key's own inbox |
+| `GET/POST /v1/external-agents`, `POST /v1/external-agents/revoke-token` | Full keys register agents / revoke keys they created |
+
+All `/v1` calls except device onboarding need exactly one
+`Authorization: Bearer ext1_...` header and refuse browser Origin, Fetch
+Metadata, cookies and `X-Treer-*` headers. Responses are
+`{"request_id":...,"result":...}`.
+
+## Management (owner port)
+
+Workspace owners (via the Console) and workspace Agents use the same API. An
+Agent calls `http://APP_NAME.treer/owner/...` through its runtime proxy; Core
+only issues it an identity for this service if its Policy allows
+`identity.token.issue` on the service. This App's own execution identity is
+refused. Human browser mutations also need same-origin `Origin`,
+`Sec-Fetch-Site` and `X-External-Agent-CSRF: 1`.
 
 ```sh
-curl --config /private/path/external-agent.curl "$APP_URL/v1/agents"
-curl --config /private/path/external-agent.curl "$APP_URL/v1/agents/ag_0123456789abcdef0123456789abcdef"
+curl http://APP_NAME.treer/owner/state
+curl -X POST -H 'Content-Type: application/json' http://APP_NAME.treer/owner/tokens \
+  -d '{"name":"ci","days":30,"authority_confirmed":true}'
 ```
 
-GET suffixes `/output` and `/transcript` return bounded content authorized by Core. Output defaults to 100 lines; transcript defaults to one turn. Requests cannot choose another workspace, transport, identity or command.
+| Route | Body / result |
+| --- | --- |
+| `GET /owner/state` | Identity, enabled, generation, tokens, `readiness` (inbox/CLI) |
+| `GET /owner/audit` | Last 100 body-free execution records |
+| `GET /owner/integration` | Data URL, blockers, copyable guide |
+| `POST /owner/tokens` | `{name,days:30|90,authority_confirmed:true}`, plaintext once |
+| `POST /owner/revoke` | `{id}` |
+| `POST /owner/activation` | `{enabled,generation,agent,policy_reviewed}` |
+| `GET/POST /owner/external-agents`, `POST /owner/external-agents/tokens` | `{key,name,days,authority_confirmed}` |
+| `GET /owner/device/requests` | Pending/approved device requests |
+| `POST /owner/device/lookup` | `{user_code}` |
+| `POST /owner/device/decision` | `{user_code,approve,days,authority_confirmed}`; **human owner only** |
 
-## Mutate
-
-POST suffixes `/prompt`, `/stop`, `/start`, `/restart` execute once, without retries. Prompt JSON is `{"text":"task"}`; other mutations use `{}`. Use `Content-Type: application/json`. Prompt uses current workspace Policy and always adds an untrusted-external-input marker. An outcome_unknown response may follow a committed mutation: inspect state before deciding to issue a new operation.
-
-## Authentication and Policy
-
-External APIs accept exactly one Authorization Bearer header, refuse browser-origin/fetch requests and cookies, and emit no CORS permission. No URL/query credentials. Tokens expire after 30/90 days. A revoked token cannot admit or dispatch another request; an already dispatched operation may finish. Each request reaches Controller and Core under the same fixed execution identity; the App does not cache or replace Policy decisions.
-
-The anonymous data origin rejects all `/owner/` routes. Owner settings live on a separate workspace-authenticated management port with an independent connection pool; the management port rejects `/v1/`. Open settings through the App's Console entry. If management is unreachable, use the independently authorized Console/Controller stop for the App; already dispatched operations may finish.
-
-The API starts disabled. Owner settings require fresh service-audience human-owner verification on every request, plus browser mutation protection. Public direct access does not provide that identity: open the App inside the authenticated Console. Activation requires fresh owner acknowledgement of the current App/generation and current workspace Policy; legacy evidence pins are not required. Explicitly authorized local deployment-operator confirmation is also supported without impersonating a human. All tokens share the App's authority; read-only automation needs a separate App with enforcing read-only Policy.
-
-Audit records identify token, operation and request without storing prompts or output. Responses and secrets are no-store. Errors use `error.code`: authentication_required, disabled, capacity_unavailable, invalid_request, unavailable, or outcome_unknown. Execution responses contain a request_id and result. This App is not OS isolation from another process running under the same account.
+The external API starts disabled. Tokens expire after 30 or 90 days, are shown
+once and only a verifier is stored. Errors use `error.code`
+(`authentication_required`, `disabled`, `capacity_unavailable`,
+`invalid_request`, `inbox_unsupported`, `cli_unavailable`, `outcome_unknown`).

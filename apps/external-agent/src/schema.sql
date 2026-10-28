@@ -35,5 +35,7 @@ CREATE TABLE IF NOT EXISTS device_requests (
  days INTEGER, approver TEXT, decided_at INTEGER, decision TEXT, token_id TEXT);
 CREATE TABLE IF NOT EXISTS device_attempt_budget (
  id INTEGER PRIMARY KEY CHECK(id=1), minute INTEGER NOT NULL, attempts INTEGER NOT NULL);
-PRAGMA user_version=5;
+CREATE TABLE IF NOT EXISTS identity (
+ id INTEGER PRIMARY KEY CHECK(id=1), workspace TEXT NOT NULL, app TEXT NOT NULL, agent TEXT NOT NULL);
+PRAGMA user_version=6;
 COMMIT;

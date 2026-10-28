@@ -7,33 +7,25 @@ use subtle::ConstantTimeEq;
 const APP_ID: i64 = 0x54454131;
 const DAY: i64 = 86_400;
 
-/// Trusted deployment pins. Token records can never choose another principal.
-#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// The App identity a store belongs to. Token verifiers are keyed by a random
+/// per-store secret kept in `settings.binding`, so configuration edits and
+/// Treer updates never invalidate issued tokens.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Binding {
     pub workspace: String,
     pub app: String,
-    pub service: String,
     pub agent: String,
-    /// SHA-256 of the full, nonsecret security configuration, supplied at startup.
-    pub configuration: String,
 }
 impl Binding {
-    fn digest(&self) -> Result<Vec<u8>, Error> {
-        if ![&self.workspace, &self.app, &self.service, &self.agent]
+    fn validate(&self) -> Result<(), Error> {
+        if [&self.workspace, &self.app, &self.agent]
             .iter()
             .all(|v| identifier(v))
-            || !hex(&self.configuration, 64)
         {
-            return Err(Error::Invalid);
+            Ok(())
+        } else {
+            Err(Error::Invalid)
         }
-        Ok(hash(&[
-            b"treer.external-agent.binding.v1",
-            self.workspace.as_bytes(),
-            self.app.as_bytes(),
-            self.service.as_bytes(),
-            self.agent.as_bytes(),
-            self.configuration.as_bytes(),
-        ]))
     }
 }
 
@@ -124,38 +116,22 @@ fn optional_timestamp<S: serde::Serializer>(v: &Option<i64>, s: S) -> Result<S::
     }
 }
 
+/// Audited external operation. Historical rows may also carry the retired typed
+/// agent-operation codes (list/status/output/...), which the schema still accepts.
 #[derive(Clone, Copy)]
 pub enum Operation {
     Registry,
     Inbox,
     Ack,
-    Send,
     Cli,
-    List,
-    Status,
-    Output,
-    Transcript,
-    Prompt,
-    Stop,
-    Start,
-    Restart,
 }
 impl Operation {
     pub(crate) fn code(self) -> &'static str {
         match self {
-            Self::List => "list",
             Self::Cli => "cli",
             Self::Registry => "registry",
             Self::Inbox => "inbox",
             Self::Ack => "ack",
-            Self::Send => "send",
-            Self::Status => "status",
-            Self::Output => "output",
-            Self::Transcript => "transcript",
-            Self::Prompt => "prompt",
-            Self::Stop => "stop",
-            Self::Start => "start",
-            Self::Restart => "restart",
         }
     }
 }
@@ -215,16 +191,17 @@ pub struct Store {
 impl Store {
     pub fn open(path: &Path, binding: Binding, limits: Limits) -> Result<Self, Error> {
         limits.validate()?;
-        let digest = binding.digest()?;
+        binding.validate()?;
         let (db, files) = private_store::open(path)?;
-        // Establish field drop order before any fallible initialization.
+        // Establish field drop order (Connection before PrivateFiles) before any fallible step.
         let mut store = Self {
             db,
             files,
             binding,
-            digest,
+            digest: Vec::new(),
             limits,
         };
+        let binding = store.binding.clone();
         let db = &store.db;
         db.busy_timeout(std::time::Duration::from_millis(250))?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -235,46 +212,47 @@ impl Store {
             |r| r.get(0),
         )?;
         if !((version == 0 && app == 0 && count == 0)
-            || (matches!(version, 1..=5) && app == APP_ID))
+            || (matches!(version, 1..=6) && app == APP_ID))
         {
             return Err(Error::PrivateStorage);
         }
-        if version != 0 {
-            let existing: Vec<u8> =
-                db.query_row("SELECT binding FROM settings WHERE id=1", [], |r| r.get(0))?;
-            if existing != store.digest {
-                return Err(Error::PrivateStorage);
-            }
+        // A v6 store records its identity: refuse a different App before touching anything.
+        if version == 6 && !same_identity(db, &binding)? {
+            return Err(Error::PrivateStorage);
         }
         if matches!(version, 1..=3) {
             db.execute_batch(include_str!("migration-inbox.sql"))?;
         }
         db.execute_batch(include_str!("schema.sql"))?;
         private_store::enable_wal(db, path)?;
-        store.initialize()?;
-        Ok(store)
-    }
-
-    fn initialize(&mut self) -> Result<(), Error> {
-        self.recheck()?;
-        let tx = self
-            .db
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let old: Option<Vec<u8>> = tx
+        let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+        let existing: Option<Vec<u8>> = tx
             .query_row("SELECT binding FROM settings WHERE id=1", [], |r| r.get(0))
             .optional()?;
-        if let Some(old) = old {
-            if old != self.digest {
-                return Err(Error::PrivateStorage);
+        let digest = match existing {
+            Some(digest) => digest,
+            None => {
+                let mut digest = vec![0; 32];
+                getrandom::fill(&mut digest).map_err(|_| Error::PrivateStorage)?;
+                tx.execute("INSERT INTO settings(id,binding,generation,reviewed,high_water) VALUES(1,?1,?2,0,0)", params![digest, random_hex(32)?])?;
+                digest
             }
-        } else {
-            tx.execute("INSERT INTO settings(id,binding,generation,reviewed,high_water) VALUES(1,?1,?2,0,0)", params![self.digest, random_hex(32)?])?;
+        };
+        // Stores from before schema v6 have no recorded identity: adopt the configured one.
+        tx.execute(
+            "INSERT OR IGNORE INTO identity(id,workspace,app,agent) VALUES(1,?1,?2,?3)",
+            params![binding.workspace, binding.app, binding.agent],
+        )?;
+        if !same_identity(&tx, &binding)? {
+            return Err(Error::PrivateStorage);
         }
         // A previous process may have dispatched a mutation and lost the result.
         // Do not retry, infer failure, or remove incomplete history on restart.
         tx.execute("UPDATE execution_audit SET outcome='outcome_unknown',ended=NULL WHERE outcome IN ('reserved','dispatched')", [])?;
         tx.commit()?;
-        Ok(())
+        store.digest = digest;
+        store.recheck()?;
+        Ok(store)
     }
     #[cfg(test)]
     pub(crate) fn test_db(&self) -> &Connection {
@@ -391,6 +369,7 @@ impl Store {
             plaintext: format!("ext1_{id}.{secret}"),
         })
     }
+    #[cfg(test)]
     pub(crate) fn db_creator(&self, id: &str) -> Result<String, Error> {
         Ok(self
             .db
@@ -478,19 +457,13 @@ impl Store {
         Ok(())
     }
 
-    pub fn admit(
-        &mut self,
-        credential: &str,
-        operation: Operation,
-        target: Option<&str>,
-    ) -> Result<Reserved, Error> {
-        self.admit_from(credential, operation, target, None)
+    pub fn admit(&mut self, credential: &str, operation: Operation) -> Result<Reserved, Error> {
+        self.admit_from(credential, operation, None)
     }
     pub(crate) fn admit_from(
         &mut self,
         credential: &str,
         operation: Operation,
-        target: Option<&str>,
         peer: Option<std::net::IpAddr>,
     ) -> Result<Reserved, Error> {
         self.recheck()?;
@@ -501,33 +474,6 @@ impl Store {
             })?
         {
             return Err(Error::Disabled);
-        }
-        if !matches!(
-            (operation, target),
-            (
-                Operation::List
-                    | Operation::Cli
-                    | Operation::Registry
-                    | Operation::Inbox
-                    | Operation::Ack
-                    | Operation::Send,
-                None
-            )
-        ) && !target.is_some_and(target_id)
-        {
-            return Err(Error::Invalid);
-        }
-        if matches!(
-            operation,
-            Operation::List
-                | Operation::Cli
-                | Operation::Registry
-                | Operation::Inbox
-                | Operation::Ack
-                | Operation::Send
-        ) && target.is_some()
-        {
-            return Err(Error::Invalid);
         }
         let (id, secret) = parse(credential)?;
         // One read-only snapshot for invalid credentials: no IMMEDIATE writer lock.
@@ -571,10 +517,7 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?;
-        let scoped_operation = matches!(
-            operation,
-            Operation::Inbox | Operation::Ack | Operation::Send
-        );
+        let scoped_operation = matches!(operation, Operation::Inbox | Operation::Ack);
         if let Some(key) = &endpoint {
             let enabled: bool = tx.query_row(
                 "SELECT enabled FROM external_agents WHERE key=?1",
@@ -590,7 +533,7 @@ impl Store {
         let target = if scoped_operation {
             endpoint.as_deref()
         } else {
-            target
+            None
         };
         // Clock sampled after acquiring the write lock. Failed admissions roll
         // back without changing high_water, last_used, audit or any other row.
@@ -734,7 +677,7 @@ impl Store {
         let mut stmt=self.db.prepare("SELECT request,token,operation,target,started,ended,outcome FROM execution_audit ORDER BY started DESC,request DESC LIMIT 100")?;
         let rows=stmt.query_map([],|r|Ok(serde_json::json!({"request_id":r.get::<_,String>(0)?,"token":r.get::<_,String>(1)?,"operation":r.get::<_,String>(2)?,"target":r.get::<_,Option<String>>(3)?,"started":chrono::DateTime::<chrono::Utc>::from_timestamp(r.get(4)?,0).map(|t|t.to_rfc3339()),"ended":r.get::<_,Option<i64>>(5)?.and_then(|t|chrono::DateTime::<chrono::Utc>::from_timestamp(t,0)).map(|t|t.to_rfc3339()),"outcome":r.get::<_,String>(6)?})))?;
         Ok(
-            serde_json::json!({"identity":{"workspace":self.binding.workspace,"app":self.binding.app,"service":self.binding.service,"agent":self.binding.agent},"requests":rows.collect::<Result<Vec<_>,_>>()?}),
+            serde_json::json!({"identity":{"workspace":self.binding.workspace,"app":self.binding.app,"agent":self.binding.agent},"requests":rows.collect::<Result<Vec<_>,_>>()?}),
         )
     }
     pub(crate) fn state(&self, owner: &Owner<'_>) -> Result<serde_json::Value, Error> {
@@ -801,6 +744,30 @@ fn sample_time(tx: &Transaction<'_>) -> Result<i64, Error> {
     })?;
     Ok(now.max(high))
 }
+fn same_identity(db: &Connection, b: &Binding) -> Result<bool, Error> {
+    let row: Option<(String, String, String)> = db
+        .query_row(
+            "SELECT workspace,app,agent FROM identity WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(row.is_some_and(|(w, a, g)| w == b.workspace && a == b.app && g == b.agent))
+}
+/// Current time, never earlier than the store's clock high-water mark (read-only).
+fn now_floor(db: &Connection) -> Result<i64, Error> {
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|_| Error::Invalid)?
+            .as_secs(),
+    )
+    .map_err(|_| Error::Invalid)?;
+    let high: i64 = db.query_row("SELECT high_water FROM settings WHERE id=1", [], |r| {
+        r.get(0)
+    })?;
+    Ok(now.max(high))
+}
 fn checkpoint(tx: &Transaction<'_>, now: i64) -> Result<(), Error> {
     tx.execute(
         "UPDATE settings SET high_water=max(high_water,?1) WHERE id=1",
@@ -847,9 +814,6 @@ fn hex(v: &str, len: usize) -> bool {
     v.len() == len
         && v.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-fn target_id(v: &str) -> bool {
-    v.strip_prefix("ag_").is_some_and(|v| hex(v, 32))
 }
 fn identifier(v: &str) -> bool {
     !v.is_empty()

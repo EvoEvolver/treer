@@ -8,15 +8,12 @@ use std::{
         Arc,
     },
 };
-const TARGET: &str = "ag_0123456789abcdef0123456789abcdef";
 
 fn binding() -> Binding {
     Binding {
         workspace: "ws_fixture".into(),
         app: "app_fixture".into(),
-        service: "svc_fixture".into(),
         agent: "ag_fixture".into(),
-        configuration: "a".repeat(64),
     }
 }
 fn owner(binding: &Binding) -> Owner<'_> {
@@ -59,11 +56,11 @@ fn defaults_closed_and_owner_proof_exact_scope() {
     let (_id, value) = token(&mut s);
     let before = s.db.total_changes();
     assert!(matches!(
-        s.admit(&value, Operation::List, None),
+        s.admit(&value, Operation::Cli),
         Err(Error::Disabled)
     ));
     assert!(matches!(
-        s.admit("bad", Operation::List, None),
+        s.admit("bad", Operation::Cli),
         Err(Error::Disabled)
     ));
     assert_eq!(s.db.total_changes(), before);
@@ -80,7 +77,7 @@ fn defaults_closed_and_owner_proof_exact_scope() {
     ));
     assert_eq!(s.db.total_changes(), before);
     enable(&mut s);
-    assert!(s.admit(&value, Operation::Status, Some(TARGET)).is_ok());
+    assert!(s.admit(&value, Operation::Cli).is_ok());
 }
 
 #[test]
@@ -133,15 +130,12 @@ fn reject_flood_never_writes_and_cannot_disable_valid_credential() {
     let before = s.db.total_changes();
     for _ in 0..1000 {
         for v in [wrong.as_str(), unknown.as_str(), "malformed"] {
-            assert!(matches!(
-                s.admit(v, Operation::List, None),
-                Err(Error::Denied)
-            ));
+            assert!(matches!(s.admit(v, Operation::Cli), Err(Error::Denied)));
         }
     }
     assert_eq!(s.db.total_changes(), before);
     assert!(audit(&s).is_empty());
-    assert!(s.admit(&value, Operation::List, None).is_ok());
+    assert!(s.admit(&value, Operation::Cli).is_ok());
 }
 
 #[test]
@@ -149,8 +143,8 @@ fn revoke_before_dispatch_refuses_but_after_dispatch_preserves_real_result() {
     let (_d, _p, mut s) = fixture(Limits::default());
     let (id, value) = token(&mut s);
     enable(&mut s);
-    let pending = s.admit(&value, Operation::Prompt, Some(TARGET)).unwrap();
-    let sent = s.admit(&value, Operation::Stop, Some(TARGET)).unwrap();
+    let pending = s.admit(&value, Operation::Cli).unwrap();
+    let sent = s.admit(&value, Operation::Cli).unwrap();
     let sent = s.dispatch(sent).unwrap();
     assert_eq!(sent.token_id(), id);
     assert!(hex(sent.request_id(), 32));
@@ -158,7 +152,7 @@ fn revoke_before_dispatch_refuses_but_after_dispatch_preserves_real_result() {
     s.revoke(&owner(&b), &id).unwrap();
     assert!(matches!(s.dispatch(pending), Err(Error::Denied)));
     assert!(matches!(
-        s.admit(&value, Operation::List, None),
+        s.admit(&value, Operation::Cli),
         Err(Error::Denied)
     ));
     s.policy_reviewed(&owner(&b), false).unwrap();
@@ -185,7 +179,7 @@ fn restart_preserves_revocation_and_marks_lost_results_unknown_without_retry() {
     let (_d, p, mut s) = fixture(Limits::default());
     let (id, value) = token(&mut s);
     enable(&mut s);
-    let pending = s.admit(&value, Operation::Restart, Some(TARGET)).unwrap();
+    let pending = s.admit(&value, Operation::Cli).unwrap();
     let dispatched = s.dispatch(pending).unwrap();
     drop(dispatched);
     let b = binding();
@@ -193,7 +187,7 @@ fn restart_preserves_revocation_and_marks_lost_results_unknown_without_retry() {
     drop(s);
     let mut s = Store::open(&p, binding(), Limits::default()).unwrap();
     assert!(matches!(
-        s.admit(&value, Operation::List, None),
+        s.admit(&value, Operation::Cli),
         Err(Error::Denied)
     ));
     assert_eq!(audit(&s)[0].1, "outcome_unknown");
@@ -211,12 +205,12 @@ fn limits_leave_owner_containment_available_and_token_quota_protects_another() {
     let (id, value) = token(&mut s);
     let (_, other) = token(&mut s);
     enable(&mut s);
-    let pending = s.admit(&value, Operation::List, None).unwrap();
+    let pending = s.admit(&value, Operation::Cli).unwrap();
     assert!(matches!(
-        s.admit(&value, Operation::List, None),
+        s.admit(&value, Operation::Cli),
         Err(Error::Capacity)
     ));
-    let other = s.admit(&other, Operation::List, None).unwrap();
+    let other = s.admit(&other, Operation::Cli).unwrap();
     let dispatched = s.dispatch(other).unwrap();
     let b = binding();
     assert_eq!(s.list(&owner(&b)).unwrap().len(), 2);
@@ -265,23 +259,23 @@ fn generation_rotation_invalidates_tokens_pending_permits_and_activation() {
     let (_d, p, mut s) = fixture(Limits::default());
     let (_, value) = token(&mut s);
     enable(&mut s);
-    let pending = s.admit(&value, Operation::List, None).unwrap();
+    let pending = s.admit(&value, Operation::Cli).unwrap();
     let b = binding();
     s.rotate_after_restore(&owner(&b)).unwrap();
     assert!(matches!(s.dispatch(pending), Err(Error::Disabled)));
     assert!(matches!(
-        s.admit(&value, Operation::List, None),
+        s.admit(&value, Operation::Cli),
         Err(Error::Disabled)
     ));
     enable(&mut s);
     assert!(matches!(
-        s.admit(&value, Operation::List, None),
+        s.admit(&value, Operation::Cli),
         Err(Error::Denied)
     ));
     drop(s);
     let mut s = Store::open(&p, binding(), Limits::default()).unwrap();
     assert!(matches!(
-        s.admit(&value, Operation::List, None),
+        s.admit(&value, Operation::Cli),
         Err(Error::Denied)
     ));
 }
@@ -291,10 +285,10 @@ fn high_water_expiry_and_retention_preserve_incomplete_records() {
     let (_d, p, mut s) = fixture(Limits::default());
     let (_, value) = token(&mut s);
     enable(&mut s);
-    let reserved = s.admit(&value, Operation::List, None).unwrap();
+    let reserved = s.admit(&value, Operation::Cli).unwrap();
     let dispatched = s.dispatch(reserved).unwrap();
     s.finish(dispatched, Outcome::Completed).unwrap();
-    s.admit(&value, Operation::List, None).unwrap(); // An incomplete row must survive retention.
+    s.admit(&value, Operation::Cli).unwrap(); // An incomplete row must survive retention.
 
     // Be clearly beyond retention, not one second after token expiry:
     // completion can cross a wall-clock second after token creation.
@@ -305,7 +299,7 @@ fn high_water_expiry_and_retention_preserve_incomplete_records() {
         .unwrap();
     let before = s.db.total_changes();
     assert!(matches!(
-        s.admit(&value, Operation::List, None),
+        s.admit(&value, Operation::Cli),
         Err(Error::Denied)
     ));
     assert_eq!(before, s.db.total_changes());
@@ -315,7 +309,7 @@ fn high_water_expiry_and_retention_preserve_incomplete_records() {
     drop(s);
     let mut s = Store::open(&p, binding(), Limits::default()).unwrap();
     assert!(matches!(
-        s.admit(&value, Operation::List, None),
+        s.admit(&value, Operation::Cli),
         Err(Error::Denied)
     ));
     assert_eq!(audit(&s)[0].1, "outcome_unknown");
@@ -324,7 +318,7 @@ fn high_water_expiry_and_retention_preserve_incomplete_records() {
 #[test]
 fn hostile_inputs_cannot_create_credentials_target_another_workspace_or_write_audit() {
     let (_d, _p, mut s) = fixture(Limits::default());
-    let (_, value) = token(&mut s);
+    let _ = token(&mut s);
     enable(&mut s);
     let b = binding();
     for name in ["", "   ", "line\nname", "x\u{202e}y", "x\0y"] {
@@ -338,27 +332,6 @@ fn hostile_inputs_cannot_create_credentials_target_another_workspace_or_write_au
         s.create(&owner(&b), "ok", 365),
         Err(Error::Invalid)
     ));
-    let before = s.db.total_changes();
-    for target in [
-        "--help",
-        "../workspaces/other",
-        "ag_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/../other",
-        "ag_É",
-        "ag_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaA",
-        "https://evil.test",
-        "self",
-        "",
-    ] {
-        assert!(matches!(
-            s.admit(&value, Operation::Status, Some(target)),
-            Err(Error::Invalid)
-        ));
-    }
-    assert!(matches!(
-        s.admit(&value, Operation::List, Some(TARGET)),
-        Err(Error::Invalid)
-    ));
-    assert_eq!(before, s.db.total_changes());
     assert!(audit(&s).is_empty());
 }
 
@@ -370,7 +343,7 @@ fn durable_audit_reservation_must_commit_before_any_fake_dispatch() {
     // A commit refusal must roll back both last_used and the audit row.
     s.db.commit_hook(Some(|| true));
     let called = AtomicUsize::new(0);
-    let reservation = s.admit(&value, Operation::List, None);
+    let reservation = s.admit(&value, Operation::Cli);
     if reservation.is_ok() {
         called.fetch_add(1, Ordering::Relaxed);
     }
@@ -402,7 +375,7 @@ fn central_hook_rolls_back_revocation_on_drift_and_restoring_path_stays_latched(
     assert!(s.revoke(&owner(&b), &id).is_err());
     fs::rename(&renamed, &dbpath).unwrap();
     assert!(s.recheck().is_err());
-    assert!(s.admit(&value, Operation::List, None).is_err());
+    assert!(s.admit(&value, Operation::Cli).is_err());
     assert!(s.list(&owner(&b)).is_err());
     s.db.update_hook(None::<fn(Action, &str, &str, i64)>);
     let revoked: bool =
@@ -435,7 +408,7 @@ fn admission_drift_rolls_back_audit_and_never_returns_dispatch_permit() {
             fs::rename(&o, &m).unwrap();
         }
     }));
-    assert!(s.admit(&value, Operation::List, None).is_err());
+    assert!(s.admit(&value, Operation::Cli).is_err());
     assert_eq!(called.load(Ordering::Relaxed), 1);
     fs::rename(&moved, &original).unwrap();
     assert!(audit(&s).is_empty());
@@ -443,7 +416,7 @@ fn admission_drift_rolls_back_audit_and_never_returns_dispatch_permit() {
 }
 
 #[test]
-fn private_storage_permissions_busy_reopen_symlink_and_config_pins() {
+fn private_storage_permissions_busy_reopen_symlink_and_identity() {
     let (_d, p, s) = fixture(Limits::default());
     assert!(matches!(
         Store::open(&p, binding(), Limits::default()),
@@ -460,7 +433,7 @@ fn private_storage_permissions_busy_reopen_symlink_and_config_pins() {
     }
     drop(s);
     let mut other = binding();
-    other.configuration = "b".repeat(64);
+    other.agent = "ag_other".into();
     assert!(Store::open(&p, other, Limits::default()).is_err());
     let s = Store::open(&p, binding(), Limits::default()).unwrap();
     drop(s);
@@ -490,7 +463,7 @@ fn sqlite_lock_survives_admission_and_metadata_rechecks() {
         assert!(result.status.success(), "SQLite shared lock was lost");
         s.recheck().unwrap();
     }
-    let reserved = s.admit(&value, Operation::List, None).unwrap();
+    let reserved = s.admit(&value, Operation::Cli).unwrap();
     let dispatched = s.dispatch(reserved).unwrap();
     s.finish(dispatched, Outcome::Completed).unwrap();
     drop(s);
@@ -508,20 +481,20 @@ fn reserved_release_expiry_and_completed_rolling_preserve_unknown() {
     let (_d, _p, mut s) = fixture(limits);
     let (_id, token) = token(&mut s);
     enable(&mut s);
-    let r = s.admit(&token, Operation::Status, Some(TARGET)).unwrap();
+    let r = s.admit(&token, Operation::Cli).unwrap();
     s.release(r).unwrap();
     assert_eq!(audit(&s)[0].1, "unavailable");
-    let abandoned = s.admit(&token, Operation::Status, Some(TARGET)).unwrap();
+    let abandoned = s.admit(&token, Operation::Cli).unwrap();
     s.db.execute("UPDATE execution_audit SET started=started-120", [])
         .unwrap();
-    let next = s.admit(&token, Operation::Status, Some(TARGET)).unwrap();
+    let next = s.admit(&token, Operation::Cli).unwrap();
     assert!(s.dispatch(abandoned).is_err());
     let sent = s.dispatch(next).unwrap();
     s.finish(sent, Outcome::Unknown).unwrap();
     for _ in 0..8 {
         s.db.execute("UPDATE execution_audit SET started=started-120", [])
             .unwrap();
-        let r = s.admit(&token, Operation::Status, Some(TARGET)).unwrap();
+        let r = s.admit(&token, Operation::Cli).unwrap();
         let d = s.dispatch(r).unwrap();
         s.finish(d, Outcome::Completed).unwrap();
     }
@@ -551,10 +524,7 @@ fn wrong_well_formed_credential_uses_no_sqlite_writer_transaction() {
     let last = bad.pop().unwrap();
     bad.push(if last == '0' { '1' } else { '0' });
     for _ in 0..200 {
-        assert!(matches!(
-            s.admit(&bad, Operation::List, None),
-            Err(Error::Denied)
-        ));
+        assert!(matches!(s.admit(&bad, Operation::Cli), Err(Error::Denied)));
     }
     assert_eq!(r.load(Ordering::Relaxed), 0);
     assert_eq!(s.db.total_changes(), before);
@@ -567,7 +537,7 @@ fn cli_audit_upgrade_preserves_existing_v2_tokens_generation_and_history() {
     let (_, first) = token(&mut store);
     let (_, second) = token(&mut store);
     enable(&mut store);
-    let permit = store.admit(&first, Operation::List, None).unwrap();
+    let permit = store.admit(&first, Operation::Cli).unwrap();
     let permit = store.dispatch(permit).unwrap();
     store.finish(permit, Outcome::Completed).unwrap();
     let before = store.state(&owner(&binding())).unwrap();
@@ -589,7 +559,8 @@ fn cli_audit_upgrade_preserves_existing_v2_tokens_generation_and_history() {
         .db
         .execute_batch(&schema[start..end].replace("'cli',", ""))
         .unwrap();
-    store.db.execute_batch("INSERT INTO execution_audit SELECT * FROM old_audit; DROP TABLE old_audit; PRAGMA user_version=2; COMMIT;").unwrap();
+    // Historical rows carry retired typed-operation codes; they must survive upgrades.
+    store.db.execute_batch("UPDATE old_audit SET operation='list'; INSERT INTO execution_audit SELECT * FROM old_audit; DROP TABLE old_audit; PRAGMA user_version=2; COMMIT;").unwrap();
     drop(store);
     let mut store = Store::open(&path, binding(), Limits::default()).unwrap();
     let after = store.state(&owner(&binding())).unwrap();
@@ -597,7 +568,7 @@ fn cli_audit_upgrade_preserves_existing_v2_tokens_generation_and_history() {
     assert_eq!(before["enabled"], after["enabled"]);
     assert_eq!(audit(&store).len(), 1);
     for value in [first, second] {
-        let p = store.admit(&value, Operation::Cli, None).unwrap();
+        let p = store.admit(&value, Operation::Cli).unwrap();
         let p = store.dispatch(p).unwrap();
         store.finish(p, Outcome::Completed).unwrap();
     }
@@ -613,7 +584,7 @@ fn external_inbox_v3_upgrade_preserves_full_keys_history_and_scoped_restart() {
     let (_, one) = token(&mut s);
     let (_, two) = token(&mut s);
     enable(&mut s);
-    let p = s.admit(&one, Operation::List, None).unwrap();
+    let p = s.admit(&one, Operation::Cli).unwrap();
     let p = s.dispatch(p).unwrap();
     s.finish(p, Outcome::Unknown).unwrap();
     let before = audit(&s);
@@ -625,7 +596,7 @@ fn external_inbox_v3_upgrade_preserves_full_keys_history_and_scoped_restart() {
     let mut s = Store::open(&path, binding(), Limits::default()).unwrap();
     assert_eq!(audit(&s), before);
     for value in [&one, &two] {
-        let p = s.admit(value, Operation::Cli, None).unwrap();
+        let p = s.admit(value, Operation::Cli).unwrap();
         let p = s.dispatch(p).unwrap();
         s.finish(p, Outcome::Completed).unwrap();
     }
@@ -638,24 +609,24 @@ fn external_inbox_v3_upgrade_preserves_full_keys_history_and_scoped_restart() {
     assert!(s
         .register_external(&owner(&b), "stable", "reuse", 30)
         .is_err());
-    let p = s.admit(&key, Operation::Inbox, None).unwrap();
+    let p = s.admit(&key, Operation::Inbox).unwrap();
     let p = s.dispatch(p).unwrap();
     assert_eq!(p.target(), Some("stable"));
     s.finish(p, Outcome::Completed).unwrap();
     drop(s);
     let mut s = Store::open(&path, binding(), Limits::default()).unwrap();
-    let p = s.admit(&key, Operation::Ack, None).unwrap();
+    let p = s.admit(&key, Operation::Ack).unwrap();
     let p = s.dispatch(p).unwrap();
     assert_eq!(p.target(), Some("stable"));
     s.finish(p, Outcome::Completed).unwrap();
-    let p = s.admit(&key, Operation::Cli, None).unwrap();
+    let p = s.admit(&key, Operation::Cli).unwrap();
     let p = s.dispatch(p).unwrap();
     s.finish(p, Outcome::Completed).unwrap();
     assert!(matches!(
-        s.admit(&key, Operation::Registry, None),
+        s.admit(&key, Operation::Registry),
         Err(Error::Denied)
     ));
-    let p = s.admit(&key, Operation::Inbox, None).unwrap();
+    let p = s.admit(&key, Operation::Inbox).unwrap();
     s.revoke(&owner(&b), &id).unwrap();
     assert!(matches!(s.dispatch(p), Err(Error::Denied)));
     assert_eq!(
@@ -706,11 +677,11 @@ fn device_grant_survives_restart_claims_once_and_preserves_old_keys() {
         rows
     );
     for value in [&old, key] {
-        let p = s.admit(value, Operation::Cli, None).unwrap();
+        let p = s.admit(value, Operation::Cli).unwrap();
         let p = s.dispatch(p).unwrap();
         s.finish(p, Outcome::Completed).unwrap();
     }
-    let p = s.admit(key, Operation::Inbox, None).unwrap();
+    let p = s.admit(key, Operation::Inbox).unwrap();
     let p = s.dispatch(p).unwrap();
     assert_eq!(p.target(), Some("device1"));
     s.finish(p, Outcome::Completed).unwrap();
@@ -843,7 +814,7 @@ fn device_v4_upgrade_preserves_existing_full_and_agent_keys_and_history() {
     let mut s = Store::open(&path, binding(), Limits::default()).unwrap();
     assert_eq!(s.state(&owner(&b)).unwrap()["generation"], generation);
     for key in [&one, &two, &scoped] {
-        let p = s.admit(key, Operation::Cli, None).unwrap();
+        let p = s.admit(key, Operation::Cli).unwrap();
         let p = s.dispatch(p).unwrap();
         s.finish(p, Outcome::Completed).unwrap();
     }
@@ -858,7 +829,7 @@ fn device_v4_upgrade_preserves_existing_full_and_agent_keys_and_history() {
 }
 
 #[test]
-fn device_v4_wrong_binding_refuses_before_any_schema_migration() {
+fn wrong_identity_refuses_before_any_schema_change_and_v4_upgrades() {
     fn schema(db: &Connection) -> Vec<(String, String)> {
         db.prepare("SELECT name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name")
             .unwrap()
@@ -872,14 +843,10 @@ fn device_v4_wrong_binding_refuses_before_any_schema_migration() {
     let (_, key) = token(&mut s);
     enable(&mut s);
     let state = s.state(&owner(&b)).unwrap();
-    s.db.execute_batch(
-        "DROP TABLE device_requests; DROP TABLE device_attempt_budget; PRAGMA user_version=4;",
-    )
-    .unwrap();
     let before = schema(&s.db);
     drop(s);
     let mut wrong = binding();
-    wrong.configuration = "b".repeat(64);
+    wrong.app = "app_other".into();
     assert!(matches!(
         Store::open(&path, wrong, Limits::default()),
         Err(Error::PrivateStorage)
@@ -889,24 +856,47 @@ fn device_v4_wrong_binding_refuses_before_any_schema_migration() {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
-    assert_eq!(
-        ro.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        4
-    );
     assert_eq!(schema(&ro), before);
     drop(ro);
+    // A v4 store (before device grants and identity) upgrades in place.
+    let s = Store::open(&path, binding(), Limits::default()).unwrap();
+    s.db.execute_batch(
+        "DROP TABLE device_requests; DROP TABLE device_attempt_budget; DROP TABLE identity; PRAGMA user_version=4;",
+    )
+    .unwrap();
+    drop(s);
     let mut s = Store::open(&path, binding(), Limits::default()).unwrap();
     assert_eq!(
         s.state(&owner(&b)).unwrap()["generation"],
         state["generation"]
     );
-    let p = s.admit(&key, Operation::Cli, None).unwrap();
+    let p = s.admit(&key, Operation::Cli).unwrap();
     let p = s.dispatch(p).unwrap();
     s.finish(p, Outcome::Completed).unwrap();
     assert_eq!(
         s.db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
+}
+
+#[test]
+fn pre_v6_store_adopts_identity_and_keeps_existing_tokens() {
+    let (_d, p, mut s) = fixture(Limits::default());
+    let (_, value) = token(&mut s);
+    enable(&mut s);
+    // Simulate a store written by the v5 release: no identity row, older user_version.
+    s.db.execute_batch("DROP TABLE identity; PRAGMA user_version=5;")
+        .unwrap();
+    drop(s);
+    let mut s = Store::open(&p, binding(), Limits::default()).unwrap();
+    let version: i64 =
+        s.db.query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(version, 6);
+    assert!(s.admit(&value, Operation::Cli).is_ok());
+    drop(s);
+    let mut other = binding();
+    other.workspace = "ws_other".into();
+    assert!(Store::open(&p, other, Limits::default()).is_err());
 }

@@ -91,6 +91,19 @@ impl Store {
         value["existing_agent"] = json!(!value["existing_name"].is_null());
         Ok(json!({"request":value}))
     }
+    /// Live (pending or approved, unexpired) requests. User codes are stored only as
+    /// hashes, so a decision still needs the code the requesting agent shows its human.
+    pub(crate) fn device_requests(&self, owner: &Owner<'_>) -> Result<Value, Error> {
+        self.owner(owner)?;
+        let now = super::now_floor(&self.db)?;
+        let mut st = self.db.prepare("SELECT key,name,created,expires,status,(SELECT name FROM external_agents WHERE key=d.key) FROM device_requests d WHERE expires>?1 AND status IN ('pending','approved') AND generation=(SELECT generation FROM settings WHERE id=1) ORDER BY created LIMIT 100")?;
+        let rows = st
+            .query_map([now], |r| {
+                Ok(json!({"key":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"created_at":r.get::<_,i64>(2)?,"expires_at":r.get::<_,i64>(3)?,"status":r.get::<_,String>(4)?,"existing_name":r.get::<_,Option<String>>(5)?}))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(json!({"requests":rows}))
+    }
     pub(crate) fn device_decide(
         &mut self,
         owner: &Owner<'_>,

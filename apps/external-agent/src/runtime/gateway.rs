@@ -3,27 +3,22 @@ use super::{controller::ResultValue, Config};
 use crate::{Error, Outcome};
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
-    os::unix::{
-        fs::{MetadataExt, OpenOptionsExt},
-        process::CommandExt,
-    },
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
 const OUTPUT: usize = 2 * 1024 * 1024;
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The configured native CLI. Identified by `treer --version`, never by file hash:
+/// a Treer update replacing the binary keeps the gateway working.
 pub struct CliGateway {
-    config_sha256: String,
     executable: PathBuf,
-    executable_sha256: String,
-    #[serde(skip)]
-    config: String,
+    version: std::sync::Mutex<Result<String, String>>,
 }
+/// Oldest CLI release whose argv contract this gateway documents.
+const MIN_VERSION: (u64, u64, u64) = (0, 1, 0);
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Input {
@@ -127,68 +122,32 @@ impl Input {
     }
 }
 impl CliGateway {
-    pub fn load(path: &Path, config: &Config, digest: &str) -> Result<Self, Error> {
-        let mut f = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-            .open(path)
-            .map_err(|_| Error::Invalid)?;
-        let m = f.metadata().map_err(|_| Error::Invalid)?;
-        if !m.is_file()
-            || m.uid() != rustix::process::geteuid().as_raw()
-            || m.mode() & 0o077 != 0
-            || m.nlink() != 1
-            || m.len() > 4096
-        {
-            return Err(Error::Invalid);
+    pub fn new(executable: PathBuf) -> Self {
+        let version = probe(&executable);
+        Self {
+            executable,
+            version: std::sync::Mutex::new(version),
         }
-        let mut bytes = Vec::new();
-        std::io::Read::by_ref(&mut f)
-            .take(4097)
-            .read_to_end(&mut bytes)
-            .map_err(|_| Error::Invalid)?;
-        let mut g: Self = serde_json::from_slice(&bytes).map_err(|_| Error::Invalid)?;
-        if bytes.len() > 4096 || g.config_sha256 != digest || !g.executable.is_absolute() {
-            return Err(Error::Invalid);
-        }
-        g.config = serde_json::to_string(config).map_err(|_| Error::Invalid)?;
-        g.check_binary()?;
-        Ok(g)
     }
-    pub(super) fn matches(&self, c: &Config) -> bool {
-        serde_json::to_string(c).is_ok_and(|s| self.config == s)
-    }
-    fn check_binary(&self) -> Result<(), Error> {
-        let mut f = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-            .open(&self.executable)
-            .map_err(|_| Error::Invalid)?;
-        let m = f.metadata().map_err(|_| Error::Invalid)?;
-        if !m.is_file()
-            || m.uid() != rustix::process::geteuid().as_raw()
-            || m.mode() & 0o022 != 0
-            || m.mode() & 0o111 == 0
-            || m.nlink() != 1
-            || m.len() > 128 * 1024 * 1024
-        {
-            return Err(Error::Invalid);
+    /// `Ok(version)` or the reason the CLI is unusable; re-probed while unusable.
+    pub(super) fn status(&self) -> Result<String, String> {
+        let mut v = self
+            .version
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if v.is_err() {
+            *v = probe(&self.executable);
         }
-        let mut hash = Sha256::new();
-        let mut bytes = [0; 65536];
-        loop {
-            let n = f.read(&mut bytes).map_err(|_| Error::Invalid)?;
-            if n == 0 {
-                break;
-            }
-            hash.update(&bytes[..n]);
-        }
-        if format!("{:x}", hash.finalize()) != self.executable_sha256 {
-            return Err(Error::Invalid);
-        }
-        Ok(())
+        v.clone()
     }
     pub(super) fn execute(&self, c: &Config, credential: &str, input: Input) -> ResultValue {
+        if let Err(reason) = self.status() {
+            return ResultValue {
+                status: 503,
+                value: json!({"error":{"code":"cli_unavailable","message":reason}}),
+                outcome: Outcome::Unavailable,
+            };
+        }
         match self.run(c, credential, input) {
             Ok((value, uncertain)) => ResultValue {
                 status: 200,
@@ -212,7 +171,6 @@ impl CliGateway {
         credential: &str,
         input: Input,
     ) -> Result<(serde_json::Value, bool), Error> {
-        self.check_binary()?;
         let mut child = Command::new(&self.executable)
             .args(&input.argv)
             .env_clear()
@@ -323,4 +281,42 @@ impl CliGateway {
         let _ = child.wait();
         result
     }
+}
+
+/// Runs `CLI --version` with an empty environment and parses `treer X.Y.Z ...`.
+fn probe(executable: &Path) -> Result<String, String> {
+    if !executable.is_absolute() {
+        return Err("treer_cli must be an absolute path".into());
+    }
+    let output = Command::new(executable)
+        .arg("--version")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run {}: {e}", executable.display()))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let version = text
+        .trim()
+        .strip_prefix("treer ")
+        .and_then(|v| v.split_whitespace().next())
+        .filter(|_| output.status.success())
+        .ok_or_else(|| {
+            format!(
+                "{} --version did not identify a treer CLI",
+                executable.display()
+            )
+        })?;
+    let mut parts = version.split(['.', '-', '+']).map(|p| p.parse::<u64>());
+    let parsed = match (parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(a)), Some(Ok(b)), Some(Ok(c))) => (a, b, c),
+        _ => return Err(format!("unrecognized treer CLI version {version}")),
+    };
+    if parsed < MIN_VERSION {
+        return Err(format!(
+            "treer CLI {version} is older than {}.{}.{}",
+            MIN_VERSION.0, MIN_VERSION.1, MIN_VERSION.2
+        ));
+    }
+    Ok(version.to_owned())
 }

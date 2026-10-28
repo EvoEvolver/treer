@@ -16,12 +16,8 @@ pub(super) fn reachability(origin: &url::Url) -> &'static str {
     }
 }
 
-#[cfg(test)]
 pub(super) fn view(config: &Config, enabled: bool) -> Value {
-    view_at(config, enabled, None)
-}
-pub(super) fn view_at(config: &Config, enabled: bool, advertised: Option<&url::Url>) -> Value {
-    let origin = advertised.unwrap_or(&config.public_origin);
+    let origin = &config.public_origin;
     let mut blockers = Vec::new();
     if reachability(origin) == "loopback_only" {
         blockers.push("loopback_only");
@@ -45,15 +41,11 @@ pub(super) fn view_at(config: &Config, enabled: bool, advertised: Option<&url::U
     })
 }
 
-#[cfg(test)]
 pub(super) fn manual(config: &Config) -> String {
-    manual_at(config, None)
-}
-pub(super) fn manual_at(config: &Config, advertised: Option<&url::Url>) -> String {
     render(
         include_str!("agent-skill.md"),
         config,
-        advertised.unwrap_or(&config.public_origin),
+        &config.public_origin,
     )
 }
 fn short(config: &Config, origin: &url::Url) -> String {
