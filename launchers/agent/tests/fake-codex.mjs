@@ -3,6 +3,7 @@ import readline from "node:readline";
 import assert from "node:assert/strict";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 import { pathToFileURL } from "node:url";
 const goalFile = join(process.cwd(), ".fake-codex-goal.json");
 let goal = null;
@@ -62,6 +63,30 @@ if (process.env.FAKE_CODEX_MANY) {
     { id: `oa-${n}`, type: "agentMessage", text: `older answer ${n}` },
   ] }));
   turns.unshift(...many);
+}
+// A solid grey PNG of the given size (no dependency): enough to make images take real layout space once decoded.
+function png(width, height) {
+  const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+  const crc = (buf) => { let c = 0xffffffff; for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const body = Buffer.concat([Buffer.from(type), data]); const sum = Buffer.alloc(4); sum.writeUInt32BE(crc(body)); return Buffer.concat([len, body, sum]); };
+  const header = Buffer.alloc(13); header.writeUInt32BE(width, 0); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 0;
+  const rows = Buffer.alloc((width + 1) * height, 0x99); for (let y = 0; y < height; y++) rows[y * (width + 1)] = 0;
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", header), chunk("IDAT", deflateSync(rows)), chunk("IEND", Buffer.alloc(0))]);
+}
+// A long, realistic transcript (UI scroll checks): many turns of prose, code blocks, tables, commands and images that
+// decode after first layout, so the conversation keeps growing after the first render.
+if (process.env.FAKE_CODEX_LONG) {
+  const image = `data:image/png;base64,${png(640, 360).toString("base64")}`;
+  const prose = (n) => Array.from({ length: 6 }, (_, p) => `Paragraph ${p} of answer ${n}. ` + "The launcher keeps the transcript readable while the agent works through long tasks. ".repeat(4)).join("\n\n");
+  const code = (n) => "```ts\n" + Array.from({ length: 24 }, (_, l) => `export const value${n}_${l} = compute(${l}, "${"x".repeat(40)}");`).join("\n") + "\n```";
+  const long = Array.from({ length: Number(process.env.FAKE_CODEX_LONG) }, (_, n) => ({ id: `long-${n}`, status: "completed", items: [
+    { id: `lu-${n}`, type: "userMessage", content: [{ type: "text", text: `long question ${n}: ` + "please look into this. ".repeat(12) }] },
+    { id: `lc-${n}`, type: "commandExecution", command: `npm test -- --grep case-${n}`, aggregatedOutput: Array.from({ length: 30 }, (_, l) => `ok ${l} - case ${n}.${l}`).join("\n"), status: "completed" },
+    ...Array.from({ length: Number(process.env.FAKE_CODEX_LONG_STEPS || 0) }, (_, k) => ({ id: `lr-${n}-${k}`, type: k % 2 ? "reasoning" : "commandExecution", ...(k % 2 ? { summary: [`Thinking about step ${k}`], text: "" } : { command: `rg -n step${k}`, aggregatedOutput: "match\n".repeat(200), status: "completed" }) })),
+    ...(process.env.FAKE_CODEX_LONG_STEPS ? [{ id: `lm-${n}`, type: "agentMessage", text: prose(n) }] : []),
+    { id: `la-${n}`, type: "agentMessage", text: `## Answer ${n}\n\n${prose(n)}\n\n${code(n)}\n\n![diagram ${n}](${image})\n\n| a | b |\n| - | - |\n| ${n} | ${n + 1} |\n\nlong answer ${n} ends here.` },
+  ] }));
+  turns.splice(0, turns.length, ...long);
 }
 for await (const line of readline.createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
