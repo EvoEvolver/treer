@@ -1,4 +1,3 @@
-import { ProviderCliInstaller } from "@/components/provider-cli-installer"
 import { ControllerUpdater, ControllerUpdateEntry } from "@/components/controller-updater"
 import type { ControllerUpdateClient } from "@/lib/controller-update"
 import { agentPath } from "@/lib/workload-path"
@@ -62,7 +61,7 @@ export function MachineOverviewView({ machine, agents, services, virtualHosts, t
       <Button variant="outline" className="shrink-0" onClick={onClose}>{t("org.close")}</Button>
     </div>
 
-    {workspaceId && <div className="mb-6 flex flex-wrap items-start gap-3"><ProviderCliInstaller key={`${workspaceId}/${machine.server_id}`} workspaceId={workspaceId} machine={machine} />{controllerUpdateScopeKey && <div>{controllerUpdateClient ? <ControllerUpdater key={`${workspaceId}/${machine.server_id}/${controllerUpdateScopeKey}`} machineId={machine.server_id} client={controllerUpdateClient} scopeKey={controllerUpdateScopeKey} /> : <ControllerUpdateEntry key={`${workspaceId}/${machine.server_id}/${controllerUpdateScopeKey}`} workspaceId={workspaceId} machine={machine} scopeKey={controllerUpdateScopeKey} />}</div>}</div>}
+    {workspaceId && <div className="mb-6 flex flex-wrap items-start gap-3">{controllerUpdateScopeKey && <div>{controllerUpdateClient ? <ControllerUpdater key={`${workspaceId}/${machine.server_id}/${controllerUpdateScopeKey}`} machineId={machine.server_id} client={controllerUpdateClient} scopeKey={controllerUpdateScopeKey} /> : <ControllerUpdateEntry key={`${workspaceId}/${machine.server_id}/${controllerUpdateScopeKey}`} workspaceId={workspaceId} machine={machine} scopeKey={controllerUpdateScopeKey} />}</div>}</div>}
     <div className="grid gap-10 md:grid-cols-2">
       <section className="space-y-3 rounded-md border p-4">
         <h2 className="text-sm font-semibold">{t("machine.build")}</h2>

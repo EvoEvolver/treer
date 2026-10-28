@@ -41,7 +41,7 @@ def copied(dockerfile):
 class DockerfileIncludesTest(unittest.TestCase):
     def test_every_compile_time_include_is_in_each_image_build_context(self):
         includes = release_includes()
-        self.assertIn("launchers/agent/provider-recipes.json", includes)
+        self.assertIn("skills/treer-install/SKILL.md", includes)
         for dockerfile in ("Dockerfile", "Dockerfile.hosted"):
             sources = copied(dockerfile)
             for path in sorted(includes):

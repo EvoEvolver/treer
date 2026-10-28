@@ -294,21 +294,6 @@ async fn catalog_has_explicit_upgrade_order_and_persistent_antirollback_floor() 
 }
 
 #[tokio::test]
-async fn update_claim_also_refuses_installer_acceptance_before_consumption() {
-    let auth = store().await;
-    let b = binding();
-    let p = preview(&auth, &b).await;
-    auth.controller_update_accept(&scope(), &p.confirmation_token, &b)
-        .await
-        .unwrap();
-    let error = auth
-        .provider_cli_accept(&scope(), &format!("pcl_{}", "0".repeat(64)), None)
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), "provider_cli_machine_busy");
-}
-
-#[tokio::test]
 async fn silence_becomes_unconfirmed_without_releasing_or_resending() {
     let auth = store().await;
     let mut b = binding();

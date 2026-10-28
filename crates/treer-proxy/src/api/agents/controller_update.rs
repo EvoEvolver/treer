@@ -59,7 +59,18 @@ async fn authorize(
     ws: &str,
     machine: &str,
 ) -> Result<(), ApiFailure> {
-    super::provider_cli::provider_cli_scope(state, auth, policy, session, ws, machine).await?;
+    state.resolve_server(ws, machine).await?;
+    auth.require_workspace_member(ws, &session.user_id).await?;
+    authorize_control(
+        policy,
+        ws,
+        Some(&PolicySubject::Human {
+            user_id: session.user_id.clone(),
+        }),
+        ACTION_MACHINE_EXEC,
+        PolicyResource::new(RESOURCE_MACHINE, machine),
+    )
+    .await?;
     // A machine name is not a stable update scope or Policy resource identity.
     if state.resolve_server(ws, machine).await?.server_id != machine {
         return Err(failure("controller_update_request_invalid"));

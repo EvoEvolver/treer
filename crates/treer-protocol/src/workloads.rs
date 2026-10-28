@@ -404,26 +404,6 @@ pub enum AgentCommand {
     ControllerUpdateOperation {
         operation_id: String,
     },
-    /// Provider CLI installation (#123): recipe table for this machine, exact
-    /// recipe check, token-confirmed install dispatch and operation polling.
-    ProviderCliRecipes {},
-    ProviderCliCheck {
-        recipe: crate::ProviderCliRecipeRef,
-    },
-    ProviderCliInstall {
-        operation_id: String,
-        recipe: crate::ProviderCliRecipeRef,
-        table_hash: String,
-        /// Hash of the plan the user confirmed; a fresh expansion must match.
-        argv_hash: String,
-        /// Consent (#134): the action and relation the human confirmed and the
-        /// hash of the observation they were shown; the Controller re-observes
-        /// before any mutation and refuses any difference.
-        consent: crate::ProviderCliConsent,
-    },
-    ProviderCliOperation {
-        operation_id: String,
-    },
     StartupAdminGet {
         agent_id: String,
     },
@@ -619,14 +599,6 @@ impl AgentCommand {
             // replacement by an ordinary capOFF image. This never admits an
             // update; the authenticated Proxy route owns the durable operation.
             Self::ControllerUpdateOperation { .. } => None,
-            Self::ProviderCliRecipes {}
-            | Self::ProviderCliCheck { .. }
-            | Self::ProviderCliOperation { .. } => {
-                Some(crate::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL)
-            }
-            Self::ProviderCliInstall { .. } => {
-                Some(crate::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2)
-            }
             Self::FileTransfer { .. } | Self::FileTransferInfo {} => {
                 Some(CAPABILITY_MACHINE_FILE_TRANSFER)
             }

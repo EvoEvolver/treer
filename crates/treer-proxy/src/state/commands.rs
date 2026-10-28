@@ -285,10 +285,6 @@ impl AppState {
                         && pending.required_capability.is_some_and(|required| {
                             required == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER
                                 || required == treer_protocol::controller_update::CAPABILITY
-                                || required
-                                    == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL
-                                || required
-                                    == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2
                                 || !capabilities.contains(required)
                         })
                 })
@@ -323,15 +319,6 @@ impl AppState {
                 ProtocolError::new(
                     "controller_update_dispatch_stale",
                     "Controller connection changed; update commands are never replayed",
-                )
-            } else if required == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL
-                || required == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2
-            {
-                // An installation is never replayed to a replacement Controller:
-                // its outcome is ambiguous and the operation record says so.
-                ProtocolError::new(
-                    "provider_cli_dispatch_stale",
-                    "Controller connection changed; provider CLI commands are not replayed",
                 )
             } else {
                 ProtocolError::new(

@@ -757,7 +757,7 @@ provider or cleanup outcome from error text. Structured `command_not_found`
 with a validated bare command and matching machine displays “command is not
 installed on machine”, never the raw PATH or argv. A proven removed identity
 allows manual submission after fixing the command; unconfirmed identities remain
-blocked. Part 1 does not install provider CLIs or display an install button. If Core reports an unconfirmed or
+blocked. The Console never installs provider CLIs or displays an install button. If Core reports an unconfirmed or
 failed reservation cleanup, creation remains blocked and the draft is preserved.
 The explicit **Clean up reserved identity** confirmation uses the human-session
 reservation cleanup endpoint, with existing `agent.delete` Policy; Core rechecks
@@ -766,37 +766,6 @@ Old or offline Controllers and observed workloads fail visibly without claiming
 cleanup. Successful cleanup enables an explicit new submission; it never creates
 an Agent automatically. This requires the Core reservation-cleanup capability;
 the Web UI alone does not provide it.
-
-### Provider CLI installation (capability-gated)
-
-The machine overview's **Install agent CLIs** entry uses the human-session
-`machine.provider-cli-install.v2` capability for observed consent. An old Proxy
-hides the entry; a v1-only Controller's explicit refusal asks the operator to
-update that machine. There is no unobserved or generic-exec fallback. A structured `command_not_found` creation
-failure offers the same flow only for a unique, supported server-declared bare
-binary, on the selected machine, with the reserved identity proven removed.
-Unconfirmed reservations retain the explicit cleanup flow and block creation.
-
-Schema 1 (five-step plans) and schema 2 are accepted. Claude's schema 2
-nine-step plan additionally requires `machine.provider-cli-plan.v2` on the Proxy;
-without it the native recipe is hidden while legacy providers remain available.
-The browser validates each typed step, prefix reference, binary digest/size and
-lifecycle review before showing a confirmation. Unknown kinds fail closed.
-
-The Claude confirmation explicitly says the reviewed package postinstall runs
-under the machine account, shows its review hashes, required Node architecture,
-pinned version and time limit. Both archives are pinned; installation uses local
-tarballs offline and Core verifies the installed file and entry link before
-running its version probe. The review and hashes prove neither safe behavior nor
-a vendor signature. Noop still means self-reported version, not file integrity.
-A failed operation with `prefix_modified` warns to uninstall before retrying;
-Web offers neither automatic retry nor a version-probe button for that state.
-Native unknown outcomes and timeouts at/after the installation step
-show the same warning even if the server omitted the flag. A file-failure receipt
-must have failed status and the binary-mismatch code; inconsistent reports fail closed.
-Version mismatches can include incompatible runtimes such as musl and are not
-labelled corrupt downloads. Real sealed installation acceptance belongs to
-release/security; Web tests use synthetic responses and never run npm installs.
 
 Choosing a provider fetches Core's observation, current and pinned target versions,
 and authoritative action: install, replace or noop. A same-version noop has no

@@ -892,8 +892,6 @@ mod network;
 mod organizations;
 mod pins;
 pub(crate) use controller_update::*;
-mod provider_cli;
-pub(crate) use provider_cli::*;
 mod workload_tree;
 
 pub(crate) use handlers::*;
