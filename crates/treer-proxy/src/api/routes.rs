@@ -13,7 +13,6 @@ pub fn router(
     messages: MessageStore,
     rollout: CapabilityRollout,
     updater: UpdaterClient,
-    voice: VoiceServices,
 ) -> Router {
     let cors = browser.cors_layer();
     let bootstrap_for_hosts = bootstrap.clone();
@@ -730,18 +729,6 @@ pub fn router(
             "/api/workspaces/{workspace_id}/events",
             get(workspace_events),
         )
-        .registered_route(
-            "/api/workspaces/{workspace_id}/voice/asr",
-            get(voice_asr_status),
-        )
-        .registered_route(
-            "/api/workspaces/{workspace_id}/voice/asr/stream",
-            get(voice_asr_stream),
-        )
-        .registered_route(
-            "/api/workspaces/{workspace_id}/voice/command",
-            get(voice_command_status).post(voice_command),
-        )
         .registered_route("/api/auth/me", get(auth::me))
         .registered_route(
             "/api/auth/profile",
@@ -884,8 +871,6 @@ pub fn router(
         .layer(Extension(ingress))
         .layer(Extension(messages))
         .layer(Extension(updater))
-        .layer(Extension(voice.asr))
-        .layer(Extension(voice.llm))
         // Outermost: Host allowlist and route exclusivity in App-serving mode.
         .layer(middleware::from_fn_with_state(
             (bootstrap_for_hosts, ingress_for_hosts),

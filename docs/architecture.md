@@ -5,10 +5,8 @@ Treer separates durable coordination from machine-local process ownership.
 ```mermaid
 flowchart LR
     Web[Browser control plane] --> Proxy[Proxy]
-    VoiceClient[Optional Voice API client] -->|PCM ASR + utterance text| Proxy
     Proxy --> DB[(PostgreSQL)]
     Proxy <--> NATS[(NATS)]
-    Proxy --> VoiceLLM[Voice LLM upstream]
     Controller[Agent Server / Controller] <--> Proxy
     Controller <--> Host[Agent Host]
     Host --> Runtime[Agent runtime and PTY]
@@ -23,7 +21,7 @@ flowchart LR
 
 | Component | Owns |
 | --- | --- |
-| `treer-proxy` | Public API, authentication, Policy, App identity, PostgreSQL metadata, Core Message, routing, ingress, distributed coordination, Voice ASR proxy, and Voice command LLM |
+| `treer-proxy` | Public API, authentication, Policy, App identity, PostgreSQL metadata, Core Message, routing, ingress, and distributed coordination |
 | `treer-agent-server` | Machine Controller, authenticated CLI parser/business logic, local API, Proxy link, explicit TCP bridge, and launch snapshots |
 | `treer-agent-host` | Stable local child-process ownership and idempotent mutations |
 | `treer-agent-runtime` | PTY lifecycle, bounded output replay, and working-directory containment |
@@ -1601,19 +1599,6 @@ Operators must budget stored audit,
 outbox, indexes, WAL and backups separately.
 Legacy/local-auth enrollments without a durable workspace retain their existing
 behavior and have no organization audit attribution; no organization is invented.
-
-Hold-to-talk audio stays on the Proxy only long enough to forward 16 kHz PCM16
-to the configured ASR vendor. After a transcript is available, `POST
-/api/workspaces/{workspace_id}/voice/command` sends that text to an OpenAI
-Responses or Chat Completions upstream. The model receives
-[the voice skill](../skills/treer-voice/SKILL.md) and a compact roster, then
-calls a `treer` tool. The Proxy executes allowed CLI-equivalent commands
-(`status`, `whoami`, `machine list`, `agent ls|show|prompt|read`) in-process
-as the signed-in user and returns a speakable reply. Clients own recording,
-speech gating and presentation; the repository no longer ships native iOS/Android
-clients. Vendor ASR and LLM keys stay in Proxy environment variables. See
-[Voice configuration](operator-guide.md#voice-apis-opt-in). This is not the later
-confirm-card Voice Live protocol, and clients do not run the Treer CLI for it.
 
 Workspace access is either `organization` or `restricted`. The former admits
 every current organization member; the latter admits only direct user grants,

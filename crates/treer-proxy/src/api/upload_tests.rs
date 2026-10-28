@@ -329,7 +329,6 @@ async fn fixture() -> Fixture {
         messages,
         CapabilityRollout::all_enabled(),
         crate::updater::UpdaterClient::disabled(),
-        crate::voice::VoiceServices::disabled(),
     );
     Fixture {
         store: crate::upload_store::UploadStore::new(auth.pool()),

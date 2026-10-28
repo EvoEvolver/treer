@@ -41,8 +41,7 @@ A saved launch can be restored after machine restart with `treer-agent-server re
 
 Treer does not ship another Agent runtime. It coordinates the tools and
 environments you already use through the browser and CLI, including a responsive
-mobile browser interface. Native iOS/Android clients have been retired; optional
-[Voice APIs](docs/operator-guide.md#voice-apis-opt-in) remain in Core.
+mobile browser interface. Native iOS/Android clients have been retired.
 
 ## How it works
 

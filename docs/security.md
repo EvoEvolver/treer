@@ -1413,8 +1413,6 @@ not the bearer. Existing stored audit records are not rewritten by this change.
 | Platform admin session | Cookie scoped to `/api/admin`; separate from user accounts; aggregate counts/traffic, platform invitations and image updates; no user/machine/Agent/organization inventories or activity detail |
 | Updater token | Shared Bearer secret between Proxy and the Compose updater sidecar; never exposed to browsers |
 | Mail cookie | Local opaque handle to an App token; compromise of Mail state grants that token until expiry |
-| Voice ASR vendor key | Proxy process only (`TREER_VOICE_ASR_API_KEY` / `DASHSCOPE_API_KEY`); never client code |
-| Voice LLM vendor key | Proxy process only (`TREER_VOICE_LLM_API_KEY`); used for utterance-to-command; never client code |
 | Telegram bot token | One Telegram bot; Telegram and any process that can inspect it can act as the bot |
 | Release signing key | All official release manifests; must remain offline and outside runtime systems |
 

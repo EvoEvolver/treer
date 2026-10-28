@@ -43,7 +43,6 @@ impl HttpProxy {
             messages,
             CapabilityRollout::all_enabled(),
             crate::updater::UpdaterClient::disabled(),
-            crate::voice::VoiceServices::disabled(),
         );
         let listener = tokio::net::TcpListener::bind(address).await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());

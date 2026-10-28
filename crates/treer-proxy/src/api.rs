@@ -66,8 +66,6 @@ use crate::policy::{
 use crate::state::{AppState, SocketFrame, TERMINAL_BROWSER_QUEUE_CAPACITY};
 use crate::traffic::TrafficClass;
 use crate::updater::UpdaterClient;
-use crate::voice::{VoiceAsrConfig, VoiceServices};
-use crate::voice_llm::{self, VoiceCommandError, VoiceLlmConfig};
 mod policy_diagnostics;
 use policy_diagnostics::*;
 mod policy_publish_authority;
@@ -461,7 +459,6 @@ mod policy_provider;
 mod route_catalog;
 mod routes;
 pub(crate) use route_catalog::RegisteredRoutes;
-mod voice;
 mod workload_tree;
 mod workloads;
 mod workspaces;
@@ -478,7 +475,6 @@ use messages::*;
 use network::*;
 pub(crate) use network::{spawn_network_metadata_refresh, virtual_network_hosts_snapshot};
 use policy_provider::*;
-use voice::*;
 use workload_tree::*;
 use workloads::*;
 use workspaces::*;
@@ -495,7 +491,6 @@ pub fn router(
     messages: MessageStore,
     rollout: CapabilityRollout,
     updater: UpdaterClient,
-    voice: VoiceServices,
 ) -> Router {
     let provider_store = crate::policy_provider_store::PolicyProviderStore::new(auth_store.pool());
     routes::router(
@@ -510,7 +505,6 @@ pub fn router(
         messages,
         rollout,
         updater,
-        voice,
     )
 }
 

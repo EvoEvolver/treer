@@ -23,7 +23,7 @@ export function securityHeaders(proxyUrl: string, nonce: string, ingressUrl?: st
     'x-frame-options': 'DENY',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
-    // Do not disable microphone: the control plane may use Voice input.
+    // Do not disable microphone: Console-embedded Apps may need audio input.
   })
 }
 
