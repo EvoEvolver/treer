@@ -5,22 +5,18 @@ import { IssueDetail } from "./components/IssueDetail";
 import { IssueForm } from "./components/IssueForm";
 import { IssueList, layout, type View } from "./components/IssueList";
 import { SearchResults } from "./components/SearchResults";
-import { StaleList } from "./components/StaleList";
 import { AssigneePicker } from "./components/Picker";
 import { Ctx, type AppContext } from "./context";
-import { COLLAPSED_BY_DEFAULT, STATUSES, canEdit, issueFromHash, NOT_ALLOWED } from "./lib";
+import { COLLAPSED_BY_DEFAULT, STATUSES, issueFromHash } from "./lib";
 import type { Issue, IssueDetailResult, IssuePage, MutationResult, Principal, Route, Toast, ToastAction } from "./types";
 
 const NAV = {
-  "nav-all": { title: "All issues", glyph: "◉", status: "", mine: false, unresolved: false, view: "list" },
-  "nav-needs": { title: "Needs me", glyph: "◈", status: "", mine: true, unresolved: true, view: "list" },
-  "nav-mine": { title: "Assigned to me", glyph: "◎", status: "", mine: true, unresolved: false, view: "list" },
-  "nav-active": { title: "In progress", glyph: "◐", status: "in_progress", mine: false, unresolved: false, view: "list" },
-  "nav-stale": { title: "Stale", glyph: "◌", status: "", mine: false, unresolved: true, view: "stale" },
-  "nav-tree": { title: "Hierarchy", glyph: "⌥", status: "", mine: false, unresolved: false, view: "tree" },
+  "nav-all": { title: "All issues", glyph: "◉", mine: false, unresolved: false },
+  "nav-mine": { title: "Mine", glyph: "◎", mine: true, unresolved: true },
+  "nav-open": { title: "Open", glyph: "◐", mine: false, unresolved: true },
 } as const;
 type NavId = keyof typeof NAV;
-interface Filters { status: string; assignee: string; label: string; unresolved: boolean }
+interface Filters { status: string; assignee: string; label: string; unresolved: boolean; hidden: boolean }
 
 const resultNotice = (result: MutationResult) => {
   const n = result.notification;
@@ -31,8 +27,8 @@ const resultNotice = (result: MutationResult) => {
     const options = n?.mention_candidates?.[m];
     return options?.length ? `@${m} (ambiguous: ${options.map((o) => "@" + o).join(" or ")})` : `@${m}`;
   });
-  const tips = (n?.hints ?? []).map((h) => h.tip);
-  return [missed.length ? `${base} · not notified: ${missed.join(", ")}` : base, ...tips].join(" · ");
+  const woken = Object.entries(n?.wake ?? {}).filter(([, outcome]) => outcome === "prompted" || outcome === "pending").length;
+  return [missed.length ? `${base} · not notified: ${missed.join(", ")}` : base, ...(woken ? [`${woken} Agent${woken > 1 ? "s" : ""} woken`] : [])].join(" · ");
 };
 
 export function App() {
@@ -40,7 +36,7 @@ export function App() {
   const [ready, setReady] = useState(false), [needLogin, setNeedLogin] = useState(false);
   const [items, setItems] = useState<Issue[]>([]), [hasMore, setHasMore] = useState(false);
   const [nav, setNav] = useState<NavId>("nav-all"), [view, setView] = useState<View>("list");
-  const [filters, setFilters] = useState<Filters>({ status: "", assignee: "", label: "", unresolved: false });
+  const [filters, setFilters] = useState<Filters>({ status: "", assignee: "", label: "", unresolved: false, hidden: false });
   const [labelDraft, setLabelDraft] = useState(""), [search, setSearch] = useState(""), [deep, setDeep] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<(typeof STATUSES)[number]>>(new Set(COLLAPSED_BY_DEFAULT));
   const [route, setRoute] = useState<Route>(() => { const id = issueFromHash(); return id ? { kind: "issue", id } : { kind: "none" }; });
@@ -62,6 +58,7 @@ export function App() {
     const params = new URLSearchParams({ limit: "100", offset: reset ? "0" : String(nextOffset.current ?? 0) });
     for (const key of ["status", "assignee", "label"] as const) if (filtersRef.current[key]) params.set(key, filtersRef.current[key]);
     if (filtersRef.current.unresolved) params.set("unresolved", "1");
+    if (filtersRef.current.hidden) params.set("hidden", "1");
     const seq = ++loadSeq.current;
     const result = await api<IssuePage>("v1/issues?" + params);
     if (seq !== loadSeq.current) return;
@@ -111,7 +108,7 @@ export function App() {
     const directory = await api<{ principals: Principal[]; paths?: string }>("v1/directory");
     setPeople(directory.principals);
     setReady(true);
-    notify("Workspace collaboration · Core Message notifications are best effort; check activity for delivery status."
+    notify("Assign an Agent or @mention it to notify and wake it; delivery is shown on each activity entry."
       + (directory.paths === "supported" ? "" : " This Treer Proxy does not report Agent tree paths yet; Agents are shown by stable ID."));
   }); }, []);
   useEffect(() => { if (ready) void run(() => load(true)); }, [ready, filters]);
@@ -159,8 +156,7 @@ export function App() {
       else if ((key === "Enter" || key === "o") && focused && !target.closest(".issue-line")) { event.preventDefault(); open(focused.id); }
       else if (key === "x" && focused) {
         event.preventDefault();
-        if (focused.status === "closed") return;
-        if (canEdit(me, focused)) void closeIssue(focused); else notify(NOT_ALLOWED);
+        if (focused.status !== "closed") void closeIssue(focused);
       }
       else if (key === "e" && route.kind === "issue" && detail?.issue.id === route.id) { event.preventDefault(); startEdit(detail.issue); }
       else if (key === "Escape" && route.kind !== "none") back();
@@ -172,9 +168,8 @@ export function App() {
   const applyNav = (id: NavId) => {
     const spec = NAV[id];
     setNav(id);
-    setFilters({ status: spec.status, assignee: spec.mine && me ? me.id : "", label: "", unresolved: spec.unresolved });
+    setFilters((f) => ({ status: "", assignee: spec.mine && me ? me.id : "", label: "", unresolved: spec.unresolved, hidden: f.hidden }));
     setLabelDraft("");
-    setView(spec.view);
     setDeep(null);
   };
   const commitLabel = () => setFilters((f) => f.label === labelDraft.trim() ? f : { ...f, label: labelDraft.trim() });
@@ -248,11 +243,13 @@ export function App() {
                 <option value="list">List</option><option value="tree">Hierarchy tree</option>
               </select>
             </label>
+            <label className="check"><input id="filter-hidden" type="checkbox" checked={filters.hidden}
+                onChange={(e) => setFilters((f) => ({ ...f, hidden: e.target.checked }))} /> Hidden issues</label>
           </div>
           <div className="workspace">
             <section id="collection" aria-label="Issue list">
-              <div id="list">{deep !== null ? <SearchResults q={deep} clear={() => setDeep(null)} /> : view === "stale" ? <StaleList /> : <IssueList visible={visible} view={view} collapsed={collapsed} toggle={toggleGroup} filterStatus={filters.status} route={route} focusId={focusId} />}</div>
-              <button id="more" type="button" hidden={!hasMore || view === "stale"} onClick={() => run(() => load(false))}>Load more</button>
+              <div id="list">{deep !== null ? <SearchResults q={deep} clear={() => setDeep(null)} /> : <IssueList visible={visible} view={view} collapsed={collapsed} toggle={toggleGroup} filterStatus={filters.status} route={route} focusId={focusId} />}</div>
+              <button id="more" type="button" hidden={!hasMore} onClick={() => run(() => load(false))}>Load more</button>
             </section>
             <section id="detail" aria-label="Issue detail">{pane}</section>
           </div>

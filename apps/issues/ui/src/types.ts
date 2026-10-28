@@ -2,25 +2,18 @@ export type Status = "open" | "in_progress" | "blocked" | "done" | "closed" | "n
 export type Priority = "low" | "normal" | "high" | "urgent";
 
 export interface Principal { id: string; kind: "human" | "agent"; name: string; role?: string; path?: string | null }
-export interface Claim { holder: string; expires_at: string }
+export interface Hidden { by: string; at: string }
 export interface Progress { total: number; completed: number; truncated?: boolean; by_status: Record<string, number> }
 export interface Issue {
   id: number; title: string; description: string; status: Status; priority: Priority; labels: string[];
   assignee: string | null; parent_id: number | null; parent_ids?: number[]; blocked_by: number[]; creator: string;
-  created_at: string; updated_at: string; version: number; claim: Claim | null;
+  created_at: string; updated_at: string; version: number; hidden: Hidden | null;
   progress: Progress; unresolved_dependencies: number[];
-  waiting_on?: string | null; waiting_by?: string | null; waiting_at?: string | null;
 }
-export interface StaleIssue {
-  id: number; title: string; status: Status; assignee: string | null; responsible: string | null; responsible_kind: string;
-  waiting_on: string | null; waiting_by: string | null; waiting_at: string | null; stale_hours: number;
-  since_any_activity_hours: number; progress_reason: string; progress_resets: number;
-}
-export interface StaleResult { issues: StaleIssue[]; total: number; hours: number; next_offset: number | null }
-export interface Notification { status: string; code?: string; message?: string; unresolved_mentions?: string[]; mention_candidates?: Record<string, string[]>; hints?: { agent: string; delivery: string; tip: string }[] }
+export interface Notification { status: string; code?: string; message?: string; wake?: Record<string, string>; unresolved_mentions?: string[]; mention_candidates?: Record<string, string[]> }
 export interface ActivityEvent {
   id: number; actor: string; kind: string; at: string; summary: string;
-  changes?: Record<string, unknown>; body?: string; title?: string; body_bytes?: number; notification: Notification;
+  changes?: Record<string, unknown>; body?: string; title?: string; body_bytes?: number; notification: Notification; hidden?: Hidden;
 }
 export interface Backlink { issue: { id: number; title: string; status: Status }; source: string; event_id: number | null; author: string; at: number }
 export interface IssueDetailResult {

@@ -38,8 +38,8 @@ export function IssueForm({ issue, parent, done, cancel }: {
       <h2>{issue ? "Edit issue" : "New issue"}</h2>
       <form className="form" onSubmit={submit}>
         <Field text="Title"><input aria-label="Title" ref={title} required maxLength={300} value={state.title} onChange={set("title")} /></Field>
-        <Field text="Description (Markdown source, rendered as text)">
-          <textarea aria-label="Description (Markdown source, rendered as text)" value={state.description} onChange={set("description")}></textarea>
+        <Field text="Description (Markdown)">
+          <textarea aria-label="Description (Markdown)" value={state.description} onChange={set("description")}></textarea>
         </Field>
         <PickerField text="Assignee"><AssigneePicker value={state.assignee} onChange={(assignee) => setState((s) => ({ ...s, assignee }))} /></PickerField>
         <Select<Priority> text="Priority" values={PRIORITIES} value={state.priority} onChange={(priority) => setState((s) => ({ ...s, priority }))} />
