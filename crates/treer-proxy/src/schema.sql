@@ -969,3 +969,7 @@ DROP TABLE IF EXISTS controller_update_previews, controller_update_attempts,
 
 -- The former Managed App email route tables.
 DROP TABLE IF EXISTS app_email_sends, app_email_attempts;
+
+-- The former Console provider CLI install tables.
+DROP TABLE IF EXISTS provider_cli_prepare_attempts, provider_cli_operations,
+    provider_cli_install_tokens;
