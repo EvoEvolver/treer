@@ -1,22 +1,19 @@
 # Treer Mail App
 
-Mail is a small HTTP service and React frontend over Core Message. It uses
-Treer's standard App OAuth flow; the local HttpOnly cookie maps to the returned
-short-lived App access token. Core remains the canonical store for Messages,
-contexts, deliveries, and acknowledgements.
+Mail is a small HTTP service and React frontend over Core Message. Humans read
+and send Messages through it; Core remains the canonical store for Messages,
+contexts, deliveries and acknowledgements. The App root `/` negotiates between
+a Markdown manual for Agents ([AGENT.md](AGENT.md)) and the browser UI.
 
-The App index `/` negotiates between a Markdown manual for Agents and the
-browser UI. Its App OAuth callback remains `/api/auth/callback`.
-
-Build the frontend:
+## Build and run
 
 ```sh
 cd apps/mail/web
 pnpm install --frozen-lockfile
-pnpm build
+pnpm build          # writes web/dist
 ```
 
-Create a JSON config matching `config.schema.json`, then run:
+Create a JSON config, then run:
 
 ```sh
 TREER_APP_CONFIG=/etc/treer/mail.json \
@@ -24,33 +21,56 @@ TREER_APP_STATE_DIR=/var/lib/treer/apps/mail \
 python3 apps/mail/mail.py
 ```
 
-`service_id` must identify the registered HTTP service and `public_url` must be
-an enabled workspace ingress for it. `proxy_public_url` is the public Proxy URL.
-The state directory stores only pending PKCE requests and browser cookie/token
-mappings; protect and back it up like any application credential store.
+Both environment variables are required. Config keys:
 
-For a legacy Mail database, stop old writes, back it up, and run `migrate.py`
-with an operator-authenticated `treer` CLI. The import is resumable and does not
-modify the source database. Existing browser sessions require a new login.
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `service_id` | yes | Registered HTTP service (`svc_…`) for this App |
+| `public_url` | yes | Enabled workspace ingress for that service; OAuth callback root |
+| `proxy_public_url` | yes | Public Proxy URL |
+| `listen` | no (`127.0.0.1:8788`) | HTTP listener |
+| `web_dir` | no (`web/dist`) | Built frontend |
+| `workspace_id` | no | Pins the accepted workspace |
+| `browser_origins` | no | Extra trusted browser origins (e.g. a tunnel origin) |
+
+`config.schema.json` documents the first five keys; it does not yet list
+`workspace_id` or `browser_origins`, which `mail.py` accepts.
+
+`migrate.py` imports a database from the old standalone Mail into Core Message
+with an operator-authenticated `treer` CLI (resumable; the source is not
+modified).
+
+## Routes
+
+- `GET /api/health`, `GET /api/config`
+- `GET /api/auth/start`, `GET /api/auth/callback`, `GET /api/auth/session`,
+  `POST /api/auth/logout`
+- `GET /api/directory`
+- `GET /api/messages` (recent history), `POST /api/messages` (send; optional
+  `Idempotency-Key` header), `POST /api/inbox` (unread)
+
+`GET /api/messages` also acknowledges the visible Core deliveries, so it is not a
+side-effect-free read.
 
 ## Authentication and local security
 
-Supplied `X-Treer-Identity-Token` is verified per request before Bearer or OAuth
-cookie fallback; invalid supplied identity never falls back to a valid cookie.
-Mail accepts human principals with the App audience/current workspace membership.
-Optional `workspace_id` pins the workspace explicitly. Browser mutations require
-JSON, reject cross-site Fetch Metadata and compare Origin with `public_url`, `proxy_public_url` and
-explicit `browser_origins` (for any additional explicitly trusted tunnel origin).
-OAuth state is paired with an expiring HttpOnly SameSite browser nonce; older
-pending logins must restart. Upstream authenticated redirects are refused.
+A supplied `X-Treer-Identity-Token` is verified per request before Bearer or the
+OAuth cookie; an invalid supplied identity never falls back to a valid cookie.
+Mail accepts human principals with this App's audience and current workspace
+membership. Browser mutations require JSON, reject cross-site Fetch Metadata and
+compare Origin with `public_url`, `proxy_public_url` and `browser_origins`.
+OAuth state is paired with an expiring HttpOnly SameSite browser nonce.
+Authenticated upstream redirects are refused.
 
-Use a dedicated state directory: startup tightens it to 0700 and the session
-database to 0600, with private SQLite sidecars. The database contains plaintext
-OAuth tokens: encrypt disks/backups and restrict backup permissions. Managed
-Apps share their OS account's authority; use a separate unprivileged user or
-container/VM on machines running critical services. No comprehensive per-user
-rate/concurrency limit or encryption-at-rest is provided by Mail itself.
+The state directory holds pending PKCE requests and browser-cookie-to-token
+mappings in SQLite. Startup tightens the directory to 0700 and the database to
+0600. The tokens are plaintext: encrypt disks and backups and restrict backup
+permissions. Same-UID processes are not isolated; use a separate unprivileged
+user or container/VM on machines running critical services. Mail has no
+per-user rate limit.
 
-Known read-state limitation: `GET /api/messages` currently acknowledges visible
-Core deliveries. It should be replaced by an explicit protected POST read action;
-the current GET is not a strictly side-effect-free inspection endpoint.
+## Test
+
+```sh
+python3 -m unittest discover -s apps/mail/tests -p 'test_*.py' -v
+```

@@ -1,14 +1,14 @@
-# Soul v2
+# Soul
 
-Soul is a Managed App for immutable, versioned Claude/Codex session snapshots.
-Humans browse their visible snapshots, inspect manifests, copy incarnation
-commands and delete their own snapshots. Agents use a standalone `treer-soul`.
-It never creates Agents with the Soul service's authority.
+Soul is an experimental Managed App for immutable, versioned Claude/Codex
+session snapshots. Humans browse their visible snapshots, inspect manifests,
+copy incarnation commands and delete their own snapshots. Agents use the
+standalone `treer-soul` client. The server never creates Agents; incarnation
+runs under the caller's own authority. The wire contract is [API.md](API.md);
+the Agent manual is [AGENT.md](AGENT.md).
 
 ## Deploy and configure
 
-Deploy only after backing up and reviewing the migration below. This repository
-change does not deploy, migrate or restart the existing `/infra/soul` App.
 Use Workspace access, never `--public`:
 
 ```sh
@@ -17,221 +17,133 @@ treer app create --machine self --name soul --cwd . --port 9420 \
   python3 apps/soul/soul.py
 ```
 
-`SOUL_SERVICE_ID` and `SOUL_WORKSPACE_ID` may explicitly configure identity.
-Otherwise the server discovers its own Managed App by matching its injected
-runtime Agent ID in `treer app list`; it does not accept an audience from clients.
-Configure `SOUL_PUBLIC_URL` for a direct origin or embedded tunnel root when
-explicit identity is used. Auto discovery uses the App public URL or canonical
-`/api/workspaces/W/apps/ID/ui/` fallback. OAuth callbacks require a registered
-callback origin; forwarded human identity works without wildcard ingress.
+Without `SOUL_SERVICE_ID`/`SOUL_WORKSPACE_ID`, the server discovers its own
+Managed App by matching its injected runtime Agent ID in `treer app list`; it
+never takes an audience from clients. Discovery uses the App's public URL or the
+`/api/workspaces/W/apps/ID/ui/` tunnel root. Set `SOUL_PUBLIC_URL` when identity
+is configured explicitly. Forwarded human identity works without wildcard
+ingress; the OAuth fallback needs a registered callback origin.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| SOUL_LISTEN | 127.0.0.1:9420 | HTTP listener |
-| SOUL_DATA_DIR | .treer/apps/soul | Private database, blobs, temporary uploads |
-| SOUL_PROXY_URL | TREER_PROXY_URL | Trusted Proxy origin; required |
-| SOUL_SERVICE_ID | own Managed App discovery | Verify audience |
-| SOUL_WORKSPACE_ID | TREER_WORKSPACE_ID / discovery | Workspace scope |
-| SOUL_PUBLIC_URL | http://soul.internal / discovery | Installer/OAuth root |
-| SOUL_MAX_UPLOAD_BYTES | 67108864 | Compressed/tar request limit |
-| SOUL_OWNER_MAX_COUNT | 10000 | Active snapshots per owner |
-| SOUL_OWNER_MAX_BYTES | 10737418240 | Logical expanded bytes per owner |
-| SOUL_CLIENT_PATH | bundled client.py source | Source for standalone artifact |
-| TREER_BIN | treer | Own identity discovery only; never Agent creation |
+| `SOUL_LISTEN` | `127.0.0.1:9420` | HTTP listener |
+| `SOUL_DATA_DIR` | `.treer/apps/soul` | Private database, blobs, temporary uploads |
+| `SOUL_PROXY_URL` | `TREER_PROXY_URL` | Trusted Proxy origin; required |
+| `SOUL_SERVICE_ID` | own Managed App discovery | Verify audience |
+| `SOUL_WORKSPACE_ID` | `TREER_WORKSPACE_ID` / discovery | Workspace scope |
+| `SOUL_PUBLIC_URL` | discovery, else `http://soul.internal` | Installer/OAuth root |
+| `SOUL_MAX_UPLOAD_BYTES` | `67108864` | Compressed/tar request limit |
+| `SOUL_OWNER_MAX_COUNT` | `10000` | Active snapshots per owner |
+| `SOUL_OWNER_MAX_BYTES` | `10737418240` | Logical expanded bytes per owner |
+| `SOUL_CLIENT_PATH` | bundled `client.py` | Source for the served client |
+| `TREER_BIN` | `treer` | Own identity discovery only |
 
-Run one server process per data directory. An exclusive lock prevents concurrent
-servers; a process lock and SQLite transactions serialize versions/quota/deletion.
-The server uses Python standard library only, no frontend build step.
+Run one server per data directory (an exclusive lock enforces it). The server is
+Python standard library only, with no frontend build step.
 
 ## Save and incarnate
-
-Install the actual single-file CLI (generated with the small session/scanner
-modules embedded, SHA-256 checked before atomic installation):
 
 ```sh
 curl -fsSL http://soul.treer/install.sh | sh
 treer-soul save --harness claude --name leader-state
 treer-soul save --harness codex --session self --name leader-state
-# New Agents have different identities: sharing must be explicit.
 treer-soul save --harness claude --name leader-state --visibility workspace
 treer-soul incarnate leader-state --machine target-machine
 ```
 
-`save` accepts `--session UUID`, `--cwd DIR`, `--parent SOUL_ID`, `--label TEXT`,
-`--reader STABLE_ID`, `--visibility private|workspace`, `--redact/--no-redact`
-and `--allow-secrets`. Redaction defaults on, changes only private temporary
-copies, preserves JSONL structure and reports aggregate counts. `--no-redact`
-still encounters server secret rejection unless `--allow-secrets` is explicit.
-`capture-codex` remains an alias. `upload --manifest ... --file PATH=LOCAL` remains
-for generic environment-bound archives. `list`, `show NAME_OR_ID[@VERSION]` and
-`delete NAME_OR_ID[@VERSION]` output JSON. Default name resolution is latest;
-ID pins a specific immutable snapshot. List supports `--name`, `--harness`,
-`--owner`, `--limit`, `--offset`; follow next_offset until null.
+`save` accepts `--session UUID|self`, `--cwd DIR`, `--parent SOUL_ID`,
+`--label TEXT`, `--reader STABLE_ID`, `--visibility private|workspace`,
+`--redact/--no-redact` and `--allow-secrets`. Redaction is on by default and
+changes only private temporary copies. `capture-codex` is an alias for
+`save --harness codex`. `upload --manifest ... --file PATH=LOCAL` stores generic
+archives. `list` (`--name`, `--harness`, `--owner`, `--limit`, `--offset`; follow
+`next_offset`), `show NAME_OR_ID[@VERSION]` and `delete NAME_OR_ID[@VERSION]`
+print JSON. A name resolves to its latest version; an ID pins a snapshot.
 
-Self selection first asks its own Controller-registered AIS for the current thread,
-then reads its own Agent-private saved thread or confirmed native session
-environment ID. It never infers self from a shared cwd or selects the newest
-session; missing authority needs an explicit --session. Claude captures project JSONL, project `memory/`, and `CLAUDE.md`.
-Codex captures its rollout; the current launcher transfer allowlist deliberately
-excludes shell snapshots because they can contain machine credentials. Legacy
-archives retain their snapshot file, which is never imported or executed.
-Codex save output explicitly reports `omitted=["shell_snapshot"]`. There is no
-option to include shell snapshots; the launcher allowlist remains authoritative.
-The legacy `--include-shell-snapshot` argument is rejected as unknown. The upload
-`--allow-secrets` flag does not change session export selection. No auth/config credential
-files are exported. Launcher consistency checks reject changing source files; original sessions
-are never modified. `soul_sessions.py` is a thin bridge to the launcher-owned session export/import
-CLI. Native file selection, consistency and rebasing belong to launcher adapters.
-Soul validates the transfer bundle, decodes files into the tar so server scanning
-sees actual bytes, and reconstructs checksums after redaction before import.
-A launcher with session-transfer support must be installed on source and target.
+`--session self` asks the Agent's own registered Agent Interface for its current
+thread, then its saved native session ID; it never guesses from a shared cwd.
+Claude snapshots contain project JSONL, project `memory/` and `CLAUDE.md`; Codex
+snapshots contain the rollout. Shell snapshots and auth/config credential files
+are never exported. Source sessions are not modified.
 
-Incarnation resolves the version first, then uses read-only `treer exec --machine`
-to inspect harness executable/version, existence of login material, installed
-launcher and free disk. It never reads or displays credential contents. Missing
-requirements/old versions refuse creation; `--force` explicitly proceeds with
-warnings. Current minimum tested contract: Codex 0.149.0 / Claude 2.0.0; this is
-a conservative compatibility floor, not proof of native session portability.
-Creation runs `treer agent admin create` under the caller's own authority.
-`--folder F` is optional; omitting it retains the caller's current tree folder.
-A private Soul cannot be handed to a brand-new unknown identity: the client
-refuses before creating and suggests an explicitly workspace-visible new version.
+`incarnate` resolves the version, then uses read-only `treer exec --machine` to
+check the harness executable/version (minimum Codex 0.149.0, Claude 2.0.0),
+presence of login material, the installed launcher and free disk, without
+reading credential contents. Missing requirements refuse unless `--force` is
+given. It then runs `treer agent admin create` as the caller (`--folder F`
+optional, `--name` optional). A private Soul cannot be handed to a new identity;
+save a workspace-visible version instead.
 
-The target downloads the single-file client, acquires its own fresh Soul token,
-verifies archive size/hash and restores declaratively from manifest.adapter.
-Each incarnation receives a new native session UUID (the source UUID remains in
-snapshot metadata), preventing global resume from selecting an unrelated original.
-Each Agent has its own `~/.local/state/treer-soul/AGENT_ID/workspace` and restore
-marker. Startup after completed restoration never downloads/reimports or overwrites
-new learning. Claude uses the dedicated cwd's unique project directory and memory;
-Codex/Claude storage selectors come from the launcher import result and must
-remain inside the dedicated Agent directory, except Claude may select exactly
-the target's already configured local Claude home while creating a separate
-project keyed to the new cwd. Unrelated external config paths are rejected. Provider login remains machine-local
-and is handled by the launcher adapter; Soul never exports or reads credentials. Shell snapshots are
-archival only; Soul never executes them. Generic souls support an explicit command after `--`.
+The new Agent downloads the client, gets its own Soul token, verifies archive
+size/hash and restores into `~/.local/state/treer-soul/AGENT_ID/workspace`
+(`TREER_SOUL_STATE_DIR` overrides) with a new native session UUID. After a
+completed restore, restarts never re-import or overwrite later work.
+`TREER_SOUL_URL` overrides the server URL (default `http://soul.treer`);
+`TREER_SOUL_SERVICE` (default `soul`) names the service for `treer token create`.
 
-Launcher path comes from `TREER_AGENT_LAUNCHER`, or
-`TREER_AGENT_INSTALL_ROOT/current`, or
-`whoami.machine.root/.treer/launchers/agent/current`. It invokes
-`launchers/agent/scripts/treer-agent.sh --harness H --session-id ID --cwd DIR`.
-Install the unified launcher on target first; no source-machine path is embedded.
-`TREER_SOUL_STATE_DIR` overrides restore storage; `TREER_SOUL_SERVICE` defaults to
-`soul` for `treer token create`; `TREER_SOUL_URL` overrides the installed URL.
+Native session export/import is delegated to the Agent launcher. The client
+locates it through `TREER_AGENT_LAUNCHER`, `TREER_AGENT_INSTALL_ROOT/current`, or
+`<machine root>/.treer/launchers/agent/current`, and looks for
+`treer-agent.sh` with a sibling `session.sh`. The current launcher ships
+`scripts/treer-agent.mjs` (with a `session` subcommand) instead, so native
+save/incarnate works only when `TREER_AGENT_LAUNCHER` points at an executable
+that provides that layout. Generic souls (`upload`) are unaffected.
 
-## Permissions, scanning and API
+## Permissions and scanning
 
-The complete wire contract is [API.md](API.md). Every `/v1/` request verifies the
-supplied token through `/.treer/apps/identity/verify`, requiring active identity,
-this service audience/workspace and current directory membership. Authentication
-order: injected X-Treer-Identity-Token, explicit Bearer, then human OAuth session.
-Invalid supplied headers never fall back to cookies. OAuth uses PKCE plus a
-separate 10-minute HttpOnly/SameSite=Lax browser correlation cookie, stored hashed
-alongside state; callback validates the initiating browser before consuming code.
-Missing/wrong cookies cannot consume another browser's flow or clear its valid
-correlation cookie; successful or matched-expired callbacks clear cookies and
-replay fails. Unbound old OAuth flows are
-invalidated on upgrade. No local account system and
-no trusted caller ID/name/role fields. Human mutations require X-Soul-Request: 1;
-all browser writes check Origin against configured App/Proxy origins and reject
-cross-site Fetch Metadata. Manuals, installer, client assets and health are public;
-all snapshot data, lists, archives, manifests and usage require authentication.
+Every `/v1/` request verifies its token through `/.treer/apps/identity/verify`
+(active identity, this service and workspace, current membership). Order:
+injected `X-Treer-Identity-Token`, explicit Bearer, then human OAuth session;
+an invalid supplied header never falls back to a cookie. OAuth uses PKCE plus a
+10-minute HttpOnly/SameSite=Lax browser nonce. Human mutations require
+`X-Soul-Request: 1`; browser writes check Origin and Fetch Metadata. Manuals,
+installer, client and health are public; all snapshot data requires
+authentication.
 
-New snapshots default private. Owner can read/delete; workspace visibility grants
-members read access; readers grants selected directory principals read access.
-Only owner can delete, including when other humans have admin roles. Content,
-labels and ACL are immutable: upload a new snapshot to change them. Parent must
-be readable and owned by the caller or legacy. Versions monotonically increase
-per owner/name, including deleted versions. Listings expose only visible records
-and show the caller's active logical usage. Quotas charge expanded bytes including
-manifest, independently of physical deduplication.
+Snapshots default to private. The owner can read and delete; `workspace`
+visibility grants members read access; `--reader` grants selected principals
+read access. Only the owner can delete. Content, labels and ACL are immutable.
+Versions increase monotonically per owner/name. Quotas charge expanded bytes,
+independent of blob deduplication.
 
-Server scans every regular file, including manifest and unbound files. Patterns
-cover Treer workload/enrollment/machine credentials, sk-/GitHub tokens, Bearer,
-JWT, private keys, AWS key IDs and password/secret/api_key assignments. A hit
-rejects with 422 and category/count only, never matched content. Explicit
-allow_secrets still scans and permanently marks contains_secrets plus counts.
-This conservative pattern scanner can have false positives and cannot detect
-all secrets (encoded, fragmented or unknown formats); redaction is best effort.
-Treat transcripts and server state as sensitive even when no hits are detected.
+The server scans every file for Treer credentials, `sk-`/GitHub tokens, Bearer
+values, JWTs, private keys, AWS key IDs and password/secret/api_key
+assignments. A hit returns 422 with categories and counts only. `allow_secrets`
+still scans and marks the snapshot `contains_secrets`. Scanning and redaction are
+heuristic; encoded or unknown secret formats can be missed. Treat all snapshots
+as sensitive.
 
-DELETE retains a small ID/owner/name/version/deletion tombstone, frees quota and
-removes unreferenced blobs. Shared blobs remain until their last active reference
-is deleted. No undelete or background retry. Server `/incarnations` always returns
-410 incarnate_deprecated to authenticated callers and never invokes create.
-Remove all agent.admin.create permissions from the service's Policy.
+DELETE keeps a small tombstone, frees quota and removes unreferenced blobs.
+`/v1/souls/ID/incarnations` always returns 410 `incarnate_deprecated`; the
+service needs no `agent.admin.create` permission.
 
-## Migration, backup and rollback
+## Storage and backup
 
-Leader/operator performs deployment and migration with the old server stopped.
-Never migrate a live directory. On first v2 start with legacy `souls/ID.json` and
-`ID.tar`, the server creates a complete sibling `DATA.pre-v2-UUID` backup **before
-creating its database or altering files**, prints its path, and imports all records
-in one SQLite transaction. IDs, manifest and file bytes remain compatible. Records
-become owner=legacy, visibility=workspace, created_by=legacy. Existing authenticated
-Agent download/startup routes remain usable; legacy snapshots cannot be deleted
-through API. Current metadata supplies reconstructed archive checksum/size.
-Post-commit cleanup removes original archive/metadata files and unreferenced blobs;
-interrupted cleanup is safe to resume. Failed migration preserves originals and
-backup; restore the backup before retrying rather than manually editing SQLite.
+Stop the server, copy the **entire** data directory and deployment configuration
+to private backup storage, then restart; a database-only copy omits blobs.
+Restore the complete copy while stopped. A data directory from the earlier
+file-based Soul is imported on first start after a sibling `DATA.pre-v2-UUID`
+backup is written; never import a live directory. Backups are plaintext and may
+contain secrets: restrict and encrypt them. Deletion is logical cleanup, not
+secure erasure.
 
-Rollback: stop v2, move its data directory aside, copy the complete announced
-pre-v2 backup to the original data path, deploy the old code and start it. New v2
-uploads/deletes are not represented in the old backup; retain the moved directory
-for recovery. Backups contain secrets and are deliberately not cleaned by DELETE.
-Restrict backup access and retention separately.
+## Limits
 
-Routine backup: stop the server, copy **the entire data directory** and deployment
-configuration to private backup storage, then restart. Database-only backups omit
-blobs. Restore the complete copy while stopped. SQLite uses secure_delete for
-metadata cleanup; filesystem snapshots/backups/SSD retention are outside the App's
-control. This is logical cleanup, not a secure-erasure guarantee.
+Tar preflight bounds the complete decoded stream (plain, gzip, bzip2, xz; no
+zip) before parsing. Archive processing is in memory per bounded request; quotas
+are per owner, not a workspace disk cap. A failed first import can leave partial
+Agent-local native storage; move it aside before retrying. Same-UID Apps and
+administrators can read data regardless of App ACLs; use a dedicated
+unprivileged user or container/VM on critical-service machines.
 
-## Checks and limits
+## Checks
 
 ```sh
 python3 apps/soul/tests/test_soul.py
 python3 apps/soul/tests/test_client.py
 SOUL_PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node --test apps/soul/tests/browser.mjs
-SOUL_TEST_SESSION_CLI=/path/to/launchers/agent/scripts/session.sh \
-  python3 apps/soul/tests/test_launcher_integration.py
+SOUL_TEST_SESSION_CLI=/path/to/session-cli python3 apps/soul/tests/test_launcher_integration.py
 ```
 
-Tests allowlist subprocess environments, use temporary HOME/TMP/state, fake Treer
-and local identity Proxy. They never create a real Agent or access a real machine.
-Three opt-in tests also use the actual launcher session CLI with temporary fake
-Claude/Codex files: export/redaction/import/restart and legacy Codex migration,
-without a provider process or real login. Browser tests reproduce automatic forwarded identity in direct ingress and embedded
-tunnel paths at desktop/390px with light/dark themes, manifest text/XSS, owner delete
-and screenshots. Mock identity verification is not production issuer coverage;
-Proxy identity signing is covered by the separate core tests. Real `/infra/soul`
-deployment/migration/remote-machine acceptance remains the leader's responsibility.
-
-Native session formats vary by harness/version; JSONL includes historical source
-paths even though structured cwd is rebased for restore. Claude project storage is
-isolated by cwd, not an OS sandbox. Provider login remains target-local and may change independently of the snapshot. Missing self session identity needs explicit --session.
-No cross-owner mutable sharing, refresh tokens, background migration, scheduling,
-secure disk erase, or remote download cache. Response/archive materialization and
-list filtering currently use bounded-request in-memory processing; quotas are
-single-process and per owner, not a workspace-wide disk cap. File blob dedup is
-implemented; append-only JSONL delta chains are deferred to keep snapshots simple.
-A failed first import can leave partial Agent-local native storage; the launcher
-refuses overwrites. Inspect/move that dedicated native directory aside before
-retrying; a successful marker prevents all later reimport. Restore targets must
-be App-owned private directories, not user-supplied symlinks.
-
-## Security review limits
-
-Tar preflight bounds the **complete decoded stream**, including PAX/GNU metadata
-and padding, before parsing. Plain tar, gzip, bzip2 and xz are supported; other
-automatic compression formats are rejected. Tar overhead counts against the
-expanded-size cap. This complements path/link/member checks and does not supply
-global CPU, connection or rate isolation. Zip archives are unsupported.
-
-Secret scanning/redaction is heuristic: encoded (including base64/JSON unicode),
-compressed, custom or semantic secrets may be missed. An archive without a
-secret marker is not certified secret-free. Do not upload live credentials.
-Data and migration backups are plaintext; retain private directory/backup
-permissions and use encrypted disks/backups. Same-UID Apps and administrators
-can read data regardless of App ACLs. Deploy under a dedicated unprivileged user
-or container/VM with minimal mounts and quotas on critical-service machines.
+Tests use temporary HOME/state, a fake Treer and a local identity Proxy; they
+never create a real Agent or contact a real machine.

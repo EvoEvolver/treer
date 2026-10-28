@@ -1,10 +1,12 @@
 # TOWER App
 
-TOWER is an experimental workspace App implementing the evidence archive at the
-base of tiered Agent oversight. The first version captures ACP JSON-RPC frames,
-stores them as a content-addressed prefix DAG, and accepts immutable reviewer
-findings linked to exact source events. It does not capture hidden chain of
-thought or independently prove external tool execution.
+TOWER is an experimental append-only evidence archive for Agent traces. It
+stores JSON-RPC (ACP-shaped) frames as a content-addressed prefix DAG and
+accepts immutable reviewer findings linked to exact source events. It does not
+capture hidden chain of thought or prove external tool execution.
+
+No bundled launcher sends traces to TOWER; producers post batches to
+`/v1/ingest` themselves. The Agent manual is [AGENT.md](AGENT.md).
 
 ## Deploy
 
@@ -20,56 +22,41 @@ treer app create --machine self --name tower --cwd treer --port 9460 \
 treer app show /tower
 ```
 
-Keep the token outside Agent-visible files when the deployment environment can
-provide a secret store. Do not use `--public`: traces may contain source code,
-prompts, paths, tool output, and credentials.
+Agents reach it at `http://tower.treer/` through their workload proxy. Keep the
+token outside Agent-visible files where a secret store is available. Do not use
+`--public`: traces may contain source code, prompts, paths, tool output and
+credentials.
 
-Configure an ACP launcher Agent with:
-
-```sh
-TOWER_URL=http://tower.internal
-TOWER_TOKEN="$TOKEN"
-```
-
-The launcher remains unchanged when `TOWER_URL` is absent. When enabled it
-spools every parsed ACP frame to `tower-spool.sqlite` beside the existing ACP
-journal, then uploads ordered batches in the background. Archive outages do not
-block the Agent; pending events retry after restart.
-
-## Configuration
-
-| Variable | Default | Meaning |
+| Variable / flag | Default | Meaning |
 | --- | --- | --- |
-| `TOWER_LISTEN` | `127.0.0.1:9460` | App HTTP listener |
-| `TOWER_DATA_DIR` | `.treer/apps/tower` | SQLite archive directory |
-| `TOWER_TOKEN` | unset | Optional bearer token required by mutating `/v1` routes |
+| `TOWER_LISTEN` / `--listen` | `127.0.0.1:9460` | HTTP listener |
+| `TOWER_DATA_DIR` / `--data` | `.treer/apps/tower` | SQLite archive directory |
+| `TOWER_TOKEN` | unset | Bearer token required by mutating `/v1` routes when set |
 
-## Storage And Backup
+## API
 
-The SQLite database separates blobs, prefix nodes, ordered stream events, and
-review findings. Prefix nodes and blobs use deterministic SHA-256 identities;
-event IDs make retries idempotent. Back up the complete data directory with a
-filesystem snapshot or while writes are stopped.
+- `GET /health`, `GET /v1/stats`
+- `GET /v1/streams`, `GET /v1/streams/ID/events`, `GET /v1/events/ID`
+- `GET /v1/findings`, `POST /v1/findings`
+- `POST /v1/ingest` (idempotent; at most 256 events and 4 MiB per batch)
 
-This MVP assumes the App and its host are trusted. ACP capture proves what the
-launcher observed relative to the provider process, not resistance to a
-same-user machine compromise. Future versions should move collection outside
-the Agent account, sign hash-chained segments, add trusted execution receipts,
-and enforce capture through Treer Policy.
+Read routes rely on workspace ingress; writes need the bearer token when
+configured.
+
+## Storage and backup
+
+The SQLite database separates blobs, prefix nodes, ordered stream events and
+review findings. Blobs and prefix nodes use SHA-256 identities; event IDs make
+retries idempotent. Back up the complete data directory with a filesystem
+snapshot or while writes are stopped.
+
+This MVP trusts the App and its host: an archived trace proves what the producer
+reported, not resistance to a same-user compromise. Startup tightens the state
+directory to 0700; backups are plaintext. Run under a separate unprivileged user
+or container/VM on critical-service machines.
 
 ## Test
 
 ```sh
 python3 -m unittest discover -s apps/tower/tests -p 'test_*.py' -v
 ```
-
-## Local state isolation
-
-Use a dedicated private state directory; startup tightens its permissions to
-0700. Python stores also use a private umask and private database files. Do not
-use a shared HOME/project directory as state. Backups remain plaintext and need
-restrictive permissions/encryption. This does not isolate same-UID processes.
-For critical services use a separate unprivileged user or container/VM with
-minimal mounts and resource limits. Workspace ingress is not per-user data ACL
-or comprehensive request-rate protection; retain this App's documented trusted
-workspace assumptions and do not make it public.
