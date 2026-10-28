@@ -118,8 +118,6 @@ ACKs remain. This depends on Core's current ACK finality and retained sender/key
 idempotency, as documented in the example's README. Removing a key stops its future local
 handling; already accepted work follows the App's persisted job contract.
 
-All Message routes remain behind the existing `TREER_ENABLE_CORE_MESSAGES`
-rollout setting. A mixed old Controller does not expose `--from-endpoint`, and
-an old Proxy rejects unsupported new fields or fails target resolution; clients
-must not strip logical addresses and retry against a root mailbox. Existing Apps
-without the directory API are not shown as having discoverable children.
+Message routes require `TREER_ENABLE_CORE_MESSAGES`. Clients must not strip a
+logical address and retry against the root mailbox when a send fails. Apps
+without the directory API are shown without children.

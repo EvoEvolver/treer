@@ -1,137 +1,91 @@
 # Product direction
 
-- Status: maintained
-- Last source review: 2026-09-30 core simplification (working tree)
-
 ## Purpose
 
-Treer is a self-hostable collaboration layer for interactive coding agents. It
-connects machines into organization-scoped workspaces, keeps agent processes
-alive on those machines, and provides browser, CLI, terminal, and private-service
-paths through one open control plane.
+Treer is a self-hostable control plane for interactive coding agents. It
+connects machines into organization-scoped workspaces, keeps Agent processes
+alive on those machines, and gives humans and Agents one place to observe,
+prompt, organize and connect them through the browser and CLI.
 
-The first useful product is for an individual or a trusted research group that
-wants to share long-running Agent sessions without publishing machine ports or
-handing every collaborator unrestricted direct machine access.
+It is built first for an individual with several machines and for trusted
+teams or research groups that share long-running Agent sessions without
+publishing machine ports or handing out direct machine access.
 
-## Current product promise
+## What Treer provides today
 
 > Local custody, scoped coordination, open control plane.
 
-In concrete terms:
+1. A small persistent Host and Controller on each machine you control, enrolled
+   into one workspace with a single-use key. Machines connect outward; local
+   ports stay private.
+2. Agents launched from editable command profiles (any CLI agent or a plain
+   terminal), with persistent PTYs, browser and native terminal attach,
+   queued prompts, structured transcripts, and an embedded Agent UI when an
+   Agent Interface Server is registered.
+3. A workspace Tree of folders holding Agents and Apps, with paths usable as
+   CLI targets and Policy selectors.
+4. Durable Core Messages between humans and Agents with explicit
+   acknowledgement and an ordered context DAG. Mail, Telegram and other
+   channels are replaceable Apps over public contracts.
+5. Managed Apps: supervised HTTP services with stable identity, platform-
+   assigned origins, workspace login by default and human identity forwarded to
+   the App.
+6. Explicit service forwarding, per-workload HTTP proxy entries with automatic
+   identity, public HTTP ingress and optional raw TCP publication.
+7. Recovery of intended-running workloads after Controller replacement, Host
+   restart or reboot, with explicit stop intent preserved.
+8. An open-source Proxy deployable as SaaS, a Compose stack or a single
+   container, scaling to several replicas with NATS.
 
-1. A user installs a small persistent service on a machine they control.
-2. A short-lived, single-use link enrolls that machine into one workspace.
-3. Workspace members can upload a bounded file into an enrolled machine root,
-   run a short non-interactive command, save reusable command-based launch profiles, and use
-   them to create, observe, prompt, and stop Agents through the web application,
-   CLI. The browser includes a full-screen mobile terminal with touch controls
-   and a full-screen Agent UI iframe. Native iOS/Android clients are retired;
-   responsive browser functionality remains available.
-4. Managed Agents and humans exchange durable Core Messages with explicit
-   acknowledgement and an ordered context DAG. Mail and Telegram are
-   replaceable workspace Apps over public contracts rather than privileged
-   Proxy features.
-5. Agents can register their own ordinary TCP/HTTP endpoints, forward services
-   across the workspace, and deploy supervised HTTP Apps. Public HTTP origins use
-   platform-assigned domains and workspace authentication by default. Explicit
-   anonymous publication is available for HTTP and configured raw TCP ports.
-   Managed Agents and Apps inherit one HTTP proxy entry each for automatic
-   identity on registered service requests; subprocesses share that identity.
-6. An Agent Interface Server can declare a browser UI path alongside its
-   semantic capabilities. The control plane embeds that page in place of the
-   Agent terminal, and transparently tunnels relative HTTP and WebSocket
-   traffic to the registered Interface port.
-7. Machines connect outward to the Proxy; local Agent Server and service ports
-   do not need to be publicly exposed. A workspace member can tell whether a
-   machine is Online, local-only, fenced as a duplicate, or stopped, and can
-   copy a recovery command that includes the real workspace ID. Lid-close
-   sleep and Proxy bounces reconnect without re-enrollment. One hostname in
-   one workspace is one supervised Host.
-8. The central Proxy is open source and can be privately deployed.
-   The browser presents Agents and Apps together in a workspace workload tree.
-   Members can create nested folders, drag workloads or folders into them, or
-   use the Move to folder action on touch screens and keyboards. Folder names
-   and placements persist in the workspace; organizing the tree does not move
-   processes or files between machines. Both workload kinds provide Start,
-   Stop, Restart, and Logs actions, with App-specific access settings available
-   from the same row. Deleting a folder promotes its contents to its parent.
-9. Organization owners and administrators can review management activity.
-   Every workspace member can inspect recent billable logical payload usage,
-   classified by machine network, service ingress, virtual host, and Agent UI.
-   Broker overhead and deployment topology do not affect that usage.
+This is a convenience-first promise with an understandable security reason. It
+is not a claim that the runtime safely hosts mutually untrusted users; the
+boundary is in the [security model](security.md).
 
-This is a convenience-first promise with a comprehensible security reason. It
-is not a claim that the current runtime safely hosts mutually untrusted users.
-The exact trust boundary is documented in the [security model](security.md).
+## Principles
 
-## Product principles
+**Runtime before surfaces.** The durable product is the runtime and control
+contract. Console, CLI and Apps are clients of the same API; every feature is
+operable by Agents through the API the UI uses.
 
-### Runtime before surfaces
+**Core semantics, replaceable channels.** Message data, recipients, context,
+Policy, acknowledgement and persistence belong to Core. Channels own
+presentation, transport, secrets and delivery mappings.
 
-The durable product is the runtime and control contract. The browser, CLI,
-voice input, richer collaboration, and future applications are clients of that
-contract. Product features should not bypass shared identities and protocols to
-become one-off UI behavior.
+**User-owned execution environments.** Treer runs exact argv from editable
+profiles. Users own Agent installation, provider credentials, containers, VMs
+and filesystem or network restrictions. Treer does not build a sandbox.
 
-### Core semantics, replaceable channels
+**Minimal core.** New behavior goes into launchers, Apps or profiles unless it
+needs a shared identity, routing or durability contract.
 
-Canonical Message data, recipients, context edges, policy, acknowledgement,
-idempotency, and persistence belong to Core and are available through
-`treer message`. External channels own presentation, transport, secrets, and
-delivery mappings. Browser channels use service-audience App tokens; Agent-run
-channels use the managed Agent's CLI identity. This keeps Mail, Telegram, and
-future adapters independently replaceable without creating parallel
-collaboration databases or private Core integrations.
+**Accurate security wording.** Make observable protections (local custody,
+scoped credentials, outbound-only machines, inspectable code) easy to
+understand, and never claim isolation the implementation lacks.
 
-### User-owned execution environments
+## Fit
 
-Treer launches exact argv from editable profiles. Users own Agent installation,
-provider credentials, external proxy configuration, containers, VMs, and filesystem/network
-restrictions. Treer does not build or promise a sandbox backend. Its CLI uses a
-separate Agent credential so a user-provided isolation boundary can expose only
-that identity. Without such a boundary, processes under the same account are
-trusted and can reach each other.
-
-### Persuasive security, accurate wording
-
-The early product should make its observable protections easy to understand:
-local process custody, workspace-scoped machine credentials, outbound-only
-machine connections, and inspectable control-plane code. Security messaging
-must not claim isolation or attribution that the implementation lacks.
-
-### Open coordination, protectable execution
-
-Open sourcing the control plane builds trust and allows private deployment. A
-commercial workflow may still keep proprietary prompts, orchestration, data, or
-managed execution on infrastructure controlled by its operator. Treer supplies
-the coordination boundary; it does not prevent a machine owner from
-inspecting an Agent that runs on that machine.
-
-## Current fit and non-fit
-
-| Scenario | Current fit |
+| Scenario | Fit |
 | --- | --- |
-| One developer using several owned machines | Good architectural fit |
-| Trusted or mostly trusted lab sharing sessions | Primary product fit |
-| Self-hosted internal Agent coordination | Good fit if operators accept current gaps |
-| Public multi-tenant paid Agent service | Requires independently provided isolation; outside Core scope |
-| Strong protection from the enrolled machine owner | Not provided by the local Host |
+| One developer on several owned machines | Good |
+| Trusted lab or team sharing sessions | Primary |
+| Self-hosted internal Agent coordination | Good, if operators accept the gaps below |
+| Public multi-tenant paid Agent service | Needs independently provided isolation |
+| Protection from the enrolled machine's owner | Not provided |
 
-## Near-term sequence
+## Known limits and direction
 
-The maintained [capability roadmap](roadmap.md) classifies the larger backlog
-preserves the broader backlog. The active sequence is the
-[core simplification plan](research/2026-09-30-core-simplification-plan.md):
+- Policy defaults to monitor/allow; restrictive defaults and decision audit
+  are opt-in through a Policy Provider.
+- Work is terminal- and Message-oriented. Durable work objects (issues, tasks,
+  runs, artifacts) live in Apps such as [Issues](../apps/issues/README.md), not
+  in Core.
+- Core Messages are text-only, without operator retention, export or deletion
+  policy.
+- Provider subscription credentials are not isolated per user; Treer does not
+  implement billing.
+- Domain events outside the Message subsystem have no transactional outbox.
+- App state has no automatic cross-version migration.
 
-1. Keep authentication, scoped identity, explicit connections, and durable process intent.
-2. Move command parsing and help into the Controller; keep `treer` a transport client.
-3. Remove transparent capture, virtual DNS, provider installation, and custom-host provisioning.
-4. Make restoration repeatable: attach surviving processes, restart intended-running
-   processes from saved launch snapshots, and report stopped/revoked/failed items.
-
-Subscription credentials are not currently isolated per platform user, and
-Treer does not implement billing. Core Messages are text-only and do not yet
-have operator-facing retention, export, or deletion policy. App state has no
-automatic cross-version migration. See [Security model](security.md) for the
-credential risk and [Architecture](architecture.md) for the runtime boundary.
+New capabilities should reuse Core identity, Policy, Tree and Message
+references rather than invent parallel channels, task buses or identity
+schemes.
