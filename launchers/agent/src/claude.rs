@@ -178,7 +178,7 @@ impl Adapter {
             | "claude_terminal_conflict" | "claude_turn_limit"
             | "claude_command_identity" | "claude_command_session" | "claude_command_interleaving"
             | "claude_command_limit" | "claude_command_state" | "claude_command_incomplete"
-            | "claude_unexpected_permission_request" | "claude_invocation_limit") => code,
+            | "claude_invocation_limit") => code,
             _ => "claude_protocol_refused",
         };
         json!({"code":code,"activeInput":self.active.is_some(),
@@ -231,6 +231,13 @@ impl Adapter {
             native_command: None,
             scheduled_result: None,
         })
+    }
+    /// After a frame the adapter could not place, drop any background
+    /// invocation scope it was tracking so the stream keeps flowing.
+    pub fn skip_refused_frame(&mut self) {
+        self.task_followup = None;
+        self.native_command = None;
+        self.scheduled_result = None;
     }
     pub fn forget_control(&mut self, id: u64) { self.model_controls.remove(&id); self.effort_controls.remove(&id); }
     pub fn commit_effort(&mut self, result: &Value) -> Result<Value> {
@@ -432,9 +439,22 @@ impl Adapter {
         })
     }
     pub fn steered(&mut self, turn: &str, epoch: u64, item: Value, after: Option<&str>) -> Result<Value> {
-        // A result received before successful write/flush cannot acknowledge
-        // this input. It may already have been sent: refuse as UNKNOWN rather
-        // than reusing the completed turn, retargeting or retrying the input.
+        // The turn ended while this input was being written. Claude runs
+        // queued input as its next invocation, so the input starts a new turn.
+        if self.active.is_none() && self.invocation_epoch==epoch && self.task_followup.is_none() && self.native_command.is_none() {
+            let text = item["text"].as_str().unwrap_or("").to_owned();
+            self.active = Some(uuid::Uuid::new_v4().to_string());
+            self.input_model_revision = self.model_revision;
+            self.input_settings_epoch = Some(self.settings_epoch);
+            self.items.clear();
+            self.order.clear();
+            self.blocks.clear();
+            self.interrupted = false;
+            self.announced = false;
+            self.user = text;
+            return Ok(self.dispatched());
+        }
+        // A background invocation started meanwhile: the input is not tracked.
         if self.active.as_deref()!=Some(turn) || self.invocation_epoch!=epoch
             || self.task_followup.is_some() || self.native_command.is_some() {bail!("claude_steer_outcome_unknown");}
         let id=item["id"].as_str().ok_or_else(||anyhow::anyhow!("claude_item_identity"))?.to_owned();
@@ -883,7 +903,16 @@ impl Adapter {
                     if let Some(model)=Self::model_name(&event["model"]) {out.push(self.observe_model(model));}
                 }
             }
-            Some("control_request") => bail!("claude_unexpected_permission_request"),
+            // Agents run without permission prompts; allow whatever Claude asks.
+            Some("control_request") => {
+                let request = &event["request"];
+                let response = if request["subtype"] == "can_use_tool" {
+                    json!({"behavior":"allow","updatedInput":request["input"]})
+                } else {
+                    json!({})
+                };
+                out.push(json!({"method":"claude/control-reply","params":{"wire":{"type":"control_response","response":{"subtype":"success","request_id":event["request_id"],"response":response}}}}));
+            }
             _ => {}
         }
         Ok(out)
@@ -1158,15 +1187,32 @@ mod tests {
         assert!(a.request(6,"turn/steer",&json!({"threadId":"synthetic-session","expectedTurnId":turn,"input":[]})).is_err());
     }
     #[test]
-    fn result_during_steer_write_is_unknown_not_old_turn_completion() {
+    fn result_during_steer_write_starts_the_next_turn_not_old_turn_completion() {
         let mut a=adapter();start(&mut a);
         let turn=a.active.clone().unwrap();
-        let Request::Steer {turn:expected,epoch,item,after,..}=a.request(2,"turn/steer",&json!({"threadId":"synthetic-session","expectedTurnId":turn,"input":[{"type":"text","text":"not acknowledged"}]})).unwrap() else {panic!()};
+        let Request::Steer {turn:expected,epoch,item,after,..}=a.request(2,"turn/steer",&json!({"threadId":"synthetic-session","expectedTurnId":turn,"input":[{"type":"text","text":"raced steer"}]})).unwrap() else {panic!()};
         let completed=a.consume(json!({"type":"result","result":"old turn result"})).unwrap();
         let items=completed.last().unwrap()["params"]["turn"]["items"].as_array().unwrap();
-        assert!(!items.iter().any(|i|i["text"]=="not acknowledged"));
-        assert_eq!(a.steered(&expected,epoch,item,after.as_deref()).unwrap_err().to_string(),"claude_steer_outcome_unknown");
-        assert!(a.active.is_none());
+        assert!(!items.iter().any(|i|i["text"]=="raced steer"));
+        // Claude runs the queued input next: it becomes its own turn.
+        let next=a.steered(&expected,epoch,item,after.as_deref()).unwrap();
+        assert_ne!(next["turn"]["id"],json!(turn));
+        assert_eq!(next["turn"]["items"][0]["text"],"raced steer");
+        let started=a.consume(json!({"type":"system","subtype":"init"})).unwrap();
+        assert_eq!(started[0]["method"],"turn/started");
+        let done=a.consume(json!({"type":"result","result":"steer answered"})).unwrap();
+        assert_eq!(done.last().unwrap()["params"]["turn"]["id"],next["turn"]["id"]);
+    }
+    #[test]
+    fn unknown_frames_are_ignored_and_permission_requests_are_allowed() {
+        let mut a=adapter();start(&mut a);
+        assert!(a.consume(json!({"type":"brand_new_frame_type","session_id":"synthetic-session"})).is_ok());
+        let out=a.consume(json!({"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}})).unwrap();
+        let reply=&out.last().unwrap()["params"]["wire"];
+        assert_eq!(reply["response"]["request_id"],"req-1");
+        assert_eq!(reply["response"]["response"]["behavior"],"allow");
+        assert_eq!(reply["response"]["response"]["updatedInput"]["command"],"ls");
+        assert!(a.consume(json!({"type":"result","session_id":"another-session"})).is_err(),"only a session mismatch is refused");
     }
     #[test]
     fn idle_is_not_a_result_and_cannot_release_a_second_turn() {

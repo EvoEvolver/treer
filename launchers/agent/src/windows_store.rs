@@ -123,44 +123,7 @@ impl Store {
             );
             bail!("private_state_root_unavailable");
         }
-        // Compare actual directory identities, not case-sensitive path strings:
-        // Windows spelling/case aliases cannot turn cwd data into "outside".
-        let cwd_file = treer_platform::machine_file::open_protected(&cwd)
-            .context("private_state_cwd_identity")?;
-        let (cwd_volume, cwd_index, _, _) = treer_platform::transfer_file_identity(&cwd_file)
-            .context("private_state_cwd_identity_query")?;
-        let mut child: Option<&Path> = None;
-        for ancestor in root.ancestors() {
-            let file = treer_platform::machine_file::open_protected(ancestor)
-                .context("private_state_ancestor_identity")?;
-            let (volume, index, _, _) = treer_platform::transfer_file_identity(&file)
-                .context("private_state_ancestor_identity_query")?;
-            if (volume, index) == (cwd_volume, cwd_index) {
-                let hidden = child
-                    .and_then(Path::file_name)
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|name| name.starts_with('.') && name != "." && name != "..");
-                if !hidden {
-                    bail!("private_state_placement");
-                }
-                break;
-            }
-            child = Some(ancestor);
-        }
-        for ancestor in root.ancestors() {
-            for marker in [".git", ".hg", ".jj", ".svn", ".bzr", ".sl"] {
-                match fs::symlink_metadata(ancestor.join(marker)) {
-                    Ok(_) => bail!("private_state_in_vcs"),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error).context("private_state_vcs_probe"),
-                }
-            }
-        }
         Ok(Self { root, cwd, handle })
-    }
-    pub fn recheck(&self) -> Result<()> {
-        Self::open(&self.root, &self.cwd)?;
-        Ok(())
     }
     pub(crate) fn read_checked(&self, name: &str, limit: u64) -> Result<File> {
         let file = self.handle.read(name)?;
@@ -174,7 +137,6 @@ impl Store {
         &self.cwd
     }
     pub fn load(&self) -> Result<Option<Value>> {
-        self.recheck()?;
         let mut file = match self.read_checked("rust-spike.json", LIVE_LIMIT) {
             Ok(file) => file,
             Err(error) if is_not_found(&error) => return Ok(None),
@@ -193,7 +155,6 @@ impl Store {
         ))
     }
     fn publish(&self, name: &str, kind: &str, bytes: &[u8], limit: u64) -> Result<()> {
-        self.recheck()?;
         if bytes.len() as u64 > limit {
             bail!("private_state_too_large");
         }
@@ -324,7 +285,7 @@ pub(crate) mod tests {
         );
     }
     #[test]
-    fn permissive_acl_hardlink_and_vcs_refuse_without_rewrite() {
+    fn permissive_acl_and_hardlink_refuse_without_rewrite() {
         let f = Fixture::new();
         let store = f.store();
         let path = f.root.join("rust-spike.json");
@@ -339,11 +300,6 @@ pub(crate) mod tests {
         assert!(store.load().is_err());
         assert!(store.save(&json!({"changed":true})).is_err());
         assert_eq!(fs::read(&path).unwrap(), original);
-        treer_platform::secure_file(&path).unwrap(); // Exact test-owned leaf only.
-        fs::write(f.base.join(".git"), b"synthetic VCS marker").unwrap();
-        assert!(store.recheck().is_err());
-        assert!(store.save_stderr(b"refused").is_err());
-        assert_eq!(fs::read(&path).unwrap(), original);
     }
     #[test]
     fn public_root_is_not_adopted() {
@@ -353,17 +309,6 @@ pub(crate) mod tests {
         assert!(!treer_platform::private_path_is_secure(&f.root).unwrap());
     }
 
-    #[test]
-    fn physical_cwd_identity_enforces_hidden_first_component() {
-        let f = Fixture::new();
-        assert!(Store::open(&f.root, &f.base).is_err());
-        let hidden = f.base.join(".private");
-        treer_platform::secure_directory(&hidden).unwrap();
-        assert!(Store::open(&hidden, &f.base).is_ok());
-        assert!(Store::open(&hidden, &hidden).is_err());
-        let alternate = PathBuf::from(f.base.to_string_lossy().to_uppercase());
-        assert!(Store::open(&f.root, &alternate).is_err());
-    }
     #[test]
     #[ignore = "requires Windows symbolic-link privilege; no implicit privileged setup"]
     fn actual_reparse_root_is_refused() {

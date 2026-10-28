@@ -93,6 +93,7 @@ mod tests {
             source_messages: vec![],
             message_batch: None,
             projection_after: None,
+            steer_refused: false,
         }
     }
     #[test]

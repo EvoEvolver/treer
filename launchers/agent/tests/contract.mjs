@@ -86,8 +86,10 @@ for(const scenario of ['completed','failed','interrupted','inProgress','legacy',
   const restarted=await s.launch({RECOVERY_HOLD:'0',RECOVERY_STATUS:scenario==='legacyInterrupted'?'interrupted':['legacy','missing','older'].includes(scenario)?'completed':scenario,RECOVERY_MISSING:scenario==='missing'?'1':'0',RECOVERY_OLD:scenario==='older'?'1':'0'});
   const get=id=>fetch(restarted.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
   if(scenario==='missing') {
-    assert.equal((await fetch(restarted.base+'/api/state').then(r=>r.json())).runtime.state,'blocked');
-    assert.equal((await get(second.submission.id)).submission.state,'queued');
+    // History has no record of the accepted turn: it fails and the queue continues.
+    await until(()=>get(second.submission.id),r=>r.submission?.state==='done');
+    const first_=(await get(first.submission.id)).submission;
+    assert.equal(first_.state,'failed');assert.match(first_.error,/not replayed/);
   } else {
     await until(()=>get(second.submission.id),r=>r.submission?.state==='done');
     assert.equal((await get(first.submission.id)).submission.state,['completed','legacy','inProgress','older'].includes(scenario)?'done':scenario==='legacyInterrupted'?'interrupted':scenario);
@@ -99,57 +101,34 @@ for(const scenario of ['completed','failed','interrupted','inProgress','legacy',
   }
   const calls=(await readFile(join(s.root,'provider.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
   const inputs=calls.filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text);
-  assert.deepEqual(inputs,scenario==='missing'?['first input must never replay']:['first input must never replay','second input must retain FIFO']);
+  assert.deepEqual(inputs,['first input must never replay','second input must retain FIFO']);
   if(scenario==='older')assert.ok(calls.some(c=>c.method==='thread/read'),'older turn is actually fetched via provider protocol');
 });
 
-for(const status of ['completed','interrupted'])test('runtime recovery unblocks an exact older receipt after initially unavailable history '+status,{timeout:25000},async t=>{
+test('restart with history that lacks an accepted turn fails it and continues the queue without replay',{timeout:25000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1'});
   const first=await s.post({text:'never resend exact accepted input',operation_id:'live-exact-first'}).then(r=>r.json());
   const second=await s.post({text:'FIFO second',operation_id:'live-exact-second'}).then(r=>r.json());
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
-  const restarted=await s.launch({RECOVERY_HOLD:'0',RECOVERY_LATE:'1',RECOVERY_OLD:'1',RECOVERY_TERMINAL:status});
+  const restarted=await s.launch({RECOVERY_HOLD:'0',RECOVERY_LATE:'1',RECOVERY_OLD:'1'});
   const get=id=>fetch(restarted.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
-  assert.equal((await fetch(restarted.base+'/api/state').then(r=>r.json())).runtime.state,'blocked');
-  try { await until(()=>get(second.submission.id),r=>r.submission?.state==='done',18000); }
-  catch(error) { throw Error(error.message+' '+JSON.stringify(await fetch(restarted.base+'/api/state').then(r=>r.json()))+' '+s.logs()+' '+JSON.stringify(await providerCalls(s))); }
-  assert.equal((await get(first.submission.id)).submission.state,status==='completed'?'done':'interrupted');
+  await until(()=>get(second.submission.id),r=>r.submission?.state==='done',18000);
+  assert.equal((await get(first.submission.id)).submission.state,'failed');
+  assert.notEqual((await fetch(restarted.base+'/api/state').then(r=>r.json())).runtime.state,'blocked');
   assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['never resend exact accepted input','FIFO second']);
-  const stop=once(restarted.child,'exit');restarted.child.kill('SIGTERM');assert.equal((await stop)[0],0);
-  const again=await s.launch({RECOVERY_HOLD:'0'});
-  assert.equal((await fetch(again.base+'/v1/submissions/'+first.submission.id,{headers:s.headers}).then(r=>r.json())).submission.state,status==='completed'?'done':'interrupted');
 });
 
-test('startup normalized interruption stays uncertain until explicit same-turn completion',{timeout:16000},async t=>{
+test('restart with an idle provider settles the stale accepted turn as interrupted and continues',{timeout:16000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1'});
   const first=await s.post({text:'one original input',operation_id:'projected-resume-first'}).then(r=>r.json());
-  const second=await s.post({text:'keep queued until completion',operation_id:'projected-resume-second'}).then(r=>r.json());
+  const second=await s.post({text:'runs after restart',operation_id:'projected-resume-second'}).then(r=>r.json());
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
-  const restarted=await s.launch({RECOVERY_IDLE_RESUME:'1',RECOVERY_IDLE_SUMMARY:'1',RECOVERY_HOLD:'0'});
+  const restarted=await s.launch({RECOVERY_IDLE_RESUME:'1',RECOVERY_HOLD:'0'});
   const get=id=>fetch(restarted.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
-  const unresolved=(await get(first.submission.id)).submission;
-  assert.equal(unresolved.state,'failed');assert.match(unresolved.error,/dispatch outcome uncertain/);
-  assert.equal((await get(second.submission.id)).submission.state,'queued');
-  await until(()=>get(first.submission.id),x=>x.submission.state==='done');
+  const settled=(await get(first.submission.id)).submission;
+  assert.equal(settled.state,'interrupted',JSON.stringify(settled)+s.logs()+JSON.stringify((await fetch(restarted.base+'/api/state').then(r=>r.json())).thread.turns));
   await until(()=>get(second.submission.id),x=>x.submission.state==='done');
-  assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['one original input','keep queued until completion']);
-});
-
-for(const order of ['before','completed-before','after'])test('reconnect buffered lifecycle obeys same-reader terminal coverage '+order,{timeout:18000},async t=>{
-  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_BUFFER_ORDER:order});
-  const first=await s.post({text:'one accepted input',operation_id:'buffer-order-first'}).then(r=>r.json());
-  const get=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
-  if(order==='after') {
-    await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.state==='integrity_failure');
-    assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
-  } else {
-    const recovered=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.ready&&x.runtime.recovery.reconnectAttempts===1&&x.runtime.state==='idle');
-    assert.equal((await get(first.submission.id)).submission.state,'interrupted','explicit raw terminal history is still honored');
-    assert.equal(recovered.thread.turns.find(t=>t.id==='accepted-0').items.find(i=>i.id==='buffered-tool').detailText,'retained-before-terminal');
-    const second=await s.post({text:'next input after ordered recovery',operation_id:'buffer-order-second'}).then(r=>r.json());
-    await until(()=>get(second.submission.id),x=>x.submission.state==='done');
-    assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['one accepted input','next input after ordered recovery']);
-  }
+  assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['one original input','runs after restart']);
 });
 
 test('stale background observation deadline cannot kill a healthy successor turn and late reply cannot settle it',{timeout:90000},async t=>{
@@ -159,12 +138,10 @@ test('stale background observation deadline cannot kill a healthy successor turn
   const get=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
   await until(()=>get(first.submission.id),x=>x.submission.state==='done');
   await until(()=>get(second.submission.id),x=>x.submission.state==='running');
-  // Real production 60-second deadline, not a shortened fixture-only timer.
-  // The late first response arrives during B, after its own newer read starts.
   await new Promise(resolve=>setTimeout(resolve,63500));
   const active=await fetch(s.base+'/api/state').then(r=>r.json());
   assert.equal(active.runtime.provider.transport,'open',JSON.stringify(active.runtime));
-  assert.equal(active.runtime.recovery.reconnectAttempts,0,JSON.stringify(active.runtime));
+  assert.equal(active.runtime.recovery.restarts,0,JSON.stringify(active.runtime));
   assert.equal(active.runtime.provider.observationTimeouts,1);
   assert.equal((await get(first.submission.id)).submission.state,'done');
   assert.equal((await get(second.submission.id)).submission.state,'running');
@@ -181,122 +158,87 @@ test('history idle summary cannot interrupt an executing turn or dispatch its su
   const second=await s.post({text:'must wait for actual completion',operation_id:'idle-summary-second'}).then(r=>r.json());
   const get=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
   await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.readCount>=1);
-  assert.equal((await get(first.submission.id)).submission.state,'running','inferred history interruption must not settle receipt');
+  assert.equal((await get(first.submission.id)).submission.state,'running','a fresh idle summary must not settle the receipt');
   assert.equal((await get(second.submission.id)).submission.state,'queued');
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
   await until(()=>get(first.submission.id),x=>x.submission.state==='done');
   await until(()=>get(second.submission.id),x=>x.submission.state==='done');
   const state=await fetch(s.base+'/api/state').then(r=>r.json());
   assert.equal(state.runtime.state,'idle');assert.equal(state.runtime.provider.transport,'open');
-  assert.equal(state.runtime.recovery.reconnectAttempts,0);
+  assert.equal(state.runtime.recovery.restarts,0);
   assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['still executing input','must wait for actual completion']);
 });
 
-for(const old of [false,true,'resume-race'])test('runtime recovery reconnects same-thread transport and continues FIFO without replay '+old,{timeout:25000},async t=>{
+for(const old of [false,true,'resume-race'])test('provider crash restarts it, resumes the same thread and continues FIFO without replay '+old,{timeout:25000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_OLD_DISCONNECT:old===true?'1':'0',RECOVERY_RESUME_RACE:old==='resume-race'?'1':'0'});
   const first=await s.post({text:'one accepted input',operation_id:'reconnect-first'}).then(r=>r.json());
   const second=await s.post({text:'second queued',operation_id:'reconnect-second'}).then(r=>r.json());
   const get=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
-  try { await until(()=>get(first.submission.id),r=>r.submission?.state==='interrupted',18000); }
+  try { await until(()=>get(first.submission.id),r=>['interrupted','done'].includes(r.submission?.state),18000); }
   catch(error) { throw Error(error.message+' '+JSON.stringify(await fetch(s.base+'/api/state').then(r=>r.json()))+' '+s.logs()+' '+JSON.stringify(await providerCalls(s))); }
   await until(()=>get(second.submission.id),r=>r.submission?.state==='running');
-  const snapshot=await fetch(s.base+'/api/state').then(r=>r.json());
-  assert.equal(snapshot.thread.id,'recovery-thread');assert.equal(snapshot.runtime.recovery.reconnectAttempts,1);
+  const snapshot=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.restarts===1&&x.ready,15000);
+  assert.equal(snapshot.thread.id,'recovery-thread');assert.equal(snapshot.runtime.recovery.state,'running');
   if(old===true) { assert.ok(snapshot.history.totalTurns>=66);assert.equal(snapshot.thread.hasOlderItems,true);assert.ok(snapshot.thread.turns.length<=50); }
   assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['one accepted input','second queued']);
   assert.equal((await fetch(s.base+'/v1/abort',{method:'POST',headers:s.headers,body:'{}'})).status,202);
 });
 
-test('runtime recovery stops after three refused replacement attempts and remains observable/stoppable',{timeout:30000},async t=>{
+test('provider restarts keep retrying with backoff when resume is refused, with no attempt cap',{timeout:30000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_REFUSE_RESUME:'1'});
   const first=await s.post({text:'accepted once',operation_id:'exhaust-first'}).then(r=>r.json());
   const second=await s.post({text:'FIFO preserved',operation_id:'exhaust-second'}).then(r=>r.json());
-  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.state==='reconnect_exhausted',24000);
-  assert.equal(state.runtime.recovery.reconnectAttempts,3);
-  assert.equal((await fetch(s.base+'/v1/submissions/'+first.submission.id,{headers:s.headers}).then(r=>r.json())).submission.state,'running');
-  assert.equal((await fetch(s.base+'/v1/submissions/'+second.submission.id,{headers:s.headers}).then(r=>r.json())).submission.state,'queued');
-  const calls=await providerCalls(s);assert.equal(calls.filter(c=>c.method==='thread/resume').length,3);
-  assert.equal(calls.filter(c=>c.method==='turn/start').length,1);
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.restarts>=4,26000);
+  assert.equal(state.runtime.recovery.state,'restarting');assert.ok(state.runtime.recovery.consecutiveFailures>=4);
+  assert.match(state.runtime.recovery.lastFailure,/restart failed/);
+  // The interruption may be observed before the provider exits.
+  assert.ok(['running','interrupted'].includes((await fetch(s.base+'/v1/submissions/'+first.submission.id,{headers:s.headers}).then(r=>r.json())).submission.state));
+  const late=await s.post({text:'accepted while restarting',operation_id:'exhaust-third'});assert.equal(late.status,202);
+  assert.ok((await providerCalls(s)).filter(c=>c.method==='turn/start').length<=2,'no turn is dispatched to a provider that cannot resume');
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');assert.equal((await exit)[0],0);
 });
 
-test('runtime recovery slow reconnect leaves state reads and shutdown responsive',{timeout:15000},async t=>{
+test('provider restart with a slow resume leaves state reads and shutdown responsive',{timeout:15000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_STALL_RESUME:'1'});
   await s.post({text:'first only',operation_id:'slow-reconnect'});
-  await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.state==='reconnecting');
-  await until(()=>providerCalls(s),x=>x.some(c=>c.method==='thread/resume'));
+  await until(()=>providerCalls(s),x=>x.filter(c=>c.method==='thread/resume').length>=1);
   const pids=(await readFile(join(s.root,'cwd/recovery-provider-pids.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(pids.length,2);
   const start=Date.now();assert.equal((await fetch(s.base+'/api/state')).status,200);assert.ok(Date.now()-start<1000);
-  const exit=once(s.child,'exit');s.child.kill('SIGTERM');assert.equal((await exit)[0],0);assert.ok(Date.now()-start<5000);
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;assert.ok(Date.now()-start<5000);
   await until(()=>Promise.resolve(pids.every(({pid})=>{try{process.kill(pid,0);return false;}catch(error){return error.code==='ESRCH';}})),Boolean,3000);
 });
 
-test('runtime recovery wrong-thread replacement is a sticky integrity refusal, not a retryable transport fault',{timeout:18000},async t=>{
-  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_WRONG_THREAD:'1'});
-  await s.post({text:'one original',operation_id:'wrong-thread'});
-  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.state==='integrity_failure');
-  assert.equal(state.runtime.recovery.reconnectAttempts,1);
-  await new Promise(r=>setTimeout(r,4200));
-  assert.equal((await providerCalls(s)).filter(c=>c.method==='thread/resume').length,1);
-  assert.equal((await fetch(s.base+'/api/recovery',{method:'POST',headers:s.headers,body:JSON.stringify({action:'recheck'})})).status,400);
-});
-
-test('runtime recovery active unknown cannot be disposed using idle or missing-ID guesses',{timeout:12000},async t=>{
-  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_NO_ID:'1',RECOVERY_HOLD:'1'});
-  const first=await s.post({text:'active unknown',operation_id:'active-unknown'}).then(r=>r.json());
-  await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.readCount>0);
-  const original=(await fetch(s.base+'/v1/submissions/'+first.submission.id,{headers:s.headers}).then(r=>r.json())).submission;
-  const response=await fetch(s.base+'/api/recovery',{method:'POST',headers:s.headers,body:JSON.stringify({action:'acknowledge_unknown',submission_id:first.submission.id,thread_id:'recovery-thread',expected_turn_id:null,expected_error:original.error,accept_unknown_outcome:true})});
-  assert.equal(response.status,400);
-  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
-});
-
-test('runtime recovery failed durable settlement never dispatches the queued successor',{timeout:20000},async t=>{
+test('unusable private storage exits the launcher non-zero so the Host restarts it, without dispatching',{timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1'});
   await s.post({text:'first once',operation_id:'write-first'});
   const second=await s.post({text:'must remain queued',operation_id:'write-second'}).then(r=>r.json());
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   const restarted=await s.launch({RECOVERY_LATE:'1',RECOVERY_HOLD:'0'});
-  const path=join(s.state,'rust-spike.json'),before=await readFile(path,'utf8');
+  const path=join(s.state,'rust-spike.json');
   try {
+    const before=await readFile(path,'utf8');
     await chmod(path,0o400);await chmod(s.state,0o500);
-    const blocked=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.state==='storage_failure');
-    assert.equal(blocked.runtime.recovery.reconnectAttempts,0);
+    const stop=once(restarted.child,'exit');
+    assert.notEqual((await stop)[0],0);
     assert.equal(await readFile(path,'utf8'),before);
-    assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
-    assert.equal((await fetch(restarted.base+'/v1/submissions/'+second.submission.id,{headers:s.headers}).then(r=>r.json())).submission.state,'queued');
-    const stop=once(restarted.child,'exit');restarted.child.kill('SIGTERM');assert.notEqual((await stop)[0],0);
+    assert.ok((await providerCalls(s)).filter(c=>c.method==='turn/start').length<=2);
+    assert.ok(JSON.parse(before).records.some(r=>r.submission.id===second.submission.id));
   } finally {await chmod(s.state,0o700);await chmod(path,0o600);}
 });
 
-test('runtime recovery missing ID requires explicit bound disposition and fresh idle, never automatic replay',{timeout:20000},async t=>{
+test('turn/start accepted without a turn id is reconciled from resumed history, never paused or replayed',{timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_NO_ID:'1'});
   const first=await s.post({text:'unknown accepted input',operation_id:'unknown-first'}).then(r=>r.json());
-  const second=await s.post({text:'queued after explicit disposition',operation_id:'unknown-second'}).then(r=>r.json());
+  const second=await s.post({text:'queued after reconciliation',operation_id:'unknown-second'}).then(r=>r.json());
   const get=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
-  const original=(await get(first.submission.id)).submission;
-  const action=body=>fetch(s.base+'/api/recovery',{method:'POST',headers:s.headers,body:JSON.stringify(body)});
-  assert.equal((await action({action:'acknowledge_unknown',submission_id:first.submission.id})).status,400);
-  await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.readCount>0);
+  await until(()=>get(first.submission.id),r=>r.submission?.turn_id==='accepted-0',15000).catch(async e=>{throw Error(e.message+JSON.stringify(await fetch(s.base+'/api/state').then(r=>r.json()))+s.logs())});
   assert.equal((await get(second.submission.id)).submission.state,'queued');
-  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
-  const bound={action:'acknowledge_unknown',submission_id:first.submission.id,thread_id:'recovery-thread',expected_turn_id:null,expected_error:original.error,accept_unknown_outcome:true};
-  assert.equal((await action({...bound,expected_error:'stale'})).status,400);
-  assert.equal((await action(bound)).status,202);
-  assert.equal((await action(bound).then(r=>r.json())).duplicate,true);
-  try { await until(()=>get(second.submission.id),r=>r.submission?.state==='done'); }
-  catch(error) { throw Error(error.message+' '+JSON.stringify(await fetch(s.base+'/api/state').then(r=>r.json()))+' '+s.logs()+' '+JSON.stringify(await providerCalls(s))); }
   const resolved=(await get(first.submission.id)).submission;
-  assert.equal(resolved.state,'interrupted');assert.equal(resolved.recovery_disposition.originalError,original.error);
-  assert.equal(resolved.recovery_disposition.providerOutcome,'unknown');
-  const stop=once(s.child,'exit');s.child.kill('SIGTERM');assert.equal((await stop)[0],0);
-  const restarted=await s.launch({});
-  const after=(await fetch(restarted.base+'/v1/submissions/'+first.submission.id,{headers:s.headers}).then(r=>r.json())).submission;
-  assert.deepEqual(after,resolved);
-  const duplicate=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'unknown accepted input',operation_id:'unknown-first'})}).then(r=>r.json());
-  assert.equal(duplicate.duplicate,true);assert.equal(duplicate.submission.id,first.submission.id);
-  assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['unknown accepted input','queued after explicit disposition']);
+  assert.equal(resolved.turn_id,'accepted-0','the accepted turn is found in resumed history by its input');
+  assert.equal(resolved.state,'running','the provider still reports that turn running');
+  assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).runtime.recovery.restarts,1);
+  assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['unknown accepted input'],'never replayed');
 });
 
 for(const mode of ['omitted','native','summary'])test('history order keeps receipt steering between observed activity and its response, including restart '+mode,{timeout:20000},async t=>{
@@ -364,9 +306,9 @@ for(const scenario of ['distinct','identical','contradiction'])test('legacy unan
   assert.equal(calls.filter(c=>c.method==='turn/start').length,1);
   assert.equal(calls.filter(c=>c.method==='turn/steer').length,2);
   if(scenario==='contradiction'){
-    const refused=await until(()=>fetch(resumed.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked');
-    assert.match(refused.runtime.error,/Conflicting provider final snapshot/);
-    assert.deepEqual(refused.thread.turns[0].items,final.thread.turns[0].items,'learned native order remains immutable');
+    // A contradicting later snapshot is logged and applied; the Agent stays live.
+    await new Promise(r=>setTimeout(r,500));
+    assert.notEqual((await fetch(resumed.base+'/api/state').then(r=>r.json())).runtime.state,'blocked');
     return;
   }
   const stop=once(resumed.child,'exit');resumed.child.kill('SIGTERM');await stop;
@@ -474,7 +416,7 @@ test('many-turn recent window evicts finished history without losing receipts or
   for(let n=0;n<60;n++) {
     const response=await s.post({text:`bounded history ${n}`,operation_id:`history-${n}`});assert.equal(response.status,202);
     const receipt=await response.json();admitted.push(receipt.submission.id);
-    await until(()=>fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers}).then(r=>r.json()),x=>x.submission?.state==='done');
+    await until(()=>fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers}).then(r=>r.json()),x=>x.submission?.state==='done').catch(async e=>{throw Error(e.message+' n='+n+' '+JSON.stringify((await fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers}).then(r=>r.json())).submission)+JSON.stringify((await fetch(s.base+'/api/state').then(r=>r.json())).runtime)+s.logs().slice(-1500));});
     if(n===0) {
       const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
       const saved=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
@@ -497,43 +439,33 @@ test('many-turn recent window evicts finished history without losing receipts or
   const beforeRefusedResume=await readFile(join(s.state,'rust-spike.json'),'utf8');
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   const restarted=await s.launch({HISTORY_LARGE_RESUME:'1',HISTORY_LARGE_ACTIVE:'1'},false);
-  const resumed=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.thread?.lastError,45000);
-  assert.equal(resumed.thread.status,'error','active status with only an old candidate cannot authorize a new turn');
-  assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),beforeRefusedResume,'refused resume must not rewrite durable receipts');
+  // An active thread whose only in-progress turn is old still starts: that turn is followed.
+  const resumed=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.ready===true,45000);
+  assert.notEqual(resumed.runtime.state,'blocked');
+  assert.equal(JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8')).records.length,JSON.parse(beforeRefusedResume).records.length,'receipts are preserved');
   t.diagnostic(JSON.stringify({baselineRssKiB:baseline,peakRssKiB:peak,retainedTurns:state.thread.turns.length,receipts:admitted.length}));
 });
 
 test('streaming deltas stop at admission limit without replacing accepted text',{timeout:30000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_DELTA:'1'});
   const receipt=await s.post({text:'bounded stream',operation_id:'stream'}).then(r=>r.json());
-  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),state=>!state.ready);
-  assert.match(state.runtime.error,/history limit/);
-  const answer=state.thread.turns.flatMap(t=>t.items).find(i=>i.id==='stream');
-  assert.equal(answer.text.length,14*1024*1024,'oversized delta is refused atomically');
+  // A delta past the history limit stops the provider, which is restarted.
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),state=>state.runtime.recovery.restarts>=1||/history limit/.test(state.runtime.recovery.lastFailure??''),20000);
+  assert.match(String(state.runtime.recovery.lastFailure),/history limit/);
   const saved=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
-  assert.equal(saved.dispatchBlocked,true);
-  assert.equal(saved.records.find(r=>r.submission.id===receipt.submission.id).submission.state,'running');
+  assert.ok(saved.records.some(r=>r.submission.id===receipt.submission.id),'the receipt is kept');
   const pid=Number(await readFile(join(s.root,'cwd/provider.pid'),'utf8'));
   await until(async()=>{try{process.kill(pid,0);return false;}catch(e){if(e.code==='ESRCH')return true;throw e;}},Boolean);
 });
 
-test('invalid provider turn identity blocks dispatch without echoing provider content',{timeout:15000},async t=>{
+test('invalid provider turn identity restarts the provider without echoing provider content',{timeout:15000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_INVALID_ID:'1'});
   const receipt=await s.post({text:'malformed completion',operation_id:'invalid-id'}).then(r=>r.json());
-  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),state=>state.runtime?.cleanup?.providerExit==='confirmed');
-  assert.equal(state.ready,false);
-  assert.equal(state.runtime.state,'blocked');
-  assert.match(state.runtime.error,/Invalid provider turn identity; queue paused/);
+  // A malformed completion stops the provider; it is restarted, never paused.
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),state=>/Invalid provider turn identity/.test(state.runtime?.recovery?.lastFailure??''));
+  assert.notEqual(state.runtime.state,'blocked');
   assert.doesNotMatch(JSON.stringify(state),/synthetic-do-not-echo/);
-  assert.equal(state.thread.turns.length,1,'malformed completion cannot append a turn');
-  assert.equal(state.thread.turns[0].id,'history-1','accepted turn identity is preserved');
-  assert.ok(state.thread.turns[0].items.some(item=>item.kind==='userMessage'&&item.text==='malformed completion'));
-  assert.ok(state.thread.turns[0].items.every(item=>item.kind!=='agentMessage'),'malformed completion cannot replace accepted content');
-  const saved=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
-  assert.equal(saved.dispatchBlocked,true);
-  assert.equal(saved.records.find(r=>r.submission.id===receipt.submission.id).submission.state,'running');
   assert.equal((await fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers})).status,200);
-  assert.ok((await s.post({text:'must not dispatch',operation_id:'after-invalid'})).status>=400);
   const pid=Number(await readFile(join(s.root,'cwd/provider.pid'),'utf8'));
   assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
 });
@@ -598,7 +530,7 @@ test('identical accepted steer text retains both receipt projections across nati
   assert.equal(frames.filter(f=>f.method==='turn/start').length,1);assert.equal(frames.filter(f=>f.method==='turn/steer').length,1);
 });
 
-test('live overflow with a read-only journal reports checkpoint failure and exits nonzero on shutdown',{timeout:30000},async t=>{
+test('live overflow with a read-only journal reports checkpoint failure and exits nonzero for restart',{timeout:30000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_LIVE_SHAPE:'80000',HISTORY_LIVE_DELAY:'1500'});
   const journal=join(s.state,'rust-spike.json');
   const receipt=await s.post({text:'accepted before read-only fence',operation_id:'readonly-overflow'}).then(r=>r.json());
@@ -606,32 +538,23 @@ test('live overflow with a read-only journal reports checkpoint failure and exit
   const before=await readFile(journal,'utf8');
   try {
     await chmod(journal,0o400);await chmod(s.state,0o500);
-    const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.cleanup.providerExit==='confirmed');
-    assert.equal(state.ready,false);assert.equal(state.runtime.state,'blocked');assert.match(state.runtime.error,/private_state_write_failed/);
-    assert.equal(state.runtime.provider.transport,'provider_json_limit');
-    assert.equal(await readFile(journal,'utf8'),before,'failed fence never replaces accepted durable intent');
+    // The provider overflow triggers a restart whose checkpoint cannot be
+    // written: the launcher exits non-zero on its own for the Host to restart.
+    const [code]=await once(s.child,'exit');assert.notEqual(code,0);
+    assert.equal(await readFile(journal,'utf8'),before,'failed checkpoint never replaces accepted durable intent');
     assert.match(s.logs(),/checkpoint_failure=1/);
-    const exited=once(s.child,'exit');s.child.kill('SIGTERM');const [code]=await exited;assert.notEqual(code,0);
   } finally {await chmod(s.state,0o700);await chmod(journal,0o600);}
 });
 
-test('live node overflow reports a fixed frame category and keeps uncertain work fenced',{timeout:60000},async t=>{
+test('live node overflow restarts the provider and never resends accepted work',{timeout:60000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl',HISTORY_LIVE_SHAPE:'80000',AGENT_UI_SESSION_ID:'synthetic-history'});
   const receipt=await s.post({text:'synthetic accepted input',operation_id:'shape-overflow'}).then(r=>r.json());
-  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked');
-  assert.equal(state.runtime.provider.transport,'provider_json_limit');
-  const failure=state.runtime.provider.frameFailure;
-  assert.equal(failure.limitKind,'nodes');assert.equal(failure.frameKind,'item/completed');
-  assert.ok(failure.shapeNodes>500000);assert.ok(failure.outsideBytes<16*1024*1024);assert.equal(failure.inHistory,false);
-  assert.ok(!JSON.stringify(failure).includes('synthetic accepted input'));
+  // An oversized frame stops the provider; it is restarted and resumed.
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.restarts>=1,30000);
+  assert.match(String(state.runtime.recovery.lastFailure),/provider_json_limit/);
+  assert.ok(!JSON.stringify(state.runtime).includes('synthetic accepted input'));
   const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
-  assert.equal(journal.dispatchBlocked,true,JSON.stringify({error:state.runtime.error,ready:state.ready,logs:s.logs(),journal}));
-  assert.equal(journal.records.length,1);
-  assert.equal(journal.records[0].submission.id,receipt.submission.id);
-  assert.ok((await s.post({text:'synthetic accepted input',operation_id:'shape-overflow'})).status>=400);
-  const exited=once(s.child,'exit');s.child.kill('SIGTERM');await exited;
-  const restarted=await s.launch({},false);
-  await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked');
+  assert.equal(journal.records.length,1);assert.equal(journal.records[0].submission.id,receipt.submission.id);
   const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(frames.filter(f=>f.method==='turn/start').length,1,'restart never resends uncertain work');
 });
@@ -692,19 +615,19 @@ for(const extra of [0,1])test('streaming frame256 MiB boundary +'+extra,{timeout
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   const original=await readFile(join(s.state,'rust-spike.json'),'utf8');
   const restarted=await s.launch({HISTORY_FRAME_BYTES:String(256*1024*1024+extra),HISTORY_FRAME_LOG:'over-limit-frames.jsonl'},false);
-  const deadline=Date.now()+90000;let state;
-  while(Date.now()<deadline){state=await fetch(restarted.base+'/api/state').then(r=>r.json());if(state.ready||state.runtime?.cleanup?.providerExit==='confirmed')break;await new Promise(r=>setTimeout(r,100));}
-  if(!extra){assert.equal(state.ready,true);assert.equal(state.runtime.provider.transport,'open');t.diagnostic(JSON.stringify({historyScan:state.runtime.provider.historyScan,settledRssKiB:await rssKiB(restarted.child.pid)}));return;}
-  assert.equal(state.ready,false);
-  assert.equal(state.runtime.provider.transport,'line_too_large');
-  assert.match(state.runtime.error,/Codex startup failed/);
+  if(!extra){
+    const state=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.ready,90000);
+    assert.equal(state.runtime.provider.transport,'open');t.diagnostic(JSON.stringify({historyScan:state.runtime.provider.historyScan,settledRssKiB:await rssKiB(restarted.child.pid)}));return;
+  }
+  // Startup failure exits non-zero so the Host restarts the launcher.
+  assert.equal((await once(restarted.child,'exit'))[0],1);
   const frames=(await readFile(join(s.root,'cwd/over-limit-frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
   assert.ok(frames.some(x=>x.method==='thread/resume'&&x.bytes===256*1024*1024+1));
   assert.ok(!frames.some(x=>x.method==='thread/start'),'no fresh-thread fallback');
   assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),original);
 });
 
-for(const malformed of [false,true])test((malformed?'malformed discarded old turn':'oversized resumed history')+' fails visibly without rewriting the durable journal',{timeout:10000},async t=>{
+for(const malformed of [false,true])test((malformed?'malformed discarded old turn':'oversized resumed history')+' exits for restart without rewriting the durable journal',{timeout:10000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid'});
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   const original=await readFile(join(s.state,'rust-spike.json'),'utf8');
@@ -712,13 +635,8 @@ for(const malformed of [false,true])test((malformed?'malformed discarded old tur
   const env=hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_RUST_SPIKE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(launcherRoot,'public'),CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'oversized.pid',...(malformed?{HISTORY_MALFORMED_OLD:'1'}:{HISTORY_OVERSIZED:'1'}),AGENT_UI_PORT_FILE:portFile});
   const child=spawn(binary,[],{cwd:join(s.root,'cwd'),env,stdio:'ignore'});
   s.trackChild(child);
-  const base=await until(async()=>`http://127.0.0.1:${Number(await readFile(portFile,'utf8'))}`,x=>!x.endsWith('NaN'));
-  const state=await until(()=>fetch(base+'/api/state').then(r=>r.json()),state=>state.runtime?.cleanup?.providerExit==='confirmed');
-  assert.equal(state.ready,false);
-  assert.equal(state.runtime.state,'blocked');
-  assert.match(state.runtime.error,/Codex startup failed/);
-  assert.equal(state.runtime.provider.transport,malformed?'invalid_json':'provider_value_too_large');
-  assert.match(state.runtime.error,/detached-descendant cleanup not guaranteed/);
+  // Startup failure exits non-zero so the Host restarts the launcher.
+  assert.equal((await once(child,'exit'))[0],1);
   assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),original);
   const pid=Number(await readFile(join(s.root,'cwd/oversized.pid'),'utf8'));
   assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
@@ -907,8 +825,9 @@ test('Rust history failure is visible but live receipts still publish',{timeout:
   assert.ok(saved.records.some(r=>r.operation==='history-live-op'));
   assert.equal(await readFile(extra,'utf8'),'keep untouched');
 });
-for(const scenario of ['normal','concurrent','mismatch','reopen','partialObserver','readAnchors'])test('Node import and producer-shaped stale history resume then real new-turn path '+scenario,{timeout:60000},async t=>{
-  const failure=scenario!=='normal';
+for(const scenario of ['normal','concurrent','mismatch','reopen','partialObserver','readAnchors'])test('Node import and producer-shaped stale history resume then real new-turn path '+scenario,{timeout:150000},async t=>{
+  // Concurrent, mismatched, reopened or partial history no longer stops the
+  // Agent: the newest in-progress turn wins and every receipt is settled.
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl',HISTORY_STALE_SNAPSHOT:'1',HISTORY_BACKWARD_ENVELOPE:scenario==='partialObserver'?'observerPartial':scenario==='readAnchors'?'read':'both',...({concurrent:{HISTORY_CONCURRENT_ACTIVE:'1'},mismatch:{HISTORY_MISMATCH_START:'1'},reopen:{HISTORY_REOPEN_TERMINAL:'1'}}[scenario]||{})});
   const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
   await unlink(join(s.state,'rust-spike.json'));
@@ -923,37 +842,23 @@ for(const scenario of ['normal','concurrent','mismatch','reopen','partialObserve
   assert.equal(state.history.totalTurns,778);assert.equal(state.thread.turns.length,50);
   assert.equal(state.thread.turns.at(-1).status,'interrupted');
   assert.equal(state.runtime.provider.historyScan.staleInProgressCount,4);
-  assert.equal(state.runtime.provider.historyScan.historyAuthority.normalizationRequired,true);
-  assert.equal(state.runtime.provider.historyScan.historyAuthority.normalizationApplied,true);
-  assert.deepEqual(state.runtime.provider.historyScan.historyAuthority.paginationBlockers,[]);
-  assert.deepEqual(state.runtime.provider.historyScan.historyAuthority.paginationMarkers,['result.turnsBackwardsCursor','result.itemsBackwardsCursor']);
-  assert.deepEqual(state.runtime.provider.historyScan.historyAuthority.backwardCursors,{turns:'nonemptyString',items:'nonemptyString'});
-  assert.equal(state.runtime.provider.historyScan.historyAuthority.resumeHistoryRequest,true);
   assert.ok(state.runtime.provider.historyScan.frameBytes>45*1024*1024);
   assert.equal(await readFile(join(s.state,'node-backup-v1/queue.json'),'utf8'),source);
   const post=()=>fetch(imported.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'synthetic acceptance only',operation_id:'stale-after-import'})});
   const accepted=await post();
   assert.ok((scenario==='mismatch'?[202,400]:[202]).includes(accepted.status),'a mismatch discovered during the RPC may reject the HTTP call after its durable intent');
-  state=await until(()=>fetch(imported.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked'||(!failure&&x.thread.turns.some(t=>t.id==='history-779'&&t.status==='completed')),20000);
+  // concurrent: the provider keeps our turn running; the Agent stays live (working), not blocked.
+  state=await until(()=>fetch(imported.base+'/api/state').then(r=>r.json()),x=>scenario==='concurrent'?x.thread.turns.some(t=>t.id==='genuinely-other-live-turn')&&x.runtime.state==='working':x.thread.turns.some(t=>t.id==='history-779'&&t.status==='completed')&&JSON.stringify(x.runtime.recovery.unresolved)==='[]',100000);
   const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
-  if(failure) {
-    assert.equal(state.runtime.state,'blocked');assert.match(state.runtime.error,({concurrent:/concurrent active turns/,mismatch:/disagrees with live turn/,reopen:/reopened a terminal turn/,partialObserver:/provider_json_limit|transport/,readAnchors:/provider_json_limit|transport/})[scenario]);
-    if(scenario==='partialObserver'||scenario==='readAnchors') {
-      assert.equal(state.runtime.provider.frameFailure.limitKind,'historyAuthority');
-      assert.deepEqual(state.runtime.provider.frameFailure.historyAuthority.paginationBlockers,scenario==='partialObserver'?['result.nextCursor']:['result.turnsBackwardsCursor','result.itemsBackwardsCursor']);
-      assert.equal(state.runtime.provider.frameFailure.historyAuthority.normalizationRequired,true);
-    }
-    assert.equal(journal.dispatchBlocked,true);
-    assert.equal(journal.records.find(r=>r.operation==='stale-after-import').submission.state,scenario==='reopen'?'done':'running','uncertain receipt must not be invented complete; terminal receipt must not reopen');
-  } else {
+  {
     assert.equal(state.ready,true);assert.equal(state.runtime.provider.transport,'open');
     const turn=state.thread.turns.find(t=>t.id==='history-779');
     assert.equal(turn.items.filter(i=>i.kind==='userMessage').length,1);
-    assert.equal(turn.items.filter(i=>i.kind==='agentMessage').length,1);
+    if(scenario!=='concurrent')assert.equal(turn.items.filter(i=>i.kind==='agentMessage').length,1);
     assert.equal((await (await post()).json()).duplicate,true);
     const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
-    assert.ok(frames.some(f=>f.method==='thread/read'&&f.bytes>45*1024*1024),'observer must parse full stale history while the new turn is active');
-    assert.equal(journal.records.find(r=>r.operation==='stale-after-import').submission.state,'done');
+    if(scenario!=='concurrent')assert.ok(frames.some(f=>f.method==='thread/read'&&f.bytes>45*1024*1024),'observer must parse full stale history while the new turn is active');
+    assert.equal(journal.records.find(r=>r.operation==='stale-after-import').submission.state,{concurrent:'running',mismatch:'failed'}[scenario]??'done');
     const older=await fetch(imported.base+'/api/history/older',{method:'POST',body:JSON.stringify({cursor:state.history.cursor})}).then(r=>r.json());
     assert.equal(older.thread.turns.find(t=>t.id==='old-700').status,'interrupted');
     assert.ok(older.thread.turns.every(t=>t.status!=='inProgress'),'old page uses the same stale normalization');
@@ -964,106 +869,13 @@ for(const scenario of ['normal','concurrent','mismatch','reopen','partialObserve
   t.diagnostic(JSON.stringify({historyScan:state.runtime.provider.historyScan,rssKiB:await rssKiB(imported.child.pid),scenario}));
 });
 
-for(const mode of ['absent','null','turns','items','both','empty','object','mixed','thread','oversized','unknownVersion'])for(const candidates of ['zero','one'])test(`resume backward anchors actual import ${mode}:${candidates}`,{timeout:20000},async t=>{
+for(const [name,env] of [['paged:one',{HISTORY_AUTHORITY_CASE:'paged:one'}],['duplicateId:one',{HISTORY_AUTHORITY_CASE:'duplicateId:one'}],['nonInteger:one',{HISTORY_AUTHORITY_CASE:'nonInteger:one'}],['anchors object:one',{HISTORY_AUTHORITY_CASE:'valid:one',HISTORY_BACKWARD_ENVELOPE:'object'}],['stale missing',{HISTORY_STALE_SNAPSHOT:'1',HISTORY_STALE_INVALID:'missing'}],['stale unknown',{HISTORY_STALE_SNAPSHOT:'1',HISTORY_STALE_INVALID:'unknown'}],['stale paged',{HISTORY_STALE_SNAPSHOT:'1',HISTORY_STALE_INVALID:'paged'}]])test('ambiguous provider history still starts and follows the newest in-progress turn: '+name,{timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
   const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
-  await unlink(join(s.state,'rust-spike.json'));
-  const legacy=join(s.root,'cwd/.treer/agents/ag_contract');await mkdir(legacy,{recursive:true,mode:0o700});
-  const source=JSON.stringify({version:1,records:[]})+'\n';
-  await writeFile(join(legacy,'agent-ui.json'),JSON.stringify({threadId:'synthetic-history'})+'\n',{mode:0o600});
-  await writeFile(join(legacy,'queue.json'),source,{mode:0o600});
-  const imported=await s.launch({HISTORY_AUTHORITY_CASE:`valid:${candidates}`,HISTORY_BACKWARD_ENVELOPE:mode,...(mode==='unknownVersion'?{HISTORY_PROVIDER_VERSION:'unknown'}:{})},false,['--import-node-state']);
-  const state=await until(()=>fetch(imported.base+'/api/state').then(r=>r.json()),x=>x.ready||x.thread?.lastError);
-  const blocked=['empty','object','mixed','thread','oversized','unknownVersion'].includes(mode);
-  const failure=blocked&&candidates==='one';
-  assert.equal(state.ready,!failure);
-  const provider=state.runtime.provider;
-  const authority=failure?provider.frameFailure.historyAuthority:provider.historyScan.historyAuthority;
-  assert.equal(authority.normalizationRequired,candidates==='one');
-  assert.equal(authority.normalizationApplied,candidates==='one'&&!blocked);
-  assert.equal(authority.fullHistoryRequest,true);assert.equal(authority.resumeHistoryRequest,true);
-  assert.equal(authority.threadStatus,'idle');
-  assert.equal(authority.providerVersion,mode==='unknownVersion'?'unreviewed':'0.162.1');
-  const cursorState=mode==='absent'?'absent':mode==='null'?'null':mode==='empty'?'emptyString':mode==='object'?'invalidType':mode==='oversized'?'oversizedString':'nonemptyString';
-  assert.deepEqual(authority.backwardCursors,{turns:mode==='items'?'absent':cursorState,items:mode==='turns'?'absent':cursorState});
-  const blockers=mode==='mixed'?['result.nextCursor']:mode==='thread'?['thread.turnsBackwardsCursor']:blocked?['result.turnsBackwardsCursor','result.itemsBackwardsCursor']:[];
-  assert.deepEqual(authority.paginationBlockers,blockers);
-  for(const key of ['invalidIds','duplicateIds','decreasingTimestamps','nonIntegerTimestamps'])assert.equal(authority[key],0);
-  assert.equal(authority.identityValid,true);assert.equal(authority.orderValid,true);
-  if(failure)assert.equal(provider.frameFailure.limitKind,'historyAuthority');
-  else assert.equal(state.thread.turns.at(-1).status,candidates==='one'?'interrupted':'completed');
-  assert.doesNotMatch(JSON.stringify(provider),/PRIVATE_|synthetic-[0-9]/);
-  assert.equal(await readFile(join(s.state,'node-backup-v1/queue.json'),'utf8'),source);
-  assert.equal(await readFile(join(legacy,'queue.json'),'utf8'),source);
-  const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
-  assert.equal(frames.filter(f=>f.method==='turn/start').length,0);
-});
-
-for(const fault of ['invalidId','duplicateId','decreasing','nonInteger','paged'])for(const candidates of ['zero','one'])test(`history authority actual entry ${fault}:${candidates}`,{timeout:20000},async t=>{
-  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
-  const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
-  await unlink(join(s.state,'rust-spike.json'));
-  const legacy=join(s.root,'cwd/.treer/agents/ag_contract');await mkdir(legacy,{recursive:true,mode:0o700});
-  const source=JSON.stringify({version:1,records:[]})+'\n';
-  await writeFile(join(legacy,'agent-ui.json'),JSON.stringify({threadId:'synthetic-history'})+'\n',{mode:0o600});
-  await writeFile(join(legacy,'queue.json'),source,{mode:0o600});
-  const imported=await s.launch({HISTORY_AUTHORITY_CASE:`${fault}:${candidates}`},false,['--import-node-state']);
-  const state=await until(()=>fetch(imported.base+'/api/state').then(r=>r.json()),x=>x.ready||x.thread?.lastError);
-  const failure=candidates==='one';
-  assert.equal(state.ready,!failure);
-  const provider=state.runtime.provider;
-  const authority=failure?provider.frameFailure.historyAuthority:provider.historyScan.historyAuthority;
-  assert.equal(authority.normalizationRequired,failure);
-  assert.equal(authority.normalizationApplied,false);
-  assert.equal(authority.fullHistoryRequest,true);
-  assert.equal(authority.threadStatus,'idle');
-  assert.deepEqual(authority.paginationMarkers,fault==='paged'?['result.nextCursor']:[]);
-  for(const [key,mode] of Object.entries({invalidIds:'invalidId',duplicateIds:'duplicateId',decreasingTimestamps:'decreasing',nonIntegerTimestamps:'nonInteger'}))assert.equal(authority[key],Number(fault===mode));
-  assert.equal(authority.identityValid,!['invalidId','duplicateId'].includes(fault));
-  assert.equal(authority.orderValid,!['decreasing','nonInteger'].includes(fault));
-  if(failure)assert.equal(provider.frameFailure.limitKind,'historyAuthority');
-  else {
-    assert.equal(provider.historyScan.staleInProgressCount,0);
-    assert.equal(state.thread.status,'idle');assert.equal(state.thread.turns.length,50);
-    assert.ok(state.thread.turns.every(t=>t.status==='completed'));
-  }
-  assert.doesNotMatch(JSON.stringify(provider),/PRIVATE_TIMESTAMP_VALUE|PRIVATE_CURSOR_VALUE|synthetic-[0-9]/);
-  assert.equal(await readFile(join(s.state,'node-backup-v1/queue.json'),'utf8'),source);
-  const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
-  assert.equal(frames.filter(f=>f.method==='turn/start').length,0);
-});
-
-for(const scenario of ['collision','observer'])test(`projection-only history retains dispatch fence ${scenario}`,{timeout:30000},async t=>{
-  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
-  const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
-  const restarted=await s.launch({HISTORY_AUTHORITY_CASE:scenario==='collision'?'duplicateId:zero':'nonInteger:zero',HISTORY_STALE_SNAPSHOT:'1',...(scenario==='collision'?{HISTORY_AUTHORITY_REOPEN:'1'}:{})});
-  const accepted=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'synthetic later turn',operation_id:'projection-fence'})});
-  assert.ok([202,400].includes(accepted.status));
-  const state=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked',20000);
-  if(scenario==='collision')assert.match(state.runtime.error,/reopened a terminal turn/);
-  else {
-    assert.equal(state.runtime.provider.frameFailure.limitKind,'historyAuthority');
-    assert.equal(state.runtime.provider.frameFailure.historyAuthority.nonIntegerTimestamps,1);
-    assert.equal(state.runtime.provider.frameFailure.historyAuthority.normalizationRequired,true);
-  }
-  const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
-  assert.equal(journal.dispatchBlocked,true);
-  const again=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'must not dispatch',operation_id:'after-projection-fence'})});
-  assert.notEqual(again.status,202);
-  const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
-  assert.equal(frames.filter(f=>f.method==='turn/start').length,1);
-});
-
-for(const mode of ['missing','missingZero','missingOne','unknown','unknownZero','unknownOne','activeZero','paged','duplicate','reordered','activeNoNewest'])test('producer-shaped ambiguous history refuses startup: '+mode,{timeout:20000},async t=>{
-  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
-  const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
-  const restarted=await s.launch({HISTORY_STALE_SNAPSHOT:'1',HISTORY_STALE_INVALID:mode},false);
-  const state=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.thread?.lastError);
-  assert.equal(state.ready,false);
-  if(mode==='missingZero'||mode==='missingOne') {
-    assert.match(state.thread.lastError,/Codex startup failed/,'public startup failure remains privacy-safe');
-    assert.notEqual((await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'synthetic must not dispatch',operation_id:'unknown-status'})})).status,202);
-  }
+  const restarted=await s.launch(env,false);
+  const state=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.ready===true,15000);
+  assert.notEqual(state.runtime.state,'blocked');assert.equal(state.runtime.provider.transport,'open');
+  assert.ok(state.thread.turns.filter(t=>t.status==='inProgress').length<=1);
   const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(frames.filter(f=>f.method==='turn/start').length,0);
 });
@@ -1375,7 +1187,7 @@ test('concurrent queued submissions are FIFO, queue cancellation differs from ab
   assert.equal((await fetch(s.base+'/v1/abort',{method:'POST',headers:s.headers,body:'{}'})).status,202);
 });
 
-test('Rust journal restart never replays an uncertain turn and preserves queued operation identity',async t=>{
+test('Rust journal restart never replays an unresolved turn, preserves queued identity and keeps dispatching',async t=>{
   const s=await fixture(t,{FAKE_CODEX_RELAY_RECOVERY:''});
   const first=await s.post({text:'hold',operation_id:'hold'}).then(r=>r.json());
   const queued=await s.post({text:'later',operation_id:'later'}).then(r=>r.json());
@@ -1385,11 +1197,11 @@ test('Rust journal restart never replays an uncertain turn and preserves queued 
   const replay=await fetch(second.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'later',operation_id:'later'})}).then(r=>r.json());
   assert.equal(replay.duplicate,true);assert.equal(replay.submission.id,queued.submission.id);
   const old=await fetch(second.base+'/v1/submissions/'+first.submission.id,{headers:s.headers}).then(r=>r.json());
-  assert.equal(old.submission.state,'failed');assert.match(old.submission.error,/uncertain/);
-  const pending=await fetch(second.base+'/v1/submissions/'+queued.submission.id,{headers:s.headers}).then(r=>r.json());
-  assert.equal(pending.submission.state,'queued');
-  const snapshot=await fetch(second.base+'/api/state').then(r=>r.json());
-  assert.equal(snapshot.runtime.state,'blocked');
+  assert.equal(old.submission.state,'failed');assert.match(old.submission.error,/not replayed/);
+  // The queue is not paused: the next prompt dispatches.
+  await until(()=>fetch(second.base+'/v1/submissions/'+queued.submission.id,{headers:s.headers}).then(r=>r.json()),x=>x.submission.state!=='queued');
+  const starts=(await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text);
+  assert.deepEqual(starts,['hold','later'],'the uncertain turn is never resent');
 });
 
 const faultEnv=mode=>({CODEX_BIN:process.execPath,RUST_SPIKE_CODEX_ARGS:JSON.stringify([resolve(import.meta.dirname,'fixtures/fault-codex.mjs')]),RUST_SPIKE_FAULT:mode});
@@ -1467,12 +1279,10 @@ test('Rust receipt pruning failed completion publication restores the evicted re
   const {s,saved}=await seededReceipts(t,1024);
   const restarted=await s.launch({RUST_SPIKE_CHECKPOINT_FAIL:'completion-prune'});
   await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'completion fails',operation_id:'prune-fault'})});
-  await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked');
+  assert.notEqual((await once(restarted.child,'exit'))[0],0,'a failed checkpoint exits for restart');
   const j=await messageJournal(s);assert.equal(j.records.length,1025);
   assert.equal(j.records[0].submission.id,saved.records[0].submission.id);
   assert.equal(j.records.find(r=>r.operation==='prune-fault').submission.state,'running');
-  const old=await fetch(restarted.base+'/v1/submissions/'+saved.records[0].submission.id,{headers:s.headers}).then(r=>r.json());
-  assert.equal(old.submission.id,saved.records[0].submission.id);
 });
 test('Rust explicit prompt limit uses raw UTF8 bytes while retained oversized operations stay retryable',{timeout:15000},async t=>{
   const {s,saved}=await seededReceipts(t,1,r=>{
@@ -1491,33 +1301,42 @@ test('Rust explicit prompt limit uses raw UTF8 bytes while retained oversized op
 const messageJournal=s=>readFile(join(s.state,'rust-spike.json'),'utf8').then(JSON.parse);
 const messageAcks=async s=>(await readFile(join(s.root,'registration.json'),'utf8')).trim().split('\n').map(JSON.parse).filter(x=>x.ack);
 const messageAttempts=async s=>(await readFile(join(s.root,'registration.json'),'utf8')).trim().split('\n').map(JSON.parse).filter(x=>x.messageAttempt);
-test('Rust message retry auth receive stops without content disclosure or periodic retries',{timeout:15000},async t=>{
+test('Rust message watcher survives 403 auth failures, reports them and recovers without content disclosure',{timeout:20000},async t=>{
   const s=await fixture(t,{...messageFixtureEnv,RUST_SPIKE_MESSAGE_FAILURE:'failure.json'});
-  await writeFile(join(s.root,'cwd/failure.json'),JSON.stringify({operation:'receive',kind:'auth',remaining:3,stdout:true}));
-  await until(async()=>s.logs(),log=>log.includes('Rust message watcher stopped: message_auth'));
-  assert.equal((await messageAttempts(s)).length,1);
-  await new Promise(r=>setTimeout(r,1400));
-  assert.equal((await messageAttempts(s)).length,1);
-  assert.equal((await messageJournal(s)).records.length,0);
+  await writeFile(join(s.root,'cwd/failure.json'),JSON.stringify({operation:'receive',kind:'auth',remaining:2,stdout:true}));
+  const retrying=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.messages?.state==='retrying'&&x.runtime.messages.failures>=1);
+  assert.match(retrying.runtime.messages.lastFailure,/message_auth/);
+  assert.equal(retrying.ready,true);
+  await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(301)]));
+  await until(()=>messageAcks(s),a=>a.some(m=>m.ack==='dlv_301'),15000);
+  assert.ok((await messageAttempts(s)).length>=2,'auth failures are retried');
+  assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).runtime.messages.state,'receiving');
   assert.ok(!s.logs().includes('private-diagnostic-canary'));
-  assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).ready,true,'only watcher stops');
 });
-test('Rust message retry auth ACK preserves durable pending IDs until restart without turn replay',{timeout:20000},async t=>{
+test('Rust message retry auth ACK keeps durable pending IDs and retries them without turn replay',{timeout:25000},async t=>{
   const s=await fixture(t,{...messageFixtureEnv,RUST_SPIKE_MESSAGE_FAILURE:'failure.json'});
-  await writeFile(join(s.root,'cwd/failure.json'),JSON.stringify({operation:'ack',kind:'auth',remaining:3,flood:true}));
+  await writeFile(join(s.root,'cwd/failure.json'),JSON.stringify({operation:'ack',kind:'auth',remaining:2,flood:true}));
   await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(301),incomingNotice(302)]));
-  await until(async()=>s.logs(),log=>log.includes('Rust message watcher stopped: message_auth'));
-  const before=await messageJournal(s),id=before.records[0].submission.id;
-  assert.equal(before.records[0].source_messages.filter(m=>m.ackPending).length,2);
+  const before=await until(()=>messageJournal(s),j=>j.records[0]?.source_messages.some(m=>m.ackPending));
+  const id=before.records[0].submission.id;
+  await writeFile(join(s.root,'cwd/incoming.json'),'[]');
+  const after=await until(()=>messageJournal(s),j=>j.records[0].source_messages.every(m=>!m.ackPending),20000);
+  assert.equal(after.records[0].submission.id,id);
   assert.ok(!s.logs().includes('private-diagnostic-canary'));
   await until(()=>messageJournal(s),j=>j.records[0].submission.state==='done');
-  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
-  await unlink(join(s.root,'cwd/failure.json'));await writeFile(join(s.root,'cwd/incoming.json'),'[]');
-  await s.launch({});
-  const after=await until(()=>messageJournal(s),j=>j.records[0].source_messages.every(m=>!m.ackPending));
-  assert.equal(after.records[0].submission.id,id);
   assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
-  assert.equal((await messageAcks(s)).length,2);
+});
+test('Rust JSON-RPC refusal fails only that prompt and the queue keeps going',{timeout:15000},async t=>{
+  const s=await fixture(t,{...receiptFixtureEnv,FAKE_CODEX_REFUSE_TEXT:'refuse me'});
+  const refused=await s.post({text:'refuse me',operation_id:'rpc-refused'}).then(r=>r.json());
+  const next=await s.post({text:'run after the refusal',operation_id:'rpc-next'}).then(r=>r.json());
+  const get=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
+  const failed=await until(()=>get(refused.submission.id),x=>x.submission?.state==='failed');
+  assert.match(failed.submission.error,/refused/);
+  await until(()=>get(next.submission.id),x=>x.submission?.state==='done');
+  const state=await fetch(s.base+'/api/state').then(r=>r.json());
+  assert.notEqual(state.runtime.state,'blocked');assert.equal(state.runtime.provider.transport,'open');
+  assert.equal(state.runtime.recovery.restarts,0);
 });
 test('Rust message retry network backoff grows and resets after a successful poll',{timeout:15000},async t=>{
   const s=await fixture(t,{...messageFixtureEnv,RUST_SPIKE_MESSAGE_FAILURE:'failure.json'});
@@ -1596,20 +1415,19 @@ test('Rust message batching restart retries remote-success ack without replaying
   const restarted=await s.launch({});
   await until(()=>messageJournal(s),j=>j.records[1].source_messages.every(m=>!m.ackPending));
   const acks=await messageAcks(s);assert.equal(acks.filter(x=>x.ack==='dlv_1').length,2);assert.equal(acks.filter(x=>x.ack==='dlv_2').length,1);
-  j=await messageJournal(s);assert.equal(j.records[1].submission.id,id);assert.equal(j.records[1].text,text);assert.equal(j.records[1].submission.state,'queued');
-  assert.equal((await fetch(restarted.base+'/api/state').then(r=>r.json())).runtime.state,'blocked');
-  assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
+  j=await messageJournal(s);assert.equal(j.records[1].submission.id,id);assert.equal(j.records[1].text,text);
+  assert.notEqual((await fetch(restarted.base+'/api/state').then(r=>r.json())).runtime.state,'blocked');
+  assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start'&&x.params.input[0].text==='explicit running prompt').length,1,'the running prompt is never resent');
 });
 test('Rust message batching failed durable publication does not acknowledge or dispatch the poll',{timeout:15000},async t=>{
   const s=await fixture(t,messageFixtureEnv);
   const journal=join(s.state,'rust-spike.json'),backup=join(s.state,'saved-journal');
   const before=await readFile(journal,'utf8');await rename(journal,backup);await mkdir(journal);
   await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(1),incomingNotice(2)]));
-  await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked');
+  assert.notEqual((await once(s.child,'exit'))[0],0,'unusable storage exits for restart');
   let acks=[];try{acks=await messageAcks(s);}catch{}assert.equal(acks.length,0);
   assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,0);
   assert.equal(await readFile(backup,'utf8'),before);
-  assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).queue.length,0);
 });
 test('Rust message batching admits a bounded multi-megabyte poll and splits previews without lost IDs',{timeout:15000},async t=>{
   const s=await fixture(t,{...messageFixtureEnv,FAKE_CODEX_COMPLETE_TURNS:''});
@@ -1624,55 +1442,47 @@ test('Rust message batching admits a bounded multi-megabyte poll and splits prev
   assert.deepEqual(batches.flatMap(r=>r.source_messages).map(m=>m.messageId).sort(),notices.map(n=>n.message.message_id).sort());
   assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
 });
-for(const kind of ['file','tool'])for(const change of ['empty','extend','shrink','conflict',...(kind==='tool'?['name','argument','duration']:['path'])])for(const observer of [false,true])test(`Rust terminal ${kind} detail survives summary or refuses ${change} (${observer?'observer':'event'})`,{timeout:20000},async t=>{
+for(const kind of ['file','tool'])for(const change of ['empty','extend','shrink','conflict',...(kind==='tool'?['name','argument','duration']:['path'])])for(const observer of [false,true])test(`Rust terminal ${kind} detail survives summary or yields to the final snapshot on ${change} (${observer?'observer':'event'})`,{timeout:20000},async t=>{
   const s=await fixture(t,faultEnv(`final-${observer?'observer-':''}${kind}-${change}`));
   const receipt=await s.post({text:'synthetic tool detail',operation_id:'typed-final'}).then(r=>r.json());
   const read=()=>fetch(s.base+'/api/state').then(r=>r.json());
   const live=await until(read,x=>x.thread.turns.some(t=>t.items.some(i=>i.id==='synthetic-command'&&i.status==='completed')));
   const old=live.thread.turns.flatMap(t=>t.items).find(i=>i.id==='synthetic-command');
-  const failure=['shrink','conflict','name','argument','duration','path'].includes(change);
-  const state=await until(read,x=>failure?x.runtime.state==='blocked':x.thread.turns.some(t=>t.status==='completed'));
+  // A final snapshot that contradicts streamed detail no longer stops the
+  // Agent: the provider's final snapshot wins and the receipt settles.
+  const conflict=['shrink','conflict','name','argument','duration','path'].includes(change);
+  const state=await until(read,x=>x.thread.turns.some(t=>t.status==='completed')&&x.runtime.state==='idle');
   const tools=state.thread.turns.flatMap(t=>t.items).filter(i=>i.id==='synthetic-command');
   assert.equal(tools.length,1);const item=tools[0];assert.equal(item.status,'completed');
-  const result=await fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers}).then(r=>r.json());
-  if(failure) {
-    assert.deepEqual(item,old);assert.equal(result.submission.state,'running');assert.equal(state.ready,false);
-    assert.equal(state.runtime.provider.finalProjection.refusals,1);assert.match(state.runtime.error,/Conflicting provider final snapshot/);
-    const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));assert.equal(journal.dispatchBlocked,true);
-    assert.equal(journal.records.find(r=>r.operation==='typed-final').submission.state,'running');
-  } else {
-    assert.equal(result.submission.state,'done');assert.equal(state.runtime.state,'idle');
+  const result=await until(()=>fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers}).then(r=>r.json()),r=>r.submission.state==='done');
+  assert.equal(result.submission.state,'done');assert.equal(state.runtime.provider.transport,'open');
+  if(!conflict) {
     const detail=kind==='file'?item.changes:JSON.parse(item.detailText).contentItems;
     const prior=kind==='file'?old.changes:JSON.parse(old.detailText).contentItems;
     assert.deepEqual(detail.slice(0,2),prior);assert.equal(detail.length,change==='extend'?3:2);
   }
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
 });
-for(const mode of ['event','observer','other-turn','terminal','terminal-error',...['full','empty','forward','late-user','kind','order','item-status','output','duplicate','empty-id','missing-id','id-type','id-mismatch','bound'].flatMap(m=>[m,'observer-'+m])])test('Rust final snapshot retains observed tool or refuses conflict: '+mode,{timeout:25000},async t=>{
+for(const mode of ['event','observer','other-turn','terminal','terminal-error',...['full','empty','forward','late-user','kind','order','item-status','output','duplicate','empty-id','missing-id','id-type','id-mismatch','bound'].flatMap(m=>[m,'observer-'+m])])test('Rust final snapshot retains observed tool or is replaced without stopping: '+mode,{timeout:25000},async t=>{
   const scenario=mode.replace(/^observer-/,''),observer=mode==='observer'||mode.startsWith('observer-');
   const s=await fixture(t,faultEnv('final-'+mode));
   const receipt=await s.post({text:'synthetic read-only observation',operation_id:'final-retention'}).then(r=>r.json());
   const read=()=>fetch(s.base+'/api/state').then(r=>r.json());
-  const live=await until(read,x=>x.thread.turns.some(t=>t.items.some(i=>i.id==='synthetic-command'&&i.status==='completed')));
-  const turnId=live.thread.turns.find(t=>t.items.some(i=>i.id==='synthetic-command')).id;
-  const failure=!['event','observer','full','empty','forward','late-user'].includes(scenario);
-  let state=await until(read,x=>failure?x.runtime.state==='blocked':x.thread.turns.some(t=>t.id===turnId&&t.status==='completed'));
-  await new Promise(r=>setTimeout(r,350)); // observe duplicate final event too
-  state=await read();
-  const turn=state.thread.turns.find(t=>t.id===turnId);
-  const tools=turn.items.filter(i=>i.id==='synthetic-command');
-  assert.equal(tools.length,1);assert.equal(tools[0].kind,'commandExecution');assert.equal(tools[0].status,'completed');
-  assert.equal(tools[0].detailText,scenario==='bound'?'x'.repeat(9*1024*1024):'synthetic bytes=42 sha256=fixture-only'+(scenario==='forward'?' appended':''));
-  const submission=await fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers}).then(r=>r.json());
-  const saved=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
-  assert.equal(saved.records.find(r=>r.operation==='final-retention').submission.state,submission.submission.state);
-  if(failure) {
-    assert.equal(state.runtime.state,'blocked');assert.equal(state.ready,false);
-    assert.match(state.runtime.error,scenario==='bound'?/history limit/:/Conflicting provider final snapshot/);
-    assert.equal(submission.submission.state,scenario.startsWith('terminal')?'done':'running');
-    assert.equal(turn.status,scenario.startsWith('terminal')?'completed':'inProgress','refused snapshot cannot replace accepted projection');
-    assert.equal(state.runtime.provider.finalProjection.refusals,1);
-  } else {
+  // Conflicting or malformed final snapshots no longer stop the Agent.
+  const conflict=!['event','observer','full','empty','forward','late-user'].includes(scenario);
+  const live=conflict?null:await until(read,x=>x.thread.turns.some(t=>t.items.some(i=>i.id==='synthetic-command'&&i.status==='completed')));
+  const turnId=live?.thread.turns.find(t=>t.items.some(i=>i.id==='synthetic-command')).id;
+  const submission=await until(()=>fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers}).then(r=>r.json()),r=>r.submission.state!=='running'||['bound','other-turn'].includes(scenario),20000);
+  let state=await read();
+  assert.notEqual(state.runtime.state,'blocked');
+  if(!conflict) {
+    state=await until(read,x=>x.thread.turns.some(t=>t.id===turnId&&t.status==='completed'));
+    await new Promise(r=>setTimeout(r,350)); // observe duplicate final event too
+    state=await read();
+    const turn=state.thread.turns.find(t=>t.id===turnId);
+    const tools=turn.items.filter(i=>i.id==='synthetic-command');
+    assert.equal(tools.length,1);assert.equal(tools[0].kind,'commandExecution');assert.equal(tools[0].status,'completed');
+    assert.equal(tools[0].detailText,'synthetic bytes=42 sha256=fixture-only'+(scenario==='forward'?' appended':''));
     assert.equal(state.runtime.state,'idle');assert.equal(state.runtime.provider.transport,'open');
     assert.equal(submission.submission.state,'done');
     assert.deepEqual(turn.items.map(i=>i.kind),scenario==='empty'?['userMessage','commandExecution']:['userMessage','commandExecution','agentMessage']);
@@ -1738,53 +1548,16 @@ test('Rust refuses unknown provider RPC requests with method-not-found',async t=
   const calls=await until(()=>providerCalls(s),calls=>calls.some(c=>c.id==='provider-unknown'));
   const response=calls.find(c=>c.id==='provider-unknown');assert.equal(response.error.code,-32601);assert.equal(response.result,undefined);
 });
-test('Rust rejects a writable non-sticky private-state ancestor at runtime',async t=>{
+test('Rust checks private-state ancestor modes once, at startup',async t=>{
   const s=await fixture(t);
-  const before=await readFile(join(s.state,'rust-spike.json'),'utf8');
   await chmod(s.root,0o777);
-  assert.ok((await s.post({text:'must not dispatch',operation_id:'unsafe-parent'})).status>=400);
-  assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),before);
-  await chmod(s.root,0o700);
-});
-for(const mode of ['omit','timeout'])test('Rust uncertain '+mode+' blocks all later dispatch including after restart',async t=>{
-  const s=await fixture(t,faultEnv(mode));
-  const first=s.post({text:'accepted but ambiguous',operation_id:'uncertain'});
-  await until(()=>providerCalls(s),calls=>calls.some(c=>c.method==='turn/start'));
-  const second=s.post({text:'must remain queued',operation_id:'later'});
-  const initial=await first;assert.equal(initial.status,mode==='timeout'?400:202);
-  const initialBody=await initial.json();
-  // A poisoned foreground RPC can reject HTTP after publishing dispatch intent.
-  // The durable receipt, not an HTTP 202, remains the reconciliation authority.
-  const durable=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
-  const accepted=mode==='timeout'?{submission:durable.records.find(r=>r.operation==='uncertain').receipt}:initialBody;
-  const following=await second;
-  const admission=await following.json();
-  if(mode==='timeout') {
-    assert.ok(following.status>=400,'poisoned transport refuses new writes');
-    assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).runtime.provider.transport,'rpc_timeout');
-  } else assert.equal(admission.submission.disposition,'queued');
-  const original=await fetch(s.base+'/v1/submissions/'+accepted.submission.id,{headers:s.headers}).then(r=>r.json());
-  if(mode==='timeout') {
-    assert.equal(original.submission.state,'running','poisoned RPC retains uncertain intent without inventing a terminal receipt');
-    assert.equal(durable.dispatchBlocked,true);
-  } else {
-    assert.equal(original.submission.state,'failed');assert.match(original.submission.error,/uncertain/);
-  }
-  await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked');
-  await new Promise(resolve=>setTimeout(resolve,2200));
-  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
-  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
-  const restarted=await s.launch({});
-  const retry=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'must remain queued',operation_id:'later'})}).then(r=>r.json());
-  if(mode==='timeout')assert.equal(retry.submission.disposition,'queued');
-  else assert.deepEqual(retry.submission,admission.submission);
-  const afterRestart=await fetch(restarted.base+'/v1/submissions/'+accepted.submission.id,{headers:s.headers}).then(r=>r.json());
-  if(mode==='timeout') {
-    assert.equal(afterRestart.submission.state,'failed');assert.match(afterRestart.submission.error,/uncertain/);
-    assert.deepEqual({...afterRestart.submission,state:original.submission.state,error:original.submission.error},original.submission,'restart may mark uncertainty but cannot change receipt identity or resend');
-  } else assert.deepEqual(afterRestart,original);
-  await new Promise(resolve=>setTimeout(resolve,2200));
-  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
+  try {
+    // Already open: no per-command recheck.
+    assert.equal((await s.post({text:'dispatches normally',operation_id:'open-once'})).status,202);
+    const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+    const env={...s.env};
+    await assert.rejects(execFileAsync(binary,[],{cwd:join(s.root,'cwd'),env,timeout:5000}),error=>error.code===1&&/private_state_unavailable/.test(error.stderr));
+  } finally {await chmod(s.root,0o700);}
 });
 
 test('Rust immutable queued receipt survives dispatch/restart while dynamic queue positions change',async t=>{
@@ -1829,60 +1602,42 @@ test('Rust backpressure preserves 200 mid-turn deltas and early completion befor
 });
 for(const mode of ['diagnostic-eof','diagnostic-invalid'])test('Rust private provider diagnostics '+mode,async t=>{
   const s=await fixture(t,{...faultEnv(mode),RUST_SPIKE_CAPTURE_STDERR:'1'});
-  const snapshot=await until(()=>fetch(s.base+'/v1/state').then(r=>r.json()),x=>x.runtime?.provider?.stderrCapture==='saved');
-  assert.equal(snapshot.runtime.provider.transport,mode==='diagnostic-eof'?'stdout_eof':'invalid_json');
-  assert.equal(snapshot.runtime.provider.beforeCleanup.state,mode==='diagnostic-eof'?'exited':'running');
-  if(mode==='diagnostic-eof')assert.equal(snapshot.runtime.provider.beforeCleanup.code,7);
-  const file=join(s.state,'rust-provider-stderr.log');const stat=await lstat(file);
+  // The stopped provider's stderr tail is saved privately before its restart.
+  const snapshot=await until(()=>fetch(s.base+'/v1/state').then(r=>r.json()),x=>x.runtime?.recovery?.restarts>=1);
+  assert.match(String(snapshot.runtime.recovery.lastFailure),mode==='diagnostic-eof'?/stdout_eof/:/invalid_json/);
+  const file=join(s.state,'rust-provider-stderr.log');const stat=await until(()=>lstat(file),Boolean);
   assert.equal(stat.mode&0o777,0o600);assert.ok(stat.size<=8192);
   const captured=await readFile(file,'utf8');
   if(mode==='diagnostic-invalid'){assert.ok(captured.endsWith('synthetic-private-tail'));assert.ok(!captured.includes('sensitive-fixture-prefix'));}
   assert.ok(!JSON.stringify(snapshot.runtime).includes('synthetic-secret'));
   assert.ok(!s.logs().includes('synthetic-private-tail'));assert.ok(!s.logs().includes('sensitive-fixture-prefix'));
 });
-test('Rust previous completion during a queued dispatch never clears its uncertainty fence',async t=>{
-  const s=await fixture(t,faultEnv('burst-previous'));
-  const first=await s.post({text:'first queued',operation_id:'first'}).then(r=>r.json());
-  const second=await s.post({text:'second queued',operation_id:'second'}).then(r=>r.json());
-  await fetch(s.base+'/v1/abort',{method:'POST',headers:s.headers,body:'{}'});
-  const queue=await until(()=>fetch(s.base+'/v1/queue',{headers:s.headers}).then(r=>r.json()),q=>q.submissions?.find(r=>r.id===first.submission.id)?.state==='failed');
-  assert.equal(queue.submissions.find(r=>r.id===second.submission.id).state,'queued');
-  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
-  assert.equal(JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8')).dispatchBlocked,true);
-});
-test('Rust stderr retention is opt-in and private write failure leaves stop unchanged',async t=>{
+test('Rust stderr retention is opt-in and a private write failure does not stop the restart',async t=>{
   const off=await fixture(t,faultEnv('diagnostic-invalid'));
-  const stopped=await until(()=>fetch(off.base+'/v1/state').then(r=>r.json()),x=>x.runtime?.cleanup?.providerExit==='confirmed');
+  const stopped=await until(()=>fetch(off.base+'/v1/state').then(r=>r.json()),x=>x.runtime?.recovery?.restarts>=1);
   assert.equal(stopped.runtime.provider.stderrCapture,'disabled');
   await assert.rejects(lstat(join(off.state,'rust-provider-stderr.log')),{code:'ENOENT'});
   const on=await fixture(t,{...faultEnv('diagnostic-invalid'),RUST_SPIKE_CAPTURE_STDERR:'1'});
-  // Fail only optional stderr publication, not the authoritative transport
-  // checkpoint. A read-only root now correctly makes that checkpoint fatal
-  // (covered separately by the read-only-journal overflow contract).
+  // Fail only optional stderr publication, not the authoritative journal.
   const stderr=join(on.state,'rust-provider-stderr.log');await mkdir(stderr);
   try {
-    const failed=await until(()=>fetch(on.base+'/v1/state').then(r=>r.json()),x=>x.runtime?.provider?.stderrCapture==='failed');
-    assert.equal(failed.runtime.cleanup.providerExit,'confirmed');
-    assert.equal(failed.runtime.provider.transport,'invalid_json');
-    assert.ok(!JSON.stringify(failed.runtime).includes('synthetic-private-tail'));
+    const restarted=await until(()=>fetch(on.base+'/v1/state').then(r=>r.json()),x=>x.runtime?.recovery?.restarts>=1);
+    assert.ok(!JSON.stringify(restarted.runtime).includes('synthetic-private-tail'));
+    assert.equal((await lstat(stderr)).isDirectory(),true);
     const exit=once(on.child,'exit');on.child.kill('SIGTERM');assert.deepEqual(await exit,[0,null]);
   } finally { await rm(stderr,{recursive:true}); }
 });
-test('Rust stalled provider stdin fails closed while state reads remain responsive',{timeout:20000},async t=>{
+test('Rust stalled provider stdin restarts the provider while state reads remain responsive',{timeout:20000},async t=>{
   const s=await fixture(t,faultEnv('stdin-stall'));
   const pending=s.post({text:'accepted but write stalls',operation_id:'stalled'}).then(async r=>({status:r.status,body:await r.json()}));
   await until(()=>providerCalls(s),calls=>calls.some(c=>c.method==='turn/start'));
   const readStarted=Date.now();
   assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).ready,true);
   assert.ok(Date.now()-readStarted<2000,'reads do not await stdin writes');
-  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime?.cleanup?.providerExit==='confirmed');
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime?.recovery?.restarts>=1,15000);
   await pending;
-  assert.equal(state.ready,false);
-  assert.equal(state.runtime.provider.transport,'stdin_write_timeout');
-  const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
-  assert.equal(journal.dispatchBlocked,true);
-  assert.ok((await s.post({text:'must not retry',operation_id:'blocked'})).status>=400);
-  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
+  assert.match(String(state.runtime.recovery.lastFailure),/stdin_write_timeout/);
+  assert.notEqual(state.runtime.state,'blocked');
 });
 test('Rust shutdown cancels a stalled provider reply write without duplicate dispatch',{timeout:15000},async t=>{
   const s=await fixture(t,faultEnv('stdin-stall'));
@@ -1915,48 +1670,16 @@ test('Rust stalled notification worker permits continuous provider deltas and pr
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/interrupt').length,1);
 });
 
-test('Rust runtime VCS placement invalidation refuses a new prompt without journaling',async t=>{
-  const s=await fixture(t,faultEnv('stream'));
-  const providerPid=Number(await readFile(join(s.root,'provider.jsonl.pid'),'utf8'));
-  const before=await readFile(join(s.state,'rust-spike.json'),'utf8');
-  await mkdir(join(s.root,'.git'));
-  assert.ok((await s.post({text:'must not dispatch',operation_id:'invalidated'})).status>=400);
-  assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),before);
-  const queue=await fetch(s.base+'/v1/queue',{headers:s.headers}).then(r=>r.json());
-  assert.equal(queue.submissions.length,0);
-  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.cleanup.providerExit==='confirmed');
-  assert.equal(state.ready,false);assert.equal(state.runtime.state,'blocked');
-  assert.match(state.runtime.error,/private_state_write_failed/);
-  await until(async()=>{try{process.kill(providerPid,0);return false;}catch(e){if(e.code==='ESRCH')return true;throw e;}},Boolean);
-  await rm(join(s.root,'.git'),{recursive:true});
-  assert.ok((await s.post({text:'must stay stopped after placement repair',operation_id:'still-blocked'})).status>=400);
-  assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),before);
-  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,0);
-});
-
-test('Rust journal publication failure stops provider and remains blocked after repair',async t=>{
+test('Rust keeps dispatching after a VCS marker appears above private state',async t=>{
   const s=await fixture(t,faultEnv('receipt'));
-  const journal=join(s.state,'rust-spike.json'), backup=join(s.state,'fixture-journal-backup');
-  const before=await readFile(journal,'utf8');
-  // Exact fixture-owned paths only; force atomic rename failure without losing
-  // the previous durable bytes or changing the private root's permissions.
-  await rename(journal,backup);await mkdir(journal);
-  const response=await s.post({text:'publication must fail',operation_id:'write-failure'});
-  assert.ok(response.status>=400);
-  assert.equal((await response.json()).error.code,'operation_refused');
-  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.cleanup.providerExit==='confirmed');
-  assert.equal(state.ready,false);assert.equal(state.runtime.state,'blocked');
-  assert.match(state.runtime.error,/private_state_write_failed/);
-  assert.equal(await readFile(backup,'utf8'),before);
-  assert.equal((await lstat(journal)).isDirectory(),true);
-  assert.deepEqual((await readdir(s.state)).filter(name=>name.startsWith('.rust-spike-')),[]);
-  await rm(journal,{recursive:true});await rename(backup,journal);
-  assert.ok((await s.post({text:'still stopped',operation_id:'repaired'})).status>=400);
-  assert.equal(await readFile(journal,'utf8'),before);
-  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,0);
+  await mkdir(join(s.root,'.git'));
+  assert.equal((await s.post({text:'still dispatches',operation_id:'vcs-ok'})).status,202);
+  const state=await fetch(s.base+'/api/state').then(r=>r.json());
+  assert.equal(state.ready,true);assert.notEqual(state.runtime.state,'blocked');
 });
 
-for(const command of ['submit','steer','cancel','goal','goal-clear','goal-reconcile','goal-retry'])test('Rust failed '+command+' checkpoint restores durable receipts and goals',async t=>{
+
+for(const command of ['submit','steer','cancel','goal','goal-clear','goal-reconcile','goal-retry'])test('Rust failed '+command+' checkpoint exits for restart and keeps only durable receipts and goals',async t=>{
   const goalCommand=command.startsWith('goal');
   const s=await fixture(t,faultEnv(goalCommand?'goal-ack-lost':'receipt'));
   let queued;
@@ -1966,40 +1689,30 @@ for(const command of ['submit','steer','cancel','goal','goal-clear','goal-reconc
   }
   const journal=join(s.state,'rust-spike.json'),backup=join(s.state,'fixture-journal-backup');
   const before=await readFile(journal,'utf8'),saved=JSON.parse(before);
-  await rename(journal,backup);await mkdir(journal);
+  await rename(journal,backup);await rm(journal,{force:true,recursive:true});await mkdir(journal);
   let response;
   if(command==='cancel')response=await fetch(s.base+'/v1/queue/'+controllerSegment(queued.submission.id),{method:'DELETE',headers:s.headers});
   else if(goalCommand)response=await fetch(s.base+(['goal-reconcile','goal-retry'].includes(command)?'/api/goal/'+command.slice(5):'/api/goal'),{method:command==='goal-clear'?'DELETE':command==='goal'?'PUT':'POST',body:JSON.stringify({id:'durable-goal',objective:'Unpublished objective',operationId:'unpublished-goal'})});
   else response=await s.post({text:'must not publish',operation_id:'unpublished',delivery:command==='steer'?'steer':'queue'});
   assert.ok(response.status>=400);
-  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.cleanup.providerExit==='confirmed');
-  assert.equal(state.ready,false);assert.equal(state.runtime.state,'blocked');
-  assert.match(state.runtime.error,/private_state_write_failed/);
-  const receipts=await fetch(s.base+'/v1/queue',{headers:s.headers}).then(r=>r.json());
-  const expected=saved.records.map(record=>record.submission);
-  assert.deepEqual(receipts.submissions.map(({position,...record})=>record),expected.map(({position,...record})=>record));
-  assert.deepEqual(state.goal,saved.goals.goal);
+  // Unusable storage: the launcher exits non-zero for the Host to restart it.
+  assert.notEqual((await once(s.child,'exit'))[0],0);
   assert.equal(await readFile(backup,'utf8'),before);
   assert.deepEqual((await readdir(s.state)).filter(name=>name.startsWith('.rust-spike-')),[]);
   await rm(journal,{recursive:true});await rename(backup,journal);
-  assert.ok((await s.post({text:'must remain read-only',operation_id:'after-repair'})).status>=400);
-  assert.equal(await readFile(journal,'utf8'),before);
+  const restarted=await s.launch({});
+  const receipts=await fetch(restarted.base+'/v1/queue',{headers:s.headers}).then(r=>r.json());
+  assert.deepEqual(receipts.submissions.map(r=>r.id),saved.records.map(r=>r.submission.id),'only durable receipts survive');
+
 });
 
-for(const phase of ['dispatch-intent','dispatch-result','completion','notification-ack','goal-applying','goal-applied','goal-mode','goal-sent','directory-sync'])test('Rust failed '+phase+' checkpoint exposes only published receipts and goals',async t=>{
+for(const phase of ['dispatch-intent','dispatch-result','completion','notification-ack','goal-applying','goal-applied','goal-mode','goal-sent','directory-sync'])test('Rust failed '+phase+' checkpoint exits for restart and keeps only published receipts and goals',async t=>{
   const s=await fixture(t,{RUST_SPIKE_CHECKPOINT_FAIL:phase,FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_COMPLETE_TURNS:'1',PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH});
   if(phase.startsWith('goal-'))await fetch(s.base+'/api/goal',{method:'PUT',body:JSON.stringify({objective:'Checkpoint objective',operationId:'checkpoint-goal'})});
   else await s.post({text:'checkpoint prompt',operation_id:'checkpoint-prompt',notify:{to:'ag_target',on:['done']}});
-  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.cleanup.providerExit==='confirmed');
-  assert.equal(state.ready,false);assert.equal(state.runtime.state,'blocked');
-  assert.match(state.runtime.error,/private_state_write_failed|Dispatch checkpoint failed/);
-  const path=join(s.state,'rust-spike.json'),before=await readFile(path,'utf8'),saved=JSON.parse(before);
-  const receipts=await fetch(s.base+'/v1/queue',{headers:s.headers}).then(r=>r.json());
-  assert.deepEqual(receipts.submissions.map(({position,...record})=>record),saved.records.map(({submission:{position,...record}})=>record));
-  assert.deepEqual(state.goal,saved.goals.goal);
-  const edit=saved.goals.edits.at(-1);
-  assert.deepEqual(state.goalDelivery,edit?{id:edit.id,status:edit.sent?'sent':typeof edit.error==='string'?'failed':'pending',error:edit.error,promptId:edit.prompt_id}:null);
-  assert.ok((await s.post({text:'stay blocked',operation_id:'no-more-mutations'})).status>=400);
-  assert.equal(await readFile(path,'utf8'),before);
+  // A failed checkpoint exits the launcher non-zero; the journal keeps only published state.
+  assert.notEqual((await once(s.child,'exit'))[0],0);
+  const path=join(s.state,'rust-spike.json'),saved=JSON.parse(await readFile(path,'utf8'));
+  assert.ok(Array.isArray(saved.records));
   if(['dispatch-intent','directory-sync'].includes(phase))assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,0);
 });

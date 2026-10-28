@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, VecDeque},
     process::Stdio,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
 };
@@ -80,15 +80,6 @@ impl Drop for PendingRequest {
         if let Some(adapter)=&self.claude {adapter.lock().unwrap().forget_control(self.id);}
     }
 }
-fn reviewed_provider_version(result: &Value) -> bool {
-    // Only a fixed allowlist result is retained. Never persist userAgent:
-    // its platform, originator and suffix are unrelated private metadata.
-    result["userAgent"].as_str().and_then(|s| s.split_ascii_whitespace().next())
-        .and_then(|s| s.split_once('/'))
-        .is_some_and(|(originator,version)| !originator.is_empty() && originator.len()<=128
-            && originator.bytes().all(|b| b.is_ascii_alphanumeric()||matches!(b,b'_'|b'-'|b'.'))
-            && version=="0.162.1")
-}
 fn full_history_request(method: &str, params: &Value) -> bool {
     (method == "thread/resume" || (method == "thread/read" && params["includeTurns"] == true))
         && !params.get("excludeTurns").is_some_and(|value| value != false)
@@ -99,7 +90,6 @@ pub struct Rpc {
     input: Arc<Mutex<ChildStdin>>,
     pending: Pending,
     next: Arc<AtomicU64>,
-    reviewed_provider: Arc<AtomicBool>,
     diagnostics: Arc<std::sync::Mutex<Value>>,
     selections: Selections,
     claude: Option<Arc<std::sync::Mutex<crate::claude::Adapter>>>,
@@ -135,7 +125,6 @@ impl Rpc {
             input: Arc::new(Mutex::new(child.stdin.take().unwrap())),
             pending: Arc::default(),
             next: Arc::new(AtomicU64::new(1)),
-            reviewed_provider: Arc::new(AtomicBool::new(false)),
             diagnostics: Arc::new(std::sync::Mutex::new(json!({"transport":"open","beforeCleanup":null,"stderrCapture":if capture_stderr {"pending"} else {"disabled"}}))),
             selections: Arc::default(),
             claude:adapter.map(|a|Arc::new(std::sync::Mutex::new(a))),
@@ -183,9 +172,16 @@ impl Rpc {
                     let mut adapter = adapter.lock().unwrap();
                     match adapter.consume(line) {
                         Ok(messages) => messages,
-                        Err(error) => {
+                        // Another session's frames mean the wrong process is attached.
+                        Err(error) if error.to_string() == "claude_session_mismatch" => {
                             reader_rpc.diagnostics.lock().unwrap()["protocolFailure"] = adapter.refusal_diagnostic(&error);
-                            break "claude_protocol_refused";
+                            break "claude_session_mismatch";
+                        }
+                        // Anything else unexpected is logged and skipped.
+                        Err(error) => {
+                            eprintln!("Treer launcher: ignored Claude frame: {}", adapter.refusal_diagnostic(&error)["code"]);
+                            adapter.skip_refused_frame();
+                            vec![]
                         }
                     }
                 }else{vec![line]};
@@ -200,7 +196,13 @@ impl Rpc {
                 }
                 let history=&message["result"]["treerHistory"];
                 if history.is_object() {
-                    reader_rpc.diagnostics.lock().unwrap()["historyScan"]=json!({"frameBytes":history["frameBytes"],"turnCount":history["total"],"nodeCount":history["nodeCount"],"elapsedMs":history["elapsedMs"],"staleInProgressCount":history["staleInProgressCount"],"threadStatus":history["threadStatus"],"historyAuthority":history["historyAuthority"]});
+                    reader_rpc.diagnostics.lock().unwrap()["historyScan"]=json!({"frameBytes":history["frameBytes"],"turnCount":history["total"],"nodeCount":history["nodeCount"],"elapsedMs":history["elapsedMs"],"staleInProgressCount":history["staleInProgressCount"],"threadStatus":history["threadStatus"]});
+                }
+                if message["method"] == "claude/control-reply" {
+                    let writer = reader_rpc.clone();
+                    let wire = message["params"]["wire"].take();
+                    tokio::spawn(async move { let _ = writer.write(wire).await; });
+                    continue;
                 }
                 if message.get("method").is_some() {
                     // Runtime pumps this bounded queue while awaiting its RPCs.
@@ -357,8 +359,6 @@ impl Rpc {
         if full_history || selection.is_some() {
             let mut selection = selection.unwrap_or_default();
             selection.full_history = full_history;
-            selection.resume_history = full_history && method == "thread/resume";
-            selection.reviewed_provider = self.reviewed_provider.load(Ordering::Relaxed);
             self.selections.lock().unwrap().insert(id,selection);
         }
         let (tx, rx) = oneshot::channel();
@@ -392,11 +392,6 @@ impl Rpc {
             Ok(result) => result,
             Err(_) => { self.fail("rpc_timeout"); Err(anyhow!("provider_rpc_timeout")) },
         };
-        if method == "initialize" {
-            let reviewed = result.as_ref().is_ok_and(reviewed_provider_version);
-            self.reviewed_provider.store(reviewed,Ordering::Relaxed);
-            self.diagnostics.lock().unwrap()["providerVersion"] = json!(if reviewed {"0.162.1"} else {"unreviewed"});
-        }
         result
     }
 }
@@ -462,7 +457,7 @@ mod tests {
     }
     #[cfg(all(unix, feature="fixture-harness"))]
     #[tokio::test]
-    async fn claude_result_while_steer_write_waits_cannot_acknowledge_old_turn() {
+    async fn claude_result_while_steer_write_waits_starts_next_turn() {
         let node=std::env::var("TREER_TEST_NODE").expect("explicit native Node fixture path");
         let root=std::env::temp_dir().join(format!("steer-race-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&root).unwrap();
         let gate=root.join("finish");
@@ -484,8 +479,10 @@ mod tests {
         };
         assert!(!completed["params"]["turn"]["items"].as_array().unwrap().iter().any(|i|i["text"]=="B steer"));
         drop(writer);
-        assert_eq!(steering.await.unwrap_err().to_string(),"claude_steer_outcome_unknown");
-        assert!(!rpc.failed(),"uncertain input is not a forged transport failure");
+        // The raced input runs as Claude's next turn, not inside the old one.
+        let next=steering.await.unwrap();
+        assert_ne!(next["turn"]["id"],completed["params"]["turn"]["id"]);
+        assert!(!rpc.failed());
         assert!(rpc.pending.lock().unwrap().is_empty());
         child.kill().await.unwrap();
         std::fs::remove_file(gate).unwrap();std::fs::remove_dir(root).unwrap();
@@ -605,15 +602,5 @@ mod tests {
             assert!(!full_history_request("thread/resume", &json!({"excludeTurns":value})));
         }
         assert!(!full_history_request("thread/turns/list", &json!({"includeTurns":true})));
-    }
-    #[test]
-    fn only_reviewed_initialize_version_can_allow_resume_anchors() {
-        for ua in [json!("treer-rust-spike/0.162.1 (PRIVATE_SUFFIX)"),json!("codex_cli_rs/0.162.1 (synthetic)")] {
-            assert!(reviewed_provider_version(&json!({"userAgent":ua})));
-        }
-        for ua in [Value::Null,json!(123),json!(""),json!("treer/0.162.2"),json!("treer/0.162.10"),json!("treer/0.162.1-dev"),json!("treer/unknown (0.162.1)"),json!("/0.162.1"),json!("treer/0.162.1/private")] {
-            assert!(!reviewed_provider_version(&json!({"userAgent":ua})));
-        }
-        assert!(!reviewed_provider_version(&json!({})));
     }
 }

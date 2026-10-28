@@ -32,10 +32,24 @@ pub struct Handle {
     pub commands: mpsc::Sender<Request>,
     pub state: watch::Receiver<Arc<Value>>,
     shutdown: Arc<tokio::sync::Notify>,
+    shutdown_requested: Arc<std::sync::atomic::AtomicBool>,
     stopped: watch::Receiver<Option<bool>>,
 }
 impl Handle {
+    /// Resolves only when the runtime stopped on its own (startup failure or
+    /// unusable private storage), so the process can exit non-zero and let
+    /// the Host restart it. A requested shutdown never resolves this.
+    pub async fn stopped_unrequested(&self) {
+        let mut stopped = self.stopped.clone();
+        while stopped.borrow_and_update().is_none() {
+            if stopped.changed().await.is_err() { break; }
+        }
+        if self.shutdown_requested.load(std::sync::atomic::Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+    }
     pub async fn shutdown(&self) -> Result<()> {
+        self.shutdown_requested.store(true, std::sync::atomic::Ordering::SeqCst);
         self.shutdown.notify_one();
         let mut stopped = self.stopped.clone();
         timeout(Duration::from_secs(7), async {
@@ -87,6 +101,9 @@ struct Record {
     // turn authority and never authorizes dispatch/reconciliation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     projection_after: Option<String>,
+    // The provider refused this steer; it waits to run as its own turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    steer_refused: bool,
 }
 struct Runtime {
     claude:bool,
@@ -110,22 +127,25 @@ struct Runtime {
     history_total: usize,
     history_nonce: String,
     last_history_page: Option<std::time::Instant>,
-    // Sticky stop for history admission OR private journal failure.
-    history_failed: bool,
+    // The provider process is stopped and will be restarted (see restart).
+    provider_down: bool,
     state_failed: bool,
-    transport_failed: bool,
     last_disk_snapshot: Option<std::time::Instant>,
     disk_history_status: &'static str,
     provider_exit: &'static str,
     final_projection: Value,
     records: VecDeque<Record>,
     dispatch_blocked: bool,
-    reconnect_attempts: u32,
-    reconnect_due: std::time::Instant,
-    recovering: bool,
+    restarts: u32,
+    restart_failures: u32,
+    restart_due: std::time::Instant,
+    started_at: std::time::Instant,
+    last_failure: Value,
     recovery_reads: u64,
-    idle_proof: Option<std::time::Instant>,
     recovery_generation: u64,
+    // First time the provider reported a tracked turn idle (inferred stale).
+    stale_since: Option<(String, std::time::Instant)>,
+    message_watch: Value,
     goals: Goals,
     // Last successfully published state; rollback is centralized for every
     // checkpoint caller, including provider events and notification acks.
@@ -162,7 +182,23 @@ pub struct Config {
     pub attachments: Option<Arc<tokio::sync::Mutex<Attachments>>>,
     pub capture_stderr: bool,
 }
-pub fn spawn(mut config: Config) -> Result<Handle> {
+/// Start the provider process. Claude resumes its session when Treer already
+/// holds state for it; Codex sessions are resumed over JSON-RPC by start().
+fn spawn_provider(config: &Config, session: Option<&str>, resume: bool) -> Result<(Rpc, crate::rpc::ProviderChild, mpsc::Receiver<Value>)> {
+    let mut args = config.codex_args.clone();
+    if config.claude {
+        let session = session.ok_or_else(|| anyhow!("claude_session_required"))?;
+        args.extend([if resume {"--resume"} else {"--session-id"}.into(), session.into()]);
+        Rpc::spawn_claude(&config.codex, &args, &config.cwd, config.capture_stderr, session.into())
+    } else {
+        Rpc::spawn(&config.codex, &args, &config.cwd, config.capture_stderr)
+    }
+}
+/// Capped exponential backoff between provider restarts; there is no attempt cap.
+fn restart_delay(failures: u32) -> Duration {
+    Duration::from_secs((1u64 << failures.min(6)).min(60))
+}
+pub fn spawn(config: Config) -> Result<Handle> {
     let store = Store::open(&config.private_root, &config.cwd)?;
     let saved = store.load().map_err(|_| anyhow!("private_state_invalid"))?;
     if config.claude {
@@ -180,11 +216,10 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
             bail!("private_state_session_mismatch");
         }
     }
-    let (rpc, mut child, events) = if config.claude {
-        let session=config.session.clone().or_else(||saved.as_ref().and_then(|s|s["threadId"].as_str()).map(str::to_owned)).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
-        config.codex_args.extend([if saved.is_some() || config.native_bootstrap.is_some(){"--resume"}else{"--session-id"}.into(),session.clone()]);
-        Rpc::spawn_claude(&config.codex,&config.codex_args,&config.cwd,config.capture_stderr,session)?
-    }else{Rpc::spawn(&config.codex, &config.codex_args, &config.cwd, config.capture_stderr)?};
+    let session = config.claude.then(|| config.session.clone()
+        .or_else(||saved.as_ref().and_then(|s|s["threadId"].as_str()).map(str::to_owned))
+        .unwrap_or_else(||uuid::Uuid::new_v4().to_string()));
+    let (rpc, mut child, events) = spawn_provider(&config, session.as_deref(), saved.is_some() || config.native_bootstrap.is_some())?;
     let (commands, mut requests) = mpsc::channel::<Request>(64);
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let shutdown_requested = shutdown.clone();
@@ -216,21 +251,23 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
         history_total: 0,
         history_nonce: uuid::Uuid::new_v4().simple().to_string(),
         last_history_page: None,
-        history_failed: false,
+        provider_down: false,
         state_failed: false,
-        transport_failed: false,
         last_disk_snapshot: None,
         disk_history_status: "not_requested",
         provider_exit: "not_requested",
         final_projection: Value::Null,
         records: VecDeque::new(),
         dispatch_blocked: false,
-        reconnect_attempts: 0,
-        reconnect_due: std::time::Instant::now(),
-        recovering: false,
+        restarts: 0,
+        restart_failures: 0,
+        restart_due: std::time::Instant::now(),
+        started_at: std::time::Instant::now(),
+        last_failure: Value::Null,
         recovery_reads: 0,
-        idle_proof: None,
         recovery_generation: 0,
+        stale_since: None,
+        message_watch: json!({"state":"not_started"}),
         goals: Goals::default(),
         checkpoint: (VecDeque::new(), Goals::default()),
         goals_supported: false,
@@ -247,22 +284,11 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
         biased;
         _ = shutdown_requested.notified() => {},
         _ = async {
-        let startup = rt.start(&config, saved).await;
-        if let Err(error) = startup {
-            eprintln!("Rust spike: Codex startup failed (no fresh-thread fallback)");
-            let reason = if rt.state_failed {
-                "private_state_write_failed; queue paused"
-            } else if error.is::<HistoryLimit>() {
-                rt.dispatch_blocked = true;
-                "Codex thread exceeds launcher history limit; use a launcher supporting larger history; no fresh-thread fallback"
-            } else if error.is::<InvalidTurnIdentity>() {
-                rt.dispatch_blocked = true;
-                "Invalid provider turn identity; no fresh-thread fallback"
-            } else {
-                "Codex startup failed"
-            };
-            rt.turns = Transcript::default();
-            rt.thread = json!({"status":"error","lastError":reason,"turns":[]});
+        if let Err(error) = rt.start(&config, saved).await {
+            // Exit and let the Host restart the launcher; nothing is retried here.
+            eprintln!("Treer launcher: provider startup failed: {error}");
+            rt.ready = false;
+            rt.thread = json!({"status":"error","lastError":format!("Provider startup failed: {error}"),"turns":[]});
             rt.publish();
             rt.record_provider_stop(timeout(Duration::from_secs(5), child.kill()).await);
             return;
@@ -292,15 +318,14 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
                         thread["targetTurnId"].as_str().map(str::to_owned),
                     )
                     .await;
-                if observed_tx.send((epoch, generation, result)).await.is_err() {
+                let target = thread["targetTurnId"].as_str().map(str::to_owned);
+                if observed_tx.send((epoch, generation, target, result)).await.is_err() {
                     break;
                 }
             }
         }));
         let mut observation_pending = false;
         let mut provider_epoch = 0u64;
-        let (reconnected_tx, mut reconnected_rx) = mpsc::channel(1);
-        let mut reconnect_worker: Option<AbortTask> = None;
         let mut recovery_cursor = 0usize;
         let mut provider_stopped = false;
         let mut tick = tokio::time::interval(Duration::from_secs(2));
@@ -310,41 +335,43 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
                     Some(request) => { let result = rt.command(&request.method, request.body).await; let _ = request.reply.send(result); }
                     None => break,
                 },
-                event = rt.events.recv(), if !rt.history_failed => match event {
+                event = rt.events.recv(), if !rt.provider_down => match event {
                     Some(event) => {
                         if event["method"] == "spike/provider-exit" { let _ = rt.stop_for_transport_error(); continue; }
-                        if rt.event(event).await.is_err() { eprintln!("Rust spike: provider event failed"); }
+                        if rt.event(event).await.is_err() { eprintln!("Treer launcher: provider event ignored"); }
                     }
                     None => { let _ = rt.stop_for_transport_error(); },
                 },
                 _ = tick.tick() => {
-                    if rt.claude { let _ = rt.check_claude_goal(); }
-                    if !rt.history_failed && rt.goals.edits.iter().any(|e| !e.sent && e.error.is_null()) && rt.flush_goals().await.is_err() {
-                        eprintln!("Rust spike: goal edit retained for reconciliation");
+                    if rt.provider_down && provider_stopped && !rt.state_failed && rt.restart_due <= std::time::Instant::now() {
+                        match rt.restart(&config).await {
+                            Ok(replacement) => {
+                                child = replacement;
+                                provider_epoch += 1;
+                                provider_stopped = false;
+                            }
+                            Err(error) => {
+                                eprintln!("Treer launcher: provider restart failed: {error}");
+                                rt.provider_down = true;
+                                provider_stopped = true;
+                                rt.schedule_restart(format!("Provider restart failed: {error}"));
+                            }
+                        }
                     }
-                    if rt.drain().await.is_err() { eprintln!("Rust spike: queue dispatch failed; retained"); }
-                    if !rt.claude && !rt.history_failed && !observation_pending {
+                    if rt.claude && !rt.provider_down { let _ = rt.check_claude_goal(); }
+                    if !rt.provider_down && rt.goals.edits.iter().any(|e| !e.sent && e.error.is_null()) && rt.flush_goals().await.is_err() {
+                        eprintln!("Treer launcher: goal edit retained for reconciliation");
+                    }
+                    if rt.drain().await.is_err() { eprintln!("Treer launcher: queue dispatch failed; retained"); }
+                    if !rt.claude && !rt.provider_down && !observation_pending {
                         let targets = recovery::targets(&rt.records);
                         let target = targets.get(recovery_cursor % targets.len().max(1)).cloned();
                         recovery_cursor = recovery_cursor.wrapping_add(1);
-                        if target.is_some() || rt.dispatch_blocked || rt.thread["activeTurnId"].is_string() {
+                        if target.is_some() || rt.thread["activeTurnId"].is_string() {
                             observation_pending = observe_tx.try_send((provider_epoch, rt.recovery_generation, rt.rpc.clone(), json!({"threadId":rt.thread["id"],"targetTurnId":target.or_else(||rt.thread["activeTurnId"].as_str().map(str::to_owned))}))).is_ok();
                         }
                     }
-                    if rt.can_reconnect() && !rt.recovering && rt.reconnect_attempts < 3 && rt.reconnect_due <= std::time::Instant::now() && rt.provider_exit == "confirmed" {
-                        rt.reconnect_attempts += 1;
-                        rt.recovering = true;
-                        rt.publish();
-                        let config = config.clone();
-                        let session = rt.thread["id"].as_str().unwrap().to_owned();
-                        let targets = recovery::targets(&rt.records);
-                        let tx = reconnected_tx.clone();
-                        reconnect_worker = Some(AbortTask(tokio::spawn(async move {
-                            let result = recovery::connect(config, session, targets).await;
-                            let _ = tx.send(result).await;
-                        })));
-                    }
-                    if !rt.history_failed && !notification_pending {
+                    if !rt.state_failed && !notification_pending {
                         if let Some(job) = rt.next_notification() {
                             notification_pending = notify_tx.try_send(job).is_ok();
                         }
@@ -352,93 +379,48 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
                 },
                 Some((id, success)) = result_rx.recv() => {
                     notification_pending = false;
-                    if success && !rt.history_failed {
+                    if success && !rt.state_failed {
                         if let Some(record) = rt.records.iter_mut().find(|r| r.submission["id"] == id) {
                             record.notified = true;
                             if rt.persist().is_err() {
-                                eprintln!("Rust spike: notification checkpoint failed");
+                                eprintln!("Treer launcher: notification checkpoint failed");
                             }
                         }
                     }
                 }
-                Some((epoch, generation, observed)) = observed_rx.recv() => {
+                Some((epoch, generation, target, observed)) = observed_rx.recv() => {
                     observation_pending = false;
-                    if let (true, Ok(observed)) = (epoch == provider_epoch && generation == rt.recovery_generation, observed) {
-                        if rt.observe(&observed).await.is_err() && !rt.state_failed {
-                            (rt.records, rt.goals) = rt.checkpoint.clone();
-                            let _ = rt.stop_for_history_error("Recovery observation refused; queued work preserved".into());
+                    if let (true, Ok(observed)) = (epoch == provider_epoch && generation == rt.recovery_generation && !rt.provider_down, observed) {
+                        if let Err(error) = rt.observe(&observed, target.as_deref()).await {
+                            // A read that cannot be applied changes nothing.
+                            eprintln!("Treer launcher: observation ignored: {error}");
+                            if !rt.state_failed { (rt.records, rt.goals) = rt.checkpoint.clone(); }
                         }
                     }
-                }
-                Some(result) = reconnected_rx.recv() => {
-                    reconnect_worker.take();
-                    rt.recovering = false;
-                    rt.reconnect_due = std::time::Instant::now() + Duration::from_secs(2u64.pow(rt.reconnect_attempts));
-                    if let Err(error) = &result {
-                        let reason = match error.to_string().as_str() {
-                            "recovery_cleanup_unverified" => Some("Recovery child exit unverified; reconnect refused; queued work preserved"),
-                            "recovery_validation_refused" => Some("Recovery authority/validation refused; queued work preserved"),
-                            _ => None,
-                        };
-                        if let Some(reason) = reason {
-                            rt.transport_failed = false;
-                            rt.thread["lastError"] = json!(reason);
-                        }
-                    }
-                    if let Ok(connection) = result {
-                        let recovery::Connection { rpc, child: mut replacement, events, snapshot, targets, buffered } = connection;
-                        if rt.state_failed || !rt.transport_failed {
-                            let _ = timeout(Duration::from_secs(5), replacement.kill()).await;
-                            rt.publish();
-                            continue;
-                        }
-                        rt.rpc = rpc;
-                        provider_epoch += 1;
-                        child = replacement;
-                        rt.events = events;
-                        provider_stopped = false;
-                        rt.provider_exit = "not_requested";
-                        rt.history_failed = false;
-                        rt.transport_failed = false;
-                        rt.ready = true;
-                        let result = async {
-                            rt.observe(&snapshot).await?;
-                            rt.refresh_recovery_history(&snapshot)?;
-                            // Exact target reads follow resume and may already
-                            // contain a newer terminal status. Never rebuild the
-                            // window from the older snapshot after applying them.
-                            for observed in &targets { rt.observe(observed).await?; }
-                            for event in buffered {
-                                if let Some(covered) = recovery::covering_terminal(&snapshot, &targets, &event) {
-                                    rt.merge_covered_lifecycle(&event, covered)?;
-                                } else { rt.event(event).await?; }
-                            }
-                            rt.persist()?;
-                            Ok::<_,anyhow::Error>(())
-                        }.await;
-                        if result.is_err() && !rt.history_failed {
-                            (rt.records, rt.goals) = rt.checkpoint.clone();
-                            let _ = rt.stop_for_history_error("Recovery validation failed; queued work preserved".into());
-                        }
-                    }
-                    rt.publish();
                 }
             }
-            if rt.rpc.failed() && !rt.history_failed {
+            if rt.state_failed {
+                // Private storage is unusable: stop and let the Host restart us.
+                break;
+            }
+            if rt.rpc.failed() && !rt.provider_down {
                 let _ = rt.stop_for_transport_error();
             }
-            if rt.history_failed && !provider_stopped {
-                if !rt.can_reconnect() { notification_worker.0.abort(); }
+            if rt.provider_down && !provider_stopped {
+                let reason = rt.thread["lastError"].as_str().unwrap_or("Provider stopped").to_owned();
                 rt.publish();
                 rt.record_provider_stop(timeout(Duration::from_secs(5), child.kill()).await);
+                if config.capture_stderr {
+                    rt.rpc.stderr_saved(rt.store.save_stderr(&child.stderr_tail()).is_ok());
+                }
                 rt.events.close();
                 while rt.events.try_recv().is_ok() {}
                 provider_stopped = true;
+                rt.schedule_restart(reason);
             }
         }
         drop(notification_worker);
         drop(observer);
-        drop(reconnect_worker);
         } => {},
         }
         requests.close();
@@ -449,20 +431,19 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
         rt.dispatch_blocked = true;
         rt.thread["status"] = json!("error");
         if rt.thread["lastError"].as_str().is_none_or(str::is_empty) {
-            rt.thread["lastError"] = json!("Launcher stopping; queued and uncertain work preserved");
+            rt.thread["lastError"] = json!("Launcher stopping; queued work preserved");
         }
         rt.publish();
-        // Preserve uncertain receipts and queued work; do not invent completion.
         rt.record_provider_stop(timeout(Duration::from_secs(5), child.kill()).await);
         if config.capture_stderr {
             rt.rpc.stderr_saved(rt.store.save_stderr(&child.stderr_tail()).is_ok());
         }
         rt.publish();
         let diagnostic = rt.rpc.diagnostics();
-        eprintln!("Rust spike: shutdown provider_exit={}; process_group=termination_requested_unverified; detached_descendants=not_guaranteed; transport={}; before_cleanup={}", rt.provider_exit, diagnostic["transport"].as_str().unwrap_or("unverified"), diagnostic["beforeCleanup"]);
+        eprintln!("Treer launcher: shutdown provider_exit={}; process_group=termination_requested_unverified; detached_descendants=not_guaranteed; transport={}; before_cleanup={}", rt.provider_exit, diagnostic["transport"].as_str().unwrap_or("unverified"), diagnostic["beforeCleanup"]);
         stopped_tx.send_replace(Some(!rt.state_failed));
     });
-    Ok(Handle { commands, state, shutdown, stopped })
+    Ok(Handle { commands, state, shutdown, shutdown_requested: Arc::default(), stopped })
 }
 
 impl Runtime {
@@ -511,7 +492,7 @@ impl Runtime {
                         && event["params"]["threadId"] == self.thread["id"])
                         .then(|| event["params"]["turn"]["id"].as_str().map(str::to_owned)).flatten();
                     self.event(event).await?;
-                    if self.history_failed { bail!("runtime_blocked"); }
+                    if self.provider_down { bail!("runtime_blocked"); }
                     // Completion-before-response correlation never outlives
                     // the retained window, even during a rolling long RPC.
                     if let Some(id) = completed { self.rpc_completed_turns.insert(id); }
@@ -520,50 +501,23 @@ impl Runtime {
             }
         }
     }
-    fn refresh_recovery_history(&mut self, observed: &Value) -> Result<()> {
-        let mut fresh = Transcript::default();
-        for wire in observed["thread"]["turns"].as_array().ok_or(HistoryLimit)? {
-            let mapped = model::turn(wire);
-            let projected = self.projected(vec![mapped], false)?;
-            let mut turn = projected.first().ok_or(HistoryLimit)?.clone();
-            if let Some(old) = self.turns.iter().find(|t|t["id"] == turn["id"]) {
-                let mut prior = old.clone();
-                if prior["projectionOnly"] == true { prior["status"] = json!("inProgress"); }
-                self.retain_projected_items(&prior, &mut turn)?;
-            }
-            fresh.insert(turn)?;
-        }
-        self.history_start = observed["treerHistory"]["start"].as_u64().ok_or(HistoryLimit)? as usize;
-        self.history_total = observed["treerHistory"]["total"].as_u64().ok_or(HistoryLimit)? as usize;
-        self.turns = fresh;
-        Ok(())
-    }
-    fn merge_covered_lifecycle(&mut self, event: &Value, covered: &Value) -> Result<()> {
-        let wire = &event["params"]["turn"];
-        let prior = if event["method"] == "turn/completed" { model::final_turn(wire)? } else { model::turn(wire) };
-        let prior = self.projected(vec![prior], false)?;
-        let prior = prior.first().ok_or(HistoryLimit)?;
-        let current = self.turns.iter().find(|turn| turn["id"] == covered["id"]).cloned();
-        let mut terminal = current.clone().unwrap_or(model::final_turn(covered)?);
-        // Preserve tool/item evidence, and keep the normal identity/output and
-        // terminal-contradiction guards. This cannot settle another receipt or
-        // clear a newer active turn. Out-of-window turns stay out of the window.
-        self.retain_projected_items(prior, &mut terminal)?;
-        if current.is_some() { self.upsert_turn(terminal)?; }
-        Ok(())
-    }
-    async fn observe(&mut self, observed: &Value) -> Result<()> {
-        if self.history_failed || self.claude {
+    /// Periodic Codex read: settle receipts of tracked turns and follow the
+    /// provider's newest in-progress turn. Never stops the provider.
+    async fn observe(&mut self, observed: &Value, target: Option<&str>) -> Result<()> {
+        if self.provider_down || self.claude {
             return Ok(());
         }
         recovery::validate(observed, &self.thread["id"])?;
         self.recovery_reads += 1;
-        self.idle_proof = (observed["thread"]["status"]["type"] == "idle").then(std::time::Instant::now);
-        for wire in observed["thread"]["turns"].as_array().unwrap() {
+        let before = (serde_json::to_value(&self.records)?, self.thread["activeTurnId"].clone());
+        let wires = observed["thread"]["turns"].as_array().cloned().unwrap_or_default();
+        for wire in &wires {
             if self.thread["activeTurnId"] != wire["id"] && !self.records.iter().any(|r| recovery::needs_recovery(r) && r.submission["turn_id"].is_string() && r.submission["turn_id"] == wire["id"]) { continue; }
-            // Thread idle/ordering may normalize stale inProgress history for
-            // display, but cannot interrupt a live input or release its FIFO.
-            if wire["treerStatusProjected"] == true { continue; }
+            // An idle summary can lag a turn that is still executing. Trust
+            // Treer's inferred interruption only once it has held for a minute.
+            if wire["treerStatusProjected"] == true && !self.stale_for(wire["id"].as_str().unwrap_or_default()) {
+                continue;
+            }
             let terminal = matches!(wire["status"].as_str(), Some("completed" | "failed" | "interrupted"));
             let mapped = if terminal {model::final_turn(wire)?} else {model::turn(wire)};
             let projected = self.projected(vec![mapped], false)?;
@@ -572,35 +526,101 @@ impl Runtime {
                 if terminal {
                     let mut prior = old.clone();
                     if prior["projectionOnly"] == true { prior["status"] = json!("inProgress"); }
-                    self.retain_projected_items(&prior, &mut turn)?;
+                    let fresh = turn.clone();
+                    if self.retain_projected_items(&prior, &mut turn).is_err() {
+                        eprintln!("Treer launcher: provider snapshot disagrees with streamed items; using the snapshot");
+                        turn = fresh;
+                    }
                 }
             }
-            // Do not insert an exact older target into the recent window or
-            // infer identity from projected/local history. Only this fresh read
-            // settles matching acknowledged receipts.
             for record in &mut self.records {
-                if record.submission["turn_id"] == wire["id"] { recovery::reconcile_record(record, Some(&turn)); }
+                if record.submission["turn_id"] == wire["id"] { recovery::reconcile_record(record, &turn); }
             }
             if terminal && self.thread["activeTurnId"] == wire["id"] {
                 self.thread["activeTurnId"] = Value::Null;
             }
-            if wire["status"] == "inProgress" {
-                if self.thread["activeTurnId"].is_string() && self.thread["activeTurnId"] != wire["id"] { bail!("recovery_active_identity_mismatch"); }
-                self.thread["activeTurnId"] = wire["id"].clone();
-            }
             if self.turns.iter().any(|t|t["id"] == wire["id"]) { self.upsert_turn(turn)?; }
         }
-        self.dispatch_blocked = self.records.iter().any(|r| recovery::needs_recovery(r) && (r.submission["state"] != "running" || !r.submission["turn_id"].is_string()));
-        if observed["thread"]["status"]["type"] == "active" && !self.thread["activeTurnId"].is_string() { self.dispatch_blocked = true; }
+        // An idle provider whose history has no such turn is not running it:
+        // settle instead of waiting forever.
+        if observed["thread"]["status"]["type"] == "idle" {
+            if let Some(target) = target.filter(|id| !wires.iter().any(|t| t["id"] == *id) && self.stale_for(id)) {
+                eprintln!("Treer launcher: provider history has no turn for an in-flight prompt; marking it failed");
+                for record in &mut self.records {
+                    if record.submission["turn_id"] == target && recovery::needs_recovery(record) {
+                        record.submission["state"] = json!("failed");
+                        record.submission["error"] = json!("The provider is idle and its history has no record of this turn");
+                    }
+                }
+                if self.thread["activeTurnId"] == target { self.thread["activeTurnId"] = Value::Null; }
+            }
+        }
+        // The provider's newest in-progress turn is the live one.
+        if observed["thread"]["status"]["type"] == "active" {
+            if let Some(live) = wires.iter().rev().find(|t| t["status"] == "inProgress") {
+                if self.thread["activeTurnId"] != live["id"] {
+                    eprintln!("Treer launcher: following the provider's newest in-progress turn");
+                    self.thread["activeTurnId"] = live["id"].clone();
+                }
+            }
+        }
         self.thread["status"] = json!(if self.thread["activeTurnId"].is_string() {"running"} else {"idle"});
-        if !self.dispatch_blocked { self.thread["lastError"] = Value::Null; }
-        self.persist()?;
+        if before != (serde_json::to_value(&self.records)?, self.thread["activeTurnId"].clone()) { self.persist()?; }
         self.publish();
         Ok(())
     }
-    fn can_reconnect(&self) -> bool {
-        !self.claude && self.history_failed && self.transport_failed && !self.state_failed && self.thread["id"].is_string()
-            && matches!(self.rpc.diagnostics()["transport"].as_str(), Some("stdout_eof" | "rpc_timeout" | "stdin_write_error" | "stdin_write_timeout"))
+    /// True once the provider has reported this turn as not running (idle)
+    /// for a minute; a lagging summary must not settle a live turn.
+    fn stale_for(&mut self, id: &str) -> bool {
+        match &self.stale_since {
+            Some((seen, at)) if seen == id => at.elapsed() >= Duration::from_secs(60),
+            _ => { self.stale_since = Some((id.to_owned(), std::time::Instant::now())); false }
+        }
+    }
+    /// Mark the provider down and schedule its restart with capped backoff.
+    fn schedule_restart(&mut self, reason: String) {
+        // A provider that stayed up for a minute starts a fresh backoff.
+        if self.started_at.elapsed() >= Duration::from_secs(60) { self.restart_failures = 0; }
+        let delay = restart_delay(self.restart_failures);
+        self.restart_failures = self.restart_failures.saturating_add(1);
+        self.restart_due = std::time::Instant::now() + delay;
+        self.started_at = std::time::Instant::now() + Duration::from_secs(3600);
+        self.last_failure = json!(reason);
+        self.publish();
+    }
+    /// Start a fresh provider process and resume the same session from the
+    /// durable journal, exactly as a launcher restart would.
+    async fn restart(&mut self, config: &Config) -> Result<crate::rpc::ProviderChild> {
+        self.restarts = self.restarts.saturating_add(1);
+        let saved = self.store.load()?;
+        let session = self.thread["id"].as_str().map(str::to_owned)
+            .or_else(|| saved.as_ref().and_then(|s| s["threadId"].as_str()).map(str::to_owned));
+        let mut config = config.clone();
+        config.native_bootstrap = None;
+        config.session = session.clone();
+        let (rpc, mut child, events) = spawn_provider(&config, session.as_deref(), saved.is_some())?;
+        self.rpc = rpc;
+        self.events = events;
+        self.provider_down = false;
+        self.provider_exit = "not_requested";
+        self.ready = false;
+        self.dispatch_blocked = false;
+        self.bootstrap_pending = false;
+        self.turns = Transcript::default();
+        self.history_start = 0;
+        self.history_total = 0;
+        self.rpc_completed_turns.clear();
+        self.claude_goal_wait = None;
+        self.claude_goal_ack = None;
+        self.recovery_generation += 1;
+        self.publish();
+        match self.start(&config, saved).await {
+            Ok(()) => Ok(child),
+            Err(error) => {
+                let _ = timeout(Duration::from_secs(5), child.kill()).await;
+                Err(error)
+            }
+        }
     }
     async fn start(&mut self, config: &Config, saved: Option<Value>) -> Result<()> {
         if let Some(saved) = &saved {
@@ -608,7 +628,6 @@ impl Runtime {
                 self.terminal_tasks = crate::soul_terminal::validate(saved.get("claudeTerminalTasks").unwrap_or(&json!([])))?;
             }
             self.records = decode_records(saved)?;
-            self.dispatch_blocked = saved["dispatchBlocked"].as_bool().unwrap_or(true);
             self.goals = Goals::load(&saved["goals"])?;
             self.checkpoint = (self.records.clone(), self.goals.clone());
         }
@@ -618,13 +637,13 @@ impl Runtime {
             // Empty overlay probes the native setter, not model selection.
             // Unsupported/missing ACK hides effort; integrity/write faults stay fatal.
             if let Err(error)=self.provider_request("effort/probe",json!({})).await {
-                if self.rpc.failed() || self.history_failed {return Err(error);}
+                if self.rpc.failed() || self.provider_down {return Err(error);}
                 eprintln!("Claude effort setter unavailable; effort controls hidden");
             }
         }
         self.models = match self.provider_query("model/list", json!({}), None, None, true).await {
             Ok(result) => result["data"].clone(),
-            Err(error) if self.rpc.failed() || self.history_failed => return Err(error),
+            Err(error) if self.rpc.failed() || self.provider_down => return Err(error),
             Err(_) => {
                 eprintln!("Rust spike: optional model/list unavailable; continuing startup");
                 json!([])
@@ -643,21 +662,6 @@ impl Runtime {
         if session.is_some_and(|s| s != id) {
             bail!("session identity mismatch");
         }
-        // Resumed history needs explicit status authority; an absent active
-        // candidate cannot establish that an existing provider thread is idle.
-        if (session.is_some() || result["thread"].get("status").is_some())
-            && !matches!(result["thread"]["status"]["type"].as_str(), Some("idle" | "active"))
-        {
-            bail!("unusable provider thread status");
-        }
-        // Explicit active status without an identifiable current turn cannot
-        // authorize dispatch. Do not guess an ID from historical stale turns.
-        if result["thread"]["status"]["type"] == "active"
-            && !result["thread"]["turns"].as_array().into_iter().flatten()
-                .any(|t| t["status"] == "inProgress")
-        {
-            bail!("active provider thread has no current turn");
-        }
         self.thread = json!({"id":id,"title":result["thread"]["name"].as_str().filter(|name| *name != "Codex (Rust experiment)").unwrap_or(if self.claude {"Claude"} else {"Codex"}),"cwd":config.cwd,"model":result["model"],"reasoningEffort":result["reasoningEffort"],"status":"idle","activeTurnId":null,"lastError":null,"createdAt":now(),"updatedAt":now(),"turns":[],"hasOlderItems":false});
         if self.claude {self.thread["effortSelectionStatus"]=result["effortSelectionStatus"].clone();}
         if self.claude {
@@ -668,32 +672,6 @@ impl Runtime {
         for turn in result["thread"]["turns"].as_array().into_iter().flatten() {
             self.turns.insert(model::turn(turn))?;
         }
-        // Only freshly resumed provider turns can reconcile acknowledged work.
-        // Claude's retained journal history below is a display checkpoint, not
-        // independent evidence that an uncertain provider operation finished.
-        let mut recovery_blocked = recovery::reconcile(&mut self.records, &self.turns);
-        if recovery_blocked && !self.claude {
-            // The normal window is deliberately bounded. Select an older
-            // acknowledged turn by exact ID using the existing streaming reader,
-            // not a complete in-memory history or a journal-synthesized turn.
-            let missing = self.records.iter()
-                .filter(|record| recovery::needs_recovery(record))
-                .filter_map(|record| record.submission["turn_id"].as_str()
-                    .filter(|id| !self.turns.iter().any(|turn| turn["id"] == *id))
-                    .map(|id| (record.submission["id"].clone(),id.to_owned())))
-                .collect::<Vec<_>>();
-            if missing.len() > receipts::PENDING_LIMIT { bail!("recovery_target_limit"); }
-            for (submission_id,id) in missing {
-                let observed=self.provider_query("thread/read",json!({"threadId":self.thread["id"],"includeTurns":true}),None,Some(id.clone()),false).await?;
-                if observed["thread"]["id"] != self.thread["id"] { bail!("recovery_thread_mismatch"); }
-                if !matches!(observed["thread"]["status"]["type"].as_str(),Some("idle"|"active")) { bail!("recovery_thread_status_unavailable"); }
-                let turn=observed["thread"]["turns"].as_array().and_then(|turns|turns.iter().find(|turn|turn["id"]==id)).map(model::turn);
-                if let Some(record)=self.records.iter_mut().find(|record|record.submission["id"]==submission_id && record.submission["turn_id"]==id) {
-                    recovery::reconcile_record(record,turn.as_ref());
-                }
-            }
-            recovery_blocked=self.records.iter().any(|record| recovery::needs_recovery(record) && record.submission["state"] != "running");
-        }
         if self.claude {
             if let Some(native)=&config.native_bootstrap {
                 if native["threadId"]!=self.thread["id"] || native["source"]!="native-jsonl" || native["providerConfirmed"]!=false {bail!("claude_native_bootstrap_invalid");}
@@ -703,12 +681,39 @@ impl Runtime {
             }
             if let Some(saved)=&saved {
                 let turns=saved["claudeTurns"].as_array().filter(|turns|turns.len()<=50).ok_or_else(||anyhow!("claude_history_checkpoint_invalid"))?;
-                for turn in turns { self.turns.insert(turn.clone())?; }
+                for turn in turns {
+                    let mut turn = turn.clone();
+                    // A fresh Claude process has no running turn: the one that
+                    // was in progress ended with the previous process.
+                    if turn["status"] == "inProgress" {
+                        turn["status"] = json!("interrupted");
+                        turn["error"] = json!({"message":"The provider restarted while this turn was running; it was not replayed"});
+                    }
+                    self.turns.insert(turn)?;
+                }
                 self.history_start=saved["claudeHistoryStart"].as_u64().ok_or_else(||anyhow!("claude_history_checkpoint_invalid"))? as usize;
                 self.history_total=saved["claudeHistoryTotal"].as_u64().ok_or_else(||anyhow!("claude_history_checkpoint_invalid"))? as usize;
                 if self.history_start>self.history_total || turns.len()>self.history_total {bail!("claude_history_checkpoint_invalid");}
             }
         }
+        // Settle work whose outcome was unknown when the provider stopped, from
+        // the resumed session's history. Older Codex turns are read by exact ID.
+        let mut known: Vec<Value> = self.turns.iter().cloned().collect();
+        if !self.claude {
+            let mut missing = recovery::targets(&self.records);
+            missing.retain(|id| !known.iter().any(|turn| turn["id"] == id.as_str()));
+            for id in missing.into_iter().take(receipts::PENDING_LIMIT) {
+                match self.provider_query("thread/read",json!({"threadId":self.thread["id"],"includeTurns":true}),None,Some(id.clone()),false).await {
+                    Ok(observed) if observed["thread"]["id"] == self.thread["id"] => {
+                        known.extend(observed["thread"]["turns"].as_array().into_iter().flatten().filter(|turn| turn["id"] == id.as_str()).map(model::turn));
+                    }
+                    Ok(_) => {}
+                    Err(error) if self.rpc.failed() || self.provider_down => return Err(error),
+                    Err(_) => eprintln!("Treer launcher: recovery read unavailable; settling from the resumed window"),
+                }
+            }
+        }
+        recovery::reconcile(&mut self.records, &known, self.claude);
         // Project accepted user items once, then admit every subsequent update
         // through the same byte budget. Snapshot reads never replay the journal.
         let dropped=self.turns.dropped;
@@ -724,13 +729,7 @@ impl Runtime {
             self.thread["status"] = json!("running");
             self.thread["activeTurnId"] = active["id"].clone();
         }
-        // Resume has validated the same provider thread and its history. An
-        // acknowledged turn is recoverable by identity, never by resending its
-        // input. Legacy launchers also marked these receipts failed on restart.
-        self.dispatch_blocked = recovery_blocked;
-        if self.dispatch_blocked {
-            self.thread["lastError"] = json!("Dispatch outcome uncertain; no matching provider turn; queued work preserved without replay");
-        }
+        self.dispatch_blocked = false;
         if let Ok(result) = self.provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
             .await
         {
@@ -755,6 +754,7 @@ impl Runtime {
         self.ready = true;
         self.persist()?;
         self.bootstrap_pending = false;
+        self.started_at = std::time::Instant::now();
         self.publish();
         Ok(())
     }
@@ -797,19 +797,18 @@ impl Runtime {
     fn stop_for_state_error(&mut self) {
         // Storage is unavailable: do not claim that this fence was persisted.
         // Existing durable intent remains authoritative on restart.
-        self.history_failed = true;
+        self.provider_down = true;
         self.state_failed = true;
-        self.transport_failed = false;
         self.ready = false;
         self.dispatch_blocked = true;
         self.thread["status"] = json!("error");
-        self.thread["lastError"] = json!("private_state_write_failed; queue paused");
+        self.thread["lastError"] = json!("private_state_write_failed; launcher exiting for restart");
     }
     fn publish(&self) {
         let mut thread = self.thread.clone();
         thread["turns"] = json!(&*self.turns);
         let queue: Vec<_> = self.records.iter().filter(|r|r.submission["state"] == "queued").enumerate().map(|(n,r)|json!({"id":r.submission["id"],"text":r.text,"createdAt":r.submission["created_at"],"sender":r.submission["sender"],"position":n+1})).collect();
-        let mut snapshot = json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"],"cleanup":{"providerExit":self.provider_exit,"processGroup":if self.provider_exit == "not_requested" {"not_requested"} else {"termination_requested_unverified"},"detachedDescendants":"not_guaranteed"}},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":null,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}});
+        let mut snapshot = json!({"ready":self.ready,"runtime":{"state":if self.state_failed {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" || self.dispatch_blocked {"working"} else {"idle"},"error":thread["lastError"],"cleanup":{"providerExit":self.provider_exit,"processGroup":if self.provider_exit == "not_requested" {"not_requested"} else {"termination_requested_unverified"},"detachedDescendants":"not_guaranteed"}},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":null,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}});
         snapshot["thread"] = thread;
         if self.claude {
             snapshot["harness"]=json!({"id":"claude","name":"Claude","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":true,"goal":if self.goals_supported {json!({"pause":false,"budget":false})} else {Value::Null},"sessionTransfer":null}});
@@ -829,7 +828,9 @@ impl Runtime {
         snapshot["runtime"]["provider"] = self.rpc.diagnostics();
         let unresolved: Vec<_> = self.records.iter().filter(|r| recovery::needs_recovery(r))
             .map(|r|json!({"submissionId":r.submission["id"],"turnId":r.submission["turn_id"],"state":if r.submission["turn_id"].is_string(){"exact_turn_pending"}else{"unknown_dispatch"}})).collect();
-        snapshot["runtime"]["recovery"] = json!({"state":if self.state_failed {"storage_failure"} else if self.recovering {"reconnecting"} else if self.can_reconnect() && self.reconnect_attempts>=3 {"reconnect_exhausted"} else if self.history_failed && !self.transport_failed {"integrity_failure"} else if self.history_failed {"provider_unavailable"} else if self.dispatch_blocked {"reconciliation_required"} else {"observing"},"readCount":self.recovery_reads,"reconnectAttempts":self.reconnect_attempts,"unresolved":unresolved,"endpoint":"/api/recovery","freshHistorySupported":!self.claude,"automaticReplay":false});
+        let restart_in = self.provider_down.then(|| self.restart_due.saturating_duration_since(std::time::Instant::now()).as_millis() as u64);
+        snapshot["runtime"]["recovery"] = json!({"state":if self.state_failed {"storage_failure"} else if self.provider_down || self.restarts > 0 && !self.ready {"restarting"} else {"running"},"restarts":self.restarts,"consecutiveFailures":self.restart_failures,"nextRestartInMs":restart_in,"lastFailure":self.last_failure,"readCount":self.recovery_reads,"unresolved":unresolved,"automaticReplay":false});
+        snapshot["runtime"]["messages"] = self.message_watch.clone();
         snapshot["runtime"]["provider"]["finalProjection"] = self.final_projection.clone();
         snapshot["runtime"]["journalHistory"] = json!({"state":self.disk_history_status,"diskLimitBytes":crate::disk_history::DISK_LIMIT,"sampleIntervalSeconds":300});
         self.changed.send_replace(Arc::new(snapshot));
@@ -965,14 +966,17 @@ impl Runtime {
         Ok(bounded)
     }
     async fn command(&mut self, method: &str, body: Value) -> Result<Value> {
-        if self.history_failed && !matches!(method, "queue" | "submission" | "recovery") {
-            anyhow::bail!("runtime_blocked; queue paused");
-        }
-        if !matches!(method, "queue" | "submission") && self.store.recheck().is_err() {
-            self.stop_for_state_error();
-            bail!("private_state_write_failed");
+        // Only operations that need a live provider wait for its restart;
+        // prompts and messages are journaled and dispatched once it is back.
+        if self.provider_down && matches!(method, "abort" | "settings" | "goal" | "goal_reconcile" | "goal_retry" | "history_page" | "session/export") {
+            anyhow::bail!("provider_restarting");
         }
         match method {
+            "message_watch" => {
+                self.message_watch = body;
+                self.publish();
+                Ok(Value::Null)
+            }
             "session/export" => self.session_snapshot(body).await,
             "tasks/clear-finished" if self.claude => {
                 let removed = crate::tasks::clear(&mut self.terminal_tasks);
@@ -980,64 +984,13 @@ impl Runtime {
                 self.publish();
                 Ok(json!({"removed":removed}))
             }
-            "recovery" => {
-                if self.state_failed { bail!("recovery_storage_unavailable"); }
-                match body["action"].as_str() {
-                    Some("recheck") => {
-                        if self.claude { bail!("claude_fresh_recovery_authority_unavailable"); }
-                        if self.history_failed && !self.can_reconnect() { bail!("recovery_validation_failure_requires_source_fix"); }
-                        if self.recovering { return Ok(json!({"accepted":true,"state":"reconnecting"})); }
-                        self.reconnect_attempts = 0;
-                        self.reconnect_due = std::time::Instant::now();
-                        Ok(json!({"accepted":true,"automaticReplay":false}))
-                    }
-                    Some("acknowledge_unknown") => {
-                        if let Some(record) = self.records.iter().find(|r|r.submission["id"] == body["submission_id"] && r.submission["recovery_disposition"]["action"] == "acknowledge_unknown") {
-                            if body["thread_id"] == self.thread["id"] && body["accept_unknown_outcome"] == true
-                                && body.get("expected_turn_id").is_some() && body.get("expected_error").is_some() && body["expected_turn_id"] == record.submission["turn_id"]
-                                && body["expected_error"] == record.submission["recovery_disposition"]["originalError"] {
-                                return Ok(json!({"accepted":true,"duplicate":true,"automaticReplay":false}));
-                            }
-                            bail!("recovery_disposition_binding_changed");
-                        }
-                        let current_idle = if self.claude {self.ready && self.rpc.claude_idle_for_disposition()} else {self.idle_proof.is_some_and(|at|at.elapsed()<=Duration::from_secs(5))};
-                        if self.history_failed || self.recovering || !current_idle
-                            || body["thread_id"] != self.thread["id"] || body["accept_unknown_outcome"] != true
-                        { bail!("recovery_requires_fresh_idle_and_explicit_disposition"); }
-                        let record = self.records.iter_mut().find(|r| r.submission["id"] == body["submission_id"] && recovery::needs_recovery(r)).ok_or_else(||anyhow!("recovery_submission_unavailable"))?;
-                        if body.get("expected_turn_id").is_none() || body.get("expected_error").is_none() || record.submission["turn_id"] != body["expected_turn_id"] || record.submission["error"] != body["expected_error"] { bail!("recovery_disposition_binding_changed"); }
-                        if self.thread["activeTurnId"].is_string() && self.thread["activeTurnId"] != record.submission["turn_id"] { bail!("recovery_other_active_turn"); }
-                        record.submission["recovery_disposition"] = json!({"originalState":record.submission["state"],"originalError":record.submission["error"],"action":"acknowledge_unknown","at":now(),"providerOutcome":"unknown","replayed":false,"idleEvidence":if self.claude {"initialized_current_adapter_no_active_request"} else {"fresh_provider_idle_read"}});
-                        record.submission["state"] = json!("interrupted");
-                        record.submission["error"] = json!("User acknowledged unknown provider outcome; input not replayed");
-                        let disposed_turn = record.submission["turn_id"].clone();
-                        let disposition = record.submission["recovery_disposition"].clone();
-                        let other_pending = self.records.iter().any(|r| recovery::needs_recovery(r) && r.submission["turn_id"] == disposed_turn);
-                        self.recovery_generation += 1;
-                        if !other_pending && self.thread["activeTurnId"] == disposed_turn {
-                            self.thread["activeTurnId"] = Value::Null;
-                            self.thread["status"] = json!("idle");
-                        }
-                        if self.claude && !other_pending {
-                            if let Some(mut turn) = self.turns.iter().find(|turn|turn["id"] == disposed_turn).cloned() {
-                                turn["status"] = json!("interrupted");
-                                turn["projectionOnly"] = json!(true);
-                                turn["recoveryDisposition"] = disposition;
-                                if let Err(error) = self.turns.insert(turn) {
-                                    (self.records, self.goals) = self.checkpoint.clone();
-                                    self.stop_for_history_error("Recovery display admission failed; queue preserved".into())?;
-                                    return Err(error);
-                                }
-                            }
-                        }
-                        self.dispatch_blocked = self.records.iter().any(recovery::needs_recovery);
-                        if !self.dispatch_blocked { self.thread["lastError"] = Value::Null; }
-                        self.persist()?;
-                        self.publish();
-                        Ok(json!({"accepted":true,"automaticReplay":false}))
-                    }
-                    _ => bail!("recovery_action_invalid"),
+            "recovery" => match body["action"].as_str() {
+                // Restart a stopped provider now instead of waiting for backoff.
+                Some("recheck") => {
+                    if self.provider_down { self.restart_due = std::time::Instant::now(); }
+                    Ok(json!({"accepted":true,"automaticReplay":false}))
                 }
+                _ => bail!("recovery_action_invalid"),
             },
             "history_page" => {
                 if self.claude {bail!("claude_older_history_unavailable");}
@@ -1138,7 +1091,7 @@ impl Runtime {
             }
             "settings" => {
                 if self.claude {
-                    if !self.ready || self.history_failed || self.state_failed || self.dispatch_blocked {bail!("claude_settings_unavailable");}
+                    if !self.ready || self.provider_down || self.state_failed || self.dispatch_blocked {bail!("claude_settings_unavailable");}
                     let mut validation=body.clone();
                     if validation.get("model").is_none() {validation["model"]=self.thread["model"].clone();}
                     self.provider_request("settings/validate",validation).await?;
@@ -1447,7 +1400,7 @@ impl Runtime {
     }
     fn accept_claude_goal_ack(&mut self) -> Result<()> {
         let Some(p)=self.claude_goal_ack.clone() else {return Ok(());};
-        if self.history_failed || self.state_failed || self.rpc.failed() {self.claude_goal_ack=None;return Ok(());}
+        if self.provider_down || self.state_failed || self.rpc.failed() {self.claude_goal_ack=None;return Ok(());}
         let Some(i)=self.goals.edits.iter().position(|edit| {
             !edit.applied && edit.error.is_null() && self.records.iter().any(|record|
                 record.operation==format!("claude-goal/{}",edit.id)
@@ -1490,7 +1443,9 @@ impl Runtime {
             .collect()
     }
     async fn submit(&mut self, body: Value) -> Result<Value> {
-        if !self.ready {
+        // While the provider restarts, prompts are journaled and wait.
+        let restarting = self.provider_down && !self.state_failed && self.thread["id"].is_string();
+        if !self.ready && !restarting {
             bail!("runtime unavailable")
         }
         let supplied_text = body["text"].as_str().unwrap_or("");
@@ -1582,6 +1537,7 @@ impl Runtime {
             source_messages: vec![],
             message_batch: None,
             projection_after: None,
+            steer_refused: false,
         };
         if has_images {
             self.attachments
@@ -1598,20 +1554,7 @@ impl Runtime {
         let record = self.records.back().unwrap();
         Ok(json!({"accepted":true,"operation_id":operation,"submission":receipt(record)}))
     }
-    async fn drain(&mut self) -> Result<()> {
-        if !self.ready || self.dispatch_blocked {
-            return Ok(());
-        }
-        let busy = self.thread["activeTurnId"].is_string();
-        if !busy && self.records.iter().any(|r| r.submission["state"] == "running")
-        {
-            return Ok(());
-        }
-        let next = self
-            .records
-            .iter()
-            .position(|r| r.submission["state"] == "queued" && (!busy || r.delivery == "steer"));
-        let Some(index) = next else { return Ok(()) };
+    async fn dispatch_input(&self, index: usize) -> Result<Vec<Value>> {
         let mut input = vec![];
         if !self.records[index].text.is_empty() {
             input.push(json!({"type":"text","text":self.records[index].text,"text_elements":[]}));
@@ -1640,6 +1583,34 @@ impl Runtime {
                 }
             }
         }
+        Ok(input)
+    }
+    async fn drain(&mut self) -> Result<()> {
+        if !self.ready || self.dispatch_blocked {
+            return Ok(());
+        }
+        let busy = self.thread["activeTurnId"].is_string();
+        if !busy && self.records.iter().any(|r| r.submission["state"] == "running")
+        {
+            return Ok(());
+        }
+        let next = self
+            .records
+            .iter()
+            .position(|r| r.submission["state"] == "queued" && (!busy || r.delivery == "steer" && !r.steer_refused));
+        let Some(index) = next else { return Ok(()) };
+        let input = match self.dispatch_input(index).await {
+            Ok(input) => input,
+            Err(error) => {
+                // An input that can no longer be built (for example an expired
+                // attachment) fails alone; the rest of the queue continues.
+                self.records[index].submission["state"] = json!("failed");
+                self.records[index].submission["error"] = json!(format!("Prompt could not be sent: {error}"));
+                self.persist()?;
+                self.publish();
+                return Ok(());
+            }
+        };
         // Capture display order before the cooperative RPC can consume newer
         // provider activity. Persist it with intent, never as provider authority.
         if busy {
@@ -1649,7 +1620,6 @@ impl Runtime {
                 .and_then(|item| item["id"].as_str()).map(str::to_owned);
         }
         // Persist intent BEFORE contacting the provider. No ambiguous replay.
-        self.idle_proof = None;
         self.recovery_generation += 1;
         self.records[index].submission["state"] = json!("running");
         self.dispatch_blocked = true;
@@ -1668,30 +1638,28 @@ impl Runtime {
         let steering_turn = self.thread["activeTurnId"].clone();
         let response = self.provider_request(if busy { "turn/steer" } else { "turn/start" }, params)
             .await;
-        if self.history_failed { bail!("provider history blocked dispatch"); }
+        // Timeout, EOF or write error: the provider is restarted and the
+        // resumed session's history settles this record (start/reconcile).
+        // The prompt is journaled, so its submission still succeeds.
+        if self.provider_down { return Ok(()); }
+        self.dispatch_blocked = false;
         match response {
             Ok(response) => {
-                let turn = if busy {
-                    steering_turn
-                } else {
-                    response["turn"]["id"].clone()
-                };
+                // A steer that raced the end of its turn can become a new turn.
+                let turn = if response["turn"]["id"].is_string() { response["turn"]["id"].clone() } else if busy { steering_turn } else { Value::Null };
                 if !turn.is_string() {
-                    self.mark_uncertain(index);
-                    self.persist()?;
-                    self.publish();
-                    return Ok(());
+                    // Accepted, but which turn is unknown: resume the session
+                    // and let its history decide (restart reconciliation).
+                    return self.stop_for_history_error("Provider accepted a prompt without a turn id; restarting to reconcile from history".into());
                 }
                 if self.thread["activeTurnId"].is_string() && self.thread["activeTurnId"] != turn {
-                    self.stop_for_history_error("Provider turn response disagrees with live turn".into())?;
-                    bail!("provider turn identity mismatch");
+                    eprintln!("Treer launcher: provider answered with a newer turn; following it");
                 }
                 self.records[index].submission["turn_id"] = turn.clone();
                 self.records[index].submission["position"] = Value::Null;
-                self.dispatch_blocked = false;
                 self.thread["activeTurnId"] = turn.clone();
                 self.thread["status"] = json!("running");
-                if !busy && !self.turns.iter().any(|t| t["id"] == turn) {
+                if !self.turns.iter().any(|t| t["id"] == turn) {
                     if let Err(error) = self.upsert_turn(json!({"id":turn,"status":"inProgress","startedAt":now(),"error":null,"items":[]})) {
                         self.stop_for_history_limit()?;
                         return Err(error);
@@ -1725,8 +1693,21 @@ impl Runtime {
                     self.thread["status"] = json!("idle");
                 }
             }
-            Err(_) => {
-                self.mark_uncertain(index);
+            Err(error) => {
+                // The provider answered and did not take the input.
+                let record = &mut self.records[index];
+                if error.to_string() == "claude_steer_outcome_unknown" {
+                    record.submission["state"] = json!("failed");
+                    record.submission["error"] = json!("Steer raced a Claude background invocation; it was not tracked and is not replayed");
+                } else if busy {
+                    // A refused steer (usually: its turn just ended) runs as the next turn.
+                    record.submission["state"] = json!("queued");
+                    record.steer_refused = true;
+                    record.projection_after = None;
+                } else {
+                    record.submission["state"] = json!("failed");
+                    record.submission["error"] = json!(format!("Provider refused the prompt: {error}"));
+                }
             }
         }
         if let Err(error) = self.persist() {
@@ -1735,14 +1716,6 @@ impl Runtime {
         }
         self.publish();
         Ok(())
-    }
-    fn mark_uncertain(&mut self, index: usize) {
-        self.dispatch_blocked = true;
-        self.records[index].submission["state"] = json!("failed");
-        self.records[index].submission["error"] = json!(
-            "Codex dispatch outcome uncertain; queue paused; inspect transcript before retry"
-        );
-        self.thread["lastError"] = self.records[index].submission["error"].clone();
     }
     fn upsert_turn(&mut self, turn: Value) -> Result<()> {
         let fresh=!self.turns.iter().any(|t|t["id"]==turn["id"]);
@@ -1772,48 +1745,24 @@ impl Runtime {
         self.stop_for_history_error(HistoryLimit.to_string())
     }
     fn stop_for_transport_error(&mut self) -> Result<()> {
-        let reason = "Provider transport failed; dispatch outcome uncertain; queue paused";
-        // A timed-out wait may have cancelled an event handler. Only the last
-        // published receipts/goals may become durable with the failure fence.
+        let transport = self.rpc.diagnostics()["transport"].as_str().unwrap_or("closed").to_owned();
+        self.stop_for_history_error(format!("Provider stopped ({transport}); restarting and resuming the session"))
+    }
+    /// Stop the provider; the actor restarts it and resumes the session. The
+    /// durable journal is the authority, so in-memory state returns to the
+    /// last checkpoint (an interrupted handler may have changed it).
+    fn stop_for_history_error(&mut self, reason: String) -> Result<()> {
+        eprintln!("Treer launcher: {reason}");
         (self.records, self.goals) = self.checkpoint.clone();
-        if self.thread["id"].is_string() {
-            // Publish the failure class atomically with its fence. A temporary
-            // integrity classification must not escape before transport retry.
-            self.transport_failed = matches!(self.rpc.diagnostics()["transport"].as_str(), Some("stdout_eof" | "rpc_timeout" | "stdin_write_error" | "stdin_write_timeout"));
-            self.history_failed = true;
-            self.ready = false;
-            self.dispatch_blocked = true;
-            self.thread["status"] = json!("error");
-            self.thread["lastError"] = json!(reason);
-            self.persist()?;
-            self.publish();
-            return Ok(());
-        }
-        // Initialization may fail before a thread exists. Preserve the previous
-        // durable journal instead of replacing it with an invalid thread ID.
-        self.history_failed = true;
+        self.provider_down = true;
         self.ready = false;
-        self.dispatch_blocked = true;
         self.thread["status"] = json!("error");
         self.thread["lastError"] = json!(reason);
         self.publish();
         Ok(())
     }
-    fn stop_for_history_error(&mut self, reason: String) -> Result<()> {
-        self.transport_failed = false;
-        self.history_failed = true;
-        self.ready = false;
-        self.dispatch_blocked = true;
-        self.thread["status"] = json!("error");
-        self.thread["lastError"] = json!(reason);
-        // Keep all receipts, including running intents. No terminal outcome is
-        // invented and no pending turn is automatically replayed on restart.
-        let saved = self.persist();
-        self.publish();
-        saved
-    }
     async fn event(&mut self, event: Value) -> Result<()> {
-        if self.history_failed {
+        if self.provider_down {
             return Ok(());
         }
         let completing = event["method"] == "turn/completed";
@@ -1931,40 +1880,37 @@ impl Runtime {
                 self.persist()?;
             }
             "turn/started" => {
-                self.idle_proof = None;
                 self.recovery_generation += 1;
-                if self.turns.iter().any(|t| t["id"] == p["turn"]["id"]
-                    && t["projectionOnly"] != true
-                    && matches!(t["status"].as_str(), Some("completed" | "interrupted" | "failed")))
-                {
-                    self.stop_for_history_error("Provider reopened a terminal turn".into())?;
-                    bail!("terminal turn reopened");
-                }
                 if self.thread["activeTurnId"].is_string()
                     && self.thread["activeTurnId"] != p["turn"]["id"]
                 {
-                    self.stop_for_history_error("Provider reported concurrent active turns".into())?;
-                    bail!("concurrent active turns");
+                    eprintln!("Treer launcher: provider started another turn; following the newest");
                 }
                 self.upsert_turn(model::turn(&p["turn"]))?;
                 self.thread["status"] = json!("running");
                 self.thread["activeTurnId"] = p["turn"]["id"].clone();
             }
             "turn/completed" => {
-                self.idle_proof = None;
                 self.recovery_generation += 1;
                 self.final_projection = json!({"retainedOnly":0,"sameIdUpdates":0,"conflicts":0,"refusals":0});
                 let turn_id = p["turn"]["id"].clone();
                 if !turn_id.is_string() { return Err(InvalidTurnIdentity.into()); }
-                if self.thread["activeTurnId"].is_string() && self.thread["activeTurnId"] != turn_id {
-                    return Err(model::InvalidFinalSnapshot.into());
-                }
                 let projected = self.projected(vec![model::final_turn(&p["turn"])?], false)?;
                 let mut turn = projected.first().ok_or(HistoryLimit)?.clone();
                 let counts = if let Some(old) = self.turns.iter().find(|t| t["id"] == turn_id) {
                     let mut prior = old.clone();
                     if prior["projectionOnly"] == true { prior["status"] = json!("inProgress"); }
-                    self.retain_projected_items(&prior, &mut turn)?
+                    let fresh = turn.clone();
+                    match self.retain_projected_items(&prior, &mut turn) {
+                        Ok(counts) => counts,
+                        Err(_) => {
+                            // The provider's final snapshot wins over streamed items.
+                            eprintln!("Treer launcher: final snapshot disagrees with streamed items; using the snapshot");
+                            self.final_projection["conflicts"] = json!(1);
+                            turn = fresh;
+                            (0, 0)
+                        }
+                    }
                 } else { (0, 0) };
                 let status = if turn["status"] == "failed" {
                     "failed"
@@ -1997,10 +1943,6 @@ impl Runtime {
                 if self.thread["activeTurnId"] == turn_id {
                     self.thread["activeTurnId"] = Value::Null;
                     self.thread["status"] = json!("idle");
-                }
-                if self.dispatch_blocked {
-                    self.dispatch_blocked = self.records.iter().any(|r| recovery::needs_recovery(r) && (r.submission["state"] != "running" || !r.submission["turn_id"].is_string()));
-                    if !self.dispatch_blocked { self.thread["lastError"] = Value::Null; }
                 }
                 self.persist()?;
             }
@@ -2283,7 +2225,7 @@ pub(crate) fn import_node_queue(thread: &Value, queue: &Value) -> Result<Value> 
             operation: operation.into(), fingerprint: String::new(), node_fingerprint: Some(hash.into()),
             text: text.into(), delivery: value["delivery"].as_str().unwrap_or("").into(),
             submission, receipt: value["receipt"].clone(), notify: value["notify"].clone(),
-            notified: value["notification"]["delivered"] == true, images: vec![], source_messages: messages, message_batch: None, projection_after: None,
+            notified: value["notification"]["delivered"] == true, images: vec![], source_messages: messages, message_batch: None, projection_after: None, steer_refused: false,
         };
         records.push(record);
     }
@@ -2426,6 +2368,7 @@ pub async fn message_command(args: &[String], input: Option<&str>) -> Result<Val
 }
 pub async fn watch_messages(handle: Handle, agent: String) {
     let mut failures = 0u32;
+    let mut reported = false;
     loop {
         let received = async {
             let pending = handle.call("message_pending_acks", Value::Null).await?;
@@ -2449,21 +2392,23 @@ pub async fn watch_messages(handle: Handle, agent: String) {
         }.await;
         match received {
             Ok(empty) => {
+                if failures > 0 || !reported {
+                    reported = handle.call("message_watch", json!({"state":"receiving","failures":0,"lastFailure":null})).await.is_ok();
+                }
                 failures = 0;
                 if empty { tokio::time::sleep(Duration::from_millis(250)).await; }
             },
             Err(error) => {
+                // Never give up: credentials, the Controller and the Proxy can
+                // all come back (for example after a restart or rotation).
                 let failure = error.downcast_ref::<message_retry::Failure>().unwrap_or(&message_retry::Failure::Other);
-                if *failure == message_retry::Failure::Auth {
-                    eprintln!("Rust message watcher stopped: {failure}");
-                    break;
-                }
                 let id = uuid::Uuid::new_v4();
                 let jitter = u16::from_le_bytes([id.as_bytes()[0], id.as_bytes()[1]]);
                 let delay = message_retry::retry_delay(failures, jitter);
-                eprintln!("Rust message watcher retry: {failure}; failures={failures}; delay_ms={}", delay.as_millis());
-                tokio::time::sleep(delay).await;
+                eprintln!("Treer message watcher retry: {failure}; failures={failures}; delay_ms={}", delay.as_millis());
                 failures = failures.saturating_add(1);
+                reported = handle.call("message_watch", json!({"state":"retrying","failures":failures,"lastFailure":failure.to_string(),"retryInMs":delay.as_millis() as u64})).await.is_ok();
+                tokio::time::sleep(delay).await;
             }
         }
     }

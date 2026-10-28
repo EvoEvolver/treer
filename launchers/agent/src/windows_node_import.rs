@@ -3,8 +3,7 @@ use anyhow::{bail, Result};
 use std::path::Path;
 
 fn fresh(root: &Path, cwd: &Path, agent: &str) -> Result<()> {
-    let store = crate::store::Store::open(root, cwd)?;
-    store.recheck()?;
+    crate::store::Store::open(root, cwd)?;
     if root.join(".node-backup-restored").try_exists()? {
         bail!("node_backup_restored_requires_node_startup");
     }

@@ -62,20 +62,25 @@ test('Claude scheduled command output preserves queued receipt and next prompt e
  assert.equal(s.thread.turns.filter(t=>t.historySource==='native-scheduled-command').length,1);
  assert.equal((await inputCalls(f)).length,2);
 });
-for(const fault of ['NO_COMMAND','BORROWED_INPUT','WRONG_COMMAND'])test('Claude scheduled command refuses '+fault+' without completing waiting input',async t=>{
+for(const fault of ['NO_COMMAND','BORROWED_INPUT','WRONG_COMMAND'])test('Claude scheduled command fault '+fault+' is skipped without blocking or completing waiting input',async t=>{
  const f=await fixture(t,{RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-scheduled.mjs')]),['CLAUDE_FIXTURE_'+fault]:'1'});
  await f.post({prompt:'setup',mode:'queue'});await until(f.snapshot,s=>s.thread.turns.length===1&&s.thread.status==='idle');
  await writeFile(join(f.root,'cwd/start-scheduled'),'go');await until(()=>access(join(f.root,'calls.scheduled')).then(()=>true),Boolean);
  if(fault!=='NO_COMMAND'){
   await f.post({prompt:'must not borrow scheduled result',mode:'queue'});await until(f.snapshot,s=>!!s.thread.activeTurnId);
   await writeFile(join(f.root,'cwd/finish-scheduled'),'go');await writeFile(join(f.root,'cwd/complete-command'),'go');
+  await until(()=>access(join(f.root,'calls.result')).then(()=>true),Boolean);await new Promise(r=>setTimeout(r,300));
  }
- const s=await until(f.snapshot,s=>s.runtime.state==='blocked');
- assert.equal(s.runtime.provider.transport,'claude_protocol_refused');
- assert.equal(s.thread.turns.some(t=>t.historySource==='native-scheduled-command'),false);
- const q=(await (await fetch(f.base+'/v1/queue')).json()).submissions;
- assert.equal(q[0].state,'done');if(q[1])assert.notEqual(q[1].state,'done');
- assert.equal((await inputCalls(f)).length,fault==='NO_COMMAND'?1:2);
+ let s=await f.snapshot();
+ assert.notEqual(s.runtime.state,'blocked');assert.equal(s.runtime.provider.transport,'open');
+ assert.equal(s.thread.turns.some(t=>t.historySource==='native-scheduled-command'&&t.items.some(i=>i.text==='must not borrow scheduled result')),false);
+ let q=(await (await fetch(f.base+'/v1/queue')).json()).submissions;
+ assert.equal(q[0].state,'done');if(q[1])assert.equal(q[1].state,'running','the scheduled result never settles waiting input');
+ if(fault!=='NO_COMMAND'){
+  await writeFile(join(f.root,'cwd/finish-input'),'go');
+  await until(async()=>(await (await fetch(f.base+'/v1/queue')).json()).submissions,q=>q[1].state==='done');
+ }
+ assert.equal((await inputCalls(f)).length,fault==='NO_COMMAND'?1:2,'nothing is replayed');
 });
 test('Claude task-origin followup never blocks, completes queued input or changes its model',async t=>{
   const f=await fixture(t,{RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-task-followup.mjs')])});
@@ -110,7 +115,7 @@ test('Claude task-origin followup never blocks, completes queued input or change
   assert.equal(s.thread.turns.filter(t=>t.historySource==='native-task-notification').length,1);
   assert.equal((await inputCalls(f)).length,2,'restart never replays task followup or user input');
 });
-for(const fault of ['BAD_TASK_ORIGIN','UNSOLICITED'])test('Claude task-followup refuses '+fault+' without replay or false receipt settlement',async t=>{
+for(const fault of ['BAD_TASK_ORIGIN','UNSOLICITED'])test('Claude task-followup fault '+fault+' is skipped without blocking, replay or false settlement',async t=>{
   const f=await fixture(t,{RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-task-followup.mjs')]),['CLAUDE_FIXTURE_'+fault]:'1'});
   await f.post({prompt:'original input',mode:'queue'});
   await until(f.snapshot,s=>s.thread.status==='idle'&&s.thread.turns.length===1);
@@ -121,15 +126,43 @@ for(const fault of ['BAD_TASK_ORIGIN','UNSOLICITED'])test('Claude task-followup 
     await until(f.snapshot,s=>!!s.thread.activeTurnId);
     await writeFile(join(f.root,'cwd/finish-followup'),'go');
   }
-  const s=await until(f.snapshot,s=>s.runtime.state==='blocked');
-  assert.equal(s.runtime.provider.transport,'claude_protocol_refused');
-  assert.equal(s.runtime.provider.protocolFailure.code,fault==='BAD_TASK_ORIGIN'?'claude_task_result_origin':'claude_unowned_stream');
-  assert.deepEqual(Object.keys(s.runtime.provider.protocolFailure).sort(),['activeInput','code','taskFollowup','taskRuns']);
+  await new Promise(r=>setTimeout(r,300));
+  const s=await f.snapshot();
+  assert.notEqual(s.runtime.state,'blocked');assert.equal(s.runtime.provider.transport,'open');
   assert.equal(s.thread.turns.some(t=>t.historySource==='native-task-notification'),false);
-  const receipts=await (await fetch(f.base+'/v1/queue')).json();
+  let receipts=await (await fetch(f.base+'/v1/queue')).json();
   assert.equal(receipts.submissions[0].state,'done');
-  if(fault==='BAD_TASK_ORIGIN')assert.notEqual(receipts.submissions[1].state,'done');
+  if(fault==='BAD_TASK_ORIGIN'){
+    assert.equal(receipts.submissions[1].state,'running','a wrong-origin result never settles user input');
+    await writeFile(join(f.root,'cwd/finish-input'),'go');
+    receipts=await until(async()=>(await fetch(f.base+'/v1/queue')).json(),r=>r.submissions[1].state==='done');
+  }
   assert.equal((await inputCalls(f)).length,fault==='BAD_TASK_ORIGIN'?2:1);
+});
+test('Claude unknown frames are skipped and permission requests are allowed without blocking',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_ODDITIES:'1'});
+  assert.equal((await f.post({prompt:'odd frames',mode:'queue'})).status,200);
+  const s=await until(f.snapshot,s=>s.thread.status==='idle'&&s.thread.turns.length===1);
+  assert.equal(s.runtime.state,'idle');assert.equal(s.runtime.provider.transport,'open');
+  assert.equal((await (await fetch(f.base+'/v1/queue')).json()).submissions[0].state,'done');
+  const reply=await until(async()=>JSON.parse((await readFile(join(f.root,'calls.replies'),'utf8')).trim().split('\n')[0]),Boolean);
+  assert.equal(reply.response.request_id,'perm-1');assert.equal(reply.response.response.behavior,'allow');
+  assert.deepEqual(reply.response.response.updatedInput,{command:'synthetic'});
+});
+test('Claude provider crash restarts the provider, resumes the session and keeps the queue moving',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_CRASH_ONCE:'crash-marker',CLAUDE_FIXTURE_SPAWN_LOG:'spawns'});
+  const thread=(await f.snapshot()).thread.id;
+  assert.equal((await f.post({prompt:'crashes the provider',mode:'queue'})).status,200);
+  let s=await until(f.snapshot,s=>s.runtime.recovery.restarts>=1&&s.ready&&s.runtime.state==='idle',15000);
+  assert.equal(s.thread.id,thread);assert.equal(s.runtime.recovery.state,'running');
+  const first=(await (await fetch(f.base+'/v1/queue')).json()).submissions[0];
+  assert.equal(first.state,'interrupted','a prompt running in the dead process is reported, not replayed');
+  assert.equal((await f.post({prompt:'after the restart',mode:'queue'})).status,200);
+  s=await until(f.snapshot,s=>s.thread.status==='idle'&&s.queue.length===0&&s.thread.turns.length===2);
+  assert.equal((await (await fetch(f.base+'/v1/queue')).json()).submissions[1].state,'done');
+  const calls=await inputCalls(f);
+  assert.equal(calls.length,2);assert.equal(calls[1].resume,true);assert.equal(calls[1].session,thread);
+  assert.equal((await readFile(join(f.root,'cwd/spawns'),'utf8')).trim().split('\n').length,2);
 });
 const goalCall=(f,body,method='PUT')=>{const bytes=JSON.stringify(body);return fetch(f.base+'/api/goal',{method,body:bytes,headers:{'content-type':'application/json','content-length':Buffer.byteLength(bytes)}});};
 test('Claude native goals discover explicitly, ACK before sync, preserve FIFO and never interrupt',async t=>{
@@ -179,12 +212,13 @@ test('Claude real thirty-second goal ACK deadline ignores late ACK and preserves
   assert.equal(state.goalDelivery.status,'failed');assert.equal(state.goal.syncStatus,'desynced','expired ACK cannot confirm selection');
   assert.deepEqual((await inputCalls(f)).map(c=>c.text),['/goal slow goal','after slow goal']);assert.equal(state.runtime.state,'idle');
 });
-test('Claude restart during native goal command preserves uncertain receipt and never replays input',async t=>{
+test('Claude restart during native goal command interrupts its receipt and never replays input',async t=>{
   const f=await fixture(t,{CLAUDE_FIXTURE_GOALS:'1',CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_GOAL_ACK_DELAY:'3000'});
   await goalCall(f,{objective:'pending across restart'});
   const before=await until(f.snapshot,s=>s.thread.status==='running'&&s.goalDelivery?.status==='pending');
   await stop(f.child);const resumed=await f.launch();const after=await resumed.snapshot();
-  assert.equal(after.thread.id,before.thread.id);assert.equal(after.runtime.state,'blocked');assert.equal(after.goal.syncStatus,'desynced');assert.equal(after.goalDelivery.status,'failed');
+  assert.equal(after.thread.id,before.thread.id);assert.equal(after.runtime.state,'idle');assert.equal(after.goal.syncStatus,'desynced');assert.equal(after.goalDelivery.status,'failed');
+  assert.equal((await (await fetch(resumed.base+'/v1/queue')).json()).submissions[0].state,'interrupted');
   assert.equal((await inputCalls(f)).length,1,'neither goal nor original input is replayed');
 });
 test('Claude goal uses existing shared accessible editor without unsupported budget or pause controls',{skip:!process.env.CLAUDE_GOALS_BROWSER},async t=>{
@@ -632,63 +666,20 @@ test('actual Claude entry queues two turns across early idle and retains tools a
   await until(resumed.snapshot,s=>s.thread.turns.length===3&&s.thread.status==='idle');
   const calls=(await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').map(JSON.parse);assert.equal(calls[2].resume,true);assert.equal(calls[2].session,thread);
 });
-test('restart between tool result and turn result preserves uncertain receipt and tool without replay',async t=>{
+test('restart between tool result and turn result interrupts the receipt, keeps the tool and continues the queue',async t=>{
   const f=await fixture(t,{CLAUDE_FIXTURE_HOLD:'never-created'});
   assert.equal((await f.post({prompt:'hold result'})).status,200);
   let state=await until(f.snapshot,s=>s.thread.turns.some(t=>t.items.some(i=>i.kind==='commandExecution'&&i.status==='completed')));
-  const thread=state.thread.id;await stop(f.child);const resumed=await f.launch();state=await resumed.snapshot();
-  assert.equal(state.thread.id,thread);assert.equal(state.runtime.state,'blocked');
+  const thread=state.thread.id;await stop(f.child);const resumed=await f.launch({CLAUDE_FIXTURE_HOLD:''});state=await resumed.snapshot();
+  assert.equal(state.thread.id,thread);assert.equal(state.runtime.state,'idle');
+  assert.equal(state.thread.turns[0].status,'interrupted');
   assert.equal(state.thread.turns[0].items.find(i=>i.kind==='commandExecution').detailText,'synthetic retained output');
-  assert.equal((await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').length,1);
-});
-test('Claude cached terminal display cannot clear an uncertain acknowledged receipt on restart',async t=>{
-  const f=await fixture(t,{CLAUDE_FIXTURE_HOLD:'never-created'});
-  assert.equal((await f.post({prompt:'uncertain provider result'})).status,200);
-  await until(f.snapshot,s=>s.thread.turns.some(t=>t.items.some(i=>i.kind==='commandExecution'&&i.status==='completed')));
-  await stop(f.child);
-  const path=join(f.state,'rust-spike.json'),saved=JSON.parse(await readFile(path,'utf8'));
-  assert.equal(saved.records[0].submission.state,'running');
-  // Deliberately make the display checkpoint claim completion while the
-  // independent durable dispatch receipt remains unresolved. It is not a
-  // fresh provider response and must never authorize the queued next input.
-  saved.claudeTurns[0].status='completed';
-  await writeFile(path,JSON.stringify(saved),{mode:0o600});
-  const resumed=await f.launch(),state=await resumed.snapshot();
-  assert.equal(state.runtime.state,'blocked');
-  assert.match(state.thread.lastError,/uncertain/);
-  const retained=JSON.parse(await readFile(path,'utf8'));
-  assert.equal(retained.records[0].submission.state,'failed');
-  assert.match(retained.records[0].submission.error,/uncertain/);
-  assert.equal((await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').length,1);
-});
-test('Claude explicit unknown disposition uses current idle adapter, never cached terminal authority or input replay',async t=>{
-  const f=await fixture(t,{CLAUDE_FIXTURE_HOLD:'never-created'});
-  await f.post({prompt:'original ambiguous input'});
-  let state=await until(f.snapshot,s=>s.thread.activeTurnId&&s.thread.turns.some(t=>t.items.some(i=>i.kind==='commandExecution'&&i.status==='completed')));
-  let saved=JSON.parse(await readFile(join(f.state,'rust-spike.json'),'utf8'));
-  const id=saved.records[0].submission.id,thread=state.thread.id;
-  const action=(base,receipt)=>fetch(base+'/api/recovery',{method:'POST',body:JSON.stringify({action:'acknowledge_unknown',submission_id:id,thread_id:thread,expected_turn_id:receipt.turn_id,expected_error:receipt.error,accept_unknown_outcome:true})});
-  assert.equal((await action(f.base,saved.records[0].submission)).status,400,'live active adapter must refuse');
-  await stop(f.child);
-  const resumed=await f.launch({CLAUDE_FIXTURE_HOLD:''});
-  state=await resumed.snapshot();assert.equal(state.runtime.state,'blocked');
-  saved=JSON.parse(await readFile(join(f.state,'rust-spike.json'),'utf8'));
-  const original=saved.records[0].submission;
-  const queued=await resumed.post({prompt:'new input after disposition',mode:'queue'});assert.equal(queued.status,200);
-  assert.equal((await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').length,1);
-  assert.equal((await action(resumed.base,original)).status,202);
-  state=await until(resumed.snapshot,s=>s.thread.status==='idle'&&s.queue.length===0&&s.thread.turns.length===2);
-  const result=JSON.parse(await readFile(join(f.state,'rust-spike.json'),'utf8'));
-  assert.equal(result.records[0].submission.state,'interrupted');
-  assert.equal(result.records[0].submission.recovery_disposition.providerOutcome,'unknown');
-  assert.equal(result.records[0].submission.recovery_disposition.originalError,original.error);
-  assert.equal(result.records[0].submission.recovery_disposition.idleEvidence,'initialized_current_adapter_no_active_request');
+  const receipt=(await (await fetch(resumed.base+'/v1/queue')).json()).submissions[0];
+  assert.equal(receipt.state,'interrupted');assert.match(receipt.error.message,/not replayed/);
+  assert.equal((await resumed.post({prompt:'next input after restart',mode:'queue'})).status,200);
+  await until(resumed.snapshot,s=>s.thread.status==='idle'&&s.thread.turns.length===2);
   const calls=(await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').map(JSON.parse);
-  assert.equal(calls.length,2);assert.equal(calls[1].resume,true);assert.equal(calls[1].session,thread);
-  await stop(resumed.child);const again=await f.launch({CLAUDE_FIXTURE_HOLD:''});
-  const retained=JSON.parse(await readFile(join(f.state,'rust-spike.json'),'utf8'));
-  assert.deepEqual(retained.records[0].submission,result.records[0].submission);
-  assert.equal((await again.snapshot()).thread.id,thread);
+  assert.equal(calls.length,2,'the interrupted input is never replayed');assert.equal(calls[1].resume,true);assert.equal(calls[1].session,thread);
 });
 test('actual Claude interrupt is correlated and only result completes the interrupted turn',async t=>{
   const f=await fixture(t,{CLAUDE_FIXTURE_HOLD:'never-created'});

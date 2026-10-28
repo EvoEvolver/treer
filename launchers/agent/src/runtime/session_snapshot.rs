@@ -7,10 +7,8 @@ impl Runtime {
             bail!("snapshot_thread_unavailable");
         }
         if self.dispatch_blocked
-            || self.history_failed
+            || self.provider_down
             || self.state_failed
-            || self.transport_failed
-            || self.recovering
             || self.rpc.failed()
             || !self.rpc.claude_idle_for_disposition()
             || self.thread["status"] != "idle"
@@ -101,9 +99,6 @@ impl Runtime {
                 bail!("snapshot_provider_changed");
             }
             self.snapshot_idle(&json!(thread))?;
-            self.store
-                .recheck()
-                .map_err(|_| anyhow!("snapshot_storage_changed"))?;
             value["runtimeSnapshot"] = json!({"schema":"treer.idle-claude-snapshot/v1","threadId":thread,"custody":"current_initialized_adapter_idle","includesLauncherState":false,"providerCheckpoint":false});
             if owner_default {
                 value["runtimeSnapshot"]["auth"] = json!("owner-default");

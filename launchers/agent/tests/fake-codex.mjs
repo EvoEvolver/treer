@@ -83,6 +83,9 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     { id: "gpt-a", model: "gpt-a", displayName: "GPT A", description: "", isDefault: true, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "" }, { reasoningEffort: "high", description: "" }], defaultReasoningEffort: "low" },
     { id: "gpt-b", model: "gpt-b", displayName: "GPT B", description: "", isDefault: false, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "" }], defaultReasoningEffort: "medium" },
   ] : [] };
+  if (request.method === "turn/start" && process.env.FAKE_CODEX_REFUSE_TEXT && request.params.input.some(i => i.text === process.env.FAKE_CODEX_REFUSE_TEXT)) {
+    console.log(JSON.stringify({ id: request.id, error: { code: -32600, message: "synthetic refusal" } })); continue;
+  }
   if (request.method === "turn/start") {
     if (process.env.FAKE_CODEX_RELAY_RECOVERY) {
       assert.ok(!turns.some(turn => turn.status === "inProgress"), "recovery must not start concurrent turns");

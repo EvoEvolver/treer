@@ -46,8 +46,10 @@ test('HOME hidden non-VCS private import and same-session receipt restart, no in
   const calls=(await readFile(f.calls,'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(calls.filter(c=>c.method==='turn/start').length,1,'restart must not resend accepted prompt');
 });
-for(const kind of ['equal','visible','vcs'])test('actual entry refuses '+kind+' private placement before provider/import',async t=>{
-  const f=await setup(t,kind),child=f.launch();assert.equal((await once(child,'exit'))[0],1);assert.match(f.logs(),/private_state_unavailable/);
-  await assert.rejects(readFile(f.calls));await assert.rejects(readFile(join(f.state,'.rust-launcher.lock')));await assert.rejects(readFile(join(f.state,'rust-spike.json')));
+for(const kind of ['equal','visible','vcs'])test('actual entry accepts '+kind+' private placement (owner and mode are the boundary)',async t=>{
+  const f=await setup(t,kind);f.launch();
+  const base=await until(async()=>`http://127.0.0.1:${Number(await readFile(f.port,'utf8'))}`,s=>!s.endsWith('NaN'));
+  const state=await until(()=>fetch(base+'/api/state').then(r=>r.json()),s=>s.ready);
+  assert.equal(state.thread.id,f.thread);
   assert.equal(await readFile(join(f.source,'queue.json'),'utf8'),f.queue);
 });

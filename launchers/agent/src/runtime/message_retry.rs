@@ -9,7 +9,7 @@ pub(super) enum Failure {
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Auth => "message_auth: correct credentials and restart watcher",
+            Self::Auth => "message_auth: credentials refused; retrying",
             Self::Network => "message_network: Controller or Proxy unavailable",
             Self::Other => "message_other: operation failed",
         })
