@@ -6,8 +6,8 @@ import { mkdtemp, realpath, mkdir, readFile, writeFile, rm, symlink, rename, sta
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { hermeticEnv, localFetch as fetch } from '../../agent/tests/hermetic.mjs';
-import { fakePrivateState } from '../../agent/tests/fake-private-state.mjs';
+import { hermeticEnv, localFetch as fetch } from './hermetic.mjs';
+import { fakePrivateState } from './fake-private-state.mjs';
 const binary=process.env.RUST_SPIKE_BIN;assert.ok(binary);
 async function until(read,accept,ms=10000){const end=Date.now()+ms;while(Date.now()<end){const value=await read().catch(()=>null);if(value&&accept(value))return value;await new Promise(r=>setTimeout(r,15));}throw Error('owned snapshot fixture deadline');}
 async function fixture(t,{gate=false,events=false,config=true,managed=true}={}){
@@ -15,7 +15,7 @@ async function fixture(t,{gate=false,events=false,config=true,managed=true}={}){
   await mkdir(cwd,{mode:0o700});await mkdir(privateRoot,{mode:0o700});await mkdir(home,{mode:0o700});
   const agent='ag_snapshot_fixture',instance='snapshot-fixture-instance';
   const controller=await fakePrivateState(agent);
-  const env=hermeticEnv({HOME:root,AGENT_UI_CWD:cwd,TREER_RUST_SPIKE_STATE_DIR:privateRoot,AGENT_UI_HARNESS:'claude',AGENT_UI_PUBLIC_DIR:resolve('../agent/public'),AGENT_UI_PORT:'0',AGENT_UI_PORT_FILE:port,AGENT_UI_INSTANCE_ID:instance,RUST_SPIKE_REGISTER:'0',CLAUDE_BIN:process.execPath,RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-snapshot.mjs')]),SNAPSHOT_NATIVE_HOME:home,SNAPSHOT_CALLS:join(root,'calls')});
+  const env=hermeticEnv({HOME:root,AGENT_UI_CWD:cwd,TREER_RUST_SPIKE_STATE_DIR:privateRoot,AGENT_UI_HARNESS:'claude',AGENT_UI_PUBLIC_DIR:resolve('public'),AGENT_UI_PORT:'0',AGENT_UI_PORT_FILE:port,AGENT_UI_INSTANCE_ID:instance,RUST_SPIKE_REGISTER:'0',CLAUDE_BIN:process.execPath,RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-snapshot.mjs')]),SNAPSHOT_NATIVE_HOME:home,SNAPSHOT_CALLS:join(root,'calls')});
   delete env.CLAUDE_CONFIG_DIR;
   if(config)env.CLAUDE_CONFIG_DIR=home;
   if(managed)Object.assign(env,{TREER_AGENT_ID:agent,TREER_AGENT_SERVER_URL:controller.url,TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_PRIVATE_STATE_DIR:privateRoot,AGENT_UI_MESSAGE_WATCH:'0'});

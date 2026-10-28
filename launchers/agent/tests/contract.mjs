@@ -11,13 +11,12 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { connect } from 'node:net';
 import { get as httpGet, request as httpRequest } from 'node:http';
-import { hermeticEnv, localFetch as fetch } from '../../agent/tests/hermetic.mjs';
-import { fakePrivateState } from '../../agent/tests/fake-private-state.mjs';
+import { hermeticEnv, localFetch as fetch } from './hermetic.mjs';
+import { fakePrivateState } from './fake-private-state.mjs';
 
-const nodeRoot = resolve(process.env.NODE_LAUNCHER_ROOT || '../agent');
-const { WebSocket } = createRequire(join(nodeRoot, 'package.json'))('ws');
+const launcherRoot = resolve('.');
+const { WebSocket } = createRequire(join(launcherRoot, 'package.json'))('ws');
 const binary = process.env.RUST_SPIKE_BIN;
-const useNode = process.env.COMPARE_NODE === '1';
 const execFileAsync = promisify(execFile);
 async function rssKiB(pid) {
   const {stdout}=await execFileAsync('/bin/ps',['-o','rss=','-p',String(pid)]);
@@ -34,7 +33,7 @@ async function heapSample(pid) {
 }
 // Match Controller's NON_ALPHANUMERIC encoding, which also escapes '-' / '_'.
 const controllerSegment = id => id.replace(/[^a-z0-9]/gi, c => '%'+c.charCodeAt(0).toString(16).toUpperCase());
-assert.ok(binary || useNode, 'RUST_SPIKE_BIN or COMPARE_NODE required');
+assert.ok(binary, 'RUST_SPIKE_BIN required');
 
 async function until(read, predicate, waitMs=12000) {
   const end = Date.now() + waitMs;
@@ -47,18 +46,17 @@ async function fixture(t, extra={}, controllerOptions={}) {
   await mkdir(cwd,{mode:0o700});await mkdir(state,{mode:0o700});
   const controller=await fakePrivateState('ag_contract','fixture-only',controllerOptions);
   const portFile=join(root,'port');
-  const env=hermeticEnv({ HOME:root, CODEX_HOME:join(root,'codex'), AGENT_UI_CWD:cwd, AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'), AGENT_UI_PORT_FILE:portFile, AGENT_UI_PORT:'0', TREER_AGENT_ID:'ag_contract', TREER_WORKLOAD_CREDENTIAL:'fixture-only', TREER_AGENT_SERVER_URL:controller.url, TREER_AGENT_PRIVATE_STATE_DIR:state, AGENT_UI_INSTANCE_ID:'contract-instance', AGENT_UI_MESSAGE_WATCH:'0', CODEX_BIN:join(nodeRoot,'tests/fake-codex.mjs'), FAKE_CODEX_RELAY_RECOVERY:'1', ...extra });
+  const env=hermeticEnv({ HOME:root, CODEX_HOME:join(root,'codex'), AGENT_UI_CWD:cwd, AGENT_UI_PUBLIC_DIR:join(launcherRoot,'public'), AGENT_UI_PORT_FILE:portFile, AGENT_UI_PORT:'0', TREER_AGENT_ID:'ag_contract', TREER_WORKLOAD_CREDENTIAL:'fixture-only', TREER_AGENT_SERVER_URL:controller.url, TREER_AGENT_PRIVATE_STATE_DIR:state, AGENT_UI_INSTANCE_ID:'contract-instance', AGENT_UI_MESSAGE_WATCH:'0', CODEX_BIN:join(launcherRoot,'tests/fake-codex.mjs'), FAKE_CODEX_RELAY_RECOVERY:'1', ...extra });
   env.RUST_SPIKE_CLI_LOG=join(root,'registration.json');
   // A managed Rust author may inherit registration=1; only the explicit
   // registration fixture may opt in, never the rest of this sealed suite.
   env.RUST_SPIKE_REGISTER=extra.RUST_SPIKE_REGISTER??'0';
   env.RUST_SPIKE_PROVIDER_LOG=join(root,'provider.jsonl');
   env.FAKE_CODEX_CALLS=env.RUST_SPIKE_PROVIDER_LOG;
-  if(useNode&&process.env.NODE_LAUNCHER_RUNTIME){env.AGENT_UI_APP_ROOT=dirname(process.env.NODE_LAUNCHER_RUNTIME);env.AGENT_UI_PUBLIC_DIR=join(env.AGENT_UI_APP_ROOT,'public');}
   const children=[];let logs='';
   const launch=async (overrides,waitReady=true,rustArgs=[])=>{
     await rm(portFile,{force:true});
-    const child=spawn(useNode?process.execPath:binary,useNode?(process.env.NODE_LAUNCHER_RUNTIME?[process.env.NODE_LAUNCHER_RUNTIME]:['--import',join(nodeRoot,'node_modules/tsx/dist/loader.mjs'),join(nodeRoot,'src/index.ts')]):rustArgs,{cwd,env:{...env,...overrides},stdio:['ignore','pipe','pipe']});
+    const child=spawn(binary,rustArgs,{cwd,env:{...env,...overrides},stdio:['ignore','pipe','pipe']});
     children.push(child);child.stdout.on('data',b=>logs+=b);child.stderr.on('data',b=>logs+=b);
     const base=await until(async()=>`http://127.0.0.1:${Number(await readFile(portFile,'utf8'))}`,x=>!x.endsWith('NaN'));
     if(waitReady)try {await until(()=>fetch(base+'/api/state').then(r=>r.json()),x=>x.ready===true);}catch(e){throw Error(e.message+' '+logs);}
@@ -71,7 +69,7 @@ async function fixture(t, extra={}, controllerOptions={}) {
   return {base,post,headers,child,root,state,launch,controller,env,logs:()=>logs,trackChild:child=>children.push(child)};
 }
 
-for(const scenario of ['completed','failed','interrupted','inProgress','legacy','legacyInterrupted','missing','older'])test('restart recovery reconciles '+scenario+' without replaying accepted input',{skip:useNode,timeout:20000},async t=>{
+for(const scenario of ['completed','failed','interrupted','inProgress','legacy','legacyInterrupted','missing','older'])test('restart recovery reconciles '+scenario+' without replaying accepted input',{timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1'});
   const first=await s.post({text:'first input must never replay',operation_id:'recovery-first'}).then(r=>r.json());
   const receipt=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
@@ -105,7 +103,7 @@ for(const scenario of ['completed','failed','interrupted','inProgress','legacy',
   if(scenario==='older')assert.ok(calls.some(c=>c.method==='thread/read'),'older turn is actually fetched via provider protocol');
 });
 
-for(const status of ['completed','interrupted'])test('runtime recovery unblocks an exact older receipt after initially unavailable history '+status,{skip:useNode,timeout:25000},async t=>{
+for(const status of ['completed','interrupted'])test('runtime recovery unblocks an exact older receipt after initially unavailable history '+status,{timeout:25000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1'});
   const first=await s.post({text:'never resend exact accepted input',operation_id:'live-exact-first'}).then(r=>r.json());
   const second=await s.post({text:'FIFO second',operation_id:'live-exact-second'}).then(r=>r.json());
@@ -122,7 +120,7 @@ for(const status of ['completed','interrupted'])test('runtime recovery unblocks 
   assert.equal((await fetch(again.base+'/v1/submissions/'+first.submission.id,{headers:s.headers}).then(r=>r.json())).submission.state,status==='completed'?'done':'interrupted');
 });
 
-test('startup normalized interruption stays uncertain until explicit same-turn completion',{skip:useNode,timeout:16000},async t=>{
+test('startup normalized interruption stays uncertain until explicit same-turn completion',{timeout:16000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1'});
   const first=await s.post({text:'one original input',operation_id:'projected-resume-first'}).then(r=>r.json());
   const second=await s.post({text:'keep queued until completion',operation_id:'projected-resume-second'}).then(r=>r.json());
@@ -137,7 +135,7 @@ test('startup normalized interruption stays uncertain until explicit same-turn c
   assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['one original input','keep queued until completion']);
 });
 
-for(const order of ['before','completed-before','after'])test('reconnect buffered lifecycle obeys same-reader terminal coverage '+order,{skip:useNode,timeout:18000},async t=>{
+for(const order of ['before','completed-before','after'])test('reconnect buffered lifecycle obeys same-reader terminal coverage '+order,{timeout:18000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_BUFFER_ORDER:order});
   const first=await s.post({text:'one accepted input',operation_id:'buffer-order-first'}).then(r=>r.json());
   const get=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
@@ -154,7 +152,7 @@ for(const order of ['before','completed-before','after'])test('reconnect buffere
   }
 });
 
-test('stale background observation deadline cannot kill a healthy successor turn and late reply cannot settle it',{skip:useNode,timeout:90000},async t=>{
+test('stale background observation deadline cannot kill a healthy successor turn and late reply cannot settle it',{timeout:90000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_OBSERVER_STALL:'1'});
   const first=await s.post({text:'complete A while its read stalls',operation_id:'stalled-observer-A'}).then(r=>r.json());
   const second=await s.post({text:'B remains active past stale A deadline',operation_id:'stalled-observer-B'}).then(r=>r.json());
@@ -177,7 +175,7 @@ test('stale background observation deadline cannot kill a healthy successor turn
   assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['complete A while its read stalls','B remains active past stale A deadline','C after late reply']);
 });
 
-test('history idle summary cannot interrupt an executing turn or dispatch its successor before explicit completion',{skip:useNode,timeout:22000},async t=>{
+test('history idle summary cannot interrupt an executing turn or dispatch its successor before explicit completion',{timeout:22000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_IDLE_SUMMARY:'1'});
   const first=await s.post({text:'still executing input',operation_id:'idle-summary-first'}).then(r=>r.json());
   const second=await s.post({text:'must wait for actual completion',operation_id:'idle-summary-second'}).then(r=>r.json());
@@ -194,7 +192,7 @@ test('history idle summary cannot interrupt an executing turn or dispatch its su
   assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['still executing input','must wait for actual completion']);
 });
 
-for(const old of [false,true,'resume-race'])test('runtime recovery reconnects same-thread transport and continues FIFO without replay '+old,{skip:useNode,timeout:25000},async t=>{
+for(const old of [false,true,'resume-race'])test('runtime recovery reconnects same-thread transport and continues FIFO without replay '+old,{timeout:25000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_OLD_DISCONNECT:old===true?'1':'0',RECOVERY_RESUME_RACE:old==='resume-race'?'1':'0'});
   const first=await s.post({text:'one accepted input',operation_id:'reconnect-first'}).then(r=>r.json());
   const second=await s.post({text:'second queued',operation_id:'reconnect-second'}).then(r=>r.json());
@@ -209,7 +207,7 @@ for(const old of [false,true,'resume-race'])test('runtime recovery reconnects sa
   assert.equal((await fetch(s.base+'/v1/abort',{method:'POST',headers:s.headers,body:'{}'})).status,202);
 });
 
-test('runtime recovery stops after three refused replacement attempts and remains observable/stoppable',{skip:useNode,timeout:30000},async t=>{
+test('runtime recovery stops after three refused replacement attempts and remains observable/stoppable',{timeout:30000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_REFUSE_RESUME:'1'});
   const first=await s.post({text:'accepted once',operation_id:'exhaust-first'}).then(r=>r.json());
   const second=await s.post({text:'FIFO preserved',operation_id:'exhaust-second'}).then(r=>r.json());
@@ -222,7 +220,7 @@ test('runtime recovery stops after three refused replacement attempts and remain
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');assert.equal((await exit)[0],0);
 });
 
-test('runtime recovery slow reconnect leaves state reads and shutdown responsive',{skip:useNode,timeout:15000},async t=>{
+test('runtime recovery slow reconnect leaves state reads and shutdown responsive',{timeout:15000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_STALL_RESUME:'1'});
   await s.post({text:'first only',operation_id:'slow-reconnect'});
   await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.state==='reconnecting');
@@ -234,7 +232,7 @@ test('runtime recovery slow reconnect leaves state reads and shutdown responsive
   await until(()=>Promise.resolve(pids.every(({pid})=>{try{process.kill(pid,0);return false;}catch(error){return error.code==='ESRCH';}})),Boolean,3000);
 });
 
-test('runtime recovery wrong-thread replacement is a sticky integrity refusal, not a retryable transport fault',{skip:useNode,timeout:18000},async t=>{
+test('runtime recovery wrong-thread replacement is a sticky integrity refusal, not a retryable transport fault',{timeout:18000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_WRONG_THREAD:'1'});
   await s.post({text:'one original',operation_id:'wrong-thread'});
   const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.state==='integrity_failure');
@@ -244,7 +242,7 @@ test('runtime recovery wrong-thread replacement is a sticky integrity refusal, n
   assert.equal((await fetch(s.base+'/api/recovery',{method:'POST',headers:s.headers,body:JSON.stringify({action:'recheck'})})).status,400);
 });
 
-test('runtime recovery active unknown cannot be disposed using idle or missing-ID guesses',{skip:useNode,timeout:12000},async t=>{
+test('runtime recovery active unknown cannot be disposed using idle or missing-ID guesses',{timeout:12000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_NO_ID:'1',RECOVERY_HOLD:'1'});
   const first=await s.post({text:'active unknown',operation_id:'active-unknown'}).then(r=>r.json());
   await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.readCount>0);
@@ -254,7 +252,7 @@ test('runtime recovery active unknown cannot be disposed using idle or missing-I
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
 });
 
-test('runtime recovery failed durable settlement never dispatches the queued successor',{skip:useNode,timeout:20000},async t=>{
+test('runtime recovery failed durable settlement never dispatches the queued successor',{timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1'});
   await s.post({text:'first once',operation_id:'write-first'});
   const second=await s.post({text:'must remain queued',operation_id:'write-second'}).then(r=>r.json());
@@ -272,7 +270,7 @@ test('runtime recovery failed durable settlement never dispatches the queued suc
   } finally {await chmod(s.state,0o700);await chmod(path,0o600);}
 });
 
-test('runtime recovery missing ID requires explicit bound disposition and fresh idle, never automatic replay',{skip:useNode,timeout:20000},async t=>{
+test('runtime recovery missing ID requires explicit bound disposition and fresh idle, never automatic replay',{timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_NO_ID:'1'});
   const first=await s.post({text:'unknown accepted input',operation_id:'unknown-first'}).then(r=>r.json());
   const second=await s.post({text:'queued after explicit disposition',operation_id:'unknown-second'}).then(r=>r.json());
@@ -301,7 +299,7 @@ test('runtime recovery missing ID requires explicit bound disposition and fresh 
   assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['unknown accepted input','queued after explicit disposition']);
 });
 
-for(const mode of ['omitted','native','summary'])test('history order keeps receipt steering between observed activity and its response, including restart '+mode,{skip:useNode,timeout:20000},async t=>{
+for(const mode of ['omitted','native','summary'])test('history order keeps receipt steering between observed activity and its response, including restart '+mode,{timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/history-order-provider.mjs'),ORDER_HISTORY_FILE:'order-history.json',ORDER_NATIVE_ECHO:mode==='native'?'1':'0',ORDER_SUMMARY:mode==='summary'?'1':'0'});
   const read=()=>fetch(s.base+'/api/state').then(r=>r.json());
   const first=await s.post({text:'first accepted input',operation_id:'order-first'}).then(r=>r.json());
@@ -330,7 +328,7 @@ for(const mode of ['omitted','native','summary'])test('history order keeps recei
   assert.equal(calls.filter(c=>c.method==='turn/start').length,2);assert.equal(calls.filter(c=>c.method==='turn/steer').length,1);
 });
 
-for(const scenario of ['distinct','identical','contradiction'])test('legacy unanchored steering yields to ordered native echoes instead of pinning users at top '+scenario,{skip:useNode,timeout:20000},async t=>{
+for(const scenario of ['distinct','identical','contradiction'])test('legacy unanchored steering yields to ordered native echoes instead of pinning users at top '+scenario,{timeout:20000},async t=>{
   const identical=scenario==='identical';
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/legacy-steer-order-provider.mjs')});
   const first=await s.post({text:'initial question',operation_id:'legacy-first'}).then(r=>r.json());
@@ -385,19 +383,19 @@ for(const scenario of ['distinct','identical','contradiction'])test('legacy unan
   }
 });
 
-test('Rust serves its manifest while Controller registration probes it',{skip:useNode},async t=>{
+test('Rust serves its manifest while Controller registration probes it',async t=>{
   const s=await fixture(t,{RUST_SPIKE_REGISTER:'1',PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH});
   const manifest=await until(()=>readFile(join(s.root,'registration.json'),'utf8').then(JSON.parse),x=>x.instance_id==='contract-instance');
   assert.equal(manifest.protocol,'treer.agent-interface/v1');
 });
-test('Rust retries an accept error without ending the provider or HTTP server',{skip:useNode},async t=>{
+test('Rust retries an accept error without ending the provider or HTTP server',async t=>{
   const s=await fixture(t,{RUST_SPIKE_HTTP_ACCEPT_ERROR_ONCE:'1'});
   assert.match(s.logs(),/http_accept_retry/);
   assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).ready,true);
   assert.equal((await s.post({text:'still serves after EMFILE',operation_id:'accept-retry'})).status,202);
   assert.equal(s.child.exitCode,null);
 });
-test('Rust bounds slow headers, header count and upgraded connection occupancy',{skip:useNode,timeout:15000},async t=>{
+test('Rust bounds slow headers, header count and upgraded connection occupancy',{timeout:15000},async t=>{
   const s=await fixture(t,{RUST_SPIKE_HTTP_HEADER_MS:'300',RUST_SPIKE_HTTP_CONNECTION_LIMIT:'8'});
   const socket=connect({host:'127.0.0.1',port:Number(new URL(s.base).port)});socket.on('error',()=>{});
   t.after(()=>socket.destroy());await once(socket,'connect');socket.resume();
@@ -419,7 +417,7 @@ test('Rust bounds slow headers, header count and upgraded connection occupancy',
   const exit=once(s.child,'exit');const stop=Date.now();s.child.kill('SIGTERM');assert.equal((await exit)[0],0);
   assert.ok(Date.now()-stop<8000,'open upgraded sockets cannot pin shutdown');
 });
-test('Rust bounds directory enumeration without blocking concurrent state reads',{skip:useNode,timeout:20000},async t=>{
+test('Rust bounds directory enumeration without blocking concurrent state reads',{timeout:20000},async t=>{
   const s=await fixture(t);
   const directory=join(s.root,'cwd/many');await mkdir(directory);
   for(let first=0;first<4097;first+=64)await Promise.all(Array.from({length:Math.min(64,4097-first)},(_,n)=>writeFile(join(directory,'entry-'+(first+n)),'')));
@@ -430,7 +428,7 @@ test('Rust bounds directory enumeration without blocking concurrent state reads'
   assert.equal((await fetch(s.base+'/v1/files/tree?path=')).status,200);
 });
 
-test('Rust cancelled directory requests retain worker slots until the workers exit',{skip:useNode,timeout:15000},async t=>{
+test('Rust cancelled directory requests retain worker slots until the workers exit',{timeout:15000},async t=>{
   const s=await fixture(t,{RUST_SPIKE_FILES_WORKER_GATE:'filesystem-worker-gate'});
   const gate=join(s.root,'cwd/filesystem-worker-gate');await mkdir(gate);
   const controllers=[new AbortController(),new AbortController()];
@@ -446,7 +444,7 @@ test('Rust cancelled directory requests retain worker slots until the workers ex
   await until(()=>fetch(s.base+'/v1/files/tree?path='),response=>response.status===200);
 });
 
-test('Rust canonicalizes a configured cwd alias and reports root failures without paths',{skip:useNode,timeout:15000},async t=>{
+test('Rust canonicalizes a configured cwd alias and reports root failures without paths',{timeout:15000},async t=>{
   const s=await fixture(t);
   await writeFile(join(s.root,'cwd/alias-proof.txt'),'accepted through canonical cwd');
   const alias=join(s.root,'cwd-alias');
@@ -470,7 +468,7 @@ test('Rust canonicalizes a configured cwd alias and reports root failures withou
   }
 });
 
-test('many-turn recent window evicts finished history without losing receipts or blocking dispatch',{skip:useNode,timeout:60000},async t=>{
+test('many-turn recent window evicts finished history without losing receipts or blocking dispatch',{timeout:60000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid'});
   const baseline=await rssKiB(s.child.pid);let peak=baseline;const admitted=[];
   for(let n=0;n<60;n++) {
@@ -505,7 +503,7 @@ test('many-turn recent window evicts finished history without losing receipts or
   t.diagnostic(JSON.stringify({baselineRssKiB:baseline,peakRssKiB:peak,retainedTurns:state.thread.turns.length,receipts:admitted.length}));
 });
 
-test('streaming deltas stop at admission limit without replacing accepted text',{skip:useNode,timeout:30000},async t=>{
+test('streaming deltas stop at admission limit without replacing accepted text',{timeout:30000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_DELTA:'1'});
   const receipt=await s.post({text:'bounded stream',operation_id:'stream'}).then(r=>r.json());
   const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),state=>!state.ready);
@@ -519,7 +517,7 @@ test('streaming deltas stop at admission limit without replacing accepted text',
   await until(async()=>{try{process.kill(pid,0);return false;}catch(e){if(e.code==='ESRCH')return true;throw e;}},Boolean);
 });
 
-test('invalid provider turn identity blocks dispatch without echoing provider content',{skip:useNode,timeout:15000},async t=>{
+test('invalid provider turn identity blocks dispatch without echoing provider content',{timeout:15000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_INVALID_ID:'1'});
   const receipt=await s.post({text:'malformed completion',operation_id:'invalid-id'}).then(r=>r.json());
   const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),state=>state.runtime?.cleanup?.providerExit==='confirmed');
@@ -540,7 +538,7 @@ test('invalid provider turn identity blocks dispatch without echoing provider co
   assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
 });
 
-test('terminal reconciliation selects an old target by ID without a completion notification or duplicate dispatch',{skip:useNode,timeout:15000},async t=>{
+test('terminal reconciliation selects an old target by ID without a completion notification or duplicate dispatch',{timeout:15000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_RECONCILE_OLD:'1',HISTORY_FRAME_LOG:'frames.jsonl'});
   const receipt=await s.post({text:'attested local input omitted by provider',operation_id:'old-reconciliation'}).then(r=>r.json());
   const result=await until(()=>fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers}).then(r=>r.json()),x=>x.submission?.state==='done');
@@ -558,7 +556,7 @@ test('terminal reconciliation selects an old target by ID without a completion n
   assert.equal(after.filter(f=>f.method==='turn/start').length,1);
 });
 
-for(const rich of [false,true])test('provider user echo is projected once'+(rich?' after787-turn resume and node-rich live notification':''),{skip:useNode,timeout:60000},async t=>{
+for(const rich of [false,true])test('provider user echo is projected once'+(rich?' after787-turn resume and node-rich live notification':''),{timeout:60000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl',HISTORY_ECHO_USER:'1',...(rich?{HISTORY_LIVE_SHAPE:'8000',AGENT_UI_SESSION_ID:'synthetic-history'}:{})});
   const initial=await fetch(s.base+'/api/state').then(r=>r.json());
   if(rich){assert.equal(initial.history.totalTurns,787);assert.equal(initial.thread.turns.length,50);assert.ok(initial.runtime.provider.historyScan.frameBytes>45*1024*1024);}
@@ -578,7 +576,7 @@ for(const rich of [false,true])test('provider user echo is projected once'+(rich
   assert.equal((await fetch(s.base+'/v1/submissions/'+r.submission.id,{headers:s.headers}).then(r=>r.json())).submission.state,'done');
 });
 
-test('identical accepted steer text retains both receipt projections across native echoes',{skip:useNode},async t=>{
+test('identical accepted steer text retains both receipt projections across native echoes',async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl',HISTORY_IDENTICAL_ECHO:'1'});
   const sender1={kind:'user',agent_id:'ag_first',path:'/fixture/first',name:'First'};
   const sender2={kind:'user',agent_id:'ag_second',path:'/fixture/second',name:'Second'};
@@ -600,7 +598,7 @@ test('identical accepted steer text retains both receipt projections across nati
   assert.equal(frames.filter(f=>f.method==='turn/start').length,1);assert.equal(frames.filter(f=>f.method==='turn/steer').length,1);
 });
 
-test('live overflow with a read-only journal reports checkpoint failure and exits nonzero on shutdown',{skip:useNode,timeout:30000},async t=>{
+test('live overflow with a read-only journal reports checkpoint failure and exits nonzero on shutdown',{timeout:30000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_LIVE_SHAPE:'80000',HISTORY_LIVE_DELAY:'1500'});
   const journal=join(s.state,'rust-spike.json');
   const receipt=await s.post({text:'accepted before read-only fence',operation_id:'readonly-overflow'}).then(r=>r.json());
@@ -617,7 +615,7 @@ test('live overflow with a read-only journal reports checkpoint failure and exit
   } finally {await chmod(s.state,0o700);await chmod(journal,0o600);}
 });
 
-test('live node overflow reports a fixed frame category and keeps uncertain work fenced',{skip:useNode,timeout:60000},async t=>{
+test('live node overflow reports a fixed frame category and keeps uncertain work fenced',{timeout:60000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl',HISTORY_LIVE_SHAPE:'80000',AGENT_UI_SESSION_ID:'synthetic-history'});
   const receipt=await s.post({text:'synthetic accepted input',operation_id:'shape-overflow'}).then(r=>r.json());
   const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked');
@@ -638,7 +636,7 @@ test('live node overflow reports a fixed frame category and keeps uncertain work
   assert.equal(frames.filter(f=>f.method==='turn/start').length,1,'restart never resends uncertain work');
 });
 
-test('streamed 50 MiB resume retains a recent window, fetches older pages on demand and completes the next turn',{skip:useNode,timeout:60000},async t=>{
+test('streamed 50 MiB resume retains a recent window, fetches older pages on demand and completes the next turn',{timeout:60000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
   const originalReceipt=await s.post({text:'local text belongs only to this requested old turn',operation_id:'old-page-projection'}).then(r=>r.json());
   await until(()=>fetch(s.base+'/v1/submissions/'+originalReceipt.submission.id,{headers:s.headers}).then(r=>r.json()),x=>x.submission?.state==='done');
@@ -689,7 +687,7 @@ test('streamed 50 MiB resume retains a recent window, fetches older pages on dem
   assert.equal(restarted.child.exitCode,null);
 });
 
-for(const extra of [0,1])test('streaming frame256 MiB boundary +'+extra,{skip:useNode,timeout:120000},async t=>{
+for(const extra of [0,1])test('streaming frame256 MiB boundary +'+extra,{timeout:120000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid'});
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   const original=await readFile(join(s.state,'rust-spike.json'),'utf8');
@@ -706,12 +704,12 @@ for(const extra of [0,1])test('streaming frame256 MiB boundary +'+extra,{skip:us
   assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),original);
 });
 
-for(const malformed of [false,true])test((malformed?'malformed discarded old turn':'oversized resumed history')+' fails visibly without rewriting the durable journal',{skip:useNode,timeout:10000},async t=>{
+for(const malformed of [false,true])test((malformed?'malformed discarded old turn':'oversized resumed history')+' fails visibly without rewriting the durable journal',{timeout:10000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid'});
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   const original=await readFile(join(s.state,'rust-spike.json'),'utf8');
   const portFile=join(s.root,'oversized-port');
-  const env=hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_RUST_SPIKE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'),CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'oversized.pid',...(malformed?{HISTORY_MALFORMED_OLD:'1'}:{HISTORY_OVERSIZED:'1'}),AGENT_UI_PORT_FILE:portFile});
+  const env=hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_RUST_SPIKE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(launcherRoot,'public'),CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'oversized.pid',...(malformed?{HISTORY_MALFORMED_OLD:'1'}:{HISTORY_OVERSIZED:'1'}),AGENT_UI_PORT_FILE:portFile});
   const child=spawn(binary,[],{cwd:join(s.root,'cwd'),env,stdio:'ignore'});
   s.trackChild(child);
   const base=await until(async()=>`http://127.0.0.1:${Number(await readFile(portFile,'utf8'))}`,x=>!x.endsWith('NaN'));
@@ -729,7 +727,7 @@ for(const malformed of [false,true])test((malformed?'malformed discarded old tur
 test('same manifest and initial transcript contract',async t=>{
   const s=await fixture(t);
   const manifest=await fetch(s.base+'/v1/manifest').then(r=>r.json());
-  const contract=JSON.parse(await readFile(join(nodeRoot,'interface-contract.json'),'utf8'));
+  const contract=JSON.parse(await readFile(join(launcherRoot,'interface-contract.json'),'utf8'));
   assert.equal(manifest.protocol,contract.protocol);assert.deepEqual(manifest.capabilities,contract.capabilities);
   const transcript=await fetch(s.base+'/v1/transcript?page=0&limit=1').then(r=>r.json());
   assert.equal(transcript.page_count,2);assert.equal(transcript.next_page,1);assert.equal(transcript.entries[0].content,'remember 0');
@@ -831,12 +829,10 @@ test('durable operation deduplication, conflicting retry and correlated terminal
   const encoded=await fetch(s.base+'/v1/submissions/'+controllerSegment(first.submission.id),{headers:s.headers});
   assert.equal(encoded.status,200);
   assert.deepEqual(await encoded.json(),result);
-  if(!useNode){
-    for(const invalid of ['%FF','%2Fbad','%252D','bad%'])
-      assert.equal((await fetch(s.base+'/v1/submissions/'+invalid,{headers:s.headers})).status,400);
-  }
+  for(const invalid of ['%FF','%2Fbad','%252D','bad%'])
+    assert.equal((await fetch(s.base+'/v1/submissions/'+invalid,{headers:s.headers})).status,400);
 });
-test('Rust keeps journaled user text and attested sender after completion and restart',{skip:useNode},async t=>{
+test('Rust keeps journaled user text and attested sender after completion and restart',async t=>{
   const s=await fixture(t);
   const sender={kind:'user',agent_id:'ag_sender',path:'/fixture/sender',name:'Fixture sender'};
   const accepted=await s.post({text:'durable user text',operation_id:'durable-user',sender}).then(r=>r.json());
@@ -854,7 +850,7 @@ test('Rust keeps journaled user text and attested sender after completion and re
   const restarted=await s.launch({});
   assert.equal(await check(restarted.base),id);
 });
-test('Rust corrupt journal refuses startup before provider dispatch and preserves evidence',{skip:useNode},async t=>{
+test('Rust corrupt journal refuses startup before provider dispatch and preserves evidence',async t=>{
   const s=await fixture(t);
   const accepted=await s.post({text:'private text must not enter error logs',operation_id:'corruption-check'}).then(r=>r.json());
   await until(()=>fetch(s.base+'/v1/submissions/'+accepted.submission.id,{headers:s.headers}).then(r=>r.json()),x=>['done','failed'].includes(x.submission?.state));
@@ -865,7 +861,7 @@ test('Rust corrupt journal refuses startup before provider dispatch and preserve
   const bytes=JSON.stringify(journal);
   await writeFile(path,bytes,{mode:0o600});
   const providerBefore=await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null);
-  const child=spawn(binary,[],{cwd:join(s.root,'cwd'),env:hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_RUST_SPIKE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'),CODEX_BIN:join(nodeRoot,'tests/fake-codex.mjs'),RUST_SPIKE_PROVIDER_LOG:join(s.root,'provider.jsonl')}),stdio:['ignore','pipe','pipe']});
+  const child=spawn(binary,[],{cwd:join(s.root,'cwd'),env:hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_RUST_SPIKE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(launcherRoot,'public'),CODEX_BIN:join(launcherRoot,'tests/fake-codex.mjs'),RUST_SPIKE_PROVIDER_LOG:join(s.root,'provider.jsonl')}),stdio:['ignore','pipe','pipe']});
   let logs='';child.stdout.on('data',b=>logs+=b);child.stderr.on('data',b=>logs+=b);
   const [code]=await once(child,'exit');
   assert.notEqual(code,0);
@@ -874,10 +870,10 @@ test('Rust corrupt journal refuses startup before provider dispatch and preserve
   assert.equal(await readFile(path,'utf8'),bytes);
   assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null),providerBefore);
 });
-test('Rust refuses concurrent writers and mismatched resume; existing Rust journal is not re-imported',{skip:useNode,timeout:15000},async t=>{
+test('Rust refuses concurrent writers and mismatched resume; existing Rust journal is not re-imported',{timeout:15000},async t=>{
   const s=await fixture(t);
   const path=join(s.state,'rust-spike.json');
-  const env=hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:s.controller.url,TREER_AGENT_PRIVATE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'),CODEX_BIN:join(nodeRoot,'tests/fake-codex.mjs'),RUST_SPIKE_PROVIDER_LOG:join(s.root,'provider.jsonl')});
+  const env=hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:s.controller.url,TREER_AGENT_PRIVATE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(launcherRoot,'public'),CODEX_BIN:join(launcherRoot,'tests/fake-codex.mjs'),RUST_SPIKE_PROVIDER_LOG:join(s.root,'provider.jsonl')});
   const refuses=async (code,extra={})=>{
     const bytes=await readFile(path);
     const providerBefore=await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null);
@@ -898,7 +894,7 @@ test('Rust refuses concurrent writers and mismatched resume; existing Rust journ
   assert.equal((await fetch(restarted.base+'/api/state').then(r=>r.json())).ready,true,'lease must be released on exit');
   assert.equal(await readFile(join(legacy,'queue.json'),'utf8'),evidence,'existing Rust state never reimports stale Node files');
 });
-test('Rust history failure is visible but live receipts still publish',{skip:useNode,timeout:15000},async t=>{
+test('Rust history failure is visible but live receipts still publish',{timeout:15000},async t=>{
   const s=await fixture(t);const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
   const history=join(s.state,'rust-journal-history');await mkdir(history,{recursive:true,mode:0o700});
   const extra=join(history,'unexpected-private-entry');await writeFile(extra,'keep untouched',{mode:0o600});
@@ -911,7 +907,7 @@ test('Rust history failure is visible but live receipts still publish',{skip:use
   assert.ok(saved.records.some(r=>r.operation==='history-live-op'));
   assert.equal(await readFile(extra,'utf8'),'keep untouched');
 });
-for(const scenario of ['normal','concurrent','mismatch','reopen','partialObserver','readAnchors'])test('Node import and producer-shaped stale history resume then real new-turn path '+scenario,{skip:useNode,timeout:60000},async t=>{
+for(const scenario of ['normal','concurrent','mismatch','reopen','partialObserver','readAnchors'])test('Node import and producer-shaped stale history resume then real new-turn path '+scenario,{timeout:60000},async t=>{
   const failure=scenario!=='normal';
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl',HISTORY_STALE_SNAPSHOT:'1',HISTORY_BACKWARD_ENVELOPE:scenario==='partialObserver'?'observerPartial':scenario==='readAnchors'?'read':'both',...({concurrent:{HISTORY_CONCURRENT_ACTIVE:'1'},mismatch:{HISTORY_MISMATCH_START:'1'},reopen:{HISTORY_REOPEN_TERMINAL:'1'}}[scenario]||{})});
   const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
@@ -968,7 +964,7 @@ for(const scenario of ['normal','concurrent','mismatch','reopen','partialObserve
   t.diagnostic(JSON.stringify({historyScan:state.runtime.provider.historyScan,rssKiB:await rssKiB(imported.child.pid),scenario}));
 });
 
-for(const mode of ['absent','null','turns','items','both','empty','object','mixed','thread','oversized','unknownVersion'])for(const candidates of ['zero','one'])test(`resume backward anchors actual import ${mode}:${candidates}`,{skip:useNode,timeout:20000},async t=>{
+for(const mode of ['absent','null','turns','items','both','empty','object','mixed','thread','oversized','unknownVersion'])for(const candidates of ['zero','one'])test(`resume backward anchors actual import ${mode}:${candidates}`,{timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
   const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
   await unlink(join(s.state,'rust-spike.json'));
@@ -1003,7 +999,7 @@ for(const mode of ['absent','null','turns','items','both','empty','object','mixe
   assert.equal(frames.filter(f=>f.method==='turn/start').length,0);
 });
 
-for(const fault of ['invalidId','duplicateId','decreasing','nonInteger','paged'])for(const candidates of ['zero','one'])test(`history authority actual entry ${fault}:${candidates}`,{skip:useNode,timeout:20000},async t=>{
+for(const fault of ['invalidId','duplicateId','decreasing','nonInteger','paged'])for(const candidates of ['zero','one'])test(`history authority actual entry ${fault}:${candidates}`,{timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
   const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
   await unlink(join(s.state,'rust-spike.json'));
@@ -1037,7 +1033,7 @@ for(const fault of ['invalidId','duplicateId','decreasing','nonInteger','paged']
   assert.equal(frames.filter(f=>f.method==='turn/start').length,0);
 });
 
-for(const scenario of ['collision','observer'])test(`projection-only history retains dispatch fence ${scenario}`,{skip:useNode,timeout:30000},async t=>{
+for(const scenario of ['collision','observer'])test(`projection-only history retains dispatch fence ${scenario}`,{timeout:30000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
   const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
   const restarted=await s.launch({HISTORY_AUTHORITY_CASE:scenario==='collision'?'duplicateId:zero':'nonInteger:zero',HISTORY_STALE_SNAPSHOT:'1',...(scenario==='collision'?{HISTORY_AUTHORITY_REOPEN:'1'}:{})});
@@ -1058,7 +1054,7 @@ for(const scenario of ['collision','observer'])test(`projection-only history ret
   assert.equal(frames.filter(f=>f.method==='turn/start').length,1);
 });
 
-for(const mode of ['missing','missingZero','missingOne','unknown','unknownZero','unknownOne','activeZero','paged','duplicate','reordered','activeNoNewest'])test('producer-shaped ambiguous history refuses startup: '+mode,{skip:useNode,timeout:20000},async t=>{
+for(const mode of ['missing','missingZero','missingOne','unknown','unknownZero','unknownOne','activeZero','paged','duplicate','reordered','activeNoNewest'])test('producer-shaped ambiguous history refuses startup: '+mode,{timeout:20000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
   const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
   const restarted=await s.launch({HISTORY_STALE_SNAPSHOT:'1',HISTORY_STALE_INVALID:mode},false);
@@ -1072,7 +1068,7 @@ for(const mode of ['missing','missingZero','missingOne','unknown','unknownZero',
   assert.equal(frames.filter(f=>f.method==='turn/start').length,0);
 });
 
-test('Rust imports a Node queue once, resumes its thread, preserves retries and restores byte backup',{skip:useNode,timeout:20000},async t=>{
+test('Rust imports a Node queue once, resumes its thread, preserves retries and restores byte backup',{timeout:20000},async t=>{
   const s=await fixture(t);
   const thread=(await fetch(s.base+'/api/state').then(r=>r.json())).thread.id;
   const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
@@ -1085,8 +1081,8 @@ test('Rust imports a Node queue once, resumes its thread, preserves retries and 
   const queue=JSON.stringify({version:1,records:[{operationId:'node-op',fingerprint,text:'',delivery,notify,receipt,notification:null,submission:{id,state:'done',sender,created_at:'2026-10-18T00:00:00.000Z',position:null,text_preview:text,turn_id:'old-turn',assistant_preview:null,error:null}}]})+'\n';
   const threadBytes=JSON.stringify({threadId:thread})+'\n';
   await writeFile(join(legacy,'agent-ui.json'),threadBytes,{mode:0o600});await writeFile(join(legacy,'queue.json'),queue,{mode:0o600});
-  await execFileAsync(process.execPath,['--import',join(nodeRoot,'node_modules/tsx/dist/loader.mjs'),'--input-type=module','-e',`import {AttachmentStore} from ${JSON.stringify(pathToFileURL(join(nodeRoot,'src/attachments.ts')).href)}; new AttachmentStore(${JSON.stringify(join(s.state,'images'))});`],{env:s.env,timeout:5000});
-  assert.deepEqual(await readdir(join(s.state,'images')),[],'real Node AttachmentStore creates an empty images root');
+  await mkdir(join(s.state,'images'),{recursive:true,mode:0o700});
+  assert.deepEqual(await readdir(join(s.state,'images')),[],'legacy Node images root is empty');
   const imported=await s.launch({},true,['--import-node-state']);
   const snapshot=await fetch(imported.base+'/api/state').then(r=>r.json());assert.equal(snapshot.thread.id,thread);
   assert.equal(await readFile(join(s.state,'node-backup-v1/queue.json'),'utf8'),queue);
@@ -1108,7 +1104,7 @@ test('Rust imports a Node queue once, resumes its thread, preserves retries and 
   assert.equal(await readFile(join(legacy,'agent-ui.json'),'utf8'),threadBytes);
   assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8'),providerBefore,'restore must not start the provider');
 });
-test('Rust imports bounded current Node terminal receipts and inert Claude usage, runs new turn and restores all source bytes',{skip:useNode,timeout:30000},async t=>{
+test('Rust imports bounded current Node terminal receipts and inert Claude usage, runs new turn and restores all source bytes',{timeout:30000},async t=>{
   const s=await fixture(t,{FAKE_CODEX_COMPLETE_TURNS:'1',FAKE_CODEX_RELAY_RECOVERY:''});
   const first=await fetch(s.base+'/api/state').then(r=>r.json());
   const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
@@ -1144,7 +1140,7 @@ test('Rust imports bounded current Node terminal receipts and inert Claude usage
   assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8'),providerBefore);
 });
 
-for(const field of ['goal','pendingExit','unknown'])test('Rust rejects non-inert goal sidecar '+field+' before provider start',{skip:useNode},async t=>{
+for(const field of ['goal','pendingExit','unknown'])test('Rust rejects non-inert goal sidecar '+field+' before provider start',async t=>{
   const s=await fixture(t);const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   await unlink(join(s.state,'rust-spike.json'));
   const legacy=join(s.root,'cwd/.treer/agents/ag_contract');await mkdir(legacy,{recursive:true,mode:0o700});
@@ -1160,7 +1156,7 @@ for(const field of ['goal','pendingExit','unknown'])test('Rust rejects non-inert
   await assert.rejects(readFile(join(s.state,'rust-spike.json')),{code:'ENOENT'});
 });
 
-test('Rust malformed Node state keeps exact backup and refuses before spawning provider',{skip:useNode,timeout:60000},async t=>{
+test('Rust malformed Node state keeps exact backup and refuses before spawning provider',{timeout:60000},async t=>{
   const id='sub_11111111-1111-4111-8111-111111111111';
   const record={operationId:'op',fingerprint:'a'.repeat(64),text:'',delivery:'queue',notify:null,receipt:{id,disposition:'sent',position:null},notification:null,submission:{id,state:'done',sender:null,created_at:'2026-10-18T00:00:00Z',position:null,text_preview:'seeded-private-text',turn_id:null,assistant_preview:null,error:null}};
   const cases=[['duplicate keys','{"version":1,"records":[],"records":["seeded-private-text"]}\n']];
@@ -1190,14 +1186,14 @@ test('Rust malformed Node state keeps exact backup and refuses before spawning p
   await assert.rejects(readFile(join(s.state,'rust-spike.json')),{code:'ENOENT'});
   });
 });
-test('Rust refuses a FIFO journal promptly before provider startup',{skip:useNode,timeout:10000},async t=>{
+test('Rust refuses a FIFO journal promptly before provider startup',{timeout:10000},async t=>{
   const s=await fixture(t);
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   const path=join(s.state,'rust-spike.json');
   await unlink(path);
   await execFileAsync('/usr/bin/mkfifo',[path]);
   const providerBefore=await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null);
-  const env=hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_RUST_SPIKE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'),CODEX_BIN:join(nodeRoot,'tests/fake-codex.mjs'),RUST_SPIKE_PROVIDER_LOG:join(s.root,'provider.jsonl')});
+  const env=hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_RUST_SPIKE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(launcherRoot,'public'),CODEX_BIN:join(launcherRoot,'tests/fake-codex.mjs'),RUST_SPIKE_PROVIDER_LOG:join(s.root,'provider.jsonl')});
   await assert.rejects(execFileAsync(binary,[],{cwd:join(s.root,'cwd'),env,timeout:2000,killSignal:'SIGKILL'}),error=>{
     assert.equal(error.killed,false,'FIFO must be refused without the watchdog killing startup');
     assert.match(error.stderr,/private_state_invalid/);
@@ -1206,7 +1202,7 @@ test('Rust refuses a FIFO journal promptly before provider startup',{skip:useNod
   assert.equal((await lstat(path)).isFIFO(),true);
   assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null),providerBefore);
 });
-test('Rust goal edits persist native state and deduplicate model-context delivery across restart',{skip:useNode},async t=>{
+test('Rust goal edits persist native state and deduplicate model-context delivery across restart',async t=>{
   // Use the existing persisted-turn fixture so new turn identities survive
   // provider restart. The relay-recovery fixture resets relay-1 on each process
   // and is intentionally unsuitable for terminal identity reconciliation.
@@ -1239,7 +1235,7 @@ test('Rust goal edits persist native state and deduplicate model-context deliver
   const saved=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
   assert.equal(saved.records.filter(r=>r.operation==='goal-edit/goal-one/0').length,1);
 });
-test('Rust uncertain native goal update is observed on restart without repeating the mutation',{skip:useNode},async t=>{
+test('Rust uncertain native goal update is observed on restart without repeating the mutation',async t=>{
   const s=await fixture(t,faultEnv('goal-ack-lost'));
   const response=await fetch(s.base+'/api/goal',{method:'PUT',body:JSON.stringify({objective:'Keep the exact goal',tokenBudget:5000,operationId:'goal-uncertain'})});
   assert.equal(response.status,400);
@@ -1255,7 +1251,7 @@ test('Rust uncertain native goal update is observed on restart without repeating
   assert.equal(calls.filter(c=>c.method==='thread/goal/set').length,1);
   assert.equal(calls.filter(c=>c.method==='turn/start').length,1);
 });
-test('Rust mismatching goal reconciliation refuses a stale native mutation',{skip:useNode},async t=>{
+test('Rust mismatching goal reconciliation refuses a stale native mutation',async t=>{
   const s=await fixture(t,faultEnv('goal-ack-lost'));
   assert.equal((await fetch(s.base+'/api/goal',{method:'PUT',body:JSON.stringify({objective:'Original objective',operationId:'goal-stale'})})).status,400);
   await writeFile(join(s.root,'cwd','.fault-goal.json'),JSON.stringify({objective:'Changed elsewhere',status:'active'}));
@@ -1268,7 +1264,7 @@ test('Rust mismatching goal reconciliation refuses a stale native mutation',{ski
   assert.equal(state.goalDelivery.status,'failed');
 });
 const imageGif=Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==','base64');
-test('Rust image transfers retain two slots under backpressure and expire at the total duration cap',{skip:useNode,timeout:30000},async t=>{
+test('Rust image transfers retain two slots under backpressure and expire at the total duration cap',{timeout:30000},async t=>{
   const s=await fixture(t,{AGENT_UI_DOWNLOAD_MAX_MS:'5000',AGENT_UI_DOWNLOAD_IDLE_MS:'15000'});
   const block=Buffer.alloc(256,120);block[0]=255;
   const image=Buffer.concat([imageGif.subarray(0,-1),Buffer.from([0x21,0xfe]),...Array(32768).fill(block),Buffer.from([0,0x3b])]);
@@ -1286,7 +1282,7 @@ test('Rust image transfers retain two slots under backpressure and expire at the
   await until(()=>fetch(s.base+'/api/attachments',{method:'POST',body:imageGif}),response=>response.status===201);
   assert.ok(transfers.some(({response})=>!response.complete),'expired transfer must not claim complete bytes');
 });
-test('Rust images are validated, quota admitted, retained in history and durable across restart',{skip:useNode},async t=>{
+test('Rust images are validated, quota admitted, retained in history and durable across restart',async t=>{
   const s=await fixture(t,{FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_IMAGES:'1'});
   for(const bad of [Buffer.from('MZfake'),imageGif.subarray(0,-1),Buffer.concat([imageGif,Buffer.from('MZ')])]) {
     const r=await fetch(s.base+'/api/attachments',{method:'POST',body:bad});
@@ -1315,7 +1311,7 @@ test('Rust images are validated, quota admitted, retained in history and durable
   assert.deepEqual(Buffer.from(await (await fetch(restarted.base+'/api/attachments/'+attachment.id)).arrayBuffer()),imageGif);
   assert.ok(s.controller.events.some(e=>e.path.endsWith('/commit')));assert.equal(s.controller.reservations.size,0);
 });
-test('Rust failed image quota commit rolls back exact data and releases reservation',{skip:useNode},async t=>{
+test('Rust failed image quota commit rolls back exact data and releases reservation',async t=>{
   const s=await fixture(t,{}, {commitError:'private_state_reservation_expired'});
   const r=await fetch(s.base+'/api/attachments',{method:'POST',body:imageGif});
   assert.equal(r.status,503);
@@ -1323,7 +1319,7 @@ test('Rust failed image quota commit rolls back exact data and releases reservat
   assert.ok(s.controller.events.some(e=>e.method==='DELETE'));
   assert.equal((await readdir(join(s.state,'rust-images'))).some(n=>n.startsWith('img_')),false);
 });
-test('Rust image reads refuse replaced symlinks and preserve the outside sentinel',{skip:useNode},async t=>{
+test('Rust image reads refuse replaced symlinks and preserve the outside sentinel',async t=>{
   const s=await fixture(t);
   const {attachment}=await fetch(s.base+'/api/attachments',{method:'POST',body:imageGif}).then(r=>r.json());
   const sentinel=join(s.root,'outside-image');await writeFile(sentinel,'sentinel',{mode:0o600});
@@ -1333,7 +1329,7 @@ test('Rust image reads refuse replaced symlinks and preserve the outside sentine
   assert.equal((await fetch(s.base+'/api/attachments/'+attachment.id,{method:'DELETE'})).status,503);
   assert.equal(await readFile(sentinel,'utf8'),'sentinel');
 });
-test('Rust retained images stop admission at byte and entry bounds',{skip:useNode},async t=>{
+test('Rust retained images stop admission at byte and entry bounds',async t=>{
   for(const extra of [{RUST_SPIKE_IMAGE_QUOTA_BYTES:String(imageGif.length)},{RUST_SPIKE_IMAGE_ENTRY_LIMIT:'1'}]) {
     const s=await fixture(t,{FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_IMAGES:'1',...extra});
     const {attachment}=await fetch(s.base+'/api/attachments',{method:'POST',body:imageGif}).then(r=>r.json());
@@ -1343,7 +1339,7 @@ test('Rust retained images stop admission at byte and entry bounds',{skip:useNod
     assert.equal((await fetch(s.base+'/api/attachments/'+attachment.id)).status,200);
   }
 });
-test('Rust quota timeout releases the image store for reads and deletes',{skip:useNode,timeout:12000},async t=>{
+test('Rust quota timeout releases the image store for reads and deletes',{timeout:12000},async t=>{
   const s=await fixture(t);
   const {attachment}=await fetch(s.base+'/api/attachments',{method:'POST',body:imageGif}).then(r=>r.json());
   s.controller.options.hangCommit=true;
@@ -1356,7 +1352,7 @@ test('Rust quota timeout releases the image store for reads and deletes',{skip:u
   assert.equal((await fetch(s.base+'/api/attachments/'+attachment.id,{method:'DELETE'})).status,200);
   assert.equal(s.controller.reservations.size,0);
 });
-test('Rust missing expired drafts do not block a new upload',{skip:useNode},async t=>{
+test('Rust missing expired drafts do not block a new upload',async t=>{
   const s=await fixture(t);
   const {attachment}=await fetch(s.base+'/api/attachments',{method:'POST',body:imageGif}).then(r=>r.json());
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
@@ -1379,7 +1375,7 @@ test('concurrent queued submissions are FIFO, queue cancellation differs from ab
   assert.equal((await fetch(s.base+'/v1/abort',{method:'POST',headers:s.headers,body:'{}'})).status,202);
 });
 
-test('Rust journal restart never replays an uncertain turn and preserves queued operation identity',{skip:useNode},async t=>{
+test('Rust journal restart never replays an uncertain turn and preserves queued operation identity',async t=>{
   const s=await fixture(t,{FAKE_CODEX_RELAY_RECOVERY:''});
   const first=await s.post({text:'hold',operation_id:'hold'}).then(r=>r.json());
   const queued=await s.post({text:'later',operation_id:'later'}).then(r=>r.json());
@@ -1398,7 +1394,7 @@ test('Rust journal restart never replays an uncertain turn and preserves queued 
 
 const faultEnv=mode=>({CODEX_BIN:process.execPath,RUST_SPIKE_CODEX_ARGS:JSON.stringify([resolve(import.meta.dirname,'fixtures/fault-codex.mjs')]),RUST_SPIKE_FAULT:mode});
 const providerCalls=async s=>(await readFile(join(s.root,'provider.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
-for(const mode of ['model-list-timeout','model-list-late','model-list-burst','model-list-refused'])test('Rust optional model discovery startup and resume remain usable '+mode,{skip:useNode,timeout:35000},async t=>{
+for(const mode of ['model-list-timeout','model-list-late','model-list-burst','model-list-refused'])test('Rust optional model discovery startup and resume remain usable '+mode,{timeout:35000},async t=>{
   const s=await fixture(t,faultEnv(mode));
   const state=await fetch(s.base+'/api/state').then(r=>r.json());
   assert.equal(state.ready,true);
@@ -1428,8 +1424,8 @@ for(const mode of ['model-list-timeout','model-list-late','model-list-burst','mo
   assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['after discovery startup','after discovery resume']);
 });
 const incomingNotice=(n,delivery='dlv_'+n)=>({delivery_id:delivery,recipient:{kind:'agent',id:'ag_contract'},message:{message_id:'msg_'+n,sender:{kind:'agent',id:'sender_'+n,name:'Sender '+n,path:'/team/sender-'+n},body:'Synthetic notice '+n,created_at:'2026-10-21T00:00:00Z'}});
-const messageFixtureEnv={AGENT_UI_MESSAGE_WATCH:'1',RUST_SPIKE_MESSAGE_INPUT:'incoming.json',PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH,CODEX_BIN:resolve(import.meta.dirname,'../../agent/tests/fake-codex.mjs'),FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_COMPLETE_TURNS:'1'};
-const receiptFixtureEnv={CODEX_BIN:resolve(import.meta.dirname,'../../agent/tests/fake-codex.mjs'),FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_COMPLETE_TURNS:'1'};
+const messageFixtureEnv={AGENT_UI_MESSAGE_WATCH:'1',RUST_SPIKE_MESSAGE_INPUT:'incoming.json',PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH,CODEX_BIN:resolve(import.meta.dirname,'./fake-codex.mjs'),FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_COMPLETE_TURNS:'1'};
+const receiptFixtureEnv={CODEX_BIN:resolve(import.meta.dirname,'./fake-codex.mjs'),FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_COMPLETE_TURNS:'1'};
 async function seededReceipts(t,count,edit=()=>{}) {
   const s=await fixture(t,receiptFixtureEnv);
   await s.post({text:'synthetic seed',operation_id:'seed'});
@@ -1444,7 +1440,7 @@ async function seededReceipts(t,count,edit=()=>{}) {
   await writeFile(join(s.state,'rust-spike.json'),JSON.stringify(saved));
   return {s,saved};
 }
-test('Rust receipt pruning recovers full4096 journal, preserves recent retries and admits a new real turn',{skip:useNode,timeout:15000},async t=>{
+test('Rust receipt pruning recovers full4096 journal, preserves recent retries and admits a new real turn',{timeout:15000},async t=>{
   const {s,saved}=await seededReceipts(t,4096);
   const restarted=await s.launch({});
   const journal=await messageJournal(s);assert.equal(journal.records.length,1024);
@@ -1458,7 +1454,7 @@ test('Rust receipt pruning recovers full4096 journal, preserves recent retries a
   assert.equal((await messageJournal(s)).records.length,1024);
   assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,2);
 });
-test('Rust receipt pressure protects256 terminal pending ACKs and refuses new admission before dispatch',{skip:useNode,timeout:15000},async t=>{
+test('Rust receipt pressure protects256 terminal pending ACKs and refuses new admission before dispatch',{timeout:15000},async t=>{
   const {s}=await seededReceipts(t,4096,(r,n)=>{if(n<256)r.source_messages=[{messageId:'msg_'+n,deliveryId:'dlv_'+n,ackPending:true}];});
   const restarted=await s.launch({}),j=await messageJournal(s);
   assert.equal(j.records.length,1280);assert.equal(j.records.filter(r=>r.source_messages?.some(m=>m.ackPending)).length,256);
@@ -1467,7 +1463,7 @@ test('Rust receipt pressure protects256 terminal pending ACKs and refuses new ad
   assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
   assert.equal((await messageJournal(s)).records.some(r=>r.operation==='pressure-refused'),false);
 });
-test('Rust receipt pruning failed completion publication restores the evicted receipt and durable running intent',{skip:useNode,timeout:15000},async t=>{
+test('Rust receipt pruning failed completion publication restores the evicted receipt and durable running intent',{timeout:15000},async t=>{
   const {s,saved}=await seededReceipts(t,1024);
   const restarted=await s.launch({RUST_SPIKE_CHECKPOINT_FAIL:'completion-prune'});
   await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'completion fails',operation_id:'prune-fault'})});
@@ -1478,7 +1474,7 @@ test('Rust receipt pruning failed completion publication restores the evicted re
   const old=await fetch(restarted.base+'/v1/submissions/'+saved.records[0].submission.id,{headers:s.headers}).then(r=>r.json());
   assert.equal(old.submission.id,saved.records[0].submission.id);
 });
-test('Rust explicit prompt limit uses raw UTF8 bytes while retained oversized operations stay retryable',{skip:useNode,timeout:15000},async t=>{
+test('Rust explicit prompt limit uses raw UTF8 bytes while retained oversized operations stay retryable',{timeout:15000},async t=>{
   const {s,saved}=await seededReceipts(t,1,r=>{
     r.text='x'.repeat(70_000);r.fingerprint=JSON.stringify([r.text,'queue',null,null]);
   });
@@ -1495,7 +1491,7 @@ test('Rust explicit prompt limit uses raw UTF8 bytes while retained oversized op
 const messageJournal=s=>readFile(join(s.state,'rust-spike.json'),'utf8').then(JSON.parse);
 const messageAcks=async s=>(await readFile(join(s.root,'registration.json'),'utf8')).trim().split('\n').map(JSON.parse).filter(x=>x.ack);
 const messageAttempts=async s=>(await readFile(join(s.root,'registration.json'),'utf8')).trim().split('\n').map(JSON.parse).filter(x=>x.messageAttempt);
-test('Rust message retry auth receive stops without content disclosure or periodic retries',{skip:useNode,timeout:15000},async t=>{
+test('Rust message retry auth receive stops without content disclosure or periodic retries',{timeout:15000},async t=>{
   const s=await fixture(t,{...messageFixtureEnv,RUST_SPIKE_MESSAGE_FAILURE:'failure.json'});
   await writeFile(join(s.root,'cwd/failure.json'),JSON.stringify({operation:'receive',kind:'auth',remaining:3,stdout:true}));
   await until(async()=>s.logs(),log=>log.includes('Rust message watcher stopped: message_auth'));
@@ -1506,7 +1502,7 @@ test('Rust message retry auth receive stops without content disclosure or period
   assert.ok(!s.logs().includes('private-diagnostic-canary'));
   assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).ready,true,'only watcher stops');
 });
-test('Rust message retry auth ACK preserves durable pending IDs until restart without turn replay',{skip:useNode,timeout:20000},async t=>{
+test('Rust message retry auth ACK preserves durable pending IDs until restart without turn replay',{timeout:20000},async t=>{
   const s=await fixture(t,{...messageFixtureEnv,RUST_SPIKE_MESSAGE_FAILURE:'failure.json'});
   await writeFile(join(s.root,'cwd/failure.json'),JSON.stringify({operation:'ack',kind:'auth',remaining:3,flood:true}));
   await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(301),incomingNotice(302)]));
@@ -1523,7 +1519,7 @@ test('Rust message retry auth ACK preserves durable pending IDs until restart wi
   assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
   assert.equal((await messageAcks(s)).length,2);
 });
-test('Rust message retry network backoff grows and resets after a successful poll',{skip:useNode,timeout:15000},async t=>{
+test('Rust message retry network backoff grows and resets after a successful poll',{timeout:15000},async t=>{
   const s=await fixture(t,{...messageFixtureEnv,RUST_SPIKE_MESSAGE_FAILURE:'failure.json'});
   const path=join(s.root,'cwd/failure.json');
   await writeFile(path,JSON.stringify({operation:'receive',kind:'network',remaining:2,flood:true}));
@@ -1540,7 +1536,7 @@ test('Rust message retry network backoff grows and resets after a successful pol
   assert.equal(matches[2][1],'0');
   assert.ok(!s.logs().includes('private-diagnostic-canary'));
 });
-test('Rust message retry oversized stdout kills the owned command without waiting for stderr EOF',{skip:useNode,timeout:15000},async t=>{
+test('Rust message retry oversized stdout kills the owned command without waiting for stderr EOF',{timeout:15000},async t=>{
   const s=await fixture(t,{...messageFixtureEnv,RUST_SPIKE_MESSAGE_FAILURE:'failure.json'});
   await writeFile(join(s.root,'cwd/failure.json'),JSON.stringify({operation:'receive',kind:'other',remaining:1,stdout:true,oversized:true}));
   await until(async()=>s.logs(),log=>log.includes('message_other: operation failed; failures=0'));
@@ -1548,7 +1544,7 @@ test('Rust message retry oversized stdout kills the owned command without waitin
   await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(304)]));
   await until(()=>messageAcks(s),a=>a.some(m=>m.ack==='dlv_304'));
 });
-test('Rust message batching same poll is one real turn, durable before ack and redelivery deduplicated',{skip:useNode,timeout:20000},async t=>{
+test('Rust message batching same poll is one real turn, durable before ack and redelivery deduplicated',{timeout:20000},async t=>{
   const s=await fixture(t,messageFixtureEnv);
   const notices=[incomingNotice(1),incomingNotice(2),incomingNotice(3)];
   await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify(notices));
@@ -1569,7 +1565,7 @@ test('Rust message batching same poll is one real turn, durable before ack and r
   assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
   const final=await messageJournal(s);assert.equal(final.records.length,1);assert.equal(final.records[0].source_messages.length,4);
 });
-test('Rust message batching busy bursts merge queued tail but never merge an explicit user prompt',{skip:useNode,timeout:20000},async t=>{
+test('Rust message batching busy bursts merge queued tail but never merge an explicit user prompt',{timeout:20000},async t=>{
   const s=await fixture(t,{...messageFixtureEnv,FAKE_CODEX_COMPLETE_TURNS:''});
   await s.post({text:'explicit running prompt',operation_id:'busy-user'});
   await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(1),incomingNotice(2)]));
@@ -1587,7 +1583,7 @@ test('Rust message batching busy bursts merge queued tail but never merge an exp
   assert.equal(j.records[2].message_batch,undefined);assert.equal(j.records[3].source_messages.length,1);
   assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
 });
-test('Rust message batching restart retries remote-success ack without replaying uncertain dispatch',{skip:useNode,timeout:20000},async t=>{
+test('Rust message batching restart retries remote-success ack without replaying uncertain dispatch',{timeout:20000},async t=>{
   const s=await fixture(t,{...messageFixtureEnv,RUST_SPIKE_MESSAGE_ACK_GATE:'ack-release',FAKE_CODEX_COMPLETE_TURNS:''});
   await s.post({text:'explicit running prompt',operation_id:'busy-user'});
   await writeFile(join(s.root,'cwd/incoming.json'),JSON.stringify([incomingNotice(1),incomingNotice(2)]));
@@ -1604,7 +1600,7 @@ test('Rust message batching restart retries remote-success ack without replaying
   assert.equal((await fetch(restarted.base+'/api/state').then(r=>r.json())).runtime.state,'blocked');
   assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
 });
-test('Rust message batching failed durable publication does not acknowledge or dispatch the poll',{skip:useNode,timeout:15000},async t=>{
+test('Rust message batching failed durable publication does not acknowledge or dispatch the poll',{timeout:15000},async t=>{
   const s=await fixture(t,messageFixtureEnv);
   const journal=join(s.state,'rust-spike.json'),backup=join(s.state,'saved-journal');
   const before=await readFile(journal,'utf8');await rename(journal,backup);await mkdir(journal);
@@ -1615,7 +1611,7 @@ test('Rust message batching failed durable publication does not acknowledge or d
   assert.equal(await readFile(backup,'utf8'),before);
   assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).queue.length,0);
 });
-test('Rust message batching admits a bounded multi-megabyte poll and splits previews without lost IDs',{skip:useNode,timeout:15000},async t=>{
+test('Rust message batching admits a bounded multi-megabyte poll and splits previews without lost IDs',{timeout:15000},async t=>{
   const s=await fixture(t,{...messageFixtureEnv,FAKE_CODEX_COMPLETE_TURNS:''});
   await s.post({text:'explicit running prompt',operation_id:'busy-user'});
   const notices=Array.from({length:10},(_,n)=>({...incomingNotice(n),message:{...incomingNotice(n).message,body:'x'.repeat(210_000)}}));
@@ -1628,7 +1624,7 @@ test('Rust message batching admits a bounded multi-megabyte poll and splits prev
   assert.deepEqual(batches.flatMap(r=>r.source_messages).map(m=>m.messageId).sort(),notices.map(n=>n.message.message_id).sort());
   assert.equal((await providerCalls(s)).filter(x=>x.method==='turn/start').length,1);
 });
-for(const kind of ['file','tool'])for(const change of ['empty','extend','shrink','conflict',...(kind==='tool'?['name','argument','duration']:['path'])])for(const observer of [false,true])test(`Rust terminal ${kind} detail survives summary or refuses ${change} (${observer?'observer':'event'})`,{skip:useNode,timeout:20000},async t=>{
+for(const kind of ['file','tool'])for(const change of ['empty','extend','shrink','conflict',...(kind==='tool'?['name','argument','duration']:['path'])])for(const observer of [false,true])test(`Rust terminal ${kind} detail survives summary or refuses ${change} (${observer?'observer':'event'})`,{timeout:20000},async t=>{
   const s=await fixture(t,faultEnv(`final-${observer?'observer-':''}${kind}-${change}`));
   const receipt=await s.post({text:'synthetic tool detail',operation_id:'typed-final'}).then(r=>r.json());
   const read=()=>fetch(s.base+'/api/state').then(r=>r.json());
@@ -1652,7 +1648,7 @@ for(const kind of ['file','tool'])for(const change of ['empty','extend','shrink'
   }
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
 });
-for(const mode of ['event','observer','other-turn','terminal','terminal-error',...['full','empty','forward','late-user','kind','order','item-status','output','duplicate','empty-id','missing-id','id-type','id-mismatch','bound'].flatMap(m=>[m,'observer-'+m])])test('Rust final snapshot retains observed tool or refuses conflict: '+mode,{skip:useNode,timeout:25000},async t=>{
+for(const mode of ['event','observer','other-turn','terminal','terminal-error',...['full','empty','forward','late-user','kind','order','item-status','output','duplicate','empty-id','missing-id','id-type','id-mismatch','bound'].flatMap(m=>[m,'observer-'+m])])test('Rust final snapshot retains observed tool or refuses conflict: '+mode,{timeout:25000},async t=>{
   const scenario=mode.replace(/^observer-/,''),observer=mode==='observer'||mode.startsWith('observer-');
   const s=await fixture(t,faultEnv('final-'+mode));
   const receipt=await s.post({text:'synthetic read-only observation',operation_id:'final-retention'}).then(r=>r.json());
@@ -1691,7 +1687,7 @@ for(const mode of ['event','observer','other-turn','terminal','terminal-error',.
   }
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
 });
-test('Rust observes an explicit terminal accepted turn without a completion event',{skip:useNode},async t=>{
+test('Rust observes an explicit terminal accepted turn without a completion event',async t=>{
   const s=await fixture(t,faultEnv('observe'));
   const receipt=await s.post({text:'observe only',operation_id:'observe'}).then(r=>r.json());
   const result=await until(()=>fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers}).then(r=>r.json()),x=>x.submission?.state==='done');
@@ -1700,7 +1696,7 @@ test('Rust observes an explicit terminal accepted turn without a completion even
   assert.equal(calls.filter(c=>c.method==='turn/start').length,1);
   assert.ok(calls.some(c=>c.method==='thread/read'));
 });
-test('Rust sparse completion keeps accepted user input alongside the assistant',{skip:useNode},async t=>{
+test('Rust sparse completion keeps accepted user input alongside the assistant',async t=>{
   const s=await fixture(t,faultEnv('sparse'));
   await s.post({text:'keep this input',operation_id:'sparse-user'});
   const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='idle');
@@ -1708,7 +1704,7 @@ test('Rust sparse completion keeps accepted user input alongside the assistant',
   assert.equal(items.filter(i=>i.kind==='userMessage'&&i.text==='keep this input').length,1);
   assert.ok(items.some(i=>i.kind==='agentMessage'&&i.text==='sparse answer'));
 });
-test('Rust shutdown kills the provider-owned process group including a descendant',{skip:useNode},async t=>{
+test('Rust shutdown kills the provider-owned process group including a descendant',async t=>{
   const s=await fixture(t,faultEnv('descendant'));
   const pid=Number(await readFile(join(s.root,'provider.jsonl.child'),'utf8'));
   const alive=()=>{try{process.kill(pid,0);return true}catch{return false}};
@@ -1718,7 +1714,7 @@ test('Rust shutdown kills the provider-owned process group including a descendan
   await until(async()=>alive(),x=>x===false);
   assert.match(s.logs(),/shutdown provider_exit=confirmed; process_group=termination_requested_unverified; detached_descendants=not_guaranteed/);
 });
-test('Rust shutdown cancels startup and an in-flight turn without waiting for the RPC timeout',{skip:useNode,timeout:25000},async t=>{
+test('Rust shutdown cancels startup and an in-flight turn without waiting for the RPC timeout',{timeout:25000},async t=>{
   const s=await fixture(t,faultEnv('timeout'));
   const provider=Number(await readFile(join(s.root,'provider.jsonl.pid'),'utf8'));
   const pending=s.post({text:'uncertain accepted input',operation_id:'shutdown-inflight'}).catch(()=>null);
@@ -1737,12 +1733,12 @@ test('Rust shutdown cancels startup and an in-flight turn without waiting for th
   assert.throws(()=>process.kill(nextProvider,0),{code:'ESRCH'});
   assert.match(s.logs(),/shutdown provider_exit=confirmed/);
 });
-test('Rust refuses unknown provider RPC requests with method-not-found',{skip:useNode},async t=>{
+test('Rust refuses unknown provider RPC requests with method-not-found',async t=>{
   const s=await fixture(t,faultEnv('unknown-request'));
   const calls=await until(()=>providerCalls(s),calls=>calls.some(c=>c.id==='provider-unknown'));
   const response=calls.find(c=>c.id==='provider-unknown');assert.equal(response.error.code,-32601);assert.equal(response.result,undefined);
 });
-test('Rust rejects a writable non-sticky private-state ancestor at runtime',{skip:useNode},async t=>{
+test('Rust rejects a writable non-sticky private-state ancestor at runtime',async t=>{
   const s=await fixture(t);
   const before=await readFile(join(s.state,'rust-spike.json'),'utf8');
   await chmod(s.root,0o777);
@@ -1750,7 +1746,7 @@ test('Rust rejects a writable non-sticky private-state ancestor at runtime',{ski
   assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),before);
   await chmod(s.root,0o700);
 });
-for(const mode of ['omit','timeout'])test('Rust uncertain '+mode+' blocks all later dispatch including after restart',{skip:useNode},async t=>{
+for(const mode of ['omit','timeout'])test('Rust uncertain '+mode+' blocks all later dispatch including after restart',async t=>{
   const s=await fixture(t,faultEnv(mode));
   const first=s.post({text:'accepted but ambiguous',operation_id:'uncertain'});
   await until(()=>providerCalls(s),calls=>calls.some(c=>c.method==='turn/start'));
@@ -1791,7 +1787,7 @@ for(const mode of ['omit','timeout'])test('Rust uncertain '+mode+' blocks all la
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
 });
 
-test('Rust immutable queued receipt survives dispatch/restart while dynamic queue positions change',{skip:useNode},async t=>{
+test('Rust immutable queued receipt survives dispatch/restart while dynamic queue positions change',async t=>{
   const s=await fixture(t,faultEnv('receipt'));
   const a=await s.post({text:'a',operation_id:'a'}).then(r=>r.json());
   const body={text:'b',operation_id:'b'};
@@ -1813,14 +1809,14 @@ test('Rust immutable queued receipt survives dispatch/restart while dynamic queu
   assert.equal(retry.duplicate,true);assert.deepEqual(retry.submission,b.submission);
 });
 
-test('Rust backpressure consumes 64 startup notifications before the first RPC response',{skip:useNode},async t=>{
+test('Rust backpressure consumes 64 startup notifications before the first RPC response',async t=>{
   const s=await fixture(t,faultEnv('burst-startup'));
   const snapshot=await fetch(s.base+'/v1/state').then(r=>r.json());
   assert.equal(snapshot.ready,true);
   assert.equal(snapshot.runtime.provider.transport,'open');
   assert.equal(snapshot.runtime.provider.beforeCleanup,null);
 });
-test('Rust backpressure preserves 200 mid-turn deltas and early completion before RPC response',{skip:useNode},async t=>{
+test('Rust backpressure preserves 200 mid-turn deltas and early completion before RPC response',async t=>{
   const s=await fixture(t,faultEnv('burst-turn'));
   const accepted=await s.post({text:'synthetic burst',operation_id:'burst'}).then(r=>r.json());
   const queue=await until(()=>fetch(s.base+'/v1/queue',{headers:s.headers}).then(r=>r.json()),x=>x.submissions?.find(r=>r.id===accepted.submission.id)?.state==='done');
@@ -1831,7 +1827,7 @@ test('Rust backpressure preserves 200 mid-turn deltas and early completion befor
   assert.equal(snapshot.runtime.provider.transport,'open');
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
 });
-for(const mode of ['diagnostic-eof','diagnostic-invalid'])test('Rust private provider diagnostics '+mode,{skip:useNode},async t=>{
+for(const mode of ['diagnostic-eof','diagnostic-invalid'])test('Rust private provider diagnostics '+mode,async t=>{
   const s=await fixture(t,{...faultEnv(mode),RUST_SPIKE_CAPTURE_STDERR:'1'});
   const snapshot=await until(()=>fetch(s.base+'/v1/state').then(r=>r.json()),x=>x.runtime?.provider?.stderrCapture==='saved');
   assert.equal(snapshot.runtime.provider.transport,mode==='diagnostic-eof'?'stdout_eof':'invalid_json');
@@ -1844,7 +1840,7 @@ for(const mode of ['diagnostic-eof','diagnostic-invalid'])test('Rust private pro
   assert.ok(!JSON.stringify(snapshot.runtime).includes('synthetic-secret'));
   assert.ok(!s.logs().includes('synthetic-private-tail'));assert.ok(!s.logs().includes('sensitive-fixture-prefix'));
 });
-test('Rust previous completion during a queued dispatch never clears its uncertainty fence',{skip:useNode},async t=>{
+test('Rust previous completion during a queued dispatch never clears its uncertainty fence',async t=>{
   const s=await fixture(t,faultEnv('burst-previous'));
   const first=await s.post({text:'first queued',operation_id:'first'}).then(r=>r.json());
   const second=await s.post({text:'second queued',operation_id:'second'}).then(r=>r.json());
@@ -1854,7 +1850,7 @@ test('Rust previous completion during a queued dispatch never clears its uncerta
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
   assert.equal(JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8')).dispatchBlocked,true);
 });
-test('Rust stderr retention is opt-in and private write failure leaves stop unchanged',{skip:useNode},async t=>{
+test('Rust stderr retention is opt-in and private write failure leaves stop unchanged',async t=>{
   const off=await fixture(t,faultEnv('diagnostic-invalid'));
   const stopped=await until(()=>fetch(off.base+'/v1/state').then(r=>r.json()),x=>x.runtime?.cleanup?.providerExit==='confirmed');
   assert.equal(stopped.runtime.provider.stderrCapture,'disabled');
@@ -1872,7 +1868,7 @@ test('Rust stderr retention is opt-in and private write failure leaves stop unch
     const exit=once(on.child,'exit');on.child.kill('SIGTERM');assert.deepEqual(await exit,[0,null]);
   } finally { await rm(stderr,{recursive:true}); }
 });
-test('Rust stalled provider stdin fails closed while state reads remain responsive',{skip:useNode,timeout:20000},async t=>{
+test('Rust stalled provider stdin fails closed while state reads remain responsive',{timeout:20000},async t=>{
   const s=await fixture(t,faultEnv('stdin-stall'));
   const pending=s.post({text:'accepted but write stalls',operation_id:'stalled'}).then(async r=>({status:r.status,body:await r.json()}));
   await until(()=>providerCalls(s),calls=>calls.some(c=>c.method==='turn/start'));
@@ -1888,7 +1884,7 @@ test('Rust stalled provider stdin fails closed while state reads remain responsi
   assert.ok((await s.post({text:'must not retry',operation_id:'blocked'})).status>=400);
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
 });
-test('Rust shutdown cancels a stalled provider reply write without duplicate dispatch',{skip:useNode,timeout:15000},async t=>{
+test('Rust shutdown cancels a stalled provider reply write without duplicate dispatch',{timeout:15000},async t=>{
   const s=await fixture(t,faultEnv('stdin-stall'));
   const pending=s.post({text:'stop while replying',operation_id:'stopped'}).then(()=>null,()=>null);
   await until(()=>providerCalls(s),calls=>calls.some(c=>c.method==='turn/start'));
@@ -1902,7 +1898,7 @@ test('Rust shutdown cancels a stalled provider reply write without duplicate dis
   assert.equal(after.dispatchBlocked,true);
   assert.deepEqual(after.records,before.records);assert.deepEqual(after.goals,before.goals);
 });
-test('Rust stalled notification worker permits continuous provider deltas and prompt abort',{skip:useNode},async t=>{
+test('Rust stalled notification worker permits continuous provider deltas and prompt abort',async t=>{
   const s=await fixture(t,{...faultEnv('stream'),PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH,RUST_SPIKE_NOTIFY_BLOCK:'1'});
   await s.post({text:'notify on completion',operation_id:'notify',notify:{on:['done'],to:'ag_synthetic_recipient'}});
   const notification=await until(()=>readFile(join(s.root,'registration.json'),'utf8').then(x=>JSON.parse(x.trim())),x=>x.payload?.type==='treer.prompt.completed');
@@ -1919,7 +1915,7 @@ test('Rust stalled notification worker permits continuous provider deltas and pr
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/interrupt').length,1);
 });
 
-test('Rust runtime VCS placement invalidation refuses a new prompt without journaling',{skip:useNode},async t=>{
+test('Rust runtime VCS placement invalidation refuses a new prompt without journaling',async t=>{
   const s=await fixture(t,faultEnv('stream'));
   const providerPid=Number(await readFile(join(s.root,'provider.jsonl.pid'),'utf8'));
   const before=await readFile(join(s.state,'rust-spike.json'),'utf8');
@@ -1938,7 +1934,7 @@ test('Rust runtime VCS placement invalidation refuses a new prompt without journ
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,0);
 });
 
-test('Rust journal publication failure stops provider and remains blocked after repair',{skip:useNode},async t=>{
+test('Rust journal publication failure stops provider and remains blocked after repair',async t=>{
   const s=await fixture(t,faultEnv('receipt'));
   const journal=join(s.state,'rust-spike.json'), backup=join(s.state,'fixture-journal-backup');
   const before=await readFile(journal,'utf8');
@@ -1960,7 +1956,7 @@ test('Rust journal publication failure stops provider and remains blocked after 
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,0);
 });
 
-for(const command of ['submit','steer','cancel','goal','goal-clear','goal-reconcile','goal-retry'])test('Rust failed '+command+' checkpoint restores durable receipts and goals',{skip:useNode},async t=>{
+for(const command of ['submit','steer','cancel','goal','goal-clear','goal-reconcile','goal-retry'])test('Rust failed '+command+' checkpoint restores durable receipts and goals',async t=>{
   const goalCommand=command.startsWith('goal');
   const s=await fixture(t,faultEnv(goalCommand?'goal-ack-lost':'receipt'));
   let queued;
@@ -1990,7 +1986,7 @@ for(const command of ['submit','steer','cancel','goal','goal-clear','goal-reconc
   assert.equal(await readFile(journal,'utf8'),before);
 });
 
-for(const phase of ['dispatch-intent','dispatch-result','completion','notification-ack','goal-applying','goal-applied','goal-mode','goal-sent','directory-sync'])test('Rust failed '+phase+' checkpoint exposes only published receipts and goals',{skip:useNode},async t=>{
+for(const phase of ['dispatch-intent','dispatch-result','completion','notification-ack','goal-applying','goal-applied','goal-mode','goal-sent','directory-sync'])test('Rust failed '+phase+' checkpoint exposes only published receipts and goals',async t=>{
   const s=await fixture(t,{RUST_SPIKE_CHECKPOINT_FAIL:phase,FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_COMPLETE_TURNS:'1',PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH});
   if(phase.startsWith('goal-'))await fetch(s.base+'/api/goal',{method:'PUT',body:JSON.stringify({objective:'Checkpoint objective',operationId:'checkpoint-goal'})});
   else await s.post({text:'checkpoint prompt',operation_id:'checkpoint-prompt',notify:{to:'ag_target',on:['done']}});

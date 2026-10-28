@@ -9,8 +9,8 @@ import {access} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {createRequire} from 'node:module';
-import {hermeticEnv,localFetch as fetch} from '../../agent/tests/hermetic.mjs';
-import {fakePrivateState} from '../../agent/tests/fake-private-state.mjs';
+import {hermeticEnv,localFetch as fetch} from './hermetic.mjs';
+import {fakePrivateState} from './fake-private-state.mjs';
 const binary=process.env.RUST_SPIKE_BIN;assert.ok(binary);
 async function until(read,accept,waitMs=10000){const end=Date.now()+waitMs;while(Date.now()<end){try{const v=await read();if(accept(v))return v;}catch{}await new Promise(r=>setTimeout(r,20));}throw Error('Claude fixture deadline');}
 async function fixture(t,extra={},setup=async()=>({})){
@@ -20,7 +20,7 @@ async function fixture(t,extra={},setup=async()=>({})){
   const children=[];let logs='';
   const launch=async(overrides={},args=[])=>{
     await rm(port,{force:true});
-    const env=hermeticEnv({HOME:root,AGENT_UI_CWD:cwd,TREER_RUST_SPIKE_STATE_DIR:state,AGENT_UI_PUBLIC_DIR:resolve('../agent/public'),AGENT_UI_PORT_FILE:port,AGENT_UI_PORT:'0',AGENT_UI_HARNESS:'claude',CLAUDE_BIN:process.execPath,RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-stream.mjs')]),CLAUDE_FIXTURE_LOG:join(root,'calls'),...extra,...overrides});
+    const env=hermeticEnv({HOME:root,AGENT_UI_CWD:cwd,TREER_RUST_SPIKE_STATE_DIR:state,AGENT_UI_PUBLIC_DIR:resolve('public'),AGENT_UI_PORT_FILE:port,AGENT_UI_PORT:'0',AGENT_UI_HARNESS:'claude',CLAUDE_BIN:process.execPath,RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-stream.mjs')]),CLAUDE_FIXTURE_LOG:join(root,'calls'),...extra,...overrides});
     env.RUST_SPIKE_REGISTER='0';
     const child=spawn(binary,args,{cwd,env,stdio:['ignore','pipe','pipe']});children.push(child);
     child.stderr.on('data',b=>logs+=b);child.stdout.on('data',b=>logs+=b);
@@ -188,7 +188,7 @@ test('Claude restart during native goal command preserves uncertain receipt and 
   assert.equal((await inputCalls(f)).length,1,'neither goal nor original input is replayed');
 });
 test('Claude goal uses existing shared accessible editor without unsupported budget or pause controls',{skip:!process.env.CLAUDE_GOALS_BROWSER},async t=>{
-  const {chromium,expect}=createRequire(resolve(process.env.NODE_LAUNCHER_ROOT||'../agent','package.json'))('@playwright/test');
+  const {chromium,expect}=createRequire(resolve('.','package.json'))('@playwright/test');
   const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
   const f=await fixture(t,{CLAUDE_FIXTURE_GOALS:'1',CLAUDE_FIXTURE_MODELS:'1',TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'goals-fixture'},async({state})=>({env:{TREER_AGENT_PRIVATE_STATE_DIR:state}}));
   const browser=await chromium.launch({env:hermeticEnv({HOME:process.env.HOME})});t.after(()=>browser.close());
@@ -239,7 +239,7 @@ test('Claude native tasks outlive turn completion, confined output and record-on
   assert.equal((await inputCalls(f)).length,3,'restart does not replay tasks or input');
 });
 test('Claude native tasks use shared accessible panel and bounded output on desktop and mobile', {skip:!process.env.CLAUDE_TASKS_BROWSER},async t=>{
-  const {chromium,expect}=createRequire(resolve(process.env.NODE_LAUNCHER_ROOT||'../agent','package.json'))('@playwright/test');
+  const {chromium,expect}=createRequire(resolve('.','package.json'))('@playwright/test');
   const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
   const f=await fixture(t,{CLAUDE_FIXTURE_TASKS:'1',CLAUDE_FIXTURE_STEER:'1',TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'tasks-fixture'},async({cwd,state})=>{await writeFile(join(cwd,'task.output'),'own browser task output');return {env:{TREER_AGENT_PRIVATE_STATE_DIR:state}};});
   await f.post({prompt:'start native tasks'});await until(f.snapshot,s=>s.backgroundTasks.length===5);
@@ -287,7 +287,7 @@ test('Claude validated images reach native input, steering and queued FIFO witho
   assert.equal((await inputCalls(f)).length,3,'restart does not replay image inputs');
 });
 test('Claude shared UI uploads and sends native image-only input and image steer', {skip:!process.env.CLAUDE_IMAGES_BROWSER},async t=>{
-  const {chromium,expect}=createRequire(resolve(process.env.NODE_LAUNCHER_ROOT||'../agent','package.json'))('@playwright/test');
+  const {chromium,expect}=createRequire(resolve('.','package.json'))('@playwright/test');
   const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
   const f=await fixture(t,{CLAUDE_FIXTURE_STEER:'1',CLAUDE_FIXTURE_IMAGES:'1',CLAUDE_FIXTURE_HOLD:'finish-ready',TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'image-fixture'},async({state})=>({env:{TREER_AGENT_PRIVATE_STATE_DIR:state}}));
   const browser=await chromium.launch({env:hermeticEnv({HOME:process.env.HOME})});t.after(()=>browser.close());
@@ -305,7 +305,7 @@ test('Claude shared UI uploads and sends native image-only input and image steer
   const calls=await inputCalls(f);assert.deepEqual(calls.map(c=>c.type),['accepted','steered']);assert.ok(calls.every(c=>c.images.length===1));
 });
 test('Claude shared UI sends steer to actual Rust entry on desktop and mobile', {skip:!process.env.CLAUDE_STEER_BROWSER},async t=>{
-  const {chromium,expect}=createRequire(resolve(process.env.NODE_LAUNCHER_ROOT||'../agent','package.json'))('@playwright/test');
+  const {chromium,expect}=createRequire(resolve('.','package.json'))('@playwright/test');
   const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
   const f=await fixture(t,{CLAUDE_FIXTURE_STEER:'1',CLAUDE_FIXTURE_HOLD:'finish-ready',TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'steer-fixture'},async({state})=>({env:{TREER_AGENT_PRIVATE_STATE_DIR:state}}));
   await f.post({prompt:'initial UI turn'});await until(f.snapshot,s=>s.thread.activeTurnId);
@@ -421,7 +421,7 @@ test('Claude effort real fifteen-second timeout is unknown; next prompt once, la
   assert.equal((await modelCalls(f)).filter(c=>Object.hasOwn(c.request.settings||{},'effortLevel')).length,2,'no implicit effort retry or per-prompt override');
 });
 test('Claude effort shared browser shows unknown/ACK/refusal with accessible desktop and mobile controls',{skip:!process.env.CLAUDE_EFFORT_BROWSER},async t=>{
-  const {chromium,expect}=createRequire(resolve(process.env.NODE_LAUNCHER_ROOT||'../agent','package.json'))('@playwright/test');
+  const {chromium,expect}=createRequire(resolve('.','package.json'))('@playwright/test');
   const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
   const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_EFFORTS:'1',CLAUDE_FIXTURE_EFFORT_DELAY:'1200',CLAUDE_FIXTURE_REFUSE_EFFORT:'medium',TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'effort-fixture'},async({state})=>({env:{TREER_AGENT_PRIVATE_STATE_DIR:state}}));
   const browser=await chromium.launch({env:hermeticEnv({HOME:process.env.HOME})});t.after(()=>browser.close());
@@ -540,7 +540,7 @@ test('Claude busy model timeout cannot be confirmed by old input reports; next q
   assert.deepEqual((await readFile(join(f.root,'calls'),'utf8')).trim().split('\n').map(JSON.parse).map(c=>c.text),['old running turn','new input after ambiguity']);
 });
 test('Claude model browser uses actual Rust assets and shows ACK selection or localized unknown', {skip:!process.env.CLAUDE_MODEL_BROWSER},async t=>{
-  const {chromium,expect}=createRequire(resolve('../agent/package.json'))('@playwright/test');
+  const {chromium,expect}=createRequire(resolve('package.json'))('@playwright/test');
   const controller=await fakePrivateState('ag_contract','fixture-only');t.after(()=>controller.close());
   const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_MODEL_DELAY:'1200',CLAUDE_FIXTURE_TIMEOUT_MODEL:'timeout-choice',TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'model-fixture'},async({state})=>({env:{TREER_AGENT_PRIVATE_STATE_DIR:state}}));
   const browser=await chromium.launch({env:hermeticEnv({HOME:process.env.HOME})});t.after(()=>browser.close());

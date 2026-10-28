@@ -6,8 +6,8 @@ import {mkdtemp,realpath,mkdir,readFile,writeFile,rm,stat,readdir,symlink,rename
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
-import {hermeticEnv,localFetch as fetch} from '../../agent/tests/hermetic.mjs';
-import {fakePrivateState} from '../../agent/tests/fake-private-state.mjs';
+import {hermeticEnv,localFetch as fetch} from './hermetic.mjs';
+import {fakePrivateState} from './fake-private-state.mjs';
 const binary=process.env.RUST_SPIKE_BIN;assert.ok(binary);
 const sha=b=>createHash('sha256').update(b).digest('hex'),key=p=>p.replace(/[^a-zA-Z0-9]/g,'-');
 async function until(read,accept,ms=12000){const end=Date.now()+ms;while(Date.now()<end){const v=await read().catch(()=>null);if(v&&accept(v))return v;await new Promise(r=>setTimeout(r,15));}throw Error('owner-default fixture deadline');}
@@ -20,7 +20,7 @@ async function setup(t){
  const controller=await fakePrivateState('ag_owner_fixture'),children=[];
  t.after(async()=>{for(const c of children)if(c.exitCode===null&&c.signalCode===null){const exit=once(c,'exit');c.kill('SIGTERM');await exit;}await controller.close();await rm(root,{recursive:true,force:true});});
  const env=hermeticEnv();for(const k of Object.keys(env))if(/^(CLAUDE_|ANTHROPIC_|AGENT_UI_|RUST_SPIKE_|RUST_SESSION_|LAUNCH_)/.test(k))delete env[k];
- Object.assign(env,{HOME:home,AGENT_UI_CWD:cwd,AGENT_UI_HARNESS:'claude',AGENT_UI_PUBLIC_DIR:resolve('../agent/public'),AGENT_UI_PORT:'0',TREER_AGENT_ID:'ag_owner_fixture',TREER_AGENT_SERVER_URL:controller.url,TREER_WORKLOAD_CREDENTIAL:'fixture-only',AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'owner-fixture',RUST_SPIKE_REGISTER:'0',CLAUDE_BIN:process.execPath,RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-launch.mjs')])});
+ Object.assign(env,{HOME:home,AGENT_UI_CWD:cwd,AGENT_UI_HARNESS:'claude',AGENT_UI_PUBLIC_DIR:resolve('public'),AGENT_UI_PORT:'0',TREER_AGENT_ID:'ag_owner_fixture',TREER_AGENT_SERVER_URL:controller.url,TREER_WORKLOAD_CREDENTIAL:'fixture-only',AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'owner-fixture',RUST_SPIKE_REGISTER:'0',CLAUDE_BIN:process.execPath,RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-launch.mjs')])});
  async function runtime(name,args=[],extra={}){
   const privateRoot=join(root,name+'-private');await mkdir(privateRoot,{mode:0o700}).catch(e=>{if(e.code!=='EEXIST')throw e;});
   const port=join(root,name+'-port-'+randomUUID()),calls=join(root,name+'-calls');

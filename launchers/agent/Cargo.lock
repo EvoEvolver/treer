@@ -1152,7 +1152,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "treer-agent-rust-spike"
+name = "treer-agent-launcher"
 version = "0.0.1"
 dependencies = [
  "anyhow",

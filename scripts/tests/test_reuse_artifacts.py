@@ -100,7 +100,7 @@ class ReuseTest(unittest.TestCase):
                 self.assertFalse((self.repo / "dist").exists())
 
     def test_any_native_input_change_forces_a_native_build(self):
-        for files in ({"crates/core/lib.rs": "2"}, {"launchers/agent/x.ts": "1"}, {"skills/treer/SKILL.md": "1"}, {"new-top/dir/file": "1"}, {"Cargo.lock": "1"}):
+        for files in ({"crates/core/lib.rs": "2"}, {"launchers/agent/x.rs": "1"}, {"skills/treer/SKILL.md": "1"}, {"new-top/dir/file": "1"}, {"Cargo.lock": "1"}):
             with self.subTest(files=files):
                 git(self.repo, "reset", "-q", "--hard", self.source)
                 shutil.rmtree(self.repo / "dist", ignore_errors=True)

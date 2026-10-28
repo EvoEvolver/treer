@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { hermeticEnv } from '../../agent/tests/hermetic.mjs';
+import { hermeticEnv } from './hermetic.mjs';
 
 test('default release artifact excludes fixture hooks and refuses provider overrides', async t => {
   const binary = process.env.RUST_SPIKE_RELEASE_BIN;

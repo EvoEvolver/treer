@@ -1,6 +1,6 @@
 #[cfg(unix)] mod attachments;
 #[cfg(windows)] #[path="windows_attachments.rs"] mod attachments;
-use treer_agent_rust_spike::bounded_json;
+use treer_agent_launcher::bounded_json;
 #[cfg(unix)] mod files;
 #[cfg(windows)] #[path="windows_files.rs"] mod files;
 mod goals;
@@ -41,7 +41,7 @@ use serde_json::{json, Value};
 use std::{path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 
-const CONTRACT: &str = include_str!("../../agent/interface-contract.json");
+const CONTRACT: &str = include_str!("../interface-contract.json");
 const CAPABILITIES: &[&str] = &[
     "prompt.submit",
     "transcript.read",
@@ -195,7 +195,7 @@ async fn main() -> Result<()> {
     let public = std::fs::canonicalize(
         env("AGENT_UI_PUBLIC_DIR")
             .map(PathBuf::from)
-            .unwrap_or(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../agent/public")),
+            .unwrap_or(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("public")),
     )?;
     let listener = TcpListener::bind((
         "127.0.0.1",

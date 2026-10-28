@@ -5,8 +5,8 @@ import {once} from 'node:events';
 import {mkdtemp,mkdir,realpath,writeFile,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
-import {hermeticEnv,localFetch as fetch} from '../../agent/tests/hermetic.mjs';
-import {fakePrivateState} from '../../agent/tests/fake-private-state.mjs';
+import {hermeticEnv,localFetch as fetch} from './hermetic.mjs';
+import {fakePrivateState} from './fake-private-state.mjs';
 const binary=process.env.RUST_SPIKE_BIN;assert.ok(binary);
 async function until(fn,p){const end=Date.now()+12000;while(Date.now()<end){try{const v=await fn();if(p(v))return v;}catch{}await new Promise(r=>setTimeout(r,20));}throw Error('home-cwd entry deadline');}
 async function setup(t,kind='hidden'){
@@ -20,7 +20,7 @@ async function setup(t,kind='hidden'){
   await writeFile(join(source,'queue.json'),queue,{mode:0o600});
   const controller=await fakePrivateState('ag_contract','fixture-only'),calls=join(home,'calls'),port=join(home,'port'),children=[];let logs='';
   const launch=()=>{
-    const env=hermeticEnv({HOME:home,CODEX_HOME:join(home,'synthetic-unused-codex'),AGENT_UI_CWD:home,AGENT_UI_PUBLIC_DIR:resolve('../agent/public'),AGENT_UI_PORT_FILE:port,AGENT_UI_PORT:'0',AGENT_UI_SESSION_ID:thread,TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,TREER_AGENT_PRIVATE_STATE_DIR:state,AGENT_UI_MESSAGE_WATCH:'0',CODEX_BIN:resolve('../agent/tests/fake-codex.mjs'),FAKE_CODEX_COMPLETE_TURNS:'1',FAKE_CODEX_RICH:'1',FAKE_CODEX_CALLS:calls,RUST_SPIKE_PROVIDER_LOG:calls});env.RUST_SPIKE_REGISTER='0';
+    const env=hermeticEnv({HOME:home,CODEX_HOME:join(home,'synthetic-unused-codex'),AGENT_UI_CWD:home,AGENT_UI_PUBLIC_DIR:resolve('public'),AGENT_UI_PORT_FILE:port,AGENT_UI_PORT:'0',AGENT_UI_SESSION_ID:thread,TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:controller.url,TREER_AGENT_PRIVATE_STATE_DIR:state,AGENT_UI_MESSAGE_WATCH:'0',CODEX_BIN:resolve('tests/fake-codex.mjs'),FAKE_CODEX_COMPLETE_TURNS:'1',FAKE_CODEX_RICH:'1',FAKE_CODEX_CALLS:calls,RUST_SPIKE_PROVIDER_LOG:calls});env.RUST_SPIKE_REGISTER='0';
     const child=spawn(binary,['--import-node-state'],{cwd:home,env,stdio:['ignore','pipe','pipe']});children.push(child);child.stdout.on('data',b=>logs+=b);child.stderr.on('data',b=>logs+=b);return child;
   };
   t.after(async()=>{for(const c of children)if(c.exitCode===null&&c.signalCode===null){const done=once(c,'exit');c.kill('SIGTERM');await done;}await controller.close();await rm(home,{recursive:true,force:true});});

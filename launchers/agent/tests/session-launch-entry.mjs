@@ -6,8 +6,8 @@ import {mkdtemp,realpath,mkdir,readFile,writeFile,rm,stat,copyFile,chmod} from '
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {createHash} from 'node:crypto';
-import {hermeticEnv,localFetch as fetch} from '../../agent/tests/hermetic.mjs';
-import {fakePrivateState} from '../../agent/tests/fake-private-state.mjs';
+import {hermeticEnv,localFetch as fetch} from './hermetic.mjs';
+import {fakePrivateState} from './fake-private-state.mjs';
 const binary=process.env.RUST_SPIKE_BIN;assert.ok(binary);
 const sha=b=>createHash('sha256').update(b).digest('hex');
 async function until(read,accept,ms=10000){const end=Date.now()+ms;while(Date.now()<end){const value=await read().catch(()=>null);if(value&&accept(value))return value;await new Promise(r=>setTimeout(r,15));}throw Error('owned launch fixture deadline');}
@@ -16,7 +16,7 @@ async function source(t){
   const root=await realpath(await mkdtemp(join(tmpdir(),'launch247-'))),cwd=join(root,'source'),home=join(root,'synthetic-config');await mkdir(cwd,{mode:0o700});await mkdir(home,{mode:0o700});
   const controller=await fakePrivateState('ag_launch_fixture');const children=[];
   t.after(async()=>{for(const child of children){if(child.exitCode===null&&child.signalCode===null){const done=once(child,'exit');child.kill('SIGTERM');await done;}}await controller.close();await rm(root,{recursive:true,force:true});});
-  function environment(privateRoot,port,calls){return clean({HOME:root,AGENT_UI_CWD:cwd,AGENT_UI_HARNESS:'claude',CLAUDE_CONFIG_DIR:home,AGENT_UI_PUBLIC_DIR:resolve('../agent/public'),AGENT_UI_PORT:'0',AGENT_UI_PORT_FILE:port,TREER_AGENT_ID:'ag_launch_fixture',TREER_AGENT_PRIVATE_STATE_DIR:privateRoot,TREER_AGENT_SERVER_URL:controller.url,TREER_WORKLOAD_CREDENTIAL:'fixture-only',AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'launch-fixture',RUST_SPIKE_REGISTER:'0',CLAUDE_BIN:process.execPath,RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-launch.mjs')]),LAUNCH_CALLS:calls,ANTHROPIC_API_KEY:'synthetic-launch-token'});}
+  function environment(privateRoot,port,calls){return clean({HOME:root,AGENT_UI_CWD:cwd,AGENT_UI_HARNESS:'claude',CLAUDE_CONFIG_DIR:home,AGENT_UI_PUBLIC_DIR:resolve('public'),AGENT_UI_PORT:'0',AGENT_UI_PORT_FILE:port,TREER_AGENT_ID:'ag_launch_fixture',TREER_AGENT_PRIVATE_STATE_DIR:privateRoot,TREER_AGENT_SERVER_URL:controller.url,TREER_WORKLOAD_CREDENTIAL:'fixture-only',AGENT_UI_MESSAGE_WATCH:'0',AGENT_UI_INSTANCE_ID:'launch-fixture',RUST_SPIKE_REGISTER:'0',CLAUDE_BIN:process.execPath,RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-launch.mjs')]),LAUNCH_CALLS:calls,ANTHROPIC_API_KEY:'synthetic-launch-token'});}
   async function start(args,env,entry=binary,options={}){const i=args.indexOf('--directory');const child=spawn(entry,args,{env,...(args.includes('run')&&i>=0?{cwd:args[i+1]}:{}),...options,stdio:['ignore','pipe','pipe']});children.push(child);let log='';child.stdout.on('data',b=>log+=b);child.stderr.on('data',b=>log+=b);return {child,log:()=>log};}
   async function running(args,env,entry=binary){const p=await start(args,env,entry);const base=await until(async()=>`http://127.0.0.1:${Number(await readFile(env.AGENT_UI_PORT_FILE,'utf8'))}`,v=>!v.endsWith('NaN')).catch(error=>{throw Error(error.message+p.log());});const state=()=>fetch(base+'/api/state').then(r=>r.json());await until(state,s=>s.ready);return {...p,base,state};}
   const privateRoot=join(root,'source-private');await mkdir(privateRoot,{mode:0o700});const calls=join(root,'source-calls');
@@ -85,7 +85,7 @@ test('failed initialize leaves no checkpoint/port or input; once intent prevents
 });
 test('installed session dispatcher requires Claude binding and launches the same new native session',async t=>{
   const f=await source(t),p=await f.target(),bundle=join(f.root,'bound-launcher'),scripts=join(bundle,'scripts'),publicDir=join(bundle,'public');await mkdir(scripts,{recursive:true,mode:0o700});await mkdir(publicDir,{mode:0o700});
-  for(const name of ['treer-agent.mjs','native-runtime.mjs','process.mjs'])await copyFile(resolve('../agent/scripts',name),join(scripts,name));
+  for(const name of ['treer-agent.mjs','native-runtime.mjs','process.mjs'])await copyFile(resolve('scripts',name),join(scripts,name));
   const image=join(bundle,'native');await copyFile(binary,image);await chmod(image,0o700);
   const bind=async path=>{const bytes=await readFile(path);return {path,bytes:bytes.length,sha256:sha(bytes)};};
   const executable=await bind(image),assets=[];for(const name of ['index.html','boot.js','ui.js','ui.css']){const path=join(publicDir,name);await writeFile(path,'synthetic',{mode:0o600});assets.push(await bind(path));}
@@ -139,7 +139,7 @@ test('persistent startup refuses copied root, wrong session and deleted checkpoi
 test('persistent installed dispatcher registers only initialized target and ignores inherited port observation',async t=>{
   const f=await source(t),p=await f.target('persistent-entry'),bundle=join(f.root,'persistent-bundle'),scripts=join(bundle,'scripts'),publicDir=join(bundle,'public');
   await mkdir(scripts,{recursive:true,mode:0o700});await mkdir(publicDir,{mode:0o700});
-  for(const name of ['treer-agent.mjs','native-runtime.mjs','process.mjs'])await copyFile(resolve('../agent/scripts',name),join(scripts,name));
+  for(const name of ['treer-agent.mjs','native-runtime.mjs','process.mjs'])await copyFile(resolve('scripts',name),join(scripts,name));
   const image=join(bundle,'native');await copyFile(binary,image);await chmod(image,0o700);
   const bind=async path=>{const bytes=await readFile(path);return {path,bytes:bytes.length,sha256:sha(bytes)};};
   const executable=await bind(image),assets=[];for(const name of ['index.html','boot.js','ui.js','ui.css']){const path=join(publicDir,name);await writeFile(path,'synthetic',{mode:0o600});assets.push(await bind(path));}

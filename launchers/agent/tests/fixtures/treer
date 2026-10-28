@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Sealed experiment CLI: no network except the test's own loopback manifest.
 import { writeFile, appendFile, readFile, access } from 'node:fs/promises';
-import { localFetch } from '../../../agent/tests/hermetic.mjs';
+import { localFetch } from '../hermetic.mjs';
 const args = process.argv.slice(2);
 if (args[0] === 'message' && ['receive','ack'].includes(args[1])) {
   if (!process.env.RUST_SPIKE_MESSAGE_INPUT) throw Error('message fixture not configured');

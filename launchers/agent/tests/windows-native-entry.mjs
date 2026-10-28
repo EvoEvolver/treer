@@ -7,7 +7,7 @@ import {once} from 'node:events';
 import {mkdtemp, mkdir, readFile, realpath, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
-import {localFetch as fetch} from '../../agent/tests/hermetic.mjs';
+import {localFetch as fetch} from './hermetic.mjs';
 const binary=process.env.RUST_SPIKE_BIN;
 assert.equal(process.platform,'win32','this suite must execute on Windows');
 assert.ok(binary,'RUST_SPIKE_BIN must name the Windows fixture-feature PE');
@@ -18,8 +18,8 @@ for(const harness of ['codex','claude'])test(`Windows native ${harness}: text qu
   const children=[];
   t.after(async()=>{for(const child of children)if(child.exitCode===null&&child.signalCode===null){const exit=once(child,'exit');child.kill();await exit;}await rm(root,{recursive:true,force:true,maxRetries:30,retryDelay:100});});
   const env={SystemRoot:process.env.SystemRoot,TEMP:root,TMP:root,USERPROFILE:root,PATH:process.env.PATH,
-    AGENT_UI_CWD:cwd,TREER_RUST_SPIKE_STATE_DIR:state,AGENT_UI_PUBLIC_DIR:resolve('../agent/public'),AGENT_UI_PORT_FILE:port,AGENT_UI_PORT:'0',AGENT_UI_HARNESS:harness,
-    CODEX_BIN:process.execPath,CLAUDE_BIN:process.execPath,RUST_SPIKE_CODEX_ARGS:JSON.stringify([resolve('../agent/tests/fake-codex.mjs')]),RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-stream.mjs')]),CLAUDE_FIXTURE_LOG:join(root,'calls'),FAKE_CODEX_COMPLETE_TURNS:'1',FAKE_CODEX_STATUS:'idle'};
+    AGENT_UI_CWD:cwd,TREER_RUST_SPIKE_STATE_DIR:state,AGENT_UI_PUBLIC_DIR:resolve('public'),AGENT_UI_PORT_FILE:port,AGENT_UI_PORT:'0',AGENT_UI_HARNESS:harness,
+    CODEX_BIN:process.execPath,CLAUDE_BIN:process.execPath,RUST_SPIKE_CODEX_ARGS:JSON.stringify([resolve('tests/fake-codex.mjs')]),RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-stream.mjs')]),CLAUDE_FIXTURE_LOG:join(root,'calls'),FAKE_CODEX_COMPLETE_TURNS:'1',FAKE_CODEX_STATUS:'idle'};
   assert.equal(execFileSync(binary,['--fixture-create-private-state'],{cwd,env,encoding:'utf8'}).trim(),'fixture_private_state_created');
   // The same initializer must never adopt even our own already-created root.
   assert.throws(()=>execFileSync(binary,['--fixture-create-private-state'],{cwd,env,stdio:'pipe'}));

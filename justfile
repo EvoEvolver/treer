@@ -26,7 +26,7 @@ check-unlocked:
     node scripts/check-docs.mjs
     python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
     node --test scripts/release-r2.test.mjs scripts/release-authority.test.mjs scripts/machine-artifacts.test.mjs scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs scripts/machine-rollout.test.mjs
-    node --test scripts/install-path.test.mjs scripts/install-checksums.test.mjs scripts/ais-e2e.test.mjs
+    node --test scripts/install-path.test.mjs scripts/install-checksums.test.mjs
     cd web && pnpm typecheck
     cd web && pnpm build
     cd web && pnpm test:e2e
@@ -85,14 +85,7 @@ agent-launcher-test-unlocked:
     npm --prefix launchers/agent ci
     npm --prefix launchers/agent run check
     npm --prefix launchers/agent test
-    npm --prefix launchers/agent run test:browser
-
-# Compatibility recipe name; the duplicate ACP runtime is retired.
-acp-launcher-test:
-    just agent-launcher-test
-
-ais-e2e:
-    node scripts/ais-e2e.mjs
+    TREER_TEST_NODE="$(command -v node)" cargo test --locked --features fixture-harness --manifest-path launchers/agent/Cargo.toml
 
 messaging-e2e:
     cargo test -p treer-proxy message_
@@ -105,7 +98,6 @@ machine-update-test:
 
 release-tooling-test:
     python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-    node --test scripts/ais-e2e.test.mjs
 
 agent-server *args:
     cargo run -p treer-agent-server -- {{args}}

@@ -1,10 +1,10 @@
 [package]
-name = "treer-agent-rust-spike"
+name = "treer-agent-launcher"
 version = "0.0.1"
 edition = "2021"
 publish = false
 
-# Deliberately separate from Core and the production launcher build.
+# Standalone workspace with its own Cargo.lock, separate from Core.
 [workspace]
 
 [features]

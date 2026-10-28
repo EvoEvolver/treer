@@ -219,7 +219,7 @@ test('actual installed-dispatcher entry: session goes to verified native image w
   const bundleRoot = path.join(f.root, 'bound-launcher'), scripts = path.join(bundleRoot, 'scripts'), publicDir = path.join(bundleRoot, 'public');
   await fs.mkdir(scripts, { recursive: true, mode: 0o700 }); await fs.mkdir(publicDir);
   for (const name of ['treer-agent.mjs', 'native-runtime.mjs', 'process.mjs']) {
-    await fs.copyFile(fileURLToPath(new URL(`../../agent/scripts/${name}`, import.meta.url)), path.join(scripts, name));
+    await fs.copyFile(fileURLToPath(new URL(`../scripts/${name}`, import.meta.url)), path.join(scripts, name));
   }
   const image = path.join(bundleRoot, 'native'); await fs.copyFile(binary, image); await fs.chmod(image, 0o700);
   const bind = async name => { const bytes = await fs.readFile(name); return { path: name, bytes: bytes.length, sha256: digest(bytes) }; };
@@ -241,19 +241,3 @@ test('actual installed-dispatcher entry: session goes to verified native image w
   assert.notEqual(changed.status, 0); assert.match(changed.stderr, /Native launcher binding/);
 }));
 
-test('actual Node compatibility: Node bundle -> Rust isolated restore -> Node export', { skip: !process.env.TREER_TRANSFER_NODE_LOADER }, async () => fixture(async f => {
-  const module = new URL('../../agent/src/harness/session-files.ts', import.meta.url).href;
-  const invoke = (source, args) => spawnSync(process.execPath, ['--import', process.env.TREER_TRANSFER_NODE_LOADER, '--input-type=module', '-e', source, ...args], { env: { PATH: process.env.PATH, HOME: f.root }, encoding: 'utf8', timeout: 30_000, maxBuffer: 2 * 1024 * 1024 });
-  const exported = invoke(`import { exportNativeSession } from ${JSON.stringify(module)}; console.log(JSON.stringify(await exportNativeSession('claude', ...process.argv.slice(1))));`, [f.id, f.cwd, f.home]);
-  assert.equal(exported.status, 0, exported.stderr);
-  const input = await f.save(JSON.parse(exported.stdout)), destination = path.join(f.root, 'node-compatible');
-  const result = f.run(['import', '--input', input, '--directory', destination]); assert.equal(result.status, 0, result.stderr);
-  const imported = JSON.parse(result.stdout);
-  const reexported = invoke(`import { exportNativeSession } from ${JSON.stringify(module)}; console.log(JSON.stringify(await exportNativeSession('claude', ...process.argv.slice(1))));`, [imported.sessionId, destination, imported.environment.CLAUDE_CONFIG_DIR]);
-  assert.equal(reexported.status, 0, reexported.stderr);
-  const bundle = JSON.parse(reexported.stdout); assert.equal(bundle.files.length, 1); assert.equal(bundle.sessionId, imported.sessionId);
-  // Node also accepts a Rust export, using only a second synthetic provider home.
-  const rustBundle = await f.save(f.get(), 'rust-node-input.json'), nodeHome = path.join(f.root, 'node-import-home');
-  const nodeImported = invoke(`import { readFile } from 'node:fs/promises'; import { importNativeSession } from ${JSON.stringify(module)}; const [input,directory,home]=process.argv.slice(1); console.log(JSON.stringify(await importNativeSession(JSON.parse(await readFile(input,'utf8')), {directory}, home)));`, [rustBundle, path.join(f.root, 'node-restored'), nodeHome]);
-  assert.equal(nodeImported.status, 0, nodeImported.stderr); assert.notEqual(JSON.parse(nodeImported.stdout).sessionId, f.id);
-}));

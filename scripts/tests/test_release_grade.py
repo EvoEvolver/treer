@@ -13,7 +13,7 @@ class ReleaseGradeTest(unittest.TestCase):
         self.assertEqual(grade.plan(["docs/releases.md", "AGENTS.md"])["components"], ["docs"])
         self.assertEqual(grade.plan(["apps/issues/issues.py"])["components"], ["apps"])
         self.assertEqual(grade.plan(["web/src/index.css"])["components"], ["web"])
-        self.assertEqual(grade.plan(["launchers/agent/src/model.ts"])["components"], ["launcher"])
+        self.assertEqual(grade.plan(["launchers/agent/src/main.rs"])["components"], ["launcher"])
         self.assertEqual(grade.plan(["crates/treer-proxy/src/lib.rs"])["components"], ["core"])
 
     def test_docs_and_apps_never_need_native_or_canary(self):
@@ -23,7 +23,7 @@ class ReleaseGradeTest(unittest.TestCase):
             self.assertNotIn("just check", result["local_gate"])
 
     def test_web_and_launcher_skip_rust_tests_but_still_ship_through_canary(self):
-        for paths in (["web/src/a.tsx"], ["launchers/agent/src/a.ts"]):
+        for paths in (["web/src/a.tsx"], ["launchers/agent/src/a.rs"]):
             result = grade.plan(paths)
             self.assertNotIn("just check", result["local_gate"])
             self.assertTrue(result["native_build_and_canary"])
@@ -52,7 +52,7 @@ class ReleaseGradeTest(unittest.TestCase):
             self.assertFalse(result["batchable"])
 
     def test_mixed_changes_take_the_union_and_any_core_path_wins(self):
-        result = grade.plan(["web/a.ts", "launchers/agent/a.ts", "apps/issues/a.py"])
+        result = grade.plan(["web/a.ts", "launchers/agent/a.rs", "apps/issues/a.py"])
         self.assertEqual(result["components"], ["apps", "web", "launcher"])
         self.assertIn("just agent-launcher-test", result["local_gate"])
         self.assertIn("cd web && pnpm test:e2e", result["local_gate"])
