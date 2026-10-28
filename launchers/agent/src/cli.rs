@@ -26,6 +26,18 @@ fn set(name: &str, value: &str) {
     std::env::set_var(name, value);
 }
 
+/// A launch registers its own interface with the Controller, so a parent's
+/// port observation file is dropped. An explicit `RUST_SPIKE_REGISTER`
+/// (integration tests) leaves the runtime environment exactly as given.
+fn register_by_default(drop_port_file: bool) {
+    if std::env::var_os("RUST_SPIKE_REGISTER").is_none() {
+        set("RUST_SPIKE_REGISTER", "1");
+        if drop_port_file {
+            std::env::remove_var("AGENT_UI_PORT_FILE");
+        }
+    }
+}
+
 /// Interpret argv before the runtime reads its environment.
 pub(crate) fn prepare(args: &[String]) -> Result<Next> {
     match args.first().map(String::as_str) {
@@ -47,17 +59,18 @@ pub(crate) fn prepare(args: &[String]) -> Result<Next> {
         Some("session") => {
             let sub = args.get(1).map(String::as_str);
             if matches!(sub, Some("launch" | "run")) {
-                set("RUST_SPIKE_REGISTER", "1");
                 // A saved Host startup must never inherit a parent's observation file.
-                if sub == Some("run") {
-                    std::env::remove_var("AGENT_UI_PORT_FILE");
-                }
+                register_by_default(sub == Some("run"));
             }
             return Ok(Next::Run);
         }
         // Runtime maintenance flags read directly by main.
         Some("--restore-node-backup" | "--fixture-create-private-state") => return Ok(Next::Run),
         _ => {}
+    }
+    // Only import flags: an environment-configured runtime start, as bare.
+    if args.iter().all(|arg| matches!(arg.as_str(), "--import-node-state" | "--import-claude-state")) {
+        return Ok(Next::Run);
     }
     let mut harness = std::env::var("AGENT_UI_HARNESS")
         .ok()
@@ -93,10 +106,7 @@ pub(crate) fn prepare(args: &[String]) -> Result<Next> {
             set("AGENT_UI_CWD", &cwd);
         }
     }
-    // A parent's port observation file belongs to that invocation; the
-    // launched runtime registers its own interface with the Controller.
-    std::env::remove_var("AGENT_UI_PORT_FILE");
-    set("RUST_SPIKE_REGISTER", "1");
+    register_by_default(true);
     Ok(Next::Run)
 }
 
@@ -137,6 +147,13 @@ mod tests {
         for name in ["AGENT_UI_HARNESS", "AGENT_UI_SESSION_ID", "AGENT_UI_CWD", "RUST_SPIKE_REGISTER", "CODEX_UI_CWD"] {
             std::env::remove_var(name);
         }
+        // An explicit registration choice keeps the given environment.
+        std::env::set_var("RUST_SPIKE_REGISTER", "0");
+        std::env::set_var("AGENT_UI_PORT_FILE", "/test/port");
+        assert!(matches!(prepare(&args(&["--harness", "codex"])), Ok(Next::Run)));
+        assert_eq!(std::env::var("RUST_SPIKE_REGISTER").unwrap(), "0");
+        assert_eq!(std::env::var("AGENT_UI_PORT_FILE").unwrap(), "/test/port");
+        std::env::remove_var("RUST_SPIKE_REGISTER");
         std::env::set_var("AGENT_UI_PORT_FILE", "/parent/port");
         let prepared = prepare(&args(&["--harness", "claude", "--runtime", "rust", "--session-id", "s1", "--cwd", "/work"]));
         assert!(matches!(prepared, Ok(Next::Run)));

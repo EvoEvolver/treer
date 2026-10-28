@@ -86,7 +86,7 @@ test('failed initialize leaves no checkpoint/port or input; once intent prevents
 test('treer-launch session launch registers the same new native session',async t=>{
   const f=await source(t),p=await f.target();
   const bin=join(f.root,'synthetic-bin'),registered=join(f.root,'registered');await mkdir(bin,{mode:0o700});const cli=join(bin,'treer');await writeFile(cli,`#!${process.execPath}\nimport {writeFileSync} from 'node:fs'; if(process.argv[2]!=='interface'||process.argv[3]!=='register')process.exit(81);writeFileSync(process.env.LAUNCH_REGISTER_LOG,JSON.stringify(process.argv.slice(2)));`,{mode:0o700});
-  const live=await f.running(p.args,{...p.env,PATH:bin+':'+p.env.PATH,LAUNCH_REGISTER_LOG:registered});assert.equal((await live.state()).thread.id,p.imported.sessionId);assert.equal((await live.state()).harness.capabilities.sessionTransfer,null);await until(()=>readFile(registered,'utf8'),v=>JSON.parse(v).includes('--instance-id'));await f.checkSource();
+  const env={...p.env,PATH:bin+':'+p.env.PATH,LAUNCH_REGISTER_LOG:registered};delete env.RUST_SPIKE_REGISTER;const live=await f.running(p.args,env);assert.equal((await live.state()).thread.id,p.imported.sessionId);assert.equal((await live.state()).harness.capabilities.sessionTransfer,null);await until(()=>readFile(registered,'utf8'),v=>JSON.parse(v).includes('--instance-id'));await f.checkSource();
 });
 
 test('persistent prepared startup reuses exact argv/checkpoint after native growth, with no duplicate launch/input',async t=>{
@@ -134,9 +134,9 @@ test('persistent treer-launch session run registers only initialized target and 
   const bin=join(f.root,'persistent-bin'),registered=join(f.root,'persistent-registration');await mkdir(bin,{mode:0o700});
   await writeFile(join(bin,'treer'),`#!${process.execPath}\nimport {appendFileSync} from 'node:fs'; if(process.argv[2]!=='interface'||process.argv[3]!=='register')process.exit(81);appendFileSync(process.env.LAUNCH_REGISTER_LOG,JSON.stringify(process.argv.slice(2))+'\\n',{mode:0o600});`,{mode:0o700});
   const args=[...p.args];args[1]='run';
-  const env={...p.env,PATH:bin+':'+p.env.PATH,LAUNCH_REGISTER_LOG:registered};await writeFile(env.AGENT_UI_PORT_FILE,'parent-owned-observation',{mode:0o600});
+  const env={...p.env,PATH:bin+':'+p.env.PATH,LAUNCH_REGISTER_LOG:registered};delete env.RUST_SPIKE_REGISTER;await writeFile(env.AGENT_UI_PORT_FILE,'parent-owned-observation',{mode:0o600});
   const q=await f.target('persistent-entry-refused'),refusedArgs=[...q.args];refusedArgs[1]='run';const refusedRegistration=join(f.root,'refused-registration');
-  const refused=await f.start(refusedArgs,{...q.env,PATH:env.PATH,LAUNCH_REGISTER_LOG:refusedRegistration,LAUNCH_REFUSE_INIT:'1'});
+  const refusedEnv={...q.env,PATH:env.PATH,LAUNCH_REGISTER_LOG:refusedRegistration,LAUNCH_REFUSE_INIT:'1'};delete refusedEnv.RUST_SPIKE_REGISTER;const refused=await f.start(refusedArgs,refusedEnv);
   await once(refused.child,'exit');assert.notEqual(refused.child.exitCode,0,refused.log());await assert.rejects(stat(refusedRegistration));await assert.rejects(stat(join(q.stateRoot,'rust-spike.json')));
   async function started(){const owned=await f.start(args,env);const events=await until(()=>readFile(registered,'utf8'),s=>s.trim().split('\n').length===count+1);count++;const argv=JSON.parse(events.trim().split('\n').at(-1)),port=argv[argv.indexOf('--port')+1];const state=await until(()=>fetch(`http://127.0.0.1:${port}/api/state`).then(r=>r.json()),s=>s.ready);assert.equal(state.thread.id,p.imported.sessionId);assert.equal(state.harness.capabilities.sessionTransfer,null);return owned;}
   let count=0;const first=await started();let done=once(first.child,'exit');first.child.kill('SIGTERM');await done;
