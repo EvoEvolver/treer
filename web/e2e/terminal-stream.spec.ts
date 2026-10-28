@@ -175,3 +175,35 @@ test.describe('mobile touch', () => {
     await expect.poll(() => backend.inputs.join('')).toContain('\x1b[A')
   })
 })
+
+for (const mobile of [false, true]) {
+  test(`terminal fits its full-bleed container and follows resizes ${mobile ? 'phone' : 'desktop'}`, async ({ browser }) => {
+    const context = await browser.newContext(mobile ? { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true } : { viewport: { width: 1280, height: 900 } })
+    const page = await context.newPage()
+    const backend = new TerminalBackend()
+    const size = await attach(page, backend, mobile)
+    const geometry = () => page.locator(scope).evaluate((xterm) => {
+      const host = xterm.parentElement!.getBoundingClientRect()
+      const screen = xterm.querySelector('.xterm-screen')!.getBoundingClientRect()
+      const row = xterm.querySelector('.xterm-rows > div')!.getBoundingClientRect().height
+      const keys = document.querySelector('button[aria-label="Escape"]')?.getBoundingClientRect()
+      return { slackX: host.width - screen.width, slackY: host.height - screen.height, row, overflow: screen.bottom - host.bottom, keysTop: keys?.top ?? Infinity, screenBottom: screen.bottom, pageScroll: document.documentElement.scrollWidth - innerWidth }
+    })
+    const check = async () => {
+      const g = await geometry()
+      // The grid fills the container to within one cell and never overflows it.
+      expect(g.overflow).toBeLessThanOrEqual(0.5)
+      expect(g.slackY).toBeLessThan(g.row + 1)
+      expect(g.slackX).toBeLessThan(24) // one cell plus the scrollbar FitAddon reserves
+      expect(g.screenBottom).toBeLessThanOrEqual(g.keysTop + 0.5)
+      expect(g.pageScroll).toBeLessThanOrEqual(0)
+    }
+    if (mobile) await expect(page.getByRole('button', { name: 'Escape', exact: true })).toBeVisible()
+    await check()
+    await page.setViewportSize(mobile ? { width: 390, height: 600 } : { width: 1000, height: 700 })
+    await expect.poll(() => backend.resizes.at(-1)?.rows ?? size.rows).toBeLessThan(size.rows)
+    if (!mobile) expect(backend.resizes.at(-1)!.cols).toBeLessThan(size.cols)
+    await check()
+    await context.close()
+  })
+}
