@@ -42,19 +42,6 @@
         "format": "uri"
       }
     },
-    "email_preview_chars": {
-      "type": "integer",
-      "minimum": 0,
-      "maximum": 200,
-      "default": 80,
-      "description": "Characters of a Message's first line shown in notification emails (0 = sender only)"
-    },
-    "notify_poll_seconds": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 3600,
-      "default": 30
-    },
     "email_capability": {
       "type": "string",
       "default": "app.email.v1",

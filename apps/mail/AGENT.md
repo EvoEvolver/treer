@@ -4,81 +4,60 @@ Treer Mail
 This index is for Agents. Browsers and clients sending `Accept: text/html`
 receive the human interface at this same URL.
 
-Treer Mail is a human inbox and composer backed by Core Message. Agents should
-use the authenticated treer CLI instead of the browser API or browser session.
+Treer Mail lets an Agent email a person a link to a Core Message. The person
+opens the link, signs in to Mail with Treer and reads and replies in the Core
+thread. Mail does not receive email, track reads or send reminders.
 
-Read and send Messages
-----------------------
+Email a person
+--------------
+
+First send them a Core Message, so they have something to reply to, then ask
+Mail to email them. From a managed workload `http://MAIL_NAME.treer/` injects
+your identity (examples use an App named `mail`; elsewhere pass
+`Authorization: Bearer $(treer token create SERVICE_ID)`):
+
+    treer member list                                   # find USER_ID
+    treer message send --to USER_ID --body 'Please review the draft.'   # note message_id
+    curl -fsS -X POST -H 'Content-Type: application/json' \
+      -d '{"to_member":"USER_ID","subject":"Review needed","text":"Please review the draft.","message_id":"MESSAGE_ID"}' \
+      http://mail.treer/api/email
+
+Fields: exactly one of `to_member` (a workspace member; Core uses their
+verified account email) or `to` (any email address), `subject` (one line, at
+most 200 bytes), `text` (plain text; with the appended link at most 4096
+bytes), optional `message_id` and `idempotency_key`. The email is your text
+plus `Read and reply: PUBLIC_URL/?message=MESSAGE_ID` (the inbox when no
+`message_id`) and your name. Replying needs a Treer account in this workspace;
+someone outside it can read the email but not reply through the link.
+
+Responses:
+
+- `200 {"email_id", "status": "sent", "idempotency_key"}`.
+- `202 {"status": "uncertain", "code", "idempotency_key"}`: Core may have sent
+  it. Do not send again; ask `GET http://mail.treer/api/email/IDEMPOTENCY_KEY`,
+  which returns Core's `sent`, `failed` or `pending`, or `email_not_found`.
+- Errors `{"error": {"code", "message", "retryable"}, "idempotency_key"}`, for
+  example `email_member_not_found` (404), `email_member_unverified` (409),
+  `email_rate_limited` (429), `email_unavailable` (503, this Treer has no App
+  email route), `policy_denied` (403: the Mail runtime lacks `email.send`).
+
+The same caller, recipient and `message_id` (or, without one, the same subject
+and text) always use the same key, so repeating a request never emails twice.
+Pass your own `idempotency_key` to choose differently; reusing it for other
+content is `email_idempotency_conflict`.
+
+Messages
+--------
+
+Read and send Core Messages with the treer CLI, not the browser API:
 
     treer message list --limit 50
     treer message get MESSAGE_ID
-    treer message send --to RECIPIENT --body "Message text"
     treer message reply MESSAGE_ID --to sender --body "Reply text"
     treer message receive --wait 30000 --limit 50
-    treer message ack DELIVERY_ID --operation-id STABLE_OPERATION_ID
 
-Use `treer member list` and `treer agent ls -R /` to discover recipients. Prefer a
-durable Message for Agent coordination. A Message does not wake or type into a
-peer terminal; use `treer agent prompt` only when immediate attention is needed.
+A person's reply in Mail arrives as an ordinary Core Message.
 
-Email notifications
--------------------
-
-Mail can email a member when a Message stays unread. Agents operate it with
-their own workload identity; from a managed workload `http://MAIL_NAME.treer/`
-injects it (examples use an App named `mail`; or pass `Authorization: Bearer $(treer token create SERVICE_ID)`).
-Every route except `members` needs `?user_id=HUMAN_ID` (from
-`treer member list`).
-
-Inspect:
-
-    curl -fsS http://mail.treer/api/notifications/members
-    curl -fsS 'http://mail.treer/api/notifications?user_id=USER_ID'
-
-The status has `available` (false when the Core email route is absent),
-`settings`, `watch.state` (`unavailable`, `disabled`, `no_address`,
-`login_required`, `watching`), `pending_messages` and the last 20 `batches`
-with every attempt (`sent`, `retryable`, `permanent`, `uncertain` and a code).
-
-Change, test, retry:
-
-    curl -fsS -X PATCH -H 'Content-Type: application/json' \
-      -d '{"enabled":true,"digest_minutes":15,"scope":"direct"}' \
-      'http://mail.treer/api/notifications/settings?user_id=USER_ID'
-    curl -fsS -X POST -H 'Content-Type: application/json' -H 'Idempotency-Key: KEY' \
-      -d '{}' 'http://mail.treer/api/notifications/test?user_id=USER_ID'
-    curl -fsS -X POST -H 'Content-Type: application/json' -d '{}' \
-      'http://mail.treer/api/notifications/batches/BATCH_ID/retry?user_id=USER_ID'
-
-Settings fields: `enabled` (bool), `digest_minutes` (0 = immediately, up to
-1440 = one digest after that many unread minutes), `scope` (`direct` = only
-Messages sent to the member alone, `all`), `address` (email or null = the
-member's account email when the directory exposes one). Agents may only set
-`address` to null; members set their own address in the UI. A test email goes
-to the effective address; the same `Idempotency-Key` never sends twice.
-Retrying an `uncertain` batch may deliver a duplicate: Mail resends on its own
-only after Core confirms the first attempt was not sent. `login_required` means
-the member must sign in to Mail itself (`/api/auth/start`); Mail watches an
-inbox only with that member's 12-hour Mail sign-in grant. Emails contain the
-sender, a short first-line preview and links that need a Treer sign-in.
-
-Browser API
------------
-
-The routes below are for the human UI and require an App OAuth browser session:
-
-    GET  /api/auth/start
-    GET  /api/auth/callback
-    GET  /api/auth/session
-    POST /api/auth/logout
-    GET  /api/directory
-    GET  /api/messages
-    POST /api/messages
-    POST /api/inbox
-    GET   /api/notifications
-    PATCH /api/notifications/settings
-    POST  /api/notifications/test
-    POST  /api/notifications/batches/BATCH_ID/retry
-
-Do not scrape the human interface or attempt to reuse its cookie. Core applies
-the calling Agent's workspace Policy to every treer CLI operation.
+The routes `/api/auth/*`, `/api/directory`, `/api/messages` and `/api/inbox`
+serve the human UI and require its browser session. Do not scrape the human
+interface or reuse its cookie.

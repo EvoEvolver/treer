@@ -69,6 +69,19 @@ class FakeProxyHandler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/apps/svc_mail/messages":
             self._require_token()
             self._json({"messages": self.server.messages, "next_before": None})
+        elif parsed.path.startswith("/api/apps/svc_mail/messages/"):
+            self._require_token()
+            wanted = parsed.path.rsplit("/", 1)[1]
+            message = next((m for m in self.server.messages if m["message_id"] == wanted), None)
+            if message is None:
+                body = json.dumps({"error": {"code": "message_not_found", "message": "no"}}).encode()
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self._json({"message": message})
         else:
             self.send_error(404)
 
@@ -224,7 +237,7 @@ class MailProcessCase(unittest.TestCase):
     ) -> tuple[int, dict[str, str], object | None]:
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         headers = {"Cookie": self.cookie} if self.cookie else {}
-        if method in {"POST", "PATCH"}:
+        if method == "POST":
             headers["Origin"] = f"http://127.0.0.1:{self.port}"
         headers.update(request_headers or {})
         encoded = None
@@ -302,6 +315,13 @@ class MailServerTest(MailProcessCase):
         self.assertEqual(status, 200)
         self.assertEqual([item["message"]["message_id"] for item in inbox["deliveries"]], ["msg_second"])
         self.assertEqual(inbox["remaining_unread"], 0)
+
+        # A reply link may name a Message outside the recent page.
+        self.proxy.messages.append(core_message("msg_old"))
+        status, _, value = self.request("GET", "/api/messages/msg_old")
+        self.assertEqual((status, value["message"]["message_id"]), (200, "msg_old"))
+        status, _, value = self.request("GET", "/api/messages/msg_missing")
+        self.assertEqual((status, value["error"]["code"]), (404, "message_not_found"))
 
         status, _, _ = self.request("POST", "/api/auth/logout", {})
         self.assertEqual(status, 204)

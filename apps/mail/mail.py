@@ -12,6 +12,7 @@ import os
 import re
 import secrets
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -26,7 +27,6 @@ from pathlib import Path
 from typing import Any
 
 from email_route import EmailRoute, treer_token
-from notify import Notifier, NotifyError
 
 
 SESSION_COOKIE = "treer_mail_session"
@@ -35,6 +35,10 @@ MAX_MESSAGE_BODY_BYTES = 32 * 1024
 MAX_RECIPIENTS = 32
 MAX_CONTEXTS = 32
 MAX_PAGE_SIZE = 100
+MAX_EMAIL_BYTES = 4096  # Core's limit for the whole plain-text email
+EMAIL_FIELDS = {"to", "to_member", "subject", "text", "message_id", "idempotency_key"}
+MESSAGE_ID = re.compile(r"[A-Za-z0-9_.-]{1,128}")
+EMAIL_KEY = re.compile(r"[A-Za-z0-9:_.-]{1,128}")
 API_TIMEOUT_SECONDS = 125
 APP_ROOT = Path(__file__).resolve().parent
 RFC3339_NANOSECONDS = re.compile(
@@ -90,8 +94,6 @@ class Config:
     database_path: Path
     workspace_id: str | None = None
     browser_origins: tuple[str, ...] = ()
-    email_preview_chars: int = 80
-    notify_poll_seconds: float = 30
     email_capability: str = "app.email.v1"
     treer_bin: str = "treer"
 
@@ -208,6 +210,11 @@ class SessionStore:
                 );
                 CREATE INDEX IF NOT EXISTS app_browser_sessions_expiry
                     ON app_browser_sessions(expires_at);
+                -- Removed email-notification feature: drop its stored addresses.
+                DROP TABLE IF EXISTS notify_attempts;
+                DROP TABLE IF EXISTS notify_batches;
+                DROP TABLE IF EXISTS notify_pending;
+                DROP TABLE IF EXISTS notify_settings;
                 """
             )
 
@@ -320,15 +327,11 @@ class MailApplication:
         self.config = config
         self.api = api
         self.sessions = sessions
-        route = EmailRoute(config.proxy_public_url, config.service_id, config.email_capability,
-                           lambda: treer_token(config.treer_bin, config.service_id))
-        self.notifier = Notifier(
-            config.database_path, route, public_url=config.public_url,
-            preview_chars=config.email_preview_chars, poll_seconds=config.notify_poll_seconds,
-            unread=self.unread_messages, directory_email=self.directory_email)
+        self.email = EmailRoute(config.proxy_public_url, config.service_id, config.email_capability,
+                                lambda: treer_token(config.treer_bin, config.service_id))
 
     def verify_agent(self, token: str | None) -> dict[str, Any]:
-        """An Agent calling the notification API with its workload identity."""
+        """An Agent calling Mail with its workload identity."""
         verified = self.api.request("POST", "/.treer/apps/identity/verify",
                                     body={"token": token or "", "audience": self.config.service_id})
         claims = verified.get("claims") or {}
@@ -338,24 +341,68 @@ class MailApplication:
             raise MailError(401, "Invalid Treer identity", "mail_identity_invalid")
         return claims
 
-    def unread_messages(self, token: str) -> tuple[list[dict[str, Any]], bool]:
-        """Unacknowledged Messages for the token's member; never acknowledges."""
-        received = self.api.request(
-            "POST", f"/api/apps/{self.config.service_id}/messages/receive", access_token=token,
-            body={"limit": MAX_PAGE_SIZE, "wait_milliseconds": 0})
-        deliveries = [_object(value, "Message delivery") for value in _list(received.get("deliveries"), "Message deliveries")]
-        messages = [_object(delivery.get("message"), "delivered Message") for delivery in deliveries]
-        remaining = _nonnegative_int(received.get("remaining_unacknowledged"), "remaining unacknowledged count")
-        return messages, remaining <= len(messages)
+    def reply_link(self, message_id: str | None) -> str:
+        if message_id is None:
+            return self.config.public_url
+        return self.config.public_url + "?" + urllib.parse.urlencode({"message": message_id})
 
-    def directory_email(self, token: str, user_id: str) -> str | None:
-        """The member's account email, if this Treer's directory exposes one."""
-        principals = self.api.request("GET", f"/api/apps/{self.config.service_id}/directory",
-                                      access_token=token).get("principals") or []
-        me = next((p for p in principals if isinstance(p, dict) and p.get("kind") == "human"
-                   and p.get("id") == user_id), {})
-        email = me.get("email")
-        return email if isinstance(email, str) else None
+    def send_email(self, caller: tuple[str, str, str], request: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """Email a person a pointer to a Core Message (or the inbox) through
+        Core. Returns the HTTP status and body; Mail never resends by itself."""
+        unknown = sorted(set(request) - EMAIL_FIELDS)
+        if unknown:
+            raise MailError(400, f"unknown field {unknown[0]}", "request_field_invalid")
+        to, member = request.get("to"), request.get("to_member")
+        if (to is None) == (member is None):
+            raise MailError(400, "exactly one of to or to_member is required", "email_recipient_invalid")
+        recipient = ({"to": _bounded_string(to, "to", 254)} if to is not None
+                     else {"to_member": _bounded_string(member, "to_member", 256)})
+        subject = request.get("subject")
+        if (not isinstance(subject, str) or not subject.strip() or len(subject.encode("utf-8")) > 200
+                or any(ord(c) < 32 or ord(c) == 127 for c in subject)):
+            raise MailError(400, "subject must be 1-200 bytes on one line", "email_subject_invalid")
+        text = request.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise MailError(400, "text must not be empty", "email_text_invalid")
+        message_id = request.get("message_id")
+        if message_id is not None and (not isinstance(message_id, str) or not MESSAGE_ID.fullmatch(message_id)):
+            raise MailError(400, "message_id is not a Core Message ID", "email_message_id_invalid")
+        supplied = request.get("idempotency_key")
+        if supplied is not None:
+            supplied = _bounded_string(supplied, "idempotency key", 128)
+        kind, caller_id, name = caller
+        link = self.reply_link(message_id)
+        action = "Read and reply" if message_id else "Open Treer Mail"
+        body = (f"{text.rstrip()}\n\n{action}: {link}\n"
+                f"Sent by {name} through Treer Mail. Replying needs a Treer account in this workspace.\n")
+        if len(body.encode("utf-8")) > MAX_EMAIL_BYTES:
+            raise MailError(400, f"text is too long: the email with its reply link may have at most {MAX_EMAIL_BYTES} bytes",
+                            "email_text_invalid")
+        material = [kind, caller_id, json.dumps(recipient, sort_keys=True)]
+        material += ["key", supplied] if supplied else ["message", message_id] if message_id else ["content", subject, text]
+        key = "mail-" + hashlib.sha256("\0".join(material).encode("utf-8")).hexdigest()[:40]
+        if not self.email.available():
+            raise MailError(503, "this Treer does not offer the App email route", "email_unavailable")
+        outcome = self.email.send(recipient, subject, body, key)
+        print(f"Treer Mail email {kind}:{caller_id} -> {next(iter(recipient.values()))} {outcome.result} {outcome.code}",
+              file=sys.stderr, flush=True)
+        if outcome.result == "sent":
+            return 200, {"email_id": outcome.email_id, "status": "sent", "idempotency_key": key}
+        if outcome.result == "uncertain":
+            return 202, {"email_id": None, "status": "uncertain", "code": outcome.code, "idempotency_key": key}
+        passthrough = {400, 403, 404, 409, 413, 422, 429, 503}
+        status = (outcome.http_status if outcome.http_status in passthrough
+                  else 503 if outcome.result == "retryable" else 502)
+        return status, {"error": {"code": outcome.code, "message": outcome.message or "Core did not send the email",
+                                  "retryable": outcome.result == "retryable"}, "idempotency_key": key}
+
+    def email_status(self, key: str) -> tuple[int, dict[str, Any]]:
+        if not EMAIL_KEY.fullmatch(key):
+            raise MailError(400, "invalid idempotency key", "email_key_invalid")
+        try:
+            return self.email.status(key)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            raise MailError(503, "Core App email route is unavailable", "email_route_unreachable")
 
     def start_oauth(self, return_to: str, browser: str = "") -> str:
         return_path = _local_return_path(return_to)
@@ -473,6 +520,13 @@ class MailApplication:
         )
         return {"message": _object(response.get("message"), "sent Message")}
 
+    def message(self, record: BrowserSession, message_id: str) -> dict[str, Any]:
+        if not MESSAGE_ID.fullmatch(message_id):
+            raise MailError(404, "Message not found", "message_not_found")
+        response = self.api.request("GET", f"/api/apps/{self.config.service_id}/messages/{message_id}",
+                                    access_token=record.access_token)
+        return {"message": _object(response.get("message"), "Message")}
+
     def recent_messages(self, record: BrowserSession, limit: int) -> dict[str, Any]:
         limit = _page_limit(limit)
         history = self.api.request(
@@ -587,9 +641,6 @@ class MailHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         self._dispatch("POST")
 
-    def do_PATCH(self) -> None:  # noqa: N802
-        self._dispatch("PATCH")
-
     def log_message(self, _format: str, *args: object) -> None:
         return
 
@@ -598,7 +649,7 @@ class MailHandler(BaseHTTPRequestHandler):
             parsed = urllib.parse.urlsplit(self.path)
             path = parsed.path
             query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-            self._mutation = method in {"POST", "PATCH"}
+            self._mutation = method == "POST"
             if self._mutation:
                 # Humans must prove a same-origin browser write; Agent callers
                 # (no Origin, workload identity) are checked in _caller().
@@ -667,8 +718,16 @@ class MailHandler(BaseHTTPRequestHandler):
                     200,
                     self.server.application.unread_inbox(record, request.get("limit", 50)),
                 )
-            elif path.startswith("/api/notifications"):
-                self._notifications(method, path, query)
+            elif path == "/api/email" and method == "POST":
+                caller = self._caller()
+                self._json(*self.server.application.send_email(caller, self._json_body()))
+            elif path.startswith("/api/email/") and method == "GET":
+                self._caller()
+                key = urllib.parse.unquote(path[len("/api/email/"):])
+                self._json(*self.server.application.email_status(key))
+            elif path.startswith("/api/messages/") and method == "GET":
+                record = self._session()
+                self._json(200, self.server.application.message(record, path[len("/api/messages/"):]))
             elif path.startswith("/api/"):
                 raise MailError(404, "Mail API route not found", "route_not_found")
             elif method in {"GET", "HEAD"}:
@@ -679,8 +738,6 @@ class MailHandler(BaseHTTPRequestHandler):
             self._error(_app_api_mail_error(error))
         except MailError as error:
             self._error(error)
-        except NotifyError as error:
-            self._error(MailError(error.status, error.message, error.code))
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as error:  # Keep HTTP internals out of client responses.
@@ -702,33 +759,8 @@ class MailHandler(BaseHTTPRequestHandler):
         morsel = cookies.get(name)
         return morsel.value if morsel else None
 
-    def _notifications(self, method: str, path: str, query: dict[str, list[str]]) -> None:
-        notifier = self.server.application.notifier
-        kind, user_id = self._caller()
-        if kind == "agent":
-            requested = query.get("user_id", [""])[0]
-            if path != "/api/notifications/members" and not requested:
-                raise MailError(400, "Agents must pass ?user_id=MEMBER", "notify_user_required")
-            user_id = requested
-        if path == "/api/notifications" and method == "GET":
-            self._json(200, notifier.status(user_id))
-        elif path == "/api/notifications/members" and method == "GET":
-            if kind != "agent":
-                raise MailError(403, "Agents only; members see their own settings", "notify_agents_only")
-            self._json(200, {"members": notifier.members()})
-        elif path == "/api/notifications/settings" and method == "PATCH":
-            self._json(200, notifier.update(user_id, self._json_body(), by_agent=kind == "agent"))
-        elif path == "/api/notifications/test" and method == "POST":
-            self._json_body()
-            self._json(200, {"batch": notifier.test(user_id, self.headers.get("Idempotency-Key"))})
-        elif re.fullmatch(r"/api/notifications/batches/nb_[0-9a-f]{24}/retry", path) and method == "POST":
-            self._json_body()
-            self._json(200, {"batch": notifier.retry(user_id, path.split("/")[4])})
-        else:
-            raise MailError(404, "Mail API route not found", "route_not_found")
-
-    def _caller(self) -> tuple[str, str]:
-        """("human", own user ID) or ("agent", agent ID). Agents use their
+    def _caller(self) -> tuple[str, str, str]:
+        """(kind, ID, name) of a signed-in human or an Agent. Agents use their
         workload identity (injected on http://NAME.treer/ or a Bearer from
         `treer token create SERVICE_ID`)."""
         token = self.headers.get("X-Treer-Identity-Token")
@@ -736,11 +768,13 @@ class MailHandler(BaseHTTPRequestHandler):
             token = self.headers["Authorization"][7:]
         if token is not None:
             try:
-                return "human", self._session().user_id
+                record = self._session()
+                return "human", record.user_id, record.preferred_name
             except MailError:
                 claims = self.server.application.verify_agent(token)
-                return "agent", str(claims["sub"])
-        return "human", self._session().user_id
+                return "agent", str(claims["sub"]), str(claims.get("name") or claims["sub"])
+        record = self._session()
+        return "human", record.user_id, record.preferred_name
 
     def _session(self) -> BrowserSession:
         if getattr(self, "_mutation", False) and "Origin" not in self.headers:
@@ -940,8 +974,8 @@ def _query_int(query: dict[str, list[str]], name: str, default: int) -> int:
 
 
 def _local_return_path(value: str) -> str:
-    # The App root, optionally opening one Message or view (email links).
-    if value != "/" and not re.fullmatch(r"/\?(message=[A-Za-z0-9_.-]{1,128}|view=notifications)", value):
+    # The App root, optionally opening one Message (email reply links).
+    if value != "/" and not re.fullmatch(r"/\?message=[A-Za-z0-9_.-]{1,128}", value):
         raise MailError(400, "return_to must be the App root", "return_path_invalid")
     return value
 
@@ -996,18 +1030,9 @@ def load_config() -> Config:
         database_path=Path(state_dir) / "mail-state.sqlite3",
         workspace_id=value.get("workspace_id"),
         browser_origins=tuple(_normalized_url(origin, "browser origin").rstrip("/") for origin in value.get("browser_origins", [])),
-        email_preview_chars=_int_setting(value, "email_preview_chars", 80, 0, 200),
-        notify_poll_seconds=_int_setting(value, "notify_poll_seconds", 30, 1, 3600),
         email_capability=_bounded_string(value.get("email_capability", "app.email.v1"), "email capability", 128),
         treer_bin=_bounded_string(value.get("treer_bin", "treer"), "treer binary", 4096),
     )
-
-
-def _int_setting(value: dict[str, Any], name: str, default: int, low: int, high: int) -> int:
-    result = value.get(name, default)
-    if not isinstance(result, int) or isinstance(result, bool) or not low <= result <= high:
-        raise ValueError(f"{name} must be an integer between {low} and {high}")
-    return result
 
 
 def main() -> int:
@@ -1019,8 +1044,6 @@ def main() -> int:
             SessionStore(config.database_path),
         )
         server = MailServer((config.listen_host, config.listen_port), application)
-        threading.Thread(target=application.notifier.run_forever, args=(threading.Event(),),
-                         daemon=True, name="mail-notifier").start()
         print(
             f"Treer Mail listening on {config.listen_host}:{server.server_address[1]}",
             file=sys.stderr,

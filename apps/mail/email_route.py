@@ -1,11 +1,11 @@
 """The only place Mail talks to the Core App email route.
 
 Core sends email on behalf of a Managed App: `POST /api/apps/{service_id}/email`
-with `{to, subject, text, idempotency_key}`, authenticated by the App's own
-runtime identity (a 60-second token from `treer token create SERVICE_ID`).
-The Proxy holds the provider credentials and advertises the route in
-`/api/health` `capabilities`. Every outcome is classified here so the caller
-only decides what to do with `sent`, `retryable`, `permanent` and `uncertain`.
+with `{to | to_member, subject, text, idempotency_key}`, authenticated by the
+App's own runtime identity (a 60-second token from `treer token create
+SERVICE_ID`). The Proxy holds the provider credentials and advertises the route
+in `/api/health` `capabilities`. Every send outcome is classified here; Mail
+never retries on its own.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Callable
 
 TIMEOUT_SECONDS = 30
 CAPABILITY_TTL_SECONDS = 60
-# Core rejected the request and certainly sent nothing; retrying cannot help.
+# Core rejected the request and certainly sent nothing; resending cannot help.
 PERMANENT_STATUSES = {400, 403, 404, 405, 409, 413, 422}
 # Core certainly sent nothing yet; the same request may succeed later.
 RETRYABLE_STATUSES = {401, 408, 425, 429, 503}
@@ -32,7 +32,9 @@ RETRYABLE_STATUSES = {401, 408, 425, 429, 503}
 class Outcome:
     result: str  # sent | retryable | permanent | uncertain
     code: str
+    http_status: int | None = None
     email_id: str | None = None
+    message: str = ""
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -71,12 +73,13 @@ class EmailRoute:
         self._checked_at = time.time()
         return self._available
 
-    def send(self, to: str, subject: str, text: str, key: str) -> Outcome:
+    def send(self, recipient: dict[str, str], subject: str, text: str, key: str) -> Outcome:
+        """`recipient` is `{"to": ADDRESS}` or `{"to_member": USER_ID}`."""
         try:
             token = self.token()
         except (OSError, subprocess.SubprocessError, RuntimeError):
             return Outcome("retryable", "runtime_token_unavailable")
-        body = {"to": to, "subject": subject, "text": text, "idempotency_key": key}
+        body = {**recipient, "subject": subject, "text": text, "idempotency_key": key}
         try:
             status, value = self._call("POST", f"api/apps/{self.service_id}/email", body, token)
         except urllib.error.URLError as error:
@@ -87,34 +90,24 @@ class EmailRoute:
             return Outcome("uncertain", "email_route_no_response")
         except OSError:
             return Outcome("uncertain", "email_route_no_response")
-        code = str((value.get("error") or {}).get("code") or f"http_{status}")
+        failure = value.get("error") or {}
+        code = str(failure.get("code") or f"http_{status}")
+        message = str(failure.get("message") or "")
         if 200 <= status < 300:
             if value.get("status") == "sent":
-                return Outcome("sent", "sent", str(value.get("email_id") or "") or None)
-            return Outcome("uncertain", "email_route_unexpected_response")
+                return Outcome("sent", "sent", status, str(value.get("email_id") or "") or None)
+            return Outcome("uncertain", "email_route_unexpected_response", status)
         if status in PERMANENT_STATUSES:
-            return Outcome("permanent", code)
+            return Outcome("permanent", code, status, message=message)
         if status in RETRYABLE_STATUSES:
-            return Outcome("retryable", code)
+            return Outcome("retryable", code, status, message=message)
         # 500/502/504 and friends: the provider may already have accepted it.
-        return Outcome("uncertain", code)
+        return Outcome("uncertain", code, status, message=message)
 
-    def lookup(self, key: str) -> str | None:
-        """Ask Core what happened to an idempotency key: `sent`, `not_sent` or
-        None when Core offers no such check (or it failed)."""
-        try:
-            status, value = self._call(
-                "GET", f"api/apps/{self.service_id}/email/{urllib.parse.quote(key, safe='')}",
-                None, self.token())
-        except (OSError, subprocess.SubprocessError, RuntimeError, urllib.error.URLError):
-            return None
-        if status == 200 and value.get("status") == "sent":
-            return "sent"
-        if status == 200 and value.get("status") == "failed":
-            return "not_sent"
-        if status == 404 and (value.get("error") or {}).get("code") == "email_not_found":
-            return "not_sent"
-        return None
+    def status(self, key: str) -> tuple[int, dict]:
+        """Core's record of an idempotency key, passed through unchanged."""
+        return self._call("GET", f"api/apps/{self.service_id}/email/{urllib.parse.quote(key, safe='')}",
+                          None, self.token())
 
     def _call(self, method: str, path: str, body: dict | None, token: str | None) -> tuple[int, dict]:
         headers = {"Accept": "application/json"}
