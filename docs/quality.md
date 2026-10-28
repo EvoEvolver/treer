@@ -245,9 +245,10 @@ The Linux Rust job builds the workspace, checks formatting, runs
 runs Clippy for all targets with warnings denied. Each database test uses its
 own schema; connection failures fail the job rather than skipping coverage.
 An independent Node 22 / pnpm job installs the frozen frontend lockfile and runs
-`pnpm typecheck` and `pnpm build`. CI requires no deployment credentials and
-does not publish artifacts or deploy. Native macOS/Windows PR gates and browser
-end-to-end CI remain separate gaps.
+`pnpm typecheck`, `pnpm build` and the Playwright user-journey suite
+(`pnpm test:e2e`, Chromium). A release-tooling job runs `just scripts-test`'s
+checks and the updater tests. CI requires no deployment credentials and does
+not publish artifacts or deploy. Native macOS/Windows PR gates remain a gap.
 
 Use Slurm for CPU- or memory-heavy builds, Clippy runs, frontend builds, and
 non-database workspace tests when the checkout and toolchain are available on
