@@ -459,6 +459,7 @@ Message, then `treer agent prompt TARGET "<message-id>"` with only the ID;
 ```bash
 treer machine list
 treer machine show <machine>
+treer machine metrics <machine> --window 15m
 treer machine put --machine <machine> LOCAL REMOTE
 treer machine get --machine <machine> REMOTE LOCAL
 treer exec --machine build-machine --cwd packages/api -- git status --short
@@ -479,6 +480,11 @@ the machine account's authority under `machine.exec` Policy. Timeout is
 milliseconds, default and maximum 30000; each output stream keeps at most
 64 KiB. It is not a sandbox and gets no workload credential; do not run
 destructive commands unless asked.
+
+`machine metrics` returns the machine's CPU %, RAM used/total and NVIDIA GPU
+utilization/memory: `latest` is the newest 5-second reading, `samples` the
+window (5-second samples up to 1h, minute means up to 24h). Use it before
+placing heavy work; `machine_metrics_unsupported` means an older Controller.
 
 If a machine shows Offline while its Agents still exist, do not re-enroll it.
 On that host, with the real workspace ID:
