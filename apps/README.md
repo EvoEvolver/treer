@@ -70,7 +70,8 @@ They continue to expose their registered `ui_path`.
   hierarchy, dependencies and comments. Assigning or @mentioning an Agent wakes
   it with `treer agent prompt`, so grant the App's runtime identity
   `agent.prompt` in the workspace Policy (otherwise only a Message is sent).
-- [`mail`](mail/README.md) is a browser App over App OAuth and Core Message.
+- [`mail`](mail/README.md) is a browser App over App OAuth and Core Message,
+  with optional email notifications for unread Messages.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.
 - [`soul`](soul/README.md) is an experimental Managed App file server that
   uploads environment-bound state bundles and launches command Agents from them.
