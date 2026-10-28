@@ -146,7 +146,9 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
 
 async fn install(options: InstallArgs) -> Result<()> {
     let launcher = launcher_in(options.dir)?;
-    let directory = launcher.parent().context("launcher path has no directory")?;
+    let directory = launcher
+        .parent()
+        .context("launcher path has no directory")?;
     std::fs::create_dir_all(directory)
         .with_context(|| format!("failed to create {}", directory.display()))?;
     let (bytes, expected) = match &options.from {
@@ -175,7 +177,10 @@ async fn install(options: InstallArgs) -> Result<()> {
             };
             let platform = controller_update::release_platform()
                 .context("no release artifacts exist for this platform")?;
-            eprintln!("treer: downloading signed {version} {LAUNCHER} from {}", options.release_base_url);
+            eprintln!(
+                "treer: downloading signed {version} {LAUNCHER} from {}",
+                options.release_base_url
+            );
             let bytes = crate::release_update::download_launcher(
                 &client,
                 options.release_base_url.clone(),
@@ -192,7 +197,10 @@ async fn install(options: InstallArgs) -> Result<()> {
         if changed {
             let _ = controller_update::restore_previous(&launcher);
         }
-        bail!("{} did not run; the previous launcher was restored", launcher.display());
+        bail!(
+            "{} did not run; the previous launcher was restored",
+            launcher.display()
+        );
     };
     if let Some(version) = &expected {
         let number = version.trim_start_matches('v');
@@ -225,19 +233,26 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    #[cfg(unix)]
     struct TempDir(PathBuf);
+    #[cfg(unix)]
     impl TempDir {
         fn path(&self) -> &Path {
             &self.0
         }
     }
+    #[cfg(unix)]
     impl Drop for TempDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+    #[cfg(unix)]
     fn tempdir() -> TempDir {
-        let path = std::env::temp_dir().join(format!("treer-launcher-test-{}", uuid::Uuid::new_v4().simple()));
+        let path = std::env::temp_dir().join(format!(
+            "treer-launcher-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
         std::fs::create_dir(&path).unwrap();
         TempDir(path.canonicalize().unwrap())
     }
@@ -251,9 +266,34 @@ mod tests {
     #[test]
     fn saved_pre_rust_invocations_still_parse() {
         for argv in [
-            vec!["x", "--node", "/usr/bin/node", "--treer", "/bin/treer", "install", "--agent", "codex", "--cwd", "."],
-            vec!["x", "--node", "/usr/bin/node", "update", "--require-runtime", "rust"],
-            vec!["x", "install", "--from", "/tmp/treer-launch", "--dir", "/tmp/bin"],
+            vec![
+                "x",
+                "--node",
+                "/usr/bin/node",
+                "--treer",
+                "/bin/treer",
+                "install",
+                "--agent",
+                "codex",
+                "--cwd",
+                ".",
+            ],
+            vec![
+                "x",
+                "--node",
+                "/usr/bin/node",
+                "update",
+                "--require-runtime",
+                "rust",
+            ],
+            vec![
+                "x",
+                "install",
+                "--from",
+                "/tmp/treer-launch",
+                "--dir",
+                "/tmp/bin",
+            ],
             vec!["x", "update", "--version", "v1.2.3"],
             vec!["x", "status"],
         ] {
@@ -271,22 +311,42 @@ mod tests {
         let dir = root.path().join("bin");
         std::fs::create_dir(&dir).unwrap();
         // A pre-Rust Node shim and its receipt.
-        std::fs::write(dir.join("treer-agent"), "#!/bin/sh\n# treer-agent-shim/v1\nexec node run.mjs \"$@\"\n").unwrap();
+        std::fs::write(
+            dir.join("treer-agent"),
+            "#!/bin/sh\n# treer-agent-shim/v1\nexec node run.mjs \"$@\"\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("treer-agent.json"), "{}").unwrap();
         let build = root.path().join("build-launch");
         std::fs::write(&build, "#!/bin/sh\necho 'treer-launch 9.9.9 (abc)'\n").unwrap();
         std::fs::set_permissions(&build, std::fs::Permissions::from_mode(0o755)).unwrap();
         let cli = Cli::try_parse_from([
-            "x", "install", "--from", build.to_str().unwrap(), "--dir", dir.to_str().unwrap(),
+            "x",
+            "install",
+            "--from",
+            build.to_str().unwrap(),
+            "--dir",
+            dir.to_str().unwrap(),
         ])
         .unwrap();
         run(cli.launcher).await.unwrap();
-        assert_eq!(std::fs::read(dir.join("treer-launch")).unwrap(), std::fs::read(&build).unwrap());
-        assert_eq!(std::fs::read_link(dir.join("treer-agent")).unwrap(), Path::new("treer-launch"));
+        assert_eq!(
+            std::fs::read(dir.join("treer-launch")).unwrap(),
+            std::fs::read(&build).unwrap()
+        );
+        assert_eq!(
+            std::fs::read_link(dir.join("treer-agent")).unwrap(),
+            Path::new("treer-launch")
+        );
         assert!(!dir.join("treer-agent.json").exists());
         // Idempotent.
         let cli = Cli::try_parse_from([
-            "x", "install", "--from", build.to_str().unwrap(), "--dir", dir.to_str().unwrap(),
+            "x",
+            "install",
+            "--from",
+            build.to_str().unwrap(),
+            "--dir",
+            dir.to_str().unwrap(),
         ])
         .unwrap();
         run(cli.launcher).await.unwrap();
@@ -294,7 +354,10 @@ mod tests {
         std::fs::remove_file(dir.join("treer-agent")).unwrap();
         std::fs::write(dir.join("treer-agent"), "#!/bin/sh\necho mine\n").unwrap();
         assert!(!controller_update::link_legacy_launcher(&dir.join("treer-launch")).unwrap());
-        assert_eq!(std::fs::read_to_string(dir.join("treer-agent")).unwrap(), "#!/bin/sh\necho mine\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("treer-agent")).unwrap(),
+            "#!/bin/sh\necho mine\n"
+        );
     }
 
     #[cfg(unix)]
@@ -311,9 +374,20 @@ mod tests {
         }
         let dir = root.path().to_str().unwrap().to_owned();
         for (file, ok) in [(&good, true), (&bad, false)] {
-            let cli = Cli::try_parse_from(["x", "install", "--from", file.to_str().unwrap(), "--dir", &dir]).unwrap();
+            let cli = Cli::try_parse_from([
+                "x",
+                "install",
+                "--from",
+                file.to_str().unwrap(),
+                "--dir",
+                &dir,
+            ])
+            .unwrap();
             assert_eq!(run(cli.launcher).await.is_ok(), ok);
         }
-        assert_eq!(std::fs::read(root.path().join("treer-launch")).unwrap(), std::fs::read(&good).unwrap());
+        assert_eq!(
+            std::fs::read(root.path().join("treer-launch")).unwrap(),
+            std::fs::read(&good).unwrap()
+        );
     }
 }

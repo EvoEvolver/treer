@@ -112,7 +112,10 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             history_seen: false,
         }
     }
-    pub fn with_response_filter(mut self, active: impl Fn(u64) -> Option<Selection> + Send + Sync + 'static) -> Self {
+    pub fn with_response_filter(
+        mut self,
+        active: impl Fn(u64) -> Option<Selection> + Send + Sync + 'static,
+    ) -> Self {
         self.response_filter = Some(Box::new(active));
         self
     }
@@ -123,19 +126,24 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
     pub fn diagnostic(&self) -> Value {
         serde_json::json!({"frameBytes":self.count,"outsideBytes":self.outside,"nodeCount":self.total_nodes,"shapeNodes":self.nodes,"outsideNodes":self.outside_nodes,"maxDepth":self.max_depth,"turnCount":self.total,"inHistory":self.in_history,"frameKind":self.frame_kind,"limitKind":self.limit_kind,"inProgressCount":self.active_count})
     }
-    fn outside_budget(&self) -> (usize,usize) {
+    fn outside_budget(&self) -> (usize, usize) {
         // Until the root method is read, use a bounded provisional envelope.
         // A late control method is rechecked before any frame is returned.
-        if self.history_seen || matches!(self.frame_kind,"other"|"thread/tokenUsage/updated") {
-            (4*1024*1024,50_000)
+        if self.history_seen || matches!(self.frame_kind, "other" | "thread/tokenUsage/updated") {
+            (4 * 1024 * 1024, 50_000)
         } else {
-            (WINDOW_BYTES,500_000)
+            (WINDOW_BYTES, 500_000)
         }
     }
     fn check_outside(&mut self) -> Result<()> {
-        let (bytes,nodes)=self.outside_budget();
-        if self.outside>bytes {self.limit_kind="outsideBytes";return Err("provider_value_too_large");}
-        if self.outside_nodes>nodes {return Err(self.shape_limit("nodes"));}
+        let (bytes, nodes) = self.outside_budget();
+        if self.outside > bytes {
+            self.limit_kind = "outsideBytes";
+            return Err("provider_value_too_large");
+        }
+        if self.outside_nodes > nodes {
+            return Err(self.shape_limit("nodes"));
+        }
         Ok(())
     }
     async fn peek(&mut self) -> Result<Option<u8>> {
@@ -169,8 +177,8 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         }
         self.check_outside()?;
         if self
-                .turn_begin
-                .is_some_and(|start| self.count - start > WINDOW_BYTES)
+            .turn_begin
+            .is_some_and(|start| self.count - start > WINDOW_BYTES)
         {
             self.limit_kind = "turnBytes";
             return Err("provider_value_too_large");
@@ -233,7 +241,10 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             }
             self.nodes += 1;
             self.total_nodes += 1;
-            if !self.in_history {self.outside_nodes+=1;self.check_outside()?;}
+            if !self.in_history {
+                self.outside_nodes += 1;
+                self.check_outside()?;
+            }
             if self.nodes > 500_000 {
                 return Err(self.shape_limit("nodes"));
             }
@@ -259,7 +270,10 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                         }
                         self.nodes += 1;
                         self.total_nodes += 1;
-                        if !self.in_history {self.outside_nodes+=1;self.check_outside()?;}
+                        if !self.in_history {
+                            self.outside_nodes += 1;
+                            self.check_outside()?;
+                        }
                         self.spaces().await?;
                         if self.byte().await? != b':' {
                             return Err("invalid_json");
@@ -276,8 +290,12 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                                 Some("turn/plan/updated") => "turn/plan/updated",
                                 Some("item/agentMessage/delta") => "item/agentMessage/delta",
                                 Some("item/reasoning/textDelta") => "item/reasoning/textDelta",
-                                Some("item/reasoning/summaryTextDelta") => "item/reasoning/summaryTextDelta",
-                                Some("item/commandExecution/outputDelta") => "item/commandExecution/outputDelta",
+                                Some("item/reasoning/summaryTextDelta") => {
+                                    "item/reasoning/summaryTextDelta"
+                                }
+                                Some("item/commandExecution/outputDelta") => {
+                                    "item/commandExecution/outputDelta"
+                                }
                                 Some("thread/tokenUsage/updated") => "thread/tokenUsage/updated",
                                 _ => "other",
                             };
@@ -378,11 +396,16 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             }
             // Reserve provenance bytes/nodes in every retained window BEFORE
             // admission; only a locally rewritten status keeps this marker.
-            if let Some(object) = value.as_object_mut() { object.remove("treerStatusProjected"); }
-            if value["status"] == "inProgress" { value["treerStatusProjected"] = Value::Bool(true); }
+            if let Some(object) = value.as_object_mut() {
+                object.remove("treerStatusProjected");
+            }
+            if value["status"] == "inProgress" {
+                value["treerStatusProjected"] = Value::Bool(true);
+            }
             let bytes = serde_json::to_vec(&value)
                 .map_err(|_| "invalid_json")?
-                .len() + usize::from(value["status"] == "inProgress"); // interrupted is one byte longer
+                .len()
+                + usize::from(value["status"] == "inProgress"); // interrupted is one byte longer
             let value = Arc::new(value);
             if value["status"] == "inProgress" {
                 self.active_count += 1;
@@ -429,7 +452,10 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         }
         match tokio::time::timeout(std::time::Duration::from_secs(60), self.frame()).await {
             Ok(result) => result,
-            Err(_) => { self.limit_kind = "frameDeadline"; Err("provider_frame_timeout") },
+            Err(_) => {
+                self.limit_kind = "frameDeadline";
+                Err("provider_frame_timeout")
+            }
         }
     }
     async fn frame(&mut self) -> Result<Option<Value>> {
@@ -475,7 +501,10 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                 match active(id) {
                     Some(selection) => admitted_selection = Some(selection),
                     None => {
-                        self.windows.clear();self.targets.clear();self.active=None;self.recent=Window::default();
+                        self.windows.clear();
+                        self.targets.clear();
+                        self.active = None;
+                        self.recent = Window::default();
                         return Ok(Some(serde_json::json!({"id":id})));
                     }
                 }
@@ -486,22 +515,36 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             // Match Node's ordered full-history interpretation only with an
             // explicit usable thread status. Metadata may follow the turns.
             let status = match value["result"]["thread"]["status"]["type"].as_str() {
-                Some("idle") => Some("idle"), Some("active") => Some("active"),
-                None => None, _ => Some("other"),
+                Some("idle") => Some("idle"),
+                Some("active") => Some("active"),
+                None => None,
+                _ => Some("other"),
             };
-            let selection = admitted_selection.unwrap_or_else(|| self.selections.lock().unwrap()
-                .get(&value["id"].as_u64().unwrap_or(0)).cloned().unwrap_or_default());
+            let selection = admitted_selection.unwrap_or_else(|| {
+                self.selections
+                    .lock()
+                    .unwrap()
+                    .get(&value["id"].as_u64().unwrap_or(0))
+                    .cloned()
+                    .unwrap_or_default()
+            });
             let full_history = selection.full_history;
             // With several in-progress turns the newest is the live one (none
             // when the thread reports idle); older ones are shown interrupted.
             if self.active_count > 1 {
                 eprintln!("Treer launcher: provider history has {} in-progress turns; following the newest", self.active_count);
             }
-            let normalize = self.active_count > 1 || (full_history && self.active_count > 0 && matches!(status, Some("idle" | "active")));
+            let normalize = self.active_count > 1
+                || (full_history
+                    && self.active_count > 0
+                    && matches!(status, Some("idle" | "active")));
             let live_id = if status == Some("idle") && normalize {
                 None
             } else {
-                self.active.as_ref().and_then(|t| t["id"].as_str()).map(str::to_owned)
+                self.active
+                    .as_ref()
+                    .and_then(|t| t["id"].as_str())
+                    .map(str::to_owned)
             };
             if normalize && live_id.is_none() {
                 self.active = None;
@@ -522,7 +565,8 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                 {
                     let size = serde_json::to_vec(&*active)
                         .map_err(|_| "invalid_json")?
-                        .len() + usize::from(active["status"] == "inProgress");
+                        .len()
+                        + usize::from(active["status"] == "inProgress");
                     let nodes = shape_nodes(&active);
                     while window.values.len() >= WINDOW_TURNS
                         || window.bytes + size > WINDOW_BYTES
@@ -554,11 +598,14 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                     .values
                     .into_iter()
                     .map(|v| {
-                        let is_live = live_turn.as_ref().is_some_and(|active| Arc::ptr_eq(active, &v));
-                        if is_live { live_turn = None; }
+                        let is_live = live_turn
+                            .as_ref()
+                            .is_some_and(|active| Arc::ptr_eq(active, &v));
+                        if is_live {
+                            live_turn = None;
+                        }
                         let mut turn = Arc::try_unwrap(v).unwrap_or_else(|v| (*v).clone());
-                        if normalize && turn["status"] == "inProgress" && !is_live
-                        {
+                        if normalize && turn["status"] == "inProgress" && !is_live {
                             turn["status"] = Value::String("interrupted".into());
                             // Marks a status Treer inferred, not one the provider sent.
                             turn["treerStatusProjected"] = Value::Bool(true);
@@ -582,29 +629,81 @@ mod tests {
     #[tokio::test]
     async fn expired_response_skips_history_but_not_wire_limits_or_current_responses() {
         let history = serde_json::to_vec(&json!({"id":1,"result":{"thread":{"status":{"type":"idle"},"turns":[{"id":"old","status":"inProgress"},{"id":"recent","status":"inProgress"}]}}})).unwrap();
-        let ignored = Reader::new(history.as_slice(), Selections::default()).with_response_filter(|_|None).next().await.unwrap().unwrap();
-        assert_eq!(ignored,json!({"id":1}));
+        let ignored = Reader::new(history.as_slice(), Selections::default())
+            .with_response_filter(|_| None)
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ignored, json!({"id":1}));
         // Several in-progress turns in an idle thread are all stale.
-        let admitted = Reader::new(history.as_slice(),Selections::default()).with_response_filter(|_|Some(Selection::default())).next().await.unwrap().unwrap();
-        assert!(admitted["result"]["thread"]["turns"].as_array().unwrap().iter().all(|t| t["status"] == "interrupted"));
-        for malformed in [b"{\"id\":1,\"result\":1,\"result\":2}\n".as_slice(),b"{\"id\":1,\"result\":[}\n".as_slice()] {
-            assert!(Reader::new(malformed,Selections::default()).with_response_filter(|_|None).next().await.is_err());
+        let admitted = Reader::new(history.as_slice(), Selections::default())
+            .with_response_filter(|_| Some(Selection::default()))
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(admitted["result"]["thread"]["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["status"] == "interrupted"));
+        for malformed in [
+            b"{\"id\":1,\"result\":1,\"result\":2}\n".as_slice(),
+            b"{\"id\":1,\"result\":[}\n".as_slice(),
+        ] {
+            assert!(Reader::new(malformed, Selections::default())
+                .with_response_filter(|_| None)
+                .next()
+                .await
+                .is_err());
         }
-        let deep=format!("{{\"id\":1,\"result\":{}{}}}\n","[".repeat(40),"]".repeat(40));
-        assert!(Reader::new(deep.as_bytes(),Selections::default()).with_response_filter(|_|None).next().await.is_err());
-        let control=b"{\"id\":1,\"method\":\"item/commandExecution/requestApproval\",\"params\":{}}\n";
-        assert_eq!(Reader::new(control.as_slice(),Selections::default()).with_response_filter(|_|None).next().await.unwrap().unwrap()["method"],"item/commandExecution/requestApproval");
+        let deep = format!(
+            "{{\"id\":1,\"result\":{}{}}}\n",
+            "[".repeat(40),
+            "]".repeat(40)
+        );
+        assert!(Reader::new(deep.as_bytes(), Selections::default())
+            .with_response_filter(|_| None)
+            .next()
+            .await
+            .is_err());
+        let control =
+            b"{\"id\":1,\"method\":\"item/commandExecution/requestApproval\",\"params\":{}}\n";
+        assert_eq!(
+            Reader::new(control.as_slice(), Selections::default())
+                .with_response_filter(|_| None)
+                .next()
+                .await
+                .unwrap()
+                .unwrap()["method"],
+            "item/commandExecution/requestApproval"
+        );
         let selections = Selections::default();
-        selections.lock().unwrap().insert(1,Selection {full_history:true,..Selection::default()});
+        selections.lock().unwrap().insert(
+            1,
+            Selection {
+                full_history: true,
+                ..Selection::default()
+            },
+        );
         let cancelled = selections.clone();
-        let admitted = Reader::new(history.as_slice(),selections).with_response_filter(move |id| {
-            // Deterministic check/use interleaving: registry disappears after
-            // admission, before the Reader performs history interpretation.
-            let captured=cancelled.lock().unwrap().get(&id).cloned();
-            cancelled.lock().unwrap().remove(&id);
-            captured
-        }).next().await.unwrap().unwrap();
-        assert_eq!(admitted["result"]["treerHistory"]["staleInProgressCount"],2);
+        let admitted = Reader::new(history.as_slice(), selections)
+            .with_response_filter(move |id| {
+                // Deterministic check/use interleaving: registry disappears after
+                // admission, before the Reader performs history interpretation.
+                let captured = cancelled.lock().unwrap().get(&id).cloned();
+                cancelled.lock().unwrap().remove(&id);
+                captured
+            })
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            admitted["result"]["treerHistory"]["staleInProgressCount"],
+            2
+        );
     }
     #[tokio::test]
     async fn producer_history_status_normalizes_stale_turns_after_complete_metadata() {
@@ -616,46 +715,96 @@ mod tests {
                     {"id":"newest","status":"inProgress"}
                 ]);
                 let metadata = format!("\"status\":{{\"type\":\"{status}\",\"activeFlags\":[]}}");
-                let thread = if late { format!("\"turns\":{turns},{metadata}") }
-                    else { format!("{metadata},\"turns\":{turns}") };
+                let thread = if late {
+                    format!("\"turns\":{turns},{metadata}")
+                } else {
+                    format!("{metadata},\"turns\":{turns}")
+                };
                 let wire = format!("{{\"id\":1,\"result\":{{\"thread\":{{{thread}}}}}}}\n");
                 let selections = Selections::default();
-                selections.lock().unwrap().insert(1, Selection { full_history: true, ..Selection::default() });
-                let result = Reader::new(wire.as_bytes(), selections).next().await.unwrap().unwrap();
+                selections.lock().unwrap().insert(
+                    1,
+                    Selection {
+                        full_history: true,
+                        ..Selection::default()
+                    },
+                );
+                let result = Reader::new(wire.as_bytes(), selections)
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap();
                 let turns = result["result"]["thread"]["turns"].as_array().unwrap();
                 assert_eq!(turns[0]["status"], "interrupted");
                 assert_eq!(turns[0]["treerStatusProjected"], true);
                 assert_eq!(turns[1]["status"], "completed");
                 assert!(turns[1].get("treerStatusProjected").is_none());
-                assert_eq!(turns[2]["status"], if status == "idle" { "interrupted" } else { "inProgress" });
+                assert_eq!(
+                    turns[2]["status"],
+                    if status == "idle" {
+                        "interrupted"
+                    } else {
+                        "inProgress"
+                    }
+                );
                 assert_eq!(turns[2]["treerStatusProjected"] == true, status == "idle");
             }
         }
-        for status in [Value::Null, json!({"type":"unknown"}), json!({"type":"systemError"})] {
-            let wire = serde_json::to_vec(&json!({"id":1,"result":{"thread":{"status":status,"turns":[
-                {"id":"one","status":"inProgress"},{"id":"two","status":"inProgress"}
-            ]}}})).unwrap();
+        for status in [
+            Value::Null,
+            json!({"type":"unknown"}),
+            json!({"type":"systemError"}),
+        ] {
+            let wire =
+                serde_json::to_vec(&json!({"id":1,"result":{"thread":{"status":status,"turns":[
+                    {"id":"one","status":"inProgress"},{"id":"two","status":"inProgress"}
+                ]}}}))
+                .unwrap();
             // Without a usable status the newest in-progress turn is live.
-            let value = Reader::new(wire.as_slice(), Selections::default()).next().await.unwrap().unwrap();
-            assert_eq!(value["result"]["thread"]["turns"][0]["status"], "interrupted");
-            assert_eq!(value["result"]["thread"]["turns"][1]["status"], "inProgress");
+            let value = Reader::new(wire.as_slice(), Selections::default())
+                .next()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                value["result"]["thread"]["turns"][0]["status"],
+                "interrupted"
+            );
+            assert_eq!(
+                value["result"]["thread"]["turns"][1]["status"],
+                "inProgress"
+            );
         }
     }
     #[tokio::test]
     async fn projection_only_does_not_weaken_target_or_request_authority() {
         let wire = br#"{"id":1,"result":{"thread":{"status":{"type":"idle"},"turns":[{"id":"same","status":"completed"},{"id":"same","status":"completed"}]}}}"#;
         let selections = Selections::default();
-        selections.lock().unwrap().insert(1, Selection { full_history:true, target:Some("same".into()), ..Default::default() });
+        selections.lock().unwrap().insert(
+            1,
+            Selection {
+                full_history: true,
+                target: Some("same".into()),
+                ..Default::default()
+            },
+        );
         let mut reader = Reader::new(wire.as_slice(), selections);
-        assert_eq!(reader.next().await.unwrap_err(),"provider_json_limit");
-        assert_eq!(reader.diagnostic()["limitKind"],"duplicateTarget");
-        for candidates in [false,true] {
+        assert_eq!(reader.next().await.unwrap_err(), "provider_json_limit");
+        assert_eq!(reader.diagnostic()["limitKind"], "duplicateTarget");
+        for candidates in [false, true] {
             // A response without matched full-request authority does not
             // acquire it from the mere presence of an idle status.
             let wire = serde_json::to_vec(&json!({"id":1,"result":{"thread":{"status":{"type":"idle"},"turns":[{"id":"one","status":if candidates {"inProgress"} else {"completed"}}]}}})).unwrap();
-            let mut reader = Reader::new(wire.as_slice(),Selections::default());
-            let value=reader.next().await.unwrap().unwrap();
-            assert_eq!(value["result"]["thread"]["turns"][0]["status"],if candidates {"inProgress"} else {"completed"});
+            let mut reader = Reader::new(wire.as_slice(), Selections::default());
+            let value = reader.next().await.unwrap().unwrap();
+            assert_eq!(
+                value["result"]["thread"]["turns"][0]["status"],
+                if candidates {
+                    "inProgress"
+                } else {
+                    "completed"
+                }
+            );
         }
     }
     #[tokio::test]
@@ -669,12 +818,24 @@ mod tests {
                 "paged" => thread["nextCursor"] = json!("synthetic-next"),
                 "duplicate" => thread["turns"][1]["id"] = json!("one"),
                 "reordered" => thread["turns"][1]["startedAt"] = json!(9),
-                _ => {},
+                _ => {}
             }
             let bytes = serde_json::to_vec(&json!({"id":1,"result":{"thread":thread}})).unwrap();
             let selections = Selections::default();
-            if case != "unregistered" { selections.lock().unwrap().insert(1, Selection { full_history: true, ..Default::default() }); }
-            let value = Reader::new(bytes.as_slice(), selections).next().await.unwrap().unwrap();
+            if case != "unregistered" {
+                selections.lock().unwrap().insert(
+                    1,
+                    Selection {
+                        full_history: true,
+                        ..Default::default()
+                    },
+                );
+            }
+            let value = Reader::new(bytes.as_slice(), selections)
+                .next()
+                .await
+                .unwrap()
+                .unwrap();
             let turns = value["result"]["thread"]["turns"].as_array().unwrap();
             assert_eq!(turns[0]["status"], "interrupted", "{case}");
             assert_eq!(turns[1]["status"], "inProgress", "{case}");
@@ -684,22 +845,49 @@ mod tests {
     async fn producer_52_turn_node_rich_history_keeps_existing_limits() {
         let turns = (0..52).map(|n| json!({"id":format!("synthetic-{n}"),"startedAt":n,"status":"inProgress",
             "items":[{"type":"dynamicToolCall","output":"x".repeat(230*1024),"content":vec![json!({"a":[0,1,2],"b":true});210]}]})).collect::<Vec<_>>();
-        let wire = serde_json::to_vec(&json!({"id":1,"result":{"thread":{"turns":turns,"status":{"type":"idle"}}}})).unwrap();
-        assert!(wire.len() > 11*1024*1024 && wire.len() < 13*1024*1024);
+        let wire = serde_json::to_vec(
+            &json!({"id":1,"result":{"thread":{"turns":turns,"status":{"type":"idle"}}}}),
+        )
+        .unwrap();
+        assert!(wire.len() > 11 * 1024 * 1024 && wire.len() < 13 * 1024 * 1024);
         let selections = Selections::default();
-        selections.lock().unwrap().insert(1, Selection { full_history: true, ..Default::default() });
-        let result = Reader::new(wire.as_slice(), selections).next().await.unwrap().unwrap();
-        assert!(result["result"]["treerHistory"]["nodeCount"].as_u64().unwrap() > 86_000);
-        assert_eq!(result["result"]["treerHistory"]["staleInProgressCount"],52);
-        assert!(result["result"]["thread"]["turns"].as_array().unwrap().iter().all(|t| t["status"] == "interrupted"));
+        selections.lock().unwrap().insert(
+            1,
+            Selection {
+                full_history: true,
+                ..Default::default()
+            },
+        );
+        let result = Reader::new(wire.as_slice(), selections)
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result["result"]["treerHistory"]["nodeCount"]
+                .as_u64()
+                .unwrap()
+                > 86_000
+        );
+        assert_eq!(result["result"]["treerHistory"]["staleInProgressCount"], 52);
+        assert!(result["result"]["thread"]["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["status"] == "interrupted"));
     }
     #[tokio::test]
     async fn history_turn_count_cap_refuses_instead_of_truncating() {
-        let turns=(0..100_001).map(|n|json!({"id":n.to_string(),"status":"completed"})).collect::<Vec<_>>();
-        let bytes=serde_json::to_vec(&json!({"id":1,"result":{"thread":{"turns":turns,"status":{"type":"idle"}}}})).unwrap();
-        let mut reader=Reader::new(bytes.as_slice(), Selections::default());
-        assert_eq!(reader.next().await.unwrap_err(),"provider_json_limit");
-        assert_eq!(reader.diagnostic()["limitKind"],"turnCount");
+        let turns = (0..100_001)
+            .map(|n| json!({"id":n.to_string(),"status":"completed"}))
+            .collect::<Vec<_>>();
+        let bytes = serde_json::to_vec(
+            &json!({"id":1,"result":{"thread":{"turns":turns,"status":{"type":"idle"}}}}),
+        )
+        .unwrap();
+        let mut reader = Reader::new(bytes.as_slice(), Selections::default());
+        assert_eq!(reader.next().await.unwrap_err(), "provider_json_limit");
+        assert_eq!(reader.diagnostic()["limitKind"], "turnCount");
     }
     #[tokio::test]
     async fn bounded_live_tool_shapes_and_content_free_failure_diagnostics() {
@@ -720,20 +908,27 @@ mod tests {
                 assert!(diagnostic["frameBytes"].as_u64().unwrap() < 4 * 1024 * 1024);
             }
         }
-        let bytes = format!("{{\"method\":\"SYNTHETIC_SECRET\",\"params\":{}0{}}}", "[".repeat(40), "]".repeat(40));
+        let bytes = format!(
+            "{{\"method\":\"SYNTHETIC_SECRET\",\"params\":{}0{}}}",
+            "[".repeat(40),
+            "]".repeat(40)
+        );
         let mut reader = Reader::new(bytes.as_bytes(), Selections::default());
         assert_eq!(reader.next().await.unwrap_err(), "provider_json_limit");
         assert_eq!(reader.diagnostic()["limitKind"], "depth");
         assert!(!reader.diagnostic().to_string().contains("SYNTHETIC_SECRET"));
-        for late in [false,true] {
+        for late in [false, true] {
             // A nested allowlisted method never upgrades the root class.
             let payload=serde_json::to_string(&json!({"method":"item/completed","entries":vec![json!({"a":[0,1,2],"b":true});8_000]})).unwrap();
-            let bytes=if late {format!("{{\"params\":{payload},\"method\":\"secret-control\"}}")}
-                else {format!("{{\"method\":\"secret-control\",\"params\":{payload}}}")};
-            let mut reader=Reader::new(bytes.as_bytes(),Selections::default());
-            assert_eq!(reader.next().await.unwrap_err(),"provider_json_limit");
-            assert_eq!(reader.diagnostic()["frameKind"],"other");
-            assert_eq!(reader.diagnostic()["limitKind"],"nodes");
+            let bytes = if late {
+                format!("{{\"params\":{payload},\"method\":\"secret-control\"}}")
+            } else {
+                format!("{{\"method\":\"secret-control\",\"params\":{payload}}}")
+            };
+            let mut reader = Reader::new(bytes.as_bytes(), Selections::default());
+            assert_eq!(reader.next().await.unwrap_err(), "provider_json_limit");
+            assert_eq!(reader.diagnostic()["frameKind"], "other");
+            assert_eq!(reader.diagnostic()["limitKind"], "nodes");
         }
     }
     #[tokio::test]

@@ -12,6 +12,7 @@ mod machine_upload;
 mod network;
 mod private_state;
 mod proxy;
+mod reenroll;
 mod release_update;
 mod service;
 mod startup_store;
@@ -52,9 +53,7 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    #[command(
-        about = "Install, update or inspect the treer-launch Agent launcher"
-    )]
+    #[command(about = "Install, update or inspect the treer-launch Agent launcher")]
     Launcher(launcher::LauncherArgs),
     #[command(about = "Start or reconnect the enrolled machine and restore its workloads")]
     Restore {
@@ -87,7 +86,7 @@ struct UpdateArgs {
     /// Signed release channel to follow when --version is absent.
     #[arg(long, env = "TREER_RELEASE_CHANNEL", default_value = "stable")]
     channel: String,
-    /// Exact release tag to install, such as v0.1.16.
+    /// Exact release tag to install, such as v0.2.0.
     #[arg(long)]
     version: Option<String>,
     /// Override the bundled official trust with a local SPKI Ed25519 PEM key.
@@ -113,16 +112,6 @@ enum ServiceCommand {
     Restart,
     #[command(about = "Hot restart only the replaceable Controller")]
     RestartController,
-    #[command(
-        about = "Windows: change a stopped machine's root without moving files or starting services"
-    )]
-    RelocateRoot {
-        #[arg(long)]
-        root: PathBuf,
-        /// Acknowledge that all saved relative workload paths must exist in the new root.
-        #[arg(long, required = true)]
-        accept_workload_migration: bool,
-    },
     #[command(
         about = "Repair and activate a partially installed service without a new enrollment key"
     )]
@@ -166,6 +155,10 @@ struct ConnectArgs {
     /// Confirm that the persistent proxy and agent host may use this account's permissions.
     #[arg(long)]
     accept_risk: bool,
+    /// Confirm stopping the old Host's running workloads when connect replaces
+    /// an existing local registration (new root or Proxy, or a stale machine).
+    #[arg(long)]
+    replace: bool,
 }
 
 #[derive(Debug, Clone, ClapArgs)]
@@ -456,7 +449,6 @@ async fn run_service_command(args: ServiceArgs) -> Result<()> {
         ServiceCommand::Start
             | ServiceCommand::Restart
             | ServiceCommand::RestartController
-            | ServiceCommand::RelocateRoot { .. }
             | ServiceCommand::Repair { .. }
     ) {
         service::require_windows_administrator()?;
@@ -482,9 +474,6 @@ async fn run_service_command(args: ServiceArgs) -> Result<()> {
                 ServiceCommand::Stop => service::stop(&workspace),
                 ServiceCommand::Restart => service::restart(&workspace),
                 ServiceCommand::RestartController => service::restart_controller(&workspace),
-                ServiceCommand::RelocateRoot { root, .. } => {
-                    service::relocate_root(&workspace, &root)
-                }
                 ServiceCommand::Repair { service_mode } => {
                     let network = select_network_mode(config.network_mode)?;
                     let activation =
@@ -526,82 +515,108 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
     // selection, the claim and any configuration replacement run under it.
     let registration = service::lock_machine_registration(&enrollment.workspace_id)?;
     service::finish_machine_replacement(&registration, &enrollment.workspace_id)?;
-    if let Some(mut config) = service::registered_config(&enrollment.workspace_id)? {
-        service::warn_shared_account(&config.server_id)?;
-        if let Some(root) = &args.root {
-            if std::fs::canonicalize(root)? != std::fs::canonicalize(&config.root)? {
-                anyhow::bail!("existing enrollment root is unchanged; stop the Host and use service relocate-root --root ... --accept-workload-migration explicitly");
-            }
-        }
+    if let Some(installed) = service::registered_config(&enrollment.workspace_id)? {
+        service::warn_shared_account(&installed.server_id)?;
         let installed_proxy = normalize_http_url(
-            Url::parse(&config.proxy).context("invalid proxy URL in installed service config")?,
+            Url::parse(&installed.proxy)
+                .context("invalid proxy URL in installed service config")?,
         )?;
-        if installed_proxy != proxy {
-            anyhow::bail!(
-                "workspace {} is already connected to {}; uninstall it before connecting the same workspace ID to {}",
-                enrollment.workspace_id,
-                installed_proxy,
-                proxy
-            );
-        }
-        service::save_machine_identity(&identity)?;
-        let response = claim_machine_enrollment(
+        let reasons = reenroll::replacement_reasons(
+            &installed,
+            args.root.as_deref(),
+            &installed_proxy,
             &proxy,
-            &args.enrollment_key,
-            &identity,
-            Some(config.server_id.clone()),
+        );
+        // Validate a requested root before the key is claimed.
+        let requested_root = if reasons.is_empty() {
+            None
+        } else {
+            args.root
+                .as_deref()
+                .map(|root| service::new_enrollment_root(Some(root)))
+                .transpose()?
+        };
+        let workloads = reenroll::running_workloads(&installed.host_socket).await;
+        service::save_machine_identity(&identity)?;
+        let mut consent = reenroll::ReplaceConsent {
+            replace: args.replace,
+            prompt: !args.non_interactive && io::stdin().is_terminal(),
+            input: &mut input,
+            output: &mut output,
+        };
+        let claimed = reenroll::claim_for_existing(
+            &installed,
+            &reasons,
+            installed_proxy == proxy,
+            workloads,
+            |count, reasons| consent.confirm(count, reasons),
+            |existing| claim_machine_enrollment(&proxy, &args.enrollment_key, &identity, existing),
         )
-        .await
-        .map_err(|error| {
-            stale_installation_hint(error, &enrollment.workspace_id, &config.server_id)
-        })?;
+        .await?;
+        let response = claimed.response;
         if response.workspace_id != enrollment.workspace_id {
             anyhow::bail!("Proxy returned a workspace that does not match the enrollment key");
         }
-        let previous = config.clone();
+        let mut config = installed.clone();
         config.machine_token = response.machine_token;
         if config.operator_credential.is_empty() {
             config.operator_credential = new_operator_credential();
+        }
+        if claimed.replace {
+            if let Some(root) = requested_root {
+                config.root = root;
+            }
         }
         config.proxy = proxy.to_string();
         config.service_manager = selection.manager;
         config.service_fallback_reason = selection.fallback_reason.clone();
         config.network_mode = Some(network);
-        if response.server_id != previous.server_id {
-            // The previous machine was deleted in the Console: the Proxy minted
-            // a new machine for this installation. Switch the registration to
-            // it; the old machine's local state is left behind, never adopted.
+        if response.server_id != installed.server_id {
+            // The Proxy minted a new machine for this installation (the old one
+            // was deleted in the Console or no longer accepts this identity).
+            // Switch the registration to it; the old machine's local state is
+            // left behind, never adopted.
             service::validate_proxy_server_id(&response.server_id)?;
             config.server_id = response.server_id.clone();
             config.host_socket = service::host_socket_path(&response.server_id)?;
             let activation =
-                service::replace_machine_registration(&registration, &previous, config)
+                service::replace_machine_registration(&registration, &installed, config)
                     .await
                 .with_context(|| {
                     format!(
                         "machine {} was enrolled but switching the local registration from {} failed; repair it with `treer-agent-server service --workspace {} repair`",
-                        response.server_id, previous.server_id, enrollment.workspace_id
+                        response.server_id, installed.server_id, enrollment.workspace_id
                     )
                 })?;
             println!(
-                "treer: machine {} replaced the deleted machine {} for workspace {}",
-                response.server_id, previous.server_id, enrollment.workspace_id
+                "treer: machine {} replaced machine {} for workspace {}",
+                response.server_id, installed.server_id, enrollment.workspace_id
             );
             drop(registration);
             return service::wait_for_foreground(activation).await;
         }
-        let activation = service::refresh_registration_and_wait(config)
-            .await
-            .with_context(|| {
-                format!(
-                    "machine credential was saved but service activation failed; repair it with `treer-agent-server service --workspace {} repair`",
-                    enrollment.workspace_id
-                )
-            })?;
-        println!(
-            "treer: reusing machine {} for workspace {}",
-            identity.name, enrollment.workspace_id
-        );
+        let activation = if claimed.replace {
+            service::replace_registration_in_place(&registration, &installed, config).await
+        } else {
+            service::refresh_registration_and_wait(config).await
+        }
+        .with_context(|| {
+            format!(
+                "machine credential was saved but service activation failed; repair it with `treer-agent-server service --workspace {} repair`",
+                enrollment.workspace_id
+            )
+        })?;
+        if claimed.replace {
+            println!(
+                "treer: replaced the local registration of machine {} for workspace {}",
+                identity.name, enrollment.workspace_id
+            );
+        } else {
+            println!(
+                "treer: reusing machine {} for workspace {}",
+                identity.name, enrollment.workspace_id
+            );
+        }
         drop(registration);
         return service::wait_for_foreground(activation).await;
     }
@@ -647,9 +662,9 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
 
 /// Proxy enrollment refusal with its fixed code; the message is user-facing.
 #[derive(Debug)]
-struct EnrollmentFailure {
-    code: String,
-    message: String,
+pub(crate) struct EnrollmentFailure {
+    pub(crate) code: String,
+    pub(crate) message: String,
 }
 
 impl std::fmt::Display for EnrollmentFailure {
@@ -659,30 +674,6 @@ impl std::fmt::Display for EnrollmentFailure {
 }
 
 impl std::error::Error for EnrollmentFailure {}
-
-/// A conflict while reusing an installed service means the local service
-/// configuration names a machine this installation no longer owns (for example
-/// the state directory was recreated, or the machine was deleted in the Console
-/// while another installation still holds it). Point at the exact local reset.
-fn stale_installation_hint(
-    error: anyhow::Error,
-    workspace: &str,
-    server_id: &str,
-) -> anyhow::Error {
-    let Some(EnrollmentFailure { code, message }) = error.downcast_ref::<EnrollmentFailure>()
-    else {
-        return error;
-    };
-    if code != "machine_identity_conflict" {
-        return error;
-    }
-    let config_dir = treer_platform::config_directory()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "the Treer configuration directory".to_string());
-    anyhow::anyhow!(
-        "{message}. The installed service configuration in {config_dir} still names machine {server_id} for workspace {workspace}, but this installation identity does not own it. If that machine was deleted or replaced, remove the stale local service with `treer-agent-server service --workspace {workspace} uninstall`, then run connect again; a fresh machine will be enrolled."
-    )
-}
 
 fn new_operator_credential() -> String {
     format!("opc_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
@@ -875,67 +866,6 @@ fn sibling_treer_binary() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn stale_installation_hint_only_rewrites_identity_conflicts() {
-        let conflict = anyhow::Error::new(super::EnrollmentFailure {
-            code: "machine_identity_conflict".into(),
-            message: "the installed machine is bound to another installation identity".into(),
-        });
-        let hinted = super::stale_installation_hint(conflict, "ws_a", "srv_old").to_string();
-        assert!(hinted.contains("srv_old") && hinted.contains("ws_a"));
-        assert!(hinted.contains("treer-agent-server service --workspace ws_a uninstall"));
-        assert!(!hinted.contains("Bearer") && !hinted.contains("opc_"));
-        let other = anyhow::Error::new(super::EnrollmentFailure {
-            code: "invalid_machine_enrollment".into(),
-            message: "enrollment key is invalid".into(),
-        });
-        assert_eq!(
-            super::stale_installation_hint(other, "ws_a", "srv_old").to_string(),
-            "enrollment key is invalid"
-        );
-        let plain = anyhow::anyhow!("connection refused");
-        assert_eq!(
-            super::stale_installation_hint(plain, "ws_a", "srv_old").to_string(),
-            "connection refused"
-        );
-    }
-
-    #[test]
-    fn offline_root_migration_requires_explicit_acknowledgement() {
-        use clap::Parser;
-        assert!(super::Args::try_parse_from([
-            "treer-agent-server",
-            "service",
-            "--workspace",
-            "fixture",
-            "relocate-root",
-            "--root",
-            "."
-        ])
-        .is_err());
-        let parsed = super::Args::try_parse_from([
-            "treer-agent-server",
-            "service",
-            "--workspace",
-            "fixture",
-            "relocate-root",
-            "--root",
-            ".",
-            "--accept-workload-migration",
-        ])
-        .unwrap();
-        assert!(matches!(
-            parsed.command,
-            Some(super::Command::Service(super::ServiceArgs {
-                command: super::ServiceCommand::RelocateRoot {
-                    accept_workload_migration: true,
-                    ..
-                },
-                ..
-            }))
-        ));
-    }
-
-    #[test]
     fn workload_proxy_url_contains_only_public_base() {
         let input = url::Url::parse(
             "wss://user:fixture-secret@proxy.example:8443/connect?key=fixture#secret",
@@ -1113,6 +1043,7 @@ mod tests {
             name: name.map(str::to_string),
             non_interactive,
             accept_risk,
+            replace: false,
         }
     }
 

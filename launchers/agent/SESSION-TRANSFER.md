@@ -216,7 +216,7 @@ semantic CLI command, credential or general filesystem API is introduced.
 
 The actor serializes the export against prompt/settings commands. It requires
 the exact current idle thread and initialized adapter with no active input or
-pending interrupt; transport/recovery/storage fences, queued/uncertain receipts,
+pending interrupt; a stopped/restarting provider or storage failure, queued or in-flight receipts,
 pending acknowledgements/notifications, any goal and running background tasks
 refuse. Provider events continue through the normal event pump during filesystem
 work; any observed event invalidates that export, without rolling back the event,
@@ -366,9 +366,10 @@ Copied/replaced private directories, mismatched sessions/harnesses, unsafe or
 invalid checkpoints, and missing intent refuse before spawning a provider.
 An intent without a checkpoint cannot bootstrap again. There is no automatic
 retry, delete/recreate, cleanup of a reservation or conversion to a new UUID.
-Ordinary resumed uncertainty remains fenced with its AIS recovery controls
-reachable; an existing unknown receipt is not a reason to kill that provider
-or treat the receipt as successful. `session run` ignores inherited port files.
+Once the target runs, ordinary launcher recovery applies: a prompt that was in
+flight is settled from the resumed provider history (never replayed if history
+shows it was delivered), and the queue keeps moving. `session run` ignores
+inherited port files.
 
 Use the **existing** normal Create API/command to persist that exact command,
 for example, after explicitly reviewing the prepared target on that machine:

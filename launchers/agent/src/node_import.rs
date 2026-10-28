@@ -200,11 +200,30 @@ fn empty_node_images(root: &Path) -> Result<Option<(u64, u64)>> {
 // for Node rollback, without interpreting it as a Codex goal or replaying it.
 fn inert_goal_usage(bytes: &[u8]) -> Result<()> {
     let value = crate::bounded_json::decode(bytes)?;
-    crate::runtime::node_fields(&value, &["sessionId", "goalKey", "goal", "pendingExit", "tokensUsed", "timeUsedSeconds", "resultTokens"])?;
-    if !value["sessionId"].as_str().is_some_and(|s| !s.is_empty() && s.len() <= 1024 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
-        || value["goalKey"] != ""
-        || ["goal", "pendingExit", "tokensUsed", "timeUsedSeconds"].into_iter().any(|key| !value.get(key).is_some_and(Value::is_null))
-        || !value["resultTokens"].as_f64().is_some_and(|n| n.is_finite() && n >= 0.0)
+    crate::runtime::node_fields(
+        &value,
+        &[
+            "sessionId",
+            "goalKey",
+            "goal",
+            "pendingExit",
+            "tokensUsed",
+            "timeUsedSeconds",
+            "resultTokens",
+        ],
+    )?;
+    if !value["sessionId"].as_str().is_some_and(|s| {
+        !s.is_empty()
+            && s.len() <= 1024
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    }) || value["goalKey"] != ""
+        || ["goal", "pendingExit", "tokensUsed", "timeUsedSeconds"]
+            .into_iter()
+            .any(|key| !value.get(key).is_some_and(Value::is_null))
+        || !value["resultTokens"]
+            .as_f64()
+            .is_some_and(|n| n.is_finite() && n >= 0.0)
     {
         bail!("node_import_goal_usage_not_inert");
     }
@@ -217,14 +236,22 @@ pub fn prepare(
     explicit_session: Option<&str>,
     allow_import: bool,
 ) -> Result<()> {
-    prepare_inner(root, cwd, agent, explicit_session, allow_import,None).map_err(|_| {
+    prepare_inner(root, cwd, agent, explicit_session, allow_import, None).map_err(|_| {
         anyhow::anyhow!(
             "node_state_import_failed; source preserved; inspect local backup before retry"
         )
     })
 }
-pub fn prepare_claude(root:&Path,cwd:&Path,agent:&str,session:Option<&str>,seed:Option<&Path>)->Result<()> {
-    prepare_inner(root,cwd,agent,session,seed.is_some(),seed).map_err(|_|anyhow::anyhow!("claude_state_import_failed; source preserved; no fresh-session fallback"))
+pub fn prepare_claude(
+    root: &Path,
+    cwd: &Path,
+    agent: &str,
+    session: Option<&str>,
+    seed: Option<&Path>,
+) -> Result<()> {
+    prepare_inner(root, cwd, agent, session, seed.is_some(), seed).map_err(|_| {
+        anyhow::anyhow!("claude_state_import_failed; source preserved; no fresh-session fallback")
+    })
 }
 fn prepare_inner(
     root: &Path,
@@ -232,7 +259,7 @@ fn prepare_inner(
     agent: &str,
     explicit_session: Option<&str>,
     allow_import: bool,
-    claude_seed:Option<&Path>,
+    claude_seed: Option<&Path>,
 ) -> Result<()> {
     let store = Store::open(root, cwd)?;
     if fs::symlink_metadata(root.join(".node-backup-restored")).is_ok() {
@@ -341,10 +368,14 @@ fn prepare_inner(
         }
     }
     let mut state = crate::runtime::import_node_queue(&thread, &queue)?;
-    if let Some(seed)=claude_seed {
-        let seed=crate::bounded_json::decode(&read(seed,16*1024*1024)?)?;
-        let hash=backup.files.iter().find(|e|e.name=="queue.json").map(|e|e.sha256.as_str());
-        crate::claude::import_history(&mut state,&seed,agent,cwd,hash)?;
+    if let Some(seed) = claude_seed {
+        let seed = crate::bounded_json::decode(&read(seed, 16 * 1024 * 1024)?)?;
+        let hash = backup
+            .files
+            .iter()
+            .find(|e| e.name == "queue.json")
+            .map(|e| e.sha256.as_str());
+        crate::claude::import_history(&mut state, &seed, agent, cwd, hash)?;
     }
     // Recheck source after conversion, before the only publication. Same-account
     // concurrent mutation remains an operator precondition, as with Node.
@@ -442,7 +473,11 @@ mod tests {
         write_new(&f.source.join(name), bytes).unwrap();
         prepare(&f.private, &f.cwd, "ag_test", Some("thread-test"), true).unwrap();
         assert_eq!(fs::read(f.private.join(BACKUP).join(name)).unwrap(), bytes);
-        let saved = Store::open(&f.private, &f.cwd).unwrap().load().unwrap().unwrap();
+        let saved = Store::open(&f.private, &f.cwd)
+            .unwrap()
+            .load()
+            .unwrap()
+            .unwrap();
         assert!(saved["goals"].is_null());
         assert_eq!(saved["threadId"], "thread-test");
         restore(&f.private, &f.cwd, "ag_test").unwrap();
@@ -452,10 +487,23 @@ mod tests {
     fn goal_sidecar_requires_explicit_inert_shape_and_preserves_refused_backup() {
         let base = json!({"sessionId":"old-session","goalKey":"","goal":null,"pendingExit":null,"tokensUsed":null,"timeUsedSeconds":null,"resultTokens":0});
         let mut faults = Vec::new();
-        for (key, value) in [("goal", json!({"status":"active"})), ("pendingExit", json!({"status":"done"})), ("goalKey", json!("old-goal")), ("tokensUsed", json!(0)), ("timeUsedSeconds", json!(0)), ("resultTokens", json!(-1)), ("resultTokens", json!("0")), ("sessionId", json!("")), ("unknown", Value::Null)] {
-            let mut invalid = base.clone(); invalid[key] = value; faults.push(serde_json::to_vec(&invalid).unwrap());
+        for (key, value) in [
+            ("goal", json!({"status":"active"})),
+            ("pendingExit", json!({"status":"done"})),
+            ("goalKey", json!("old-goal")),
+            ("tokensUsed", json!(0)),
+            ("timeUsedSeconds", json!(0)),
+            ("resultTokens", json!(-1)),
+            ("resultTokens", json!("0")),
+            ("sessionId", json!("")),
+            ("unknown", Value::Null),
+        ] {
+            let mut invalid = base.clone();
+            invalid[key] = value;
+            faults.push(serde_json::to_vec(&invalid).unwrap());
         }
-        let mut missing = base.clone(); missing.as_object_mut().unwrap().remove("pendingExit");
+        let mut missing = base.clone();
+        missing.as_object_mut().unwrap().remove("pendingExit");
         faults.push(serde_json::to_vec(&missing).unwrap());
         faults.push(br#"{"goal":null,"goal":{"status":"active"}}"#.to_vec());
         for bytes in faults {

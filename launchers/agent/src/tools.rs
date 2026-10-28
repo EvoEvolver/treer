@@ -52,7 +52,9 @@ pub(crate) fn provider(harness: &str) -> Result<String> {
     }
     match which(name) {
         Some(path) => Ok(path.display().to_string()),
-        None => bail!("{name} was not found on PATH; install it or set {variable} to its absolute path"),
+        None => {
+            bail!("{name} was not found on PATH; install it or set {variable} to its absolute path")
+        }
     }
 }
 
