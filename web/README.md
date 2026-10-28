@@ -213,7 +213,11 @@ reconnect from a stream cursor, fit-on-resize (never resizing the PTY to a
 hidden zero-size container) and mobile key rows (`mobile-terminal-keys.tsx`).
 Historical output replay swallows terminal queries (DA, CPR/DSR, DECRQM, OSC
 colour, window reports) so replay does not answer stale queries; live queries
-and user input are untouched (`lib/terminal-replay.ts`).
+and user input are untouched (`lib/terminal-replay.ts`). Output is written to
+xterm as bytes and acknowledged once parsed (the Proxy flow window); resets are
+an in-band RIS so they apply in order with queued output. `e2e/terminal-stream.spec.ts` streams heavy
+CLI output through a byte-faithful model of the Host/Proxy path and compares
+every buffer line with a headless xterm.
 
 **Agent Interface embed** (`isolated-agent-interface.tsx`), when the Proxy
 advertises `agent.interface-embed.v1`:

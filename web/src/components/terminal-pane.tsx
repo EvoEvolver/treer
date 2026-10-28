@@ -40,10 +40,10 @@ interface TerminalControlMessage {
 }
 
 const MAX_PENDING_INPUT_BYTES = 32_768
-const TERMINAL_FLOW_WINDOW_BYTES = 256 * 1024
-const MAX_PENDING_OUTPUT_BYTES = TERMINAL_FLOW_WINDOW_BYTES * 2
-const MAX_PENDING_OUTPUT_WRITES = 1024
-const TERMINAL_BACKLOG_CLOSE_CODE = 4001
+// RIS, parsed in order with the output queued before it. Terminal.reset()
+// would apply immediately (ahead of queued writes) and keep the parser inside
+// any escape sequence the previous stream was cut in.
+const FULL_RESET = new Uint8Array([0x1b, 0x63])
 
 interface PendingTerminalWrite {
   bytes: number
@@ -102,9 +102,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     let cursor: StreamCursor | null = null
     let replayChunksRemaining = 0
     let replayCursor: StreamCursor | null = null
-    let pendingOutputBytes = 0
     let reconnectAfterWrites = false
-    let resetOnReady = false
+    // Output past the cursor is on screen: the next attach must replay all.
+    let fullReplay = false
     let flowControlActive = false
     const pendingInput: string[] = []
     const commitQueue: PendingTerminalWrite[] = []
@@ -238,11 +238,14 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     const maybeReconnect = () => {
       if (disposed || !reconnectAfterWrites || commitQueue.length > 0) return
       reconnectAfterWrites = false
-      const delay = Math.min(1_000 * 2 ** reconnectAttempt, 10_000)
+      // A detached slow consumer resumes from its cursor right away.
+      const delay = reconnectAttempt === 0 ? 0 : Math.min(1_000 * 2 ** (reconnectAttempt - 1), 10_000)
       reconnectAttempt += 1
       reconnectTimer = window.setTimeout(() => connect(false), delay)
     }
 
+    // The Proxy bounds unacknowledged output, so xterm never holds more than
+    // one flow window; every byte is written and acknowledged once parsed.
     const queueOutput = (data: Uint8Array, currentSocket: WebSocket) => {
       let outputCursor: StreamCursor | null = null
       let waitsForCursor = true
@@ -263,14 +266,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
         refreshAfterWrite,
         parsed: false,
       }
-      pendingOutputBytes += data.byteLength
       commitQueue.push(pending)
-      if (pendingOutputBytes > MAX_PENDING_OUTPUT_BYTES || commitQueue.length > MAX_PENDING_OUTPUT_WRITES) {
-        resetOnReady = true
-        if (currentSocket.readyState === WebSocket.OPEN) {
-          currentSocket.close(TERMINAL_BACKLOG_CLOSE_CODE, "terminal output backlog")
-        }
-      }
       const flowControlled = flowControlActive
       // xterm batches queued writes into time slices. Feeding it every frame keeps
       // that batching intact; serializing callbacks here makes small-frame TUIs stall.
@@ -279,7 +275,6 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
         // before the next queued live write. Frame receipt/counts are too early.
         if (pending.refreshAfterWrite) endReplay()
         pending.parsed = true
-        pendingOutputBytes = Math.max(0, pendingOutputBytes - pending.bytes)
         if (disposed) return
         if (flowControlled) {
           pendingAcks.set(currentSocket, (pendingAcks.get(currentSocket) ?? 0) + pending.bytes)
@@ -301,7 +296,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       window.clearTimeout(reconnectTimer)
       reconnectAllowed = true
       if (initial) onStatusChange("connecting")
-      socket = new WebSocket(terminalUrl(workspaceId, agentId, terminal.cols, terminal.rows, cursor))
+      socket = new WebSocket(terminalUrl(workspaceId, agentId, terminal.cols, terminal.rows, fullReplay ? null : cursor))
       socket.binaryType = "arraybuffer"
       const currentSocket = socket
       currentSocket.onmessage = (event) => {
@@ -314,8 +309,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
         if (message.type === "ready") {
           reconnectAttempt = 0
           flowControlActive = message.replay_chunks != null
-          if (resetOnReady || shouldResetTerminal(cursor, message)) terminal.reset()
-          resetOnReady = false
+          if (fullReplay || shouldResetTerminal(cursor, message)) terminal.write(FULL_RESET)
+          fullReplay = false
           if (message.stream_epoch && message.revision != null) {
             replayCursor = { stream_epoch: message.stream_epoch, revision: message.revision }
             replayChunksRemaining = message.replay_chunks ?? 1
@@ -361,7 +356,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
         for (const pending of commitQueue) {
           if (pending.waitsForCursor && !pending.cursor) {
             pending.waitsForCursor = false
-            resetOnReady = true
+            fullReplay = true
           }
         }
         finalizeWrites()

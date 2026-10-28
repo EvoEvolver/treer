@@ -376,8 +376,13 @@ App content must never run on the Console origin.
 
 **Terminals** are revisioned byte streams: the Host keeps a bounded ring per
 stream epoch, reconnects send their last cursor, and the Host returns later
-chunks plus a gap flag if the ring moved past it. This works across Proxy
-replicas.
+chunks plus a gap flag if the ring moved past it; a replay the ring truncated
+starts at the next escape-sequence or line boundary. This works across Proxy
+replicas. Delivery is lossless: the Controller relay resyncs from the Host on
+any skipped revision, and the browser acknowledges parsed bytes so at most a
+256 KiB window is unacknowledged. A browser that stays behind long enough to
+fill its Proxy queue is detached and resumes from its cursor; if output past
+the cursor was already shown it resets and takes the full replay.
 
 **Machine exec and files** reuse the Proxy-to-Controller command path. Exec is
 one argv with a 30-second ceiling, bounded output and a minimal environment
