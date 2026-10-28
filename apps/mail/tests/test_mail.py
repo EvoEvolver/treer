@@ -5,11 +5,9 @@ for key in list(os.environ):
     if key.startswith(('TREER_', 'AGENT_UI_', 'CODEX_UI_', 'MAIL_', 'POLICY_', 'SOUL_', 'ISSUES_', 'EMAIL_ENDPOINT_')) or key.lower() in ('http_proxy','https_proxy','all_proxy','no_proxy'):
         del os.environ[key]
 import http.client
-import hashlib
 import json
 import os
 import socket
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -23,10 +21,6 @@ from pathlib import Path
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 MAIL = APP_ROOT / "mail.py"
-MIGRATE = APP_ROOT / "migrate.py"
-FAKE_TREER = APP_ROOT / "tests/fixtures/fake_treer.py"
-FAKE_PSQL = APP_ROOT / "tests/fixtures/fake_psql.py"
-SQLITE_FIXTURE = APP_ROOT / "tests/fixtures/legacy-mail-v1.sqlite.sql"
 
 
 def core_message(message_id: str = "msg_inbound") -> dict[str, object]:
@@ -344,188 +338,6 @@ class MailServerTest(unittest.TestCase):
         self.assertIn("fetch(applicationUrl(path)", source)
         vite_config = (APP_ROOT / "web" / "vite.config.ts").read_text(encoding="utf-8")
         self.assertIn('base: "./"', vite_config)
-
-
-class MigrationTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
-        self.database = self.root / "legacy.sqlite3"
-        connection = sqlite3.connect(self.database)
-        connection.executescript(SQLITE_FIXTURE.read_text(encoding="utf-8"))
-        connection.close()
-        self.fake_state = self.root / "fake-treer.json"
-        self.fake_state.write_text("{}", encoding="utf-8")
-        FAKE_TREER.chmod(0o755)
-        FAKE_PSQL.chmod(0o755)
-
-    def tearDown(self) -> None:
-        self.temporary.cleanup()
-
-    def run_migration(self, *arguments: str, environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        merged = os.environ.copy()
-        merged["FAKE_TREER_STATE"] = str(self.fake_state)
-        if environment:
-            merged.update(environment)
-        return subprocess.run(
-            [sys.executable, str(MIGRATE), *arguments],
-            capture_output=True,
-            text=True,
-            env=merged,
-            timeout=30,
-            check=False,
-        )
-
-    def test_sqlite_migration_is_topological_restartable_and_complete(self) -> None:
-        report = self.root / "report.json"
-        export = self.root / "export.jsonl"
-        common = (
-            "--source",
-            str(self.database),
-            "--workspace",
-            "workspace-a",
-            "--actor",
-            "test-owner",
-            "--treer",
-            str(FAKE_TREER),
-            "--batch-size",
-            "2",
-            "--report",
-            str(report),
-            "--export-file",
-            str(export),
-        )
-        completed = self.run_migration(*common)
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        value = json.loads(report.read_text(encoding="utf-8"))
-        self.assertTrue(value["completed"])
-        self.assertEqual(value["schema_version"], 2)
-        self.assertEqual(value["actor"], "test-owner")
-        self.assertEqual(value["source_sha256_scope"], "database_file")
-        self.assertEqual(
-            value["source_sha256"], hashlib.sha256(self.database.read_bytes()).hexdigest()
-        )
-        self.assertEqual(value["message_count"], 4)
-        self.assertEqual(value["context_edge_count"], 4)
-        self.assertEqual(value["delivery_count"], 5)
-        self.assertEqual(value["read_delivery_count"], 2)
-        self.assertTrue(value["requires_human_relogin"])
-        self.assertEqual(value["completed_batch_count"], 2)
-        self.assertEqual(
-            value["target_counts"],
-            {
-                "processed_messages": 4,
-                "imported_messages": 4,
-                "existing_messages": 0,
-            },
-        )
-        self.assertIn("started_at", value)
-        self.assertIn("completed_at", value)
-        self.assertTrue(
-            all("started_at" in batch and "completed_at" in batch for batch in value["batches"])
-        )
-        records = [json.loads(line) for line in export.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual(
-            [record["message_id"] for record in records],
-            ["legacy_root", "legacy_branch_a", "legacy_branch_b", "legacy_merge"],
-        )
-        state = json.loads(self.fake_state.read_text(encoding="utf-8"))
-        self.assertEqual(len(state["imports"]), 2)
-        self.assertEqual(len(state["imported_messages"]), 4)
-
-        repeated = self.run_migration(*common)
-        self.assertEqual(repeated.returncode, 0, repeated.stderr)
-        repeated_state = json.loads(self.fake_state.read_text(encoding="utf-8"))
-        self.assertEqual(len(repeated_state["imports"]), 2)
-        self.assertEqual(len(repeated_state["imported_messages"]), 4)
-        repeated_report = json.loads(report.read_text(encoding="utf-8"))
-        self.assertEqual(repeated_report["resume_count"], 1)
-
-    def test_interrupted_migration_resumes_from_body_free_checkpoint(self) -> None:
-        report = self.root / "interrupted-report.json"
-        arguments = (
-            "--source",
-            str(self.database),
-            "--workspace",
-            "workspace-a",
-            "--actor",
-            "change-ticket-42",
-            "--treer",
-            str(FAKE_TREER),
-            "--batch-size",
-            "2",
-            "--report",
-            str(report),
-        )
-        interrupted = self.run_migration(
-            *arguments, environment={"FAKE_TREER_FAIL_IMPORT_ONCE_AT": "2"}
-        )
-        self.assertNotEqual(interrupted.returncode, 0)
-        checkpoint = json.loads(report.read_text(encoding="utf-8"))
-        self.assertFalse(checkpoint["completed"])
-        self.assertEqual(checkpoint["completed_batch_count"], 1)
-        self.assertEqual(
-            checkpoint["failure"],
-            {
-                "code": "mail_migration_failed",
-                "stage": "import_batch",
-                "batch_index": 1,
-            },
-        )
-        encoded_checkpoint = json.dumps(checkpoint)
-        for body in ("Root", "Branch A", "Branch B", "Merge"):
-            self.assertNotIn(body, encoded_checkpoint)
-
-        resumed = self.run_migration(*arguments)
-        self.assertEqual(resumed.returncode, 0, resumed.stderr)
-        completed = json.loads(report.read_text(encoding="utf-8"))
-        self.assertTrue(completed["completed"])
-        self.assertEqual(completed["resume_count"], 1)
-        self.assertEqual(completed["completed_batch_count"], 2)
-        self.assertNotIn("failure", completed)
-        state = json.loads(self.fake_state.read_text(encoding="utf-8"))
-        self.assertEqual(state["import_attempts"], 3)
-        self.assertEqual(len(state["imports"]), 2)
-        self.assertEqual(len(state["imported_messages"]), 4)
-
-    def test_postgres_export_path_uses_structured_psql_json(self) -> None:
-        export = self.root / "sqlite-export.jsonl"
-        sqlite_result = self.run_migration(
-            "--source",
-            str(self.database),
-            "--workspace",
-            "workspace-a",
-            "--actor",
-            "test-owner",
-            "--dry-run",
-            "--report",
-            str(self.root / "sqlite-report.json"),
-            "--export-file",
-            str(export),
-        )
-        self.assertEqual(sqlite_result.returncode, 0, sqlite_result.stderr)
-        postgres_result = self.run_migration(
-            "--source",
-            "postgresql://legacy.invalid/mail",
-            "--source-kind",
-            "postgres",
-            "--workspace",
-            "workspace-a",
-            "--actor",
-            "test-owner",
-            "--psql",
-            str(FAKE_PSQL),
-            "--dry-run",
-            "--report",
-            str(self.root / "postgres-report.json"),
-            environment={"FAKE_PSQL_MESSAGES": str(export)},
-        )
-        self.assertEqual(postgres_result.returncode, 0, postgres_result.stderr)
-        value = json.loads((self.root / "postgres-report.json").read_text(encoding="utf-8"))
-        self.assertEqual(value["source_kind"], "postgres")
-        self.assertEqual(value["source_sha256_scope"], "workspace_export")
-        self.assertEqual(value["message_count"], 4)
-        self.assertEqual(value["legacy_sessions"], {"active": 1, "expired": 1})
 
 
 def free_port() -> int:

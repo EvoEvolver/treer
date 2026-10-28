@@ -36,10 +36,6 @@ Both environment variables are required. Config keys:
 `config.schema.json` documents the first five keys; it does not yet list
 `workspace_id` or `browser_origins`, which `mail.py` accepts.
 
-`migrate.py` imports a database from the old standalone Mail into Core Message
-with an operator-authenticated `treer` CLI (resumable; the source is not
-modified).
-
 ## Routes
 
 - `GET /api/health`, `GET /api/config`
