@@ -789,23 +789,15 @@ impl Uploads {
                 ));
             }
         }
-        // The upload is out of the registry while it is verified and
-        // published, so the (up to 128 MiB) read-back never holds the lock
-        // other uploads' chunks need; a concurrent chunk or abort for this id
-        // sees "not active" meanwhile.
+        // The upload is out of the registry while it is published, so the
+        // lock other uploads' chunks need is not held; a concurrent chunk or
+        // abort for this id sees "not active" meanwhile.
         drop(entries);
         let hash = if upload.chunked() {
             upload.committed_hash.clone()
         } else {
             upload.file_hash.clone()
         };
-        // Fail closed before publishing: the staging file must hold exactly
-        // the written bytes and hash to what was acknowledged. On a mismatch
-        // the upload stays registered (staging kept) for abort or the reaper.
-        if let Err(error) = verify_staged(&mut upload, &hash) {
-            self.lock()?.insert(upload_id.to_owned(), upload);
-            return Err(error);
-        }
         let staged = upload
             .staged
             .take()
@@ -1017,42 +1009,6 @@ impl Uploads {
         file.flush().unwrap();
         file.seek(SeekFrom::Start(written)).unwrap();
     }
-}
-
-/// The staging file must be exactly `written` bytes long and hash to the
-/// acknowledged digest; read back through the held parent descriptor.
-fn verify_staged(upload: &mut Upload, expected: &Sha256) -> Result<(), ProtocolError> {
-    let staged = upload
-        .staged
-        .as_mut()
-        .expect("active upload keeps its staging file");
-    staged.file_mut().flush().map_err(io_failure)?;
-    let length = staged.file_mut().metadata().map_err(io_failure)?.len();
-    if length != upload.written {
-        return Err(failure(
-            "machine_upload_content_mismatch",
-            "the staging file length differs from the bytes written; refusing to publish",
-        ));
-    }
-    let mut reader = staged.reopen_read().map_err(io_failure)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    let mut total = 0_u64;
-    loop {
-        let read = reader.read(&mut buffer).map_err(io_failure)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        total += read as u64;
-    }
-    if total != upload.written || hasher.finalize() != expected.clone().finalize() {
-        return Err(failure(
-            "machine_upload_content_mismatch",
-            "the staging file does not hash to the acknowledged content; refusing to publish",
-        ));
-    }
-    Ok(())
 }
 
 /// Discards bytes written since the committed offset and restores the hash

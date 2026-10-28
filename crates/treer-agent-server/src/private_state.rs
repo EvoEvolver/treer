@@ -2,20 +2,16 @@
 //!
 //! Layout: `<Treer state dir>/agent-private/<server_id>/<agent_id>`. The three
 //! Treer levels are created with mode 0700 (Windows: the protected current-user
-//! DACL) and re-verified before every use: a directory, not a symlink or
-//! reparse point, owned by the Controller user and closed to group/others. The
-//! canonical ancestors above `agent-private` must be directories owned by the
-//! Controller user or root and must not be writable by others unless sticky.
-//! The path derives only from the Controller's own server ID and the stable
-//! Agent ID; callers, requests, profiles and inherited environments never
-//! supply it.
+//! DACL) so other OS users cannot read them. The path derives only from the
+//! Controller's own server ID and the stable Agent ID; callers, requests,
+//! profiles and inherited environments never supply it.
 //!
 //! Directories survive stop, restart, recovery and Controller replacement and
 //! are removed only by an explicit purge after the Proxy confirms permanent
 //! deletion (`deleted_agents` tombstone). The Controller never reads file
 //! content below an Agent directory; it only sizes and deletes its own
-//! namespace. This is a same-user privacy boundary (see docs/security.md), not
-//! operating-system isolation, and the quota is cooperative admission control.
+//! namespace. Processes of the same OS user are trusted (see
+//! docs/security.md); the quota is cooperative admission control.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -32,76 +28,11 @@ use uuid::Uuid;
 pub const ENVIRONMENT_VARIABLE: &str = "TREER_AGENT_PRIVATE_STATE_DIR";
 /// Directory name below the Treer state directory.
 pub const ROOT_DIRECTORY_NAME: &str = "agent-private";
-/// Version-control markers (directory, file or link) that make a tree a
-/// worktree. `.git` may be a file (git worktrees/submodules).
-pub const VCS_MARKERS: [&str; 6] = [".git", ".hg", ".jj", ".svn", ".bzr", ".sl"];
-/// Defence in depth inside every agent-private root: tools and VCS that do
-/// look into hidden state ignore everything below it.
+/// Tools and VCS that look into hidden state ignore everything below the root.
 const IGNORE_FILES: [&str; 2] = [".gitignore", ".ignore"];
 
-/// Where an Agent's private directory may live (#133, security ruling 2611).
-/// A version-controlled tree is refused wherever the cwd is: a marker at the
-/// private directory or any of its ancestors up to the filesystem root means a
-/// `git add -A` could collect attachments. Below the cwd, only a hidden first
-/// component is allowed (hidden OS state under a home is neither scanned nor
-/// committed); a non-hidden path, or a cwd equal to the private directory, is
-/// refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Placement {
-    /// Not below the working directory and not in any version-controlled tree.
-    Outside,
-    /// Below the working directory with a hidden first component and no VCS
-    /// marker from the private directory up to the filesystem root.
-    HiddenOutsideVcs,
-    /// Below (or equal to) the working directory on a non-hidden path.
-    InsideCwd,
-    /// A VCS marker exists at the private directory or one of its ancestors
-    /// (any file type, inspected with `lstat` only), or a marker could not be
-    /// inspected (fail closed). Independent of the working directory.
-    InsideVcsWorktree,
-}
-
-/// Both paths must already be canonical (physical) paths; canonicalization
-/// only resolves aliases and never replaces the private directory's own
-/// no-follow/ownership/mode checks. Markers are inspected with
-/// `symlink_metadata`: nothing is followed or read, a marker of any file type
-/// counts, and any error other than "not found" counts as a marker.
-pub fn private_directory_placement(cwd: &Path, private_dir: &Path) -> Placement {
-    for directory in private_dir.ancestors() {
-        for marker in VCS_MARKERS {
-            match fs::symlink_metadata(directory.join(marker)) {
-                Ok(_) => return Placement::InsideVcsWorktree,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    tracing::warn!(
-                        marker,
-                        kind = ?error.kind(),
-                        "VCS marker could not be inspected; treating the tree as version-controlled"
-                    );
-                    return Placement::InsideVcsWorktree;
-                }
-            }
-        }
-    }
-    let Ok(relative) = private_dir.strip_prefix(cwd) else {
-        return Placement::Outside;
-    };
-    let hidden_first = relative
-        .components()
-        .next()
-        .and_then(|component| component.as_os_str().to_str())
-        .is_some_and(|name| name.starts_with('.') && name != "." && name != "..");
-    if hidden_first {
-        Placement::HiddenOutsideVcs
-    } else {
-        // Includes cwd == private directory (empty relative path).
-        Placement::InsideCwd
-    }
-}
-
 /// `.gitignore` and `.ignore` containing `*` in the agent-private root,
-/// created exclusively with mode 0600 and never rewritten. Failure is logged:
-/// the root stays usable because placement is enforced independently.
+/// created exclusively with mode 0600 and never rewritten. Failure is logged.
 fn ensure_ignore_files(root: &Path) {
     for name in IGNORE_FILES {
         let path = root.join(name);
@@ -159,47 +90,6 @@ fn unavailable(path: &Path, error: io::Error) -> ProtocolError {
     )
 }
 
-/// Fixed code for the Windows product rule: private state is only served to
-/// an Administrators-group account; a standard account gets this code instead
-/// of a misleading DACL verdict.
-pub const WINDOWS_REQUIRES_ADMINISTRATOR: &str = "windows_requires_administrator";
-
-/// Windows: whether this process runs under an Administrators-group token.
-/// Decided from the token alone (never from names, paths or environment) and
-/// cached for the process lifetime; a classification error counts as not an
-/// administrator (fail closed). Always true elsewhere.
-fn windows_account_is_administrator() -> bool {
-    #[cfg(windows)]
-    {
-        static ADMINISTRATOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ADMINISTRATOR.get_or_init(|| match treer_platform::account_class() {
-            Ok(treer_platform::WindowsAccountClass::Standard) => false,
-            Ok(_) => true,
-            Err(error) => {
-                warn!(%error, "Windows account classification failed; treating as non-administrator");
-                false
-            }
-        })
-    }
-    #[cfg(not(windows))]
-    true
-}
-
-fn requires_administrator() -> ProtocolError {
-    ProtocolError::new(
-        WINDOWS_REQUIRES_ADMINISTRATOR,
-        "Treer on Windows requires an account in the Administrators group; private state is unavailable",
-    )
-}
-
-fn unsafe_directory(path: &Path, reason: &str) -> ProtocolError {
-    warn!(path = %path.display(), reason, "Agent private state directory failed its safety check");
-    ProtocolError::new(
-        "agent_private_state_unsafe",
-        "Agent private state directory failed its safety check; inspect the Controller log",
-    )
-}
-
 /// Disk usage of one Agent directory as the Controller measured it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Measurement {
@@ -219,8 +109,8 @@ pub struct PrivateStateRoot {
 impl PrivateStateRoot {
     /// `root` is the Controller-derived `agent-private` directory. Its parent
     /// (the Treer state directory) must exist or be creatable; the root and the
-    /// server level are created and verified now, so the root exists for
-    /// file-transfer protection before any Agent starts.
+    /// server level are created now, so the root exists for file-transfer
+    /// protection before any Agent starts.
     pub fn open(root: &Path, server_id: &str) -> Result<Self, ProtocolError> {
         if !root.is_absolute() {
             return Err(ProtocolError::new(
@@ -230,11 +120,6 @@ impl PrivateStateRoot {
         }
         if !valid_identity(server_id) {
             return Err(invalid_identity());
-        }
-        // Product rule first: a non-administrator Windows account gets the
-        // fixed code before any directory is created, resolved or inspected.
-        if !windows_account_is_administrator() {
-            return Err(requires_administrator());
         }
         let (parent, name) = match (root.parent(), root.file_name()) {
             (Some(parent), Some(name)) => (parent, name),
@@ -252,7 +137,7 @@ impl PrivateStateRoot {
             server: root.join(server_id),
             root,
         };
-        state.verify_levels()?;
+        state.ensure_levels()?;
         Ok(state)
     }
 
@@ -269,45 +154,38 @@ impl PrivateStateRoot {
         Ok(self.server.join(agent_id))
     }
 
-    /// Ancestors above the root, then the root and server levels. Creates the
-    /// two Treer levels when absent.
-    fn verify_levels(&self) -> Result<(), ProtocolError> {
-        verify_ancestors(&self.root)?;
+    /// Creates the root and server levels when absent.
+    fn ensure_levels(&self) -> Result<(), ProtocolError> {
         ensure_private_directory(&self.root)?;
         ensure_ignore_files(&self.root);
         ensure_private_directory(&self.server)
     }
 
-    /// Create or re-verify the Agent directory and every level above it. Any
-    /// unsafe level fails closed; nothing below the Agent directory is read.
+    /// Create the Agent directory and every level above it when absent.
     pub fn prepare(&self, agent_id: &str) -> Result<PathBuf, ProtocolError> {
         let directory = self.agent_directory(agent_id)?;
-        if !windows_account_is_administrator() {
-            return Err(requires_administrator());
-        }
-        self.verify_levels()?;
+        self.ensure_levels()?;
         ensure_private_directory(&directory)?;
         Ok(directory)
     }
 
-    /// Re-verify an existing Agent directory without creating anything. Quota
+    /// An existing Agent directory, without creating anything. Quota
     /// operations use this so a purged or never-started Agent cannot recreate
     /// its directory through the local API.
     pub fn verify_existing(&self, agent_id: &str) -> Result<PathBuf, ProtocolError> {
         let directory = self.agent_directory(agent_id)?;
-        if !windows_account_is_administrator() {
-            return Err(requires_administrator());
+        match fs::metadata(&directory) {
+            Ok(metadata) if metadata.is_dir() => Ok(directory),
+            Ok(_) => Err(unavailable(
+                &directory,
+                io::Error::other("not a directory"),
+            )),
+            Err(error) => Err(unavailable(&directory, error)),
         }
-        self.verify_levels()?;
-        match fs::symlink_metadata(&directory) {
-            Ok(metadata) => verify_private_directory(&directory, &metadata)?,
-            Err(error) => return Err(unavailable(&directory, error)),
-        }
-        Ok(directory)
     }
 
     /// Agent directories currently present under this server. Only names that
-    /// are valid identities and real (non-link) directories are reported.
+    /// are valid identities and directories are reported.
     pub fn agent_ids(&self) -> io::Result<Vec<String>> {
         let mut ids = Vec::new();
         for entry in fs::read_dir(&self.server)? {
@@ -316,7 +194,7 @@ impl PrivateStateRoot {
                 continue;
             };
             let file_type = entry.file_type()?;
-            if valid_identity(&name) && file_type.is_dir() && !file_type.is_symlink() {
+            if valid_identity(&name) && file_type.is_dir() {
                 ids.push(name);
             }
         }
@@ -332,41 +210,18 @@ impl PrivateStateRoot {
     }
 
     /// Remove an Agent directory after the Proxy confirmed permanent deletion.
-    /// Returns false when nothing was present. The directory is re-checked
-    /// before and after removal; a link at the Agent level is never followed.
+    /// Returns false when nothing was present. Links are removed, never
+    /// followed.
     pub fn purge(&self, agent_id: &str) -> Result<bool, ProtocolError> {
         let directory = self.agent_directory(agent_id)?;
-        if !windows_account_is_administrator() {
-            return Err(requires_administrator());
-        }
-        verify_ancestors(&self.root)?;
-        for level in [&self.root, &self.server] {
-            match fs::symlink_metadata(level) {
-                Ok(metadata) => verify_private_directory(level, &metadata)?,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-                Err(error) => return Err(unavailable(level, error)),
-            }
-        }
-        match fs::symlink_metadata(&directory) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                    return Err(unsafe_directory(&directory, "not_a_private_directory"));
-                }
-            }
+        let removed = match fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(&directory),
+            Ok(_) => fs::remove_file(&directory),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(unavailable(&directory, error)),
-        }
-        // std::fs::remove_dir_all does not follow symbolic links: a link below
-        // the Agent directory is unlinked and its target is left untouched.
-        fs::remove_dir_all(&directory).map_err(|error| unavailable(&directory, error))?;
-        match fs::symlink_metadata(&directory) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
-            Ok(_) => Err(unavailable(
-                &directory,
-                io::Error::other("directory still present after removal"),
-            )),
-            Err(error) => Err(unavailable(&directory, error)),
-        }
+            Err(error) => Err(error),
+        };
+        removed.map_err(|error| unavailable(&directory, error))?;
+        Ok(true)
     }
 }
 
@@ -397,58 +252,10 @@ fn measure_directory(directory: &Path) -> io::Result<Measurement> {
     Ok(measurement)
 }
 
-/// Canonical ancestors of the root (exclusive). Each must be a real directory
-/// owned by the Controller user or root and must not be writable by others
-/// unless the sticky bit prevents renaming foreign entries (for example /tmp).
-fn verify_ancestors(root: &Path) -> Result<(), ProtocolError> {
-    let mut ancestors: Vec<&Path> = root.ancestors().skip(1).collect();
-    ancestors.reverse();
-    for ancestor in ancestors {
-        let metadata =
-            fs::symlink_metadata(ancestor).map_err(|error| unavailable(ancestor, error))?;
-        if metadata.file_type().is_symlink() {
-            return Err(unsafe_directory(ancestor, "ancestor_symlink"));
-        }
-        if !metadata.is_dir() {
-            return Err(unsafe_directory(ancestor, "ancestor_not_a_directory"));
-        }
-        #[cfg(windows)]
-        if is_reparse_point(&metadata) {
-            return Err(unsafe_directory(ancestor, "ancestor_reparse_point"));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{MetadataExt, PermissionsExt};
-            let uid = metadata.uid();
-            if uid != nix::unistd::geteuid().as_raw() && uid != 0 {
-                return Err(unsafe_directory(ancestor, "ancestor_foreign_owner"));
-            }
-            let mode = metadata.permissions().mode();
-            if mode & 0o022 != 0 && mode & 0o1000 == 0 {
-                return Err(unsafe_directory(ancestor, "ancestor_writable_by_others"));
-            }
-        }
-    }
-    Ok(())
-}
-
 fn ensure_private_directory(path: &Path) -> Result<(), ProtocolError> {
-    if !windows_account_is_administrator() {
-        return Err(requires_administrator());
-    }
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => verify_private_directory(path, &metadata),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            match create_private_directory(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(unavailable(path, error)),
-            }
-            // Re-check after creation: a concurrent same-user writer may have
-            // placed a link or a foreign directory at this name meanwhile.
-            let metadata = fs::symlink_metadata(path).map_err(|error| unavailable(path, error))?;
-            verify_private_directory(path, &metadata)
-        }
+    match create_private_directory(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
         Err(error) => Err(unavailable(path, error)),
     }
 }
@@ -464,62 +271,6 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
         fs::create_dir(path)?;
         treer_platform::secure_directory(path)
     }
-}
-
-#[cfg(windows)]
-fn is_reparse_point(metadata: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-fn verify_private_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), ProtocolError> {
-    if !windows_account_is_administrator() {
-        return Err(requires_administrator());
-    }
-    if metadata.file_type().is_symlink() {
-        return Err(unsafe_directory(path, "symlink"));
-    }
-    if !metadata.is_dir() {
-        return Err(unsafe_directory(path, "not_a_directory"));
-    }
-    #[cfg(windows)]
-    {
-        if is_reparse_point(metadata) {
-            return Err(unsafe_directory(path, "reparse_point"));
-        }
-        // Existing directories (and later DACL changes) are re-read, not
-        // trusted from the creation branch: owner must be the current user and
-        // the protected DACL may only allow the current user and SYSTEM.
-        match treer_platform::private_path_is_secure(path) {
-            Ok(true) => {}
-            Ok(false) => {
-                // SIDs, control flags and masks only: enough to diagnose a
-                // foreign owner or inherited entry without exposing content.
-                // One bounded, categorical log line and the fixed code; the
-                // path-logging helper is deliberately not used on this branch.
-                let report = treer_platform::private_path_security_report(path)
-                    .unwrap_or_else(|error| format!("report unavailable: {error}"));
-                warn!(%report, reason = "insecure_dacl", "Agent private state directory failed its safety check");
-                return Err(ProtocolError::new(
-                    "agent_private_state_unsafe",
-                    "Agent private state directory failed its safety check; inspect the Controller log",
-                ));
-            }
-            Err(error) => return Err(unavailable(path, error)),
-        }
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if metadata.uid() != nix::unistd::geteuid().as_raw() {
-            return Err(unsafe_directory(path, "foreign_owner"));
-        }
-        if metadata.permissions().mode() & 0o077 != 0 {
-            return Err(unsafe_directory(path, "group_or_world_accessible"));
-        }
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -846,116 +597,6 @@ impl QuotaLedger {
 }
 
 #[cfg(test)]
-mod placement_tests {
-    use super::*;
-
-    fn scratch() -> PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("treer-placement-{}", uuid::Uuid::new_v4().simple()));
-        fs::create_dir_all(&path).unwrap();
-        fs::canonicalize(path).unwrap()
-    }
-
-    /// cwd = HOME with the state directory on a hidden path is allowed; any
-    /// VCS marker from the private directory up to the filesystem root, a
-    /// non-hidden relative path, or an uninspectable marker refuses.
-    #[test]
-    fn placement_allows_hidden_state_under_a_plain_home_and_refuses_repositories() {
-        let base = scratch();
-        let home = base.join("home");
-        let private = home.join(".local/state/treer/agent-private/srv_a/ag_a");
-        fs::create_dir_all(&private).unwrap();
-        fs::create_dir_all(home.join("projects/app")).unwrap();
-        assert_eq!(
-            private_directory_placement(&home, &private),
-            Placement::HiddenOutsideVcs
-        );
-        assert_eq!(
-            private_directory_placement(&home.join("projects/app"), &private),
-            Placement::Outside
-        );
-        // cwd equal to the private directory is "inside" (empty relative path).
-        assert_eq!(
-            private_directory_placement(&private, &private),
-            Placement::InsideCwd
-        );
-        // A repository anywhere above the private directory refuses even when
-        // the cwd is elsewhere entirely (git add -A could collect attachments).
-        fs::create_dir_all(base.join(".git")).unwrap();
-        assert_eq!(
-            private_directory_placement(&home.join("projects/app"), &private),
-            Placement::InsideVcsWorktree
-        );
-        fs::remove_dir_all(base.join(".git")).unwrap();
-        // Non-hidden relative path (root/state/...) is refused as inside cwd.
-        let visible = home.join("state/agent-private/srv_a/ag_a");
-        fs::create_dir_all(&visible).unwrap();
-        assert_eq!(
-            private_directory_placement(&home, &visible),
-            Placement::InsideCwd
-        );
-        // Markers at the private directory, between, at cwd, and at a cwd
-        // ancestor each refuse; any marker name and any file type counts.
-        for (where_, marker) in [
-            (private.clone(), ".git"),
-            (home.join(".local/state"), ".hg"),
-            (home.clone(), ".jj"),
-            (base.clone(), ".svn"),
-            (home.join(".local"), ".bzr"),
-            (home.clone(), ".sl"),
-        ] {
-            let path = where_.join(marker);
-            fs::create_dir_all(&path).unwrap();
-            assert_eq!(
-                private_directory_placement(&home, &private),
-                Placement::InsideVcsWorktree,
-                "{}",
-                path.display()
-            );
-            fs::remove_dir_all(&path).unwrap();
-        }
-        // `.git` as a file (worktrees, submodules) and as a dangling symlink.
-        fs::write(home.join(".git"), b"gitdir: elsewhere").unwrap();
-        assert_eq!(
-            private_directory_placement(&home, &private),
-            Placement::InsideVcsWorktree
-        );
-        fs::remove_file(home.join(".git")).unwrap();
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(base.join("absent-target"), home.join(".git")).unwrap();
-            assert_eq!(
-                private_directory_placement(&home, &private),
-                Placement::InsideVcsWorktree
-            );
-            fs::remove_file(home.join(".git")).unwrap();
-        }
-        assert_eq!(
-            private_directory_placement(&home, &private),
-            Placement::HiddenOutsideVcs
-        );
-        // A marker that cannot be inspected fails closed.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if rustix_like_not_root() {
-                let locked = home.join(".local/state");
-                fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
-                let verdict = private_directory_placement(&home, &private);
-                fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
-                assert_eq!(verdict, Placement::InsideVcsWorktree);
-            }
-        }
-        fs::remove_dir_all(base).unwrap();
-    }
-
-    #[cfg(unix)]
-    fn rustix_like_not_root() -> bool {
-        !nix::unistd::geteuid().is_root()
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1120,74 +761,10 @@ mod tests {
         );
         assert!(state.verify_existing("ag_2").is_ok());
         assert!(!state.purge("ag_1").unwrap(), "second purge is a no-op");
-        // A link at the Agent level is never removed through, nor reported.
+        // A link at the Agent level is removed itself, never followed.
         std::os::unix::fs::symlink(&outside, root.join("srv_a").join("ag_link")).unwrap();
-        assert_eq!(
-            state.purge("ag_link").unwrap_err().code,
-            "agent_private_state_unsafe"
-        );
+        assert!(state.purge("ag_link").unwrap());
         assert!(outside.join("keep").exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn links_foreign_files_open_modes_and_unsafe_ancestors_fail_closed() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
-        let fixture = Fixture::new();
-        let root = fixture.0.join("agent-private");
-        let state = PrivateStateRoot::open(&root, "srv_a").unwrap();
-        let elsewhere = fixture.0.join("elsewhere");
-        fs::create_dir(&elsewhere).unwrap();
-        symlink(&elsewhere, root.join("srv_a").join("linked")).unwrap();
-        assert_eq!(
-            state.prepare("linked").unwrap_err().code,
-            "agent_private_state_unsafe"
-        );
-        fs::write(root.join("srv_a").join("file"), b"not a dir").unwrap();
-        assert_eq!(
-            state.prepare("file").unwrap_err().code,
-            "agent_private_state_unsafe"
-        );
-        let open = root.join("srv_a").join("open");
-        fs::create_dir(&open).unwrap();
-        fs::set_permissions(&open, fs::Permissions::from_mode(0o750)).unwrap();
-        assert_eq!(
-            state.prepare("open").unwrap_err().code,
-            "agent_private_state_unsafe"
-        );
-        // A link at the server level poisons every Agent below it.
-        let other = fixture.0.join("other-root");
-        fs::create_dir(&other).unwrap();
-        symlink(&other, root.join("srv_b")).unwrap();
-        assert_eq!(
-            PrivateStateRoot::open(&root, "srv_b").unwrap_err().code,
-            "agent_private_state_unsafe"
-        );
-        // Listing ignores links and files; only real directories are Agents.
-        assert_eq!(state.agent_ids().unwrap(), vec!["open".to_string()]);
-        // The root itself may not be a link, even to a private directory.
-        let linked_root = fixture.0.join("linked-root");
-        symlink(&root, &linked_root).unwrap();
-        assert_eq!(
-            PrivateStateRoot::open(&linked_root, "srv_a")
-                .unwrap_err()
-                .code,
-            "agent_private_state_unsafe"
-        );
-        // An ancestor writable by others (without sticky) is rejected, both at
-        // open and on later re-verification; sticky world-writable passes.
-        fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o777)).unwrap();
-        assert_eq!(
-            PrivateStateRoot::open(&root, "srv_a").unwrap_err().code,
-            "agent_private_state_unsafe"
-        );
-        assert_eq!(
-            state.prepare("ag_late").unwrap_err().code,
-            "agent_private_state_unsafe"
-        );
-        fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o1777)).unwrap();
-        assert!(PrivateStateRoot::open(&root, "srv_a").is_ok());
-        fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]
@@ -1369,144 +946,5 @@ mod tests {
             "private_state_global_quota_exceeded"
         );
         assert!(ledger.reserve("b", 55, u64::MAX, later).is_ok());
-    }
-
-    /// Windows diagnostic for hosted/native runners: prints the categorical
-    /// owner/DACL report of a temp parent, a fresh secure_directory root, and
-    /// the server/agent levels, plus each verifier verdict. Never fails.
-    /// Run: cargo test -p treer-agent-server windows_private_state_dacl_diagnostic -- --ignored --nocapture
-    #[cfg(windows)]
-    #[ignore = "diagnostic only; prints per-layer DACL categories"]
-    #[test]
-    fn windows_private_state_dacl_diagnostic() {
-        fn line(layer: &str, path: &Path) {
-            let report = treer_platform::private_path_security_report(path)
-                .unwrap_or_else(|error| format!("report unavailable: {error}"));
-            let verdict = treer_platform::private_path_is_secure(path)
-                .map(|secure| secure.to_string())
-                .unwrap_or_else(|error| format!("error: {error}"));
-            println!("DACL layer={layer} secure={verdict} {report}");
-        }
-        let fixture = Fixture::new();
-        line("temp_parent", &fixture.0);
-        let root = fixture.0.join("agent-private");
-        treer_platform::secure_directory(&root).unwrap();
-        line("root_after_secure_directory", &root);
-        let plain = fixture.0.join("plain-create-dir");
-        fs::create_dir(&plain).unwrap();
-        line("plain_create_dir", &plain);
-        match PrivateStateRoot::open(&root, "srv_diag") {
-            Ok(state) => {
-                line("server", &root.join("srv_diag"));
-                match state.prepare("ag_diag") {
-                    Ok(agent) => line("agent", &agent),
-                    Err(error) => println!("DACL layer=agent prepare_failed code={}", error.code),
-                }
-            }
-            Err(error) => {
-                println!("DACL layer=server open_failed code={}", error.code);
-                line("server_if_present", &root.join("srv_diag"));
-            }
-        }
-    }
-
-    /// Windows: the live owner/DACL is what decides, not the creation branch.
-    /// Executed by the native Windows gate; it shells out to icacls to loosen
-    /// a test-private directory and removes that directory afterwards.
-    #[cfg(windows)]
-    #[test]
-    fn windows_dacl_is_verified_live_not_assumed_from_creation() {
-        fn grant_everyone(path: &Path) {
-            let status = std::process::Command::new("icacls")
-                .arg(path)
-                .args(["/grant", "*S-1-1-0:(OI)(CI)F"])
-                .status()
-                .expect("run icacls");
-            assert!(status.success(), "icacls grant failed");
-        }
-        let fixture = Fixture::new();
-        let fixture_path = fixture.0.to_string_lossy().into_owned();
-        // The diagnostic is categorical: no raw SIDs and no fixture path.
-        let report = move |path: &Path| -> String {
-            let report = treer_platform::private_path_security_report(path)
-                .unwrap_or_else(|error| format!("report unavailable: {error}"));
-            assert!(!report.contains("S-1-"), "raw SID in report: {report}");
-            assert!(!report.contains(&fixture_path), "path in report");
-            report
-        };
-        let root = fixture.0.join("agent-private");
-        // Baseline: secure_directory must produce the protected private DACL
-        // on this machine; on failure print what the system actually reports.
-        treer_platform::secure_directory(&root).unwrap();
-        assert!(
-            treer_platform::private_path_is_secure(&root).unwrap(),
-            "fresh private root is not accepted: {} (fixture {})",
-            report(&root),
-            report(&fixture.0)
-        );
-        let state = PrivateStateRoot::open(&root, "srv_a").unwrap_or_else(|error| {
-            panic!(
-                "{}: root {} / server {}",
-                error.code,
-                report(&root),
-                report(&root.join("srv_a"))
-            )
-        });
-        let agent = state.prepare("ag_1").unwrap();
-        assert!(
-            treer_platform::private_path_is_secure(&agent).unwrap(),
-            "{}",
-            report(&agent)
-        );
-        // A pre-existing directory with a wide DACL is never adopted.
-        let wide = root.join("srv_a").join("ag_wide");
-        fs::create_dir(&wide).unwrap();
-        grant_everyone(&wide);
-        assert!(
-            !treer_platform::private_path_is_secure(&wide).unwrap(),
-            "{}",
-            report(&wide)
-        );
-        assert_eq!(
-            state.prepare("ag_wide").unwrap_err().code,
-            "agent_private_state_unsafe"
-        );
-        // Loosening after creation fails the next verification of a
-        // directory that passed before.
-        grant_everyone(&agent);
-        assert!(
-            !treer_platform::private_path_is_secure(&agent).unwrap(),
-            "{}",
-            report(&agent)
-        );
-        assert_eq!(
-            state.verify_existing("ag_1").unwrap_err().code,
-            "agent_private_state_unsafe"
-        );
-        assert_eq!(
-            state.prepare("ag_1").unwrap_err().code,
-            "agent_private_state_unsafe"
-        );
-        // Everything else below the root stays usable.
-        assert!(state.prepare("ag_2").is_ok());
-        // An ACE of a type the verifier does not understand (here a callback
-        // ACE) is recorded by header only and fails closed, even when the
-        // principal would otherwise be acceptable.
-        let callback = state.prepare("ag_callback").unwrap();
-        treer_platform::apply_sddl_dacl(
-            &callback,
-            "D:P(A;;GA;;;SY)(XA;;GA;;;SY;(Member_of {SID(BA)}))",
-        )
-        .unwrap();
-        let report = report(&callback);
-        assert!(report.contains("unsupported"), "{report}");
-        assert!(
-            !treer_platform::private_path_is_secure(&callback).unwrap(),
-            "{report}"
-        );
-        assert_eq!(
-            state.verify_existing("ag_callback").unwrap_err().code,
-            "agent_private_state_unsafe"
-        );
     }
 }

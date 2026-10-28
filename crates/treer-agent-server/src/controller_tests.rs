@@ -2672,7 +2672,7 @@ async fn startup_sweep_counts_consecutive_failures_per_name_and_gives_up_after_f
 }
 
 #[tokio::test]
-async fn chunked_upload_rewinds_short_writes_and_refuses_to_publish_tampered_staging() {
+async fn chunked_upload_rewinds_short_writes_and_checks_part_lengths() {
     let (runtime, root, host_task) = upload_fixture().await;
     // The first chunk of a part fails half-way: nothing of it stays, the
     // retry lands cleanly and the published file matches the receipt hash.
@@ -2708,33 +2708,6 @@ async fn chunked_upload_rewinds_short_writes_and_refuses_to_publish_tampered_sta
     let receipt = runtime.commit_upload("upl_short0002").unwrap();
     assert_eq!(std::fs::read(root.join("short.bin")).unwrap(), b"abcdef");
     assert_eq!(receipt.sha256.as_deref(), Some(sha(b"abcdef").as_str()));
-    // Staging tampered between the last part and the commit: the commit
-    // fails closed, the staging stays for abort, nothing is published.
-    runtime
-        .begin_upload("upl_tamper001", ".", "tamper.bin", false, Some(3))
-        .unwrap();
-    runtime
-        .append_upload_chunk("upl_tamper001", Some(0), &b64(b"abc"))
-        .unwrap();
-    runtime
-        .commit_upload_part("upl_tamper001", 0, 3, &sha(b"abc"))
-        .unwrap();
-    // Through the Controller's own handle: production never writes the file
-    // from outside, and Windows refuses an external writer by sharing mode.
-    runtime
-        .inner
-        .uploads
-        .write_staging_for_test("upl_tamper001", 0, b"abX");
-    let error = runtime.commit_upload("upl_tamper001").unwrap_err();
-    assert_eq!(error.code, "machine_upload_content_mismatch");
-    assert!(!root.join("tamper.bin").exists());
-    assert!(root.join(".treer-transfer-upl_tamper001").exists());
-    assert_eq!(
-        runtime.upload_result("upl_tamper001").unwrap()["state"],
-        "active"
-    );
-    assert!(runtime.abort_upload("upl_tamper001").unwrap());
-    assert!(!root.join(".treer-transfer-upl_tamper001").exists());
     // A part whose bytes on disk differ in length from the acknowledged
     // count is discarded at part commit.
     runtime

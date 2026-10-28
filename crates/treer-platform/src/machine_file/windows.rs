@@ -288,24 +288,6 @@ impl StagedFile {
     pub fn file_mut(&mut self) -> &mut File {
         self.file.as_mut().unwrap()
     }
-    /// A read-only handle on the same staging file (volume and file index
-    /// compared with the write handle), so the caller can verify the bytes it
-    /// wrote before publishing. The write handle shares read access.
-    pub fn reopen_read(&self) -> io::Result<File> {
-        let written = self.file.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "staged file is committed")
-        })?;
-        let reader = open(&self.temporary)?;
-        let (id, _, _) = metadata(&reader)?;
-        let (own, _, _) = metadata(written)?;
-        if id != own {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "staging name no longer refers to the staged file",
-            ));
-        }
-        Ok(reader)
-    }
     pub fn commit(mut self, overwrite: bool) -> io::Result<()> {
         let mut file = self.file.take().unwrap();
         file.flush()?;

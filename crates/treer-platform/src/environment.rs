@@ -172,34 +172,7 @@ fn windows_system_exec_environment(
 
 #[cfg(any(windows, test))]
 fn system_module_directory_is_valid(path: &std::path::Path) -> bool {
-    if !path.is_absolute() {
-        return false;
-    }
-    let mut prefix = std::path::PathBuf::new();
-    for component in path.components() {
-        if matches!(component, std::path::Component::ParentDir) {
-            return false;
-        }
-        prefix.push(component.as_os_str());
-        #[cfg(windows)]
-        if matches!(component, std::path::Component::Prefix(_)) {
-            continue;
-        }
-        let Ok(metadata) = std::fs::symlink_metadata(&prefix) else {
-            return false;
-        };
-        if metadata.file_type().is_symlink() {
-            return false;
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            if metadata.file_attributes() & 0x400 != 0 {
-                return false;
-            }
-        }
-    }
-    path.is_dir()
+    path.is_absolute() && path.is_dir()
 }
 
 /// Call only from synchronous binary entry points, before creating threads or
@@ -273,18 +246,6 @@ mod tests {
             Err(std::io::Error::from_raw_os_error(5)),
         );
         assert!(!failed.contains_key(&OsString::from("PSModulePath")));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn system_module_validation_rejects_symlink_indirection() {
-        let root = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("trr-module-symlink-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("user-writable")).unwrap();
-        std::os::unix::fs::symlink(root.join("user-writable"), root.join("alias")).unwrap();
-        assert!(!system_module_directory_is_valid(&root.join("alias")));
         std::fs::remove_dir_all(root).unwrap();
     }
 
