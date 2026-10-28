@@ -129,6 +129,21 @@ fn invalid_token() -> AuthFailure {
     )
 }
 
+/// Serializes installer acceptances per machine. Hash collisions only
+/// serialize unrelated machines; they never grant authority.
+async fn lock_machine_mutation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ws: &str,
+    machine: &str,
+) -> Result<(), AuthFailure> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        .bind(format!("machine-mutation:{ws}:{machine}"))
+        .execute(&mut **tx)
+        .await
+        .map_err(AuthFailure::database)?;
+    Ok(())
+}
+
 pub(crate) fn machine_busy() -> AuthFailure {
     AuthFailure::conflict(
         "provider_cli_machine_busy",
@@ -536,12 +551,7 @@ impl AuthStore {
             return Err(invalid_token());
         }
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
-        super::lock_machine_mutation(&mut transaction, scope.workspace_id, scope.server_id).await?;
-        let update_busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM controller_update_operations WHERE workspace_id=$1 AND server_id=$2 AND holds_slot)")
-            .bind(scope.workspace_id).bind(scope.server_id).fetch_one(&mut *transaction).await.map_err(AuthFailure::database)?;
-        if update_busy {
-            return Err(machine_busy());
-        }
+        lock_machine_mutation(&mut transaction, scope.workspace_id, scope.server_id).await?;
         // A stale active row must not hold the slot forever (no poll required):
         // reconcile in this same transaction, before the busy check.
         self.reconcile_stale_in(&mut transaction, scope).await?;

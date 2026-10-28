@@ -12,15 +12,16 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-const VERSION: &str = "v0.1.13";
-const PLATFORM: &str = "darwin-aarch64";
+pub(crate) const VERSION: &str = "v0.1.13";
+pub(crate) const PLATFORM: &str = "darwin-aarch64";
 const CHANNEL: &str = "channels/stable.json";
 const MANIFEST: &str = "releases/v0.1.13/manifest.json";
 const CONTROLLER: &str = "releases/v0.1.13/darwin-aarch64/treer-agent-server";
 const CLI: &str = "releases/v0.1.13/darwin-aarch64/treer";
-const BINARY: &[u8] = b"a verified binary";
+const HOST: &str = "releases/v0.1.13/darwin-aarch64/treer-agent-host";
+pub(crate) const BINARY: &[u8] = b"a verified binary";
 
-fn signing_key() -> SigningKey {
+pub(crate) fn signing_key() -> SigningKey {
     SigningKey::from_bytes(&[7; 32])
 }
 
@@ -34,13 +35,13 @@ fn signature(bytes: &[u8]) -> Vec<u8> {
     .unwrap()
 }
 
-type Objects = HashMap<String, Vec<u8>>;
+pub(crate) type Objects = HashMap<String, Vec<u8>>;
 fn put_signed(objects: &mut Objects, path: &str, bytes: Vec<u8>) {
     objects.insert(format!("{path}.sig"), signature(&bytes));
     objects.insert(path.into(), bytes);
 }
 
-fn fixture() -> Objects {
+pub(crate) fn fixture() -> Objects {
     let mut objects = Objects::new();
     let manifest = json!({
         "schema_version": 2, "version": VERSION,
@@ -49,6 +50,7 @@ fn fixture() -> Objects {
         "artifacts": [
             { "binary": "treer-agent-server", "platform": PLATFORM, "path": CONTROLLER, "size": BINARY.len(), "sha256": digest(BINARY) },
             { "binary": "treer", "platform": PLATFORM, "path": CLI, "size": BINARY.len(), "sha256": digest(BINARY) },
+            { "binary": "treer-agent-host", "platform": PLATFORM, "path": HOST, "size": BINARY.len(), "sha256": digest(BINARY) },
         ],
     });
     put_signed(
@@ -59,6 +61,7 @@ fn fixture() -> Objects {
     resign_channel(&mut objects);
     objects.insert(CONTROLLER.into(), BINARY.to_vec());
     objects.insert(CLI.into(), BINARY.to_vec());
+    objects.insert(HOST.into(), BINARY.to_vec());
     objects
 }
 
@@ -68,20 +71,22 @@ fn resign_channel(objects: &mut Objects) {
         CHANNEL,
         serde_json::to_vec(&json!({
             "schema_version": 1, "channel": "stable", "version": VERSION,
-            "manifest_path": MANIFEST, "manifest_sha256": digest(&objects[MANIFEST]),
+            "manifest_path": MANIFEST,
         }))
         .unwrap(),
     );
 }
 
-fn change_manifest(objects: &mut Objects, change: impl FnOnce(&mut Value)) {
+pub(crate) fn change_manifest(objects: &mut Objects, change: impl FnOnce(&mut Value)) {
     let mut manifest: Value = serde_json::from_slice(&objects[MANIFEST]).unwrap();
     change(&mut manifest);
     put_signed(objects, MANIFEST, serde_json::to_vec(&manifest).unwrap());
     resign_channel(objects);
 }
 
-async fn server(objects: Objects) -> (Url, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+pub(crate) async fn server(
+    objects: Objects,
+) -> (Url, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
     let objects = Arc::new(objects);
     let requests = Arc::new(Mutex::new(Vec::new()));
     let observed = requests.clone();
@@ -115,84 +120,6 @@ fn client() -> reqwest::Client {
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .unwrap()
-}
-
-#[tokio::test]
-async fn windows_update_download_raw_envelopes_and_complete_signed_inputs() {
-    let objects = fixture();
-    let expected = objects.clone();
-    let (base, requests, task) = server(objects).await;
-    let (documents, controller, cli) = download_inputs(
-        &client(),
-        base,
-        "stable",
-        &signing_key().verifying_key(),
-        PLATFORM,
-    )
-    .await
-    .unwrap();
-    let documents = documents.borrow();
-    assert_eq!(documents.channel, expected[CHANNEL]);
-    assert_eq!(
-        documents.channel_signature,
-        expected[&format!("{CHANNEL}.sig")]
-    );
-    assert_eq!(documents.manifest, expected[MANIFEST]);
-    assert_eq!(
-        documents.manifest_signature,
-        expected[&format!("{MANIFEST}.sig")]
-    );
-    assert_eq!(documents.channel_name, "stable");
-    assert_eq!(controller.bytes(), BINARY);
-    assert_eq!(cli.bytes(), BINARY);
-    authenticate_documents(
-        documents.channel,
-        documents.channel_signature,
-        documents.manifest,
-        documents.manifest_signature,
-        documents.channel_name,
-        &signing_key().verifying_key(),
-        PLATFORM,
-    )
-    .unwrap();
-    let mut observed = requests.lock().unwrap().clone();
-    observed.sort();
-    let mut expected_paths = expected.keys().cloned().collect::<Vec<_>>();
-    expected_paths.sort();
-    assert_eq!(observed, expected_paths);
-    task.abort();
-}
-
-#[tokio::test]
-async fn windows_update_download_rejects_wrong_trust_metadata_and_binary_without_bundle() {
-    for case in 0..5 {
-        let mut objects = fixture();
-        let mut key = signing_key().verifying_key();
-        match case {
-            0 => key = SigningKey::from_bytes(&[8; 32]).verifying_key(),
-            1 => objects.get_mut(&format!("{CHANNEL}.sig")).unwrap()[0] ^= 1,
-            2 => objects.get_mut(MANIFEST).unwrap()[0] ^= 1,
-            3 => objects.get_mut(CLI).unwrap()[0] ^= 1,
-            _ => {
-                objects.insert(CHANNEL.into(), vec![b'x'; MAX_METADATA_BYTES + 1]);
-            }
-        }
-        let (base, requests, task) = server(objects).await;
-        assert!(
-            download_inputs(&client(), base, "stable", &key, PLATFORM)
-                .await
-                .is_err(),
-            "case {case}"
-        );
-        if case != 3 {
-            assert!(!requests
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|p| p == CONTROLLER || p == CLI));
-        }
-        task.abort();
-    }
 }
 
 #[test]
@@ -304,76 +231,100 @@ fn release_verifier_accepts_node_crypto_publisher_wire_format() {
     .is_err());
 }
 
-#[tokio::test]
-async fn signed_release_download_verifies_both_binaries() {
-    let (base, requests, task) = server(fixture()).await;
-    let (controller, cli) = download(
+async fn fetch_release(objects: Objects, version: &str) -> (Result<VerifiedRelease>, Vec<String>) {
+    let (base, requests, task) = server(objects).await;
+    let result = download(
         &client(),
         base,
-        "stable",
+        version,
         &signing_key().verifying_key(),
         PLATFORM,
     )
-    .await
-    .unwrap();
-    assert_eq!(controller.bytes(), BINARY);
-    assert_eq!(cli.bytes(), BINARY);
-    assert!(requests.lock().unwrap().contains(&CONTROLLER.to_owned()));
+    .await;
+    task.abort();
+    let observed = requests.lock().unwrap().clone();
+    (result, observed)
+}
+
+#[tokio::test]
+async fn signed_release_download_verifies_all_binaries() {
+    let (release, requests) = fetch_release(fixture(), VERSION).await;
+    let release = release.unwrap();
+    assert_eq!(release.controller, BINARY);
+    assert_eq!(release.cli, BINARY);
+    assert_eq!(release.host.as_deref(), Some(BINARY));
+    assert!(requests.contains(&CONTROLLER.to_owned()));
+    // An exact version never consults a channel.
+    assert!(!requests.iter().any(|path| path.starts_with("channels/")));
+
+    let mut without_host = fixture();
+    change_manifest(&mut without_host, |m| {
+        m["artifacts"].as_array_mut().unwrap().pop();
+    });
+    assert!(fetch_release(without_host, VERSION)
+        .await
+        .0
+        .unwrap()
+        .host
+        .is_none());
+}
+
+#[tokio::test]
+async fn signed_channel_names_the_version() {
+    let (base, _, task) = server(fixture()).await;
+    let key = signing_key().verifying_key();
+    assert_eq!(
+        channel_version(&client(), base.clone(), "stable", &key)
+            .await
+            .unwrap(),
+        VERSION
+    );
+    assert!(channel_version(&client(), base, "canary", &key)
+        .await
+        .is_err());
     task.abort();
 }
 
 #[tokio::test]
 async fn signed_release_rejects_bad_metadata_before_fetching_executables() {
     for case in [
-        "channel tamper",
         "missing signature",
         "forged signature",
+        "wrong key",
         "manifest tamper",
-        "manifest hash",
-        "channel binding",
-        "version path",
+        "version mismatch",
         "artifact path",
         "duplicate",
-        "missing binary",
+        "missing controller",
         "oversize",
         "metadata limit",
+        "invalid version",
     ] {
         let mut objects = fixture();
+        let mut version = VERSION;
         match case {
-            "channel tamper" => {
-                objects.get_mut(CHANNEL).unwrap().push(b' ');
-            }
             "missing signature" => {
-                objects.remove(&format!("{CHANNEL}.sig"));
+                objects.remove(&format!("{MANIFEST}.sig"));
             }
-            "forged signature" => {
+            "forged signature" | "wrong key" => {
                 let mut detached: Value =
-                    serde_json::from_slice(&objects[&format!("{CHANNEL}.sig")]).unwrap();
-                detached["signature"] = json!(STANDARD.encode(
-                    SigningKey::from_bytes(&[8; 32])
-                        .sign(&objects[CHANNEL])
-                        .to_bytes()
-                ));
+                    serde_json::from_slice(&objects[&format!("{MANIFEST}.sig")]).unwrap();
+                let other = SigningKey::from_bytes(&[8; 32]);
+                detached["signature"] =
+                    json!(STANDARD.encode(other.sign(&objects[MANIFEST]).to_bytes()));
+                if case == "wrong key" {
+                    detached["key_id"] = json!(key_id(&other.verifying_key()).unwrap());
+                }
                 objects.insert(
-                    format!("{CHANNEL}.sig"),
+                    format!("{MANIFEST}.sig"),
                     serde_json::to_vec(&detached).unwrap(),
                 );
             }
             "manifest tamper" => {
                 objects.get_mut(MANIFEST).unwrap().push(b' ');
             }
-            "manifest hash" => {
-                let bytes = objects[MANIFEST].clone();
-                put_signed(&mut objects, MANIFEST, [bytes, vec![b' ']].concat());
-            }
-            "channel binding" | "version path" => {
-                let mut channel: Value = serde_json::from_slice(&objects[CHANNEL]).unwrap();
-                if case == "channel binding" {
-                    channel["channel"] = json!("canary");
-                } else {
-                    channel["manifest_path"] = json!("https://untrusted.example/manifest.json");
-                }
-                put_signed(&mut objects, CHANNEL, serde_json::to_vec(&channel).unwrap());
+            "version mismatch" => {
+                change_manifest(&mut objects, |m| m["version"] = json!("v0.1.12"))
             }
             "artifact path" => change_manifest(&mut objects, |m| {
                 m["artifacts"][0]["path"] = json!("../evil")
@@ -382,36 +333,26 @@ async fn signed_release_rejects_bad_metadata_before_fetching_executables() {
                 let duplicate = m["artifacts"][0].clone();
                 m["artifacts"].as_array_mut().unwrap().push(duplicate);
             }),
-            "missing binary" => change_manifest(&mut objects, |m| {
-                m["artifacts"].as_array_mut().unwrap().pop();
+            "missing controller" => change_manifest(&mut objects, |m| {
+                m["artifacts"].as_array_mut().unwrap().remove(0);
             }),
             "oversize" => change_manifest(&mut objects, |m| {
                 m["artifacts"][0]["size"] = json!(MAX_BINARY_BYTES + 1)
             }),
             "metadata limit" => {
-                objects.insert(CHANNEL.into(), vec![b' '; MAX_METADATA_BYTES + 1]);
+                objects.insert(MANIFEST.into(), vec![b' '; MAX_METADATA_BYTES + 1]);
             }
+            "invalid version" => version = "v0.1.13/../../x",
             _ => unreachable!(),
         }
-        let (base, requests, task) = server(objects).await;
-        let result = download(
-            &client(),
-            base,
-            "stable",
-            &signing_key().verifying_key(),
-            PLATFORM,
-        )
-        .await;
+        let (result, requests) = fetch_release(objects, version).await;
         assert!(result.is_err(), "accepted {case}");
         assert!(
             !requests
-                .lock()
-                .unwrap()
                 .iter()
-                .any(|path| path == CONTROLLER || path == CLI),
+                .any(|path| path == CONTROLLER || path == CLI || path == HOST),
             "fetched executable before rejecting {case}"
         );
-        task.abort();
     }
 }
 
@@ -423,18 +364,8 @@ async fn signed_release_rejects_corrupt_or_wrong_size_binary() {
         vec![b'x'; BINARY.len() + 1],
     ] {
         let mut objects = fixture();
-        objects.insert(CLI.into(), bytes);
-        let (base, _, task) = server(objects).await;
-        assert!(download(
-            &client(),
-            base,
-            "stable",
-            &signing_key().verifying_key(),
-            PLATFORM
-        )
-        .await
-        .is_err());
-        task.abort();
+        objects.insert(HOST.into(), bytes);
+        assert!(fetch_release(objects, VERSION).await.0.is_err());
     }
 }
 

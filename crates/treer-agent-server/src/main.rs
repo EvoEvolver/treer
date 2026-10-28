@@ -14,30 +14,9 @@ mod private_state;
 mod provider_cli;
 mod proxy;
 mod release_update;
-#[cfg(unix)]
-pub mod self_update;
 mod service;
 mod startup_store;
-// Test-only envelope used by the Unix journal's foreign-record refusal test.
-// This does not add any Windows updater entry or runtime.
 mod tui;
-#[cfg(any(windows, test))]
-pub mod windows_update_admission;
-#[cfg(any(windows, test))]
-mod windows_update_custody;
-#[cfg(test)]
-mod windows_update_envelope;
-#[cfg(any(windows, test))]
-mod windows_update_handshake;
-#[cfg(any(windows, test))]
-mod windows_update_installation;
-#[cfg(any(windows, test))]
-pub mod windows_update_intent;
-#[cfg(any(windows, test))]
-#[cfg_attr(not(windows), allow(dead_code))]
-mod windows_update_transfer;
-#[cfg(any(windows, test))]
-mod windows_update_worker_entry;
 mod workload_proxy;
 
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -85,7 +64,7 @@ enum Command {
     },
     #[command(about = "Connect this machine to a Proxy workspace")]
     Connect(ConnectArgs),
-    #[command(about = "Download and hot-activate the latest Controller and treer CLI")]
+    #[command(about = "Download and hot-activate a signed Controller, treer CLI and Host release")]
     Update(UpdateArgs),
     #[command(hide = true, about = "Run from a saved service configuration")]
     Run {
@@ -106,9 +85,12 @@ struct UpdateArgs {
         default_value = "https://releases.treer.ai/"
     )]
     release_base_url: Url,
-    /// Signed release channel to follow.
+    /// Signed release channel to follow when --version is absent.
     #[arg(long, env = "TREER_RELEASE_CHANNEL", default_value = "stable")]
     channel: String,
+    /// Exact release tag to install, such as v0.1.16.
+    #[arg(long)]
+    version: Option<String>,
     /// Override the bundled official trust with a local SPKI Ed25519 PEM key.
     #[arg(long, env = "TREER_RELEASE_PUBLIC_KEY")]
     public_key: Option<PathBuf>,
@@ -218,68 +200,6 @@ struct ServerArgs {
 }
 
 fn main() -> Result<()> {
-    #[cfg(windows)]
-    if matches!(std::env::args_os().nth(1).as_deref(), Some(value)
-        if value == windows_update_worker_entry::SWITCH || value == windows_update_worker_entry::HOLD_SWITCH)
-    {
-        // Private finite receiver before normal configuration/Host/helpers.
-        // Neither a received receipt nor exit zero grants update authority.
-        let hold = std::env::args_os().nth(1).as_deref()
-            == Some(std::ffi::OsStr::new(
-                windows_update_worker_entry::HOLD_SWITCH,
-            ));
-        return windows_update_worker_entry::run(std::env::args_os().skip(2), hold);
-    }
-    #[cfg(windows)]
-    if std::env::args_os().nth(1).as_deref()
-        == Some(std::ffi::OsStr::new("--controller-update-worker"))
-    {
-        // Terminal, deny-on-error path before normal config/Host/metrics/CLI.
-        // This worker can only ACK a binding and exit; it cannot run updates.
-        return windows_update_handshake::run_bootstrap(std::env::args_os().skip(2));
-    }
-    // Private old-image worker MUST branch before Tokio, normal Controller
-    // startup, metrics helpers or any other threads/forks. Never fall back to
-    // ordinary service execution after malformed or failed worker bootstrap.
-    #[cfg(unix)]
-    if std::env::args_os().nth(1).as_deref()
-        == Some(std::ffi::OsStr::new("--controller-update-worker"))
-    {
-        let mut arguments = std::env::args_os().skip(2);
-        let selector = arguments
-            .next()
-            .and_then(|value| value.into_string().ok())
-            .ok_or_else(|| anyhow::anyhow!("update_worker_bootstrap_failed"))?;
-        if arguments.next().is_some() {
-            anyhow::bail!("update_worker_bootstrap_failed");
-        }
-        let worker = self_update::web_adapter::enter_worker(&selector)
-            .map_err(|_| anyhow::anyhow!("update_worker_bootstrap_failed"))?;
-        return self_update::web_adapter::run_worker(worker)
-            .map_err(|_| anyhow::anyhow!("update_recovery_required"));
-    }
-    // Only a dedicated non-release acceptance build contains this entry. The
-    // ordinary capability gate is unchanged; no remote route invokes it.
-    #[cfg(all(unix, feature = "native-update-acceptance"))]
-    if std::env::args_os().nth(1).as_deref()
-        == Some(std::ffi::OsStr::new("--hosted-native-update-acceptance"))
-    {
-        if std::env::args_os().len() != 2 {
-            anyhow::bail!("hosted_update_acceptance_refused");
-        }
-        return self_update::hosted_acceptance::submit();
-    }
-
-    // Evaluate the explicit hosted selector before service environment cleanup
-    // can erase evidence of an inherited managed caller. Absent release builds.
-    #[cfg(all(unix, feature = "native-update-acceptance"))]
-    if let Ok(Args {
-        command: Some(Command::Run { config }),
-        ..
-    }) = Args::try_parse()
-    {
-        self_update::hosted_controller_dispatch::configure(&config)?;
-    }
     // Saved service configuration supplies identity; never let a launcher or
     // service manager's inherited workload identity override it.
     if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--execute-cli"))
@@ -333,7 +253,13 @@ async fn async_main() -> Result<()> {
         None => run_server(args.server).await,
         Some(Command::Connect(connect)) => connect_machine(connect).await,
         Some(Command::Update(update)) => {
-            service::update(update.release_base_url, update.channel, update.public_key).await
+            service::update(
+                update.release_base_url,
+                update.channel,
+                update.version,
+                update.public_key,
+            )
+            .await
         }
         Some(Command::Restore { workspace }) => service::restore(&workspace).await,
         Some(Command::Run { config }) => {

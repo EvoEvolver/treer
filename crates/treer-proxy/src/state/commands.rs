@@ -1,12 +1,6 @@
 use super::*;
 
 impl AppState {
-    #[cfg(test)]
-    pub(crate) fn fixture_update_dispatch_attempts(&self) -> usize {
-        self.inner
-            .controller_update_dispatch_attempts
-            .load(std::sync::atomic::Ordering::SeqCst)
-    }
     /// Defence in depth against replay on a replacement Controller. A deletion
     /// can race this read, so the Controller's durable denial fence remains the
     /// authority for in-flight commands. Never use a cached PG result here.
@@ -57,12 +51,6 @@ impl AppState {
         server_id: &str,
         command: AgentCommand,
     ) -> Result<Value, ProtocolError> {
-        #[cfg(test)]
-        if matches!(&command, AgentCommand::ControllerUpdateDispatch { .. }) {
-            self.inner
-                .controller_update_dispatch_attempts
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
         let command_id = format!("cmd_{}", Uuid::new_v4().simple());
         if !self.inner.cluster.is_distributed() {
             return self

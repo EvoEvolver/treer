@@ -5,7 +5,9 @@ use std::fs;
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+#[cfg(any(windows, test))]
+use std::process::Stdio;
+use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -21,8 +23,6 @@ mod platforms;
 use platforms::platform;
 
 const FIRST_AUTOMATIC_PORT: u16 = 8790;
-const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
-const UPDATE_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROLLER_START_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(unix)]
 const NOHUP_STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -666,32 +666,12 @@ pub(crate) fn launcher_configs() -> Result<Vec<ServiceConfig>> {
         .collect())
 }
 
-/// Maintenance must resolve installed paths from the saved Host binding, not
-/// ServicePaths::new/current_exe: a detached updater runs a job-local copy.
-#[cfg(unix)]
-pub(crate) fn self_update_inventory() -> Result<crate::self_update::selection::Inventory> {
-    let directory =
-        config_dir().map_err(|_| anyhow::anyhow!("update_config_directory_unavailable"))?;
-    // Worker bootstrap is synchronous and may not fork an ambient PATH helper.
-    let hostname = nix::unistd::gethostname()
-        .ok()
-        .and_then(|name| name.into_string().ok())
-        .ok_or_else(|| anyhow::anyhow!("update_hostname_unavailable"))?;
-    crate::self_update::selection::Inventory::load(&directory, &hostname)
-}
-
-/// Internal worker locator only: opening it must not create/chmod existing
-/// state or accept a caller-supplied receipt directory.
-#[cfg(unix)]
-pub(crate) fn self_update_jobs_directory() -> Result<PathBuf> {
-    Ok(state_dir()
-        .map_err(|_| anyhow::anyhow!("update_state_directory_unavailable"))?
-        .join("self-update")
-        .join("jobs"))
-}
-
-pub(crate) fn controller_update_config_directory() -> Result<PathBuf> {
-    config_dir().map_err(|_| anyhow::anyhow!("controller_update_catalog_unavailable"))
+/// Locally provisioned release trust, preferred over the bundled official key.
+pub(crate) fn release_public_key_path() -> Result<PathBuf> {
+    Ok(config_dir()?
+        .parent()
+        .context("configuration directory has no parent")?
+        .join("release-signing-key.pub.pem"))
 }
 
 pub fn preflight_registration(workspace: &str, mode: ServiceMode) -> Result<ServiceSelection> {
@@ -1077,140 +1057,63 @@ fn warn_managed_agent_service_stop() {
 pub async fn update(
     release_base_url: Url,
     channel: String,
+    version: Option<String>,
     public_key: Option<PathBuf>,
 ) -> Result<()> {
-    if cfg!(windows) {
-        bail!("Windows in-place updates are not supported; stop Treer, reinstall the binaries, then run restore");
-    }
-    // Trust preflight must precede update-lock creation, staging, or activation.
-    let public_key_path = match &public_key {
-        Some(path) => path.clone(),
-        None => config_dir()?
-            .parent()
-            .context("configuration directory has no parent")?
-            .join("release-signing-key.pub.pem"),
-    };
-    let key = crate::release_update::resolve_public_key(
-        &release_base_url,
-        public_key.as_deref(),
-        &public_key_path,
-        Some(crate::release_update::OFFICIAL_PUBLIC_KEY_PEM),
-    )?;
+    // Trust preflight precedes any download or file change.
+    let key = crate::release_update::trusted_key(&release_base_url, public_key.as_deref())?;
     let services = installed_services()?;
-    let (paths, _) = services.first().context(
-        "no agent-server services are installed on this host; connect a machine before updating",
-    )?;
+    if services.is_empty() {
+        bail!("no agent-server services are installed on this host; connect a machine before updating");
+    }
     let activation_services = activation_services(&services)?;
-    let treer_executable = installed_treer_binary(&paths.executable).with_context(|| {
-        format!(
-            "could not find the installed treer CLI for {}",
-            paths.executable.display()
-        )
-    })?;
-    #[cfg(unix)]
-    let _native_update_guard = crate::self_update::web_adapter::legacy_update_guard(
-        &services
-            .iter()
-            .map(|(paths, config)| (paths.executable.clone(), config.workspace.clone()))
-            .collect::<Vec<_>>(),
-        &treer_executable,
-    )?;
-    let platform = artifact_platform(std::env::consts::OS, std::env::consts::ARCH)?;
-    let client = reqwest::Client::builder()
-        .timeout(UPDATE_DOWNLOAD_TIMEOUT)
-        // Agent terminals inherit Treer's workload HTTP proxy. Updating the
-        // Controller must not depend on the data plane it is replacing.
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .context("failed to create update client")?;
-
-    println!(
-        "treer: downloading signed {channel} {platform} Controller and CLI from {release_base_url}"
-    );
-    // Both signatures and both binary digests must pass before staging can
-    // execute either downloaded program, including its --help smoke check.
-    let (controller, cli) =
-        crate::release_update::download(&client, release_base_url, &channel, &key, platform)
+    let version = match version {
+        Some(version) => version,
+        None => {
+            crate::release_update::channel_version(
+                &crate::controller_update::http_client()?,
+                release_base_url.clone(),
+                &channel,
+                &key,
+            )
+            .await?
+        }
+    };
+    println!("treer: downloading signed {version} from {release_base_url}");
+    let platform = crate::controller_update::release_platform()
+        .context("no release artifacts exist for this platform")?;
+    let client = crate::controller_update::http_client()?;
+    let release =
+        crate::release_update::download(&client, release_base_url, &version, &key, platform)
             .await?;
-    let controller_bytes = controller.bytes();
-    let treer_bytes = cli.bytes();
-    let installed_controller = fs::read(&paths.executable)
-        .with_context(|| format!("failed to read {}", paths.executable.display()))?;
-    let installed_treer = fs::read(&treer_executable)
-        .with_context(|| format!("failed to read {}", treer_executable.display()))?;
-    let controller_changed = installed_controller.as_slice() != controller_bytes;
-    let treer_changed = installed_treer.as_slice() != treer_bytes;
-
-    let staged_controller = controller_changed
-        .then(|| stage_executable(&paths.executable, controller_bytes, "update", true))
-        .transpose()?;
-    let staged_treer = treer_changed
-        .then(|| stage_executable(&treer_executable, treer_bytes, "update", true))
-        .transpose()?;
-    let mut rollback_controller = controller_changed
-        .then(|| stage_executable(&paths.executable, &installed_controller, "rollback", false))
-        .transpose()?;
-    let mut rollback_treer = treer_changed
-        .then(|| stage_executable(&treer_executable, &installed_treer, "rollback", false))
-        .transpose()?;
+    let binaries = crate::controller_update::InstalledBinaries::current()?;
     let mut previous_epochs = Vec::with_capacity(activation_services.len());
     for (_, config) in &activation_services {
         previous_epochs.push(controller_epoch(config).await);
     }
-
-    if let Some(staged) = staged_controller {
-        staged.install(&paths.executable)?;
-        println!(
-            "treer: updated Controller at {}",
-            paths.executable.display()
-        );
+    let replaced = binaries.install(&release)?;
+    for path in &replaced {
+        println!("treer: updated {} (previous kept as .old)", path.display());
     }
-    if let Some(staged) = staged_treer {
-        if let Err(error) = staged.install(&treer_executable) {
-            if let Some(rollback) = rollback_controller.take() {
-                rollback.install(&paths.executable).with_context(|| {
-                    format!(
-                        "failed to restore the old Controller after CLI installation failed: {error:#}"
-                    )
-                })?;
-            }
+    if let Err(error) = activate_controllers(&activation_services, &previous_epochs).await {
+        if replaced.is_empty() {
             return Err(error);
         }
-        println!("treer: updated CLI at {}", treer_executable.display());
+        for path in replaced.iter().rev() {
+            crate::controller_update::restore_previous(path)?;
+        }
+        let rollback_epochs = vec![None; activation_services.len()];
+        if let Err(rollback_error) =
+            activate_controllers(&activation_services, &rollback_epochs).await
+        {
+            bail!("new Controller failed to activate ({error:#}); restored the old binaries but failed to restart the old Controller set: {rollback_error:#}");
+        }
+        bail!("new Controller failed to activate; old binaries were restored: {error:#}");
     }
-
-    let activation = activate_controllers(&activation_services, &previous_epochs).await;
-    if let Err(error) = activation {
-        let had_replacements = rollback_controller.is_some() || rollback_treer.is_some();
-        if let Some(rollback) = rollback_controller.take() {
-            rollback
-                .install(&paths.executable)
-                .context("failed to restore the old Controller")?;
-        }
-        if let Some(rollback) = rollback_treer.take() {
-            rollback
-                .install(&treer_executable)
-                .context("failed to restore the old treer CLI")?;
-        }
-        if had_replacements {
-            let rollback_epochs = vec![None; activation_services.len()];
-            if let Err(rollback_error) =
-                activate_controllers(&activation_services, &rollback_epochs).await
-            {
-                bail!(
-                    "new Controller failed to activate ({error:#}); restored the old binaries but failed to restart the old Controller set: {rollback_error:#}"
-                );
-            }
-            bail!("new Controller failed to activate; old binaries were restored: {error:#}");
-        }
-        return Err(error);
-    }
-
-    if !controller_changed && !treer_changed {
-        println!("treer: binaries were already current; Controller activation completed");
+    if replaced.is_empty() {
+        println!("treer: binaries were already {version}; Controller activation completed");
     } else {
-        println!("treer: update activated; Host and running agents were preserved");
+        println!("treer: updated to {version}; Host and running agents were preserved (a replaced Host takes effect on its next restart)");
     }
     Ok(())
 }
@@ -1278,152 +1181,6 @@ pub fn installed_treer_binary(controller: &Path) -> Option<PathBuf> {
             .map(|directory| directory.join(&binary_name))
             .find(|candidate| candidate.is_file())
     })
-}
-
-fn artifact_platform(os: &str, arch: &str) -> Result<&'static str> {
-    match (os, arch) {
-        ("linux", "x86_64") => Ok("linux-x86_64"),
-        ("linux", "aarch64") => Ok("linux-aarch64"),
-        ("macos", "x86_64") => Ok("darwin-x86_64"),
-        ("macos", "aarch64") => Ok("darwin-aarch64"),
-        _ => bail!("automatic updates are not supported on {os}/{arch}"),
-    }
-}
-
-#[derive(Debug)]
-struct StagedExecutable {
-    path: PathBuf,
-}
-
-impl StagedExecutable {
-    fn install(mut self, destination: &Path) -> Result<()> {
-        fs::rename(&self.path, destination)
-            .with_context(|| format!("failed to replace {}", destination.display()))?;
-        self.path = PathBuf::new();
-        sync_parent(destination);
-        Ok(())
-    }
-}
-
-impl Drop for StagedExecutable {
-    fn drop(&mut self) {
-        if !self.path.as_os_str().is_empty() {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-fn stage_executable(
-    destination: &Path,
-    bytes: &[u8],
-    purpose: &str,
-    validate: bool,
-) -> Result<StagedExecutable> {
-    let parent = destination
-        .parent()
-        .context("executable path has no parent directory")?;
-    let file_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("executable path has no UTF-8 file name")?;
-    let temporary = parent.join(format!(
-        ".{file_name}.{purpose}.{}",
-        Uuid::new_v4().simple()
-    ));
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o755);
-    }
-    let result = (|| -> Result<()> {
-        use std::io::Write;
-
-        {
-            // End the writable handle's scope before any validation process
-            // starts. Concurrent forks can still briefly inherit a CLOEXEC
-            // descriptor, so validation also handles transient ETXTBSY below.
-            let mut file = options
-                .open(&temporary)
-                .with_context(|| format!("failed to stage {}", destination.display()))?;
-            file.write_all(bytes)
-                .with_context(|| format!("failed to stage {}", destination.display()))?;
-            file.sync_all()
-                .with_context(|| format!("failed to sync {}", temporary.display()))?;
-        }
-        if validate {
-            validate_executable(&temporary, file_name)?;
-        }
-        Ok(())
-    })();
-    if let Err(error) = result {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
-    }
-    Ok(StagedExecutable { path: temporary })
-}
-
-fn validate_executable(path: &Path, file_name: &str) -> Result<()> {
-    let deadline = Instant::now() + UPDATE_VALIDATION_TIMEOUT;
-    let mut command = Command::new(path);
-    command
-        .arg("--help")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let mut child = retry_busy_executable(|| command.spawn(), deadline)
-        .with_context(|| format!("downloaded {file_name} is not executable on this machine"))?;
-    loop {
-        if let Some(status) = child
-            .try_wait()
-            .with_context(|| format!("failed to validate downloaded {file_name}"))?
-        {
-            return require_success(status, &format!("downloaded {file_name} --help"));
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!(
-                "downloaded {file_name} did not respond to --help within {} seconds",
-                UPDATE_VALIDATION_TIMEOUT.as_secs()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-fn retry_busy_executable<T>(
-    mut spawn: impl FnMut() -> std::io::Result<T>,
-    deadline: Instant,
-) -> std::io::Result<T> {
-    loop {
-        match spawn() {
-            Ok(child) => return Ok(child),
-            Err(error) => {
-                #[cfg(unix)]
-                if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline {
-                    std::thread::sleep(
-                        Duration::from_millis(50)
-                            .min(deadline.saturating_duration_since(Instant::now())),
-                    );
-                    continue;
-                }
-                #[cfg(not(unix))]
-                let _ = deadline;
-                return Err(error);
-            }
-        }
-    }
-}
-
-fn sync_parent(path: &Path) {
-    let Some(parent) = path.parent() else {
-        return;
-    };
-    if let Ok(directory) = fs::File::open(parent) {
-        let _ = directory.sync_all();
-    }
 }
 
 async fn controller_epoch(config: &ServiceConfig) -> Option<String> {

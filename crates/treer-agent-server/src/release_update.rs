@@ -30,7 +30,6 @@ struct Channel {
     channel: String,
     version: String,
     manifest_path: String,
-    manifest_sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -42,33 +41,27 @@ struct Manifest {
 }
 
 #[derive(Clone, Deserialize)]
-pub(super) struct Artifact {
+struct Artifact {
     binary: String,
     platform: String,
-    pub(super) path: String,
-    pub(super) sha256: String,
-    pub(super) size: usize,
+    path: String,
+    sha256: String,
+    size: usize,
 }
 
-/// Produced only after both signatures, channel/manifest digest and exact
-/// platform/binary/path bindings have been checked. Consumers may then stream
-/// the objects into private files instead of buffering executable bytes.
-pub(super) struct AuthenticatedRelease {
-    #[cfg(unix)]
-    pub(super) version: String,
-    pub(super) controller: Artifact,
-    pub(super) cli: Artifact,
-    #[cfg(any(windows, test))]
-    pub(super) manifest_sha256: String,
+/// Executable bytes whose size and SHA-256 matched a signed manifest.
+pub(crate) struct VerifiedRelease {
+    pub(crate) controller: Vec<u8>,
+    pub(crate) cli: Vec<u8>,
+    /// Absent only in manifests that predate shipping the Host.
+    pub(crate) host: Option<Vec<u8>>,
 }
 
-/// Constructed only after authenticating metadata and matching the binary digest.
-pub(super) struct VerifiedBinary(Vec<u8>);
-
-impl VerifiedBinary {
-    pub(super) fn bytes(&self) -> &[u8] {
-        &self.0
-    }
+/// Trust for the Controller's own updates: explicit key, else the local
+/// installation key, else (official distributor only) the bundled key.
+pub(crate) fn trusted_key(base: &Url, explicit: Option<&Path>) -> Result<VerifyingKey> {
+    let local = crate::service::release_public_key_path()?;
+    resolve_public_key(base, explicit, &local, Some(OFFICIAL_PUBLIC_KEY_PEM))
 }
 
 pub(super) fn load_public_key(path: &Path) -> Result<VerifyingKey> {
@@ -175,26 +168,19 @@ fn validate_channel(channel: &Channel, expected: &str) -> Result<()> {
 
 fn select_artifact<'a>(
     manifest: &'a Manifest,
-    channel: &Channel,
-    key: &VerifyingKey,
+    version: &str,
     platform: &str,
     binary: &str,
-) -> Result<&'a Artifact> {
-    if manifest.schema_version != 2
-        || manifest.version != channel.version
-        || manifest.signing_key_id != key_id(key)?
-    {
-        bail!("signed release manifest does not match the channel or trusted key");
-    }
+) -> Result<Option<&'a Artifact>> {
     let mut matches = manifest
         .artifacts
         .iter()
         .filter(|artifact| artifact.platform == platform && artifact.binary == binary);
-    let artifact = matches
-        .next()
-        .with_context(|| format!("signed manifest does not contain {platform}/{binary}"))?;
+    let Some(artifact) = matches.next() else {
+        return Ok(None);
+    };
     if matches.next().is_some()
-        || artifact.path != format!("releases/{}/{platform}/{binary}", channel.version)
+        || artifact.path != format!("releases/{version}/{platform}/{binary}")
         || artifact.size == 0
         || artifact.size > MAX_BINARY_BYTES
         || artifact.sha256.len() != 64
@@ -205,7 +191,7 @@ fn select_artifact<'a>(
     {
         bail!("signed manifest has an invalid or duplicate {platform}/{binary} artifact");
     }
-    Ok(artifact)
+    Ok(Some(artifact))
 }
 
 pub(super) fn normalize_base_url(mut base: Url) -> Result<Url> {
@@ -258,17 +244,12 @@ async fn fetch(client: &reqwest::Client, url: Url, limit: usize) -> Result<Vec<u
     Ok(bytes)
 }
 
-struct SignedDocument {
-    bytes: Vec<u8>,
-    signature: Vec<u8>,
-}
-
-async fn fetch_document(
+async fn fetch_signed(
     client: &reqwest::Client,
     base: &Url,
     path: &str,
     key: &VerifyingKey,
-) -> Result<SignedDocument> {
+) -> Result<Vec<u8>> {
     let (bytes, signature) = tokio::try_join!(
         fetch(client, base.join(path)?, MAX_METADATA_BYTES),
         fetch(
@@ -278,176 +259,89 @@ async fn fetch_document(
         ),
     )?;
     verify_signed(&bytes, &signature, key)?;
-    Ok(SignedDocument { bytes, signature })
-}
-
-async fn fetch_signed(
-    client: &reqwest::Client,
-    base: &Url,
-    path: &str,
-    key: &VerifyingKey,
-) -> Result<Vec<u8>> {
-    let document = fetch_document(client, base, path, key).await?;
-    // Existing binary-only consumers need no retained signature envelope.
-    drop(document.signature);
-    Ok(document.bytes)
+    Ok(bytes)
 }
 
 async fn fetch_binary(
     client: &reqwest::Client,
     base: &Url,
     artifact: &Artifact,
-) -> Result<VerifiedBinary> {
+) -> Result<Vec<u8>> {
     let bytes = fetch(client, base.join(&artifact.path)?, artifact.size).await?;
     if bytes.len() != artifact.size || digest(&bytes) != artifact.sha256 {
         bail!("{} failed signed size/SHA256 verification", artifact.binary);
     }
-    Ok(VerifiedBinary(bytes))
+    Ok(bytes)
 }
 
-pub(super) async fn authenticate(
+/// Version currently published on a signed channel.
+pub(crate) async fn channel_version(
     client: &reqwest::Client,
     base: Url,
     channel_name: &str,
     key: &VerifyingKey,
-    platform: &str,
-) -> Result<AuthenticatedRelease> {
+) -> Result<String> {
     let base = normalize_base_url(base)?;
     validate_channel_name(channel_name)?;
-    let channel_bytes =
-        fetch_signed(client, &base, &format!("channels/{channel_name}.json"), key).await?;
+    let bytes = fetch_signed(client, &base, &format!("channels/{channel_name}.json"), key).await?;
     let channel: Channel =
-        serde_json::from_slice(&channel_bytes).context("invalid signed release channel")?;
+        serde_json::from_slice(&bytes).context("invalid signed release channel")?;
     validate_channel(&channel, channel_name)?;
-    let manifest_bytes = fetch_signed(client, &base, &channel.manifest_path, key).await?;
-    authenticated_manifest(&channel, &manifest_bytes, key, platform)
+    Ok(channel.version)
 }
 
-fn authenticated_manifest(
-    channel: &Channel,
-    manifest_bytes: &[u8],
-    key: &VerifyingKey,
-    platform: &str,
-) -> Result<AuthenticatedRelease> {
-    if digest(manifest_bytes) != channel.manifest_sha256 {
-        bail!("release manifest SHA256 does not match the signed channel");
-    }
-    let manifest: Manifest =
-        serde_json::from_slice(manifest_bytes).context("invalid signed release manifest")?;
-    let controller = select_artifact(&manifest, channel, key, platform, "treer-agent-server")?;
-    let cli = select_artifact(&manifest, channel, key, platform, "treer")?;
-    Ok(AuthenticatedRelease {
-        #[cfg(unix)]
-        version: channel.version.clone(),
-        controller: controller.clone(),
-        cli: cli.clone(),
-        #[cfg(any(windows, test))]
-        manifest_sha256: digest(manifest_bytes),
-    })
-}
-
-/// Offline admission of independently supplied signed documents. Reuses the
-/// same signature, channel, manifest and artifact binding checks as networking.
-/// The key is separately trusted input, never read from either document.
-#[cfg(any(windows, test))]
-pub(super) fn authenticate_documents(
-    channel_bytes: &[u8],
-    channel_signature: &[u8],
-    manifest_bytes: &[u8],
-    manifest_signature: &[u8],
-    channel_name: &str,
-    key: &VerifyingKey,
-    platform: &str,
-) -> Result<AuthenticatedRelease> {
-    if [
-        channel_bytes,
-        channel_signature,
-        manifest_bytes,
-        manifest_signature,
-    ]
-    .iter()
-    .any(|bytes| bytes.len() > MAX_METADATA_BYTES)
-    {
-        bail!("signed update metadata exceeds limit");
-    }
-    validate_channel_name(channel_name)?;
-    verify_signed(channel_bytes, channel_signature, key)?;
-    let channel: Channel = serde_json::from_slice(channel_bytes)?;
-    validate_channel(&channel, channel_name)?;
-    verify_signed(manifest_bytes, manifest_signature, key)?;
-    authenticated_manifest(&channel, manifest_bytes, key, platform)
-}
-
-pub(super) async fn download(
+/// Fetch the signed manifest of exactly `version`, then this platform's
+/// executables. No executable byte is fetched before the manifest verifies.
+pub(crate) async fn download(
     client: &reqwest::Client,
     base: Url,
-    channel_name: &str,
+    version: &str,
     key: &VerifyingKey,
     platform: &str,
-) -> Result<(VerifiedBinary, VerifiedBinary)> {
+) -> Result<VerifiedRelease> {
+    if !treer_protocol::controller_update::valid_version(version) {
+        bail!("invalid release version {version:?}; expected vMAJOR.MINOR.PATCH[-PRERELEASE]");
+    }
     let base = normalize_base_url(base)?;
-    let release = authenticate(client, base.clone(), channel_name, key, platform).await?;
-    tokio::try_join!(
-        fetch_binary(client, &base, &release.controller),
-        fetch_binary(client, &base, &release.cli)
+    let bytes = fetch_signed(
+        client,
+        &base,
+        &format!("releases/{version}/manifest.json"),
+        key,
     )
-}
-
-/// Exact authenticated network documents, not reconstructed JSON or signatures.
-/// Independent admission may borrow these while keeping their original bytes.
-#[cfg(any(windows, test))]
-pub(super) struct SignedDocuments {
-    channel: SignedDocument,
-    manifest: SignedDocument,
-    channel_name: String,
-}
-
-#[cfg(any(windows, test))]
-impl SignedDocuments {
-    pub(super) fn borrow(&self) -> crate::windows_update_admission::Documents<'_> {
-        crate::windows_update_admission::Documents {
-            channel: &self.channel.bytes,
-            channel_signature: &self.channel.signature,
-            manifest: &self.manifest.bytes,
-            manifest_signature: &self.manifest.signature,
-            channel_name: &self.channel_name,
-        }
+    .await?;
+    let manifest: Manifest =
+        serde_json::from_slice(&bytes).context("invalid signed release manifest")?;
+    if manifest.schema_version != 2
+        || manifest.version != version
+        || manifest.signing_key_id != key_id(key)?
+    {
+        bail!("signed release manifest does not describe {version} under the trusted key");
     }
-}
-
-/// Reuses the existing bounded fetch, signature, metadata and binary verifier.
-/// The separately configured key is never selected from a downloaded document.
-#[cfg(any(windows, test))]
-pub(super) async fn download_inputs(
-    client: &reqwest::Client,
-    base: Url,
-    channel_name: &str,
-    key: &VerifyingKey,
-    platform: &str,
-) -> Result<(SignedDocuments, VerifiedBinary, VerifiedBinary)> {
-    let base = normalize_base_url(base)?;
-    validate_channel_name(channel_name)?;
-    let channel =
-        fetch_document(client, &base, &format!("channels/{channel_name}.json"), key).await?;
-    let parsed: Channel = serde_json::from_slice(&channel.bytes)?;
-    validate_channel(&parsed, channel_name)?;
-    let manifest = fetch_document(client, &base, &parsed.manifest_path, key).await?;
-    let release = authenticated_manifest(&parsed, &manifest.bytes, key, platform)?;
-    let (controller, cli) = tokio::try_join!(
-        fetch_binary(client, &base, &release.controller),
-        fetch_binary(client, &base, &release.cli)
+    let required = |binary| {
+        select_artifact(&manifest, version, platform, binary)?
+            .with_context(|| format!("signed manifest does not contain {platform}/{binary}"))
+    };
+    let controller = required("treer-agent-server")?;
+    let cli = required("treer")?;
+    let host = select_artifact(&manifest, version, platform, "treer-agent-host")?;
+    let (controller, cli, host) = tokio::try_join!(
+        fetch_binary(client, &base, controller),
+        fetch_binary(client, &base, cli),
+        async {
+            match host {
+                Some(host) => fetch_binary(client, &base, host).await.map(Some),
+                None => Ok(None),
+            }
+        }
     )?;
-    Ok((
-        SignedDocuments {
-            channel,
-            manifest,
-            channel_name: channel_name.to_owned(),
-        },
+    Ok(VerifiedRelease {
         controller,
         cli,
-    ))
+        host,
+    })
 }
 
 #[cfg(test)]
 #[path = "release_update_tests.rs"]
-mod tests;
+pub(crate) mod tests;

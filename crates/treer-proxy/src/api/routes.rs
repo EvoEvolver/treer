@@ -152,6 +152,10 @@ pub fn router(
             post(exec_machine),
         )
         .registered_route(
+            "/agent/workspaces/{workspace_id}/machines/{server_id}/controller-update",
+            get(controller_update_status).post(controller_update_start),
+        )
+        .registered_route(
             "/agent/workspaces/{workspace_id}/machines/{server_id}/files",
             post(upload_machine_file).layer(DefaultBodyLimit::max(MAX_MACHINE_UPLOAD_BODY_BYTES)),
         )
@@ -561,23 +565,7 @@ pub fn router(
         )
         .registered_route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/controller-update",
-            get(controller_update_catalog).layer(middleware::map_response(controller_update_no_store)),
-        )
-        .registered_route(
-            "/api/workspaces/{workspace_id}/machines/{server_id}/controller-update/prepare",
-            post(controller_update_prepare).layer(DefaultBodyLimit::max(1024)).layer(middleware::map_response(controller_update_no_store)),
-        )
-        .registered_route(
-            "/api/workspaces/{workspace_id}/machines/{server_id}/controller-update/confirm",
-            post(controller_update_confirm).layer(DefaultBodyLimit::max(1024)).layer(middleware::map_response(controller_update_no_store)),
-        )
-        .registered_route(
-            "/api/workspaces/{workspace_id}/machines/{server_id}/controller-update/operations",
-            get(controller_update_operations).layer(middleware::map_response(controller_update_no_store)),
-        )
-        .registered_route(
-            "/api/workspaces/{workspace_id}/machines/{server_id}/controller-update/operations/{operation_id}",
-            get(controller_update_operation).layer(middleware::map_response(controller_update_no_store)),
+            get(controller_update_status).post(controller_update_start),
         )
         .registered_route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/provider-clis/recipes",
