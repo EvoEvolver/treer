@@ -8,6 +8,7 @@ import { safeImageUrl, safeUrl, workspaceFilePath } from "../src/lib/url";
 import { reducer, shareTurns, type State } from "../src/state/store";
 import { t } from "../src/i18n";
 import { exportName, toMarkdown } from "../src/lib/export";
+import { decideScroll, NEAR } from "../src/lib/follow";
 import type { HistoryItem, Snapshot, TurnDto } from "../src/types";
 
 const item = (id: string, kind: HistoryItem["kind"], extra: Partial<HistoryItem> = {}): HistoryItem => ({ id, kind, text: id, ...extra });
@@ -165,4 +166,27 @@ test("a provider restart keeps the last conversation visible until a thread retu
   assert.equal(state.staleThread?.turns[0]?.id, "1", "repeated restart frames keep the copy");
   state = reducer(state, { type: "snapshot", snapshot: snapshot([turn("1", "a"), turn("2", "b")]), source: "ws" });
   assert.equal(state.staleThread, null);
+});
+
+test("only the reader scrolling up stops following; browser resets and hidden frames never leave the view at the top", () => {
+  const at = (top: number, height = 40000, client = 600) => ({ top, height, client });
+  const bottom = at(40000 - 600);
+  const following = { pinned: true, last: bottom };
+  // Regression: a hidden Console tab (display:none) or a placeholder swap resets a long conversation to the top. That
+  // is not the reader: the view goes back to the latest message instead of staying at the top.
+  assert.equal(decideScroll(following, at(0), false), "follow");
+  assert.equal(decideScroll(following, at(0, 0, 0), false), "hidden");
+  assert.equal(decideScroll(following, at(12000, 52000), false), "follow", "scroll anchoring while content changes size");
+  assert.equal(decideScroll(following, at(30000, 40000, 700), false), "follow", "the frame was resized");
+  // The reader's own wheel, touch, key or scrollbar input does stop following, wherever it goes.
+  assert.equal(decideScroll(following, at(0), true), "unpin");
+  assert.equal(decideScroll(following, at(30000), true), "unpin");
+  // Find-in-page or an in-page link moves the view without input or a size change: also the reader.
+  assert.equal(decideScroll(following, at(30000), false), "unpin");
+  // Reaching the bottom again follows; moving down or staying put changes nothing.
+  assert.equal(decideScroll({ pinned: false, last: at(1000) }, at(40000 - 600 - NEAR + 1), true), "pin");
+  assert.equal(decideScroll({ pinned: false, last: at(1000) }, at(2000), true), "keep");
+  // A reader who scrolled up keeps their place: a reset to the top while away restores it, layout shifts keep it.
+  assert.equal(decideScroll({ pinned: false, last: at(15000) }, at(0), false), "restore");
+  assert.equal(decideScroll({ pinned: false, last: at(15000) }, at(14000, 39000), false), "keep");
 });

@@ -238,7 +238,10 @@ Agents use; it adds no endpoint. One design, light and dark, at every width
   path, and Files, Tasks (Claude) and Settings. The tab title carries the
   status while it is not Ready.
 - **Conversation:** opens at the latest message and follows new content until
-  the reader scrolls up. Each turn folds its commands and tool calls into one
+  the reader scrolls up themselves (wheel, touch, keys, scrollbar). Scroll
+  resets the browser makes on its own (a hidden Console tab, layout changes)
+  never stop following; a hidden tab returns to the latest message, or to the
+  reader's place, when shown again. Each turn folds its commands and tool calls into one
   summary row, lists every changed file with +/− counts, its diff and an Open
   action, and shows a failed turn's error with Retry (the same message through
   `api/prompt`) and Copy. A divider marks what is new since this browser last
@@ -292,6 +295,9 @@ cargo clippy --locked --features fixture-harness --manifest-path launchers/agent
 # Runtime integration tests against a fixture-harness build (run from launchers/agent)
 cargo build --locked --features fixture-harness
 RUST_SPIKE_BIN=$CARGO_TARGET_DIR/debug/treer-launch node --test tests/contract.mjs tests/claude-entry.mjs
+# Real-browser conversation placement (Playwright Chromium): opens at the latest message, standalone and in a
+# Console-like frame, slow history, hidden tab, reader scroll-up
+RUST_SPIKE_BIN=$CARGO_TARGET_DIR/debug/treer-launch node --test tests/browser-scroll.mjs
 # Release-feature artifact scan (no fixture overrides may survive)
 RUST_SPIKE_RELEASE_BIN=$CARGO_TARGET_DIR/release/treer-launch node --test tests/default-build.mjs
 ```

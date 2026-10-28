@@ -1,12 +1,12 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { t } from "../i18n";
+import { decideScroll, INTENT_MS, type ScrollSample } from "../lib/follow";
 import { duration } from "../lib/format";
 import { useStore } from "../state/store";
 import type { Snapshot, ThreadState } from "../types";
 import { Icon } from "./Icon";
 import { TurnView } from "./Timeline";
 
-const NEAR = 48; // px from the bottom that counts as "at the latest message"
 const SEEN_KEY = "treer-launcher-seen:";
 const readSeen = (thread: string) => { try { return localStorage.getItem(SEEN_KEY + thread); } catch { return null; } };
 const writeSeen = (thread: string, turn: string) => { try { localStorage.setItem(SEEN_KEY + thread, turn); } catch { /* storage unavailable */ } };
@@ -38,7 +38,10 @@ function RecoveryBanner({ snapshot }: { snapshot: Snapshot }) {
   );
 }
 
-/** The conversation. It opens at the latest message and follows new content while the reader is there; scrolling up stops following. */
+/**
+ * The conversation. It opens at the latest message and follows new content while the reader is there; only the reader
+ * scrolling up stops following (see lib/follow). A hidden frame or tab keeps following and is put back on show.
+ */
 export function Thread() {
   const { state, actions } = useStore();
   const { snapshot } = state;
@@ -47,7 +50,10 @@ export function Thread() {
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
-  const lastTop = useRef(0);
+  const last = useRef<ScrollSample>({ top: 0, height: 0, client: 0 });
+  const readerAt = useRef(-Infinity); // last wheel/touch/key/pointer input on the conversation
+  const dragging = useRef(false); // pointer held down, e.g. on the scrollbar
+  const hiddenWatch = useRef(0);
   const anchor = useRef<{ height: number; top: number } | null>(null);
   const initialThread = useRef<string | null>(null);
   const previousPage = useRef(false);
@@ -58,32 +64,86 @@ export function Thread() {
   const running = thread?.status === "running";
   const view = !snapshot && !stale ? (state.error ? "error" : "loading") : turns.length === 0 ? (stale ? "loading" : "empty") : "chat";
 
+  const sample = (element: HTMLElement): ScrollSample => ({ top: element.scrollTop, height: element.scrollHeight, client: element.clientHeight });
+  const remember = (element: HTMLElement) => { const now = sample(element); if (now.client > 0) last.current = now; };
+
+  // While hidden (zero size) nothing is measured or moved. Frames hidden by the Console are not rendered at all, so no
+  // resize or scroll event is guaranteed on show: poll one animation frame at a time (frames do not run while hidden).
+  const restoreRef = useRef<() => void>(() => undefined);
+  const whenShown = useCallback(() => {
+    if (hiddenWatch.current) return;
+    const check = () => {
+      const element = scroller.current;
+      if (!element) { hiddenWatch.current = 0; return; }
+      if (element.clientHeight === 0) { hiddenWatch.current = requestAnimationFrame(check); return; }
+      hiddenWatch.current = 0;
+      restoreRef.current();
+    };
+    hiddenWatch.current = requestAnimationFrame(check);
+  }, []);
+  useEffect(() => () => cancelAnimationFrame(hiddenWatch.current), []);
+
   const toBottom = useCallback(() => {
     const element = scroller.current;
     if (!element) return;
+    if (element.clientHeight === 0) { whenShown(); return; }
     element.scrollTop = element.scrollHeight;
-    lastTop.current = element.scrollTop;
-  }, []);
+    remember(element);
+  }, [whenShown]);
+  const restore = useCallback(() => {
+    const element = scroller.current;
+    if (!element) return;
+    if (pinned.current) { toBottom(); return; }
+    element.scrollTop = last.current.top;
+    remember(element);
+  }, [toBottom]);
+  restoreRef.current = restore;
 
-  // Only a reader moving up unpins; content growing below never does.
   const onScroll = useCallback(() => {
     const element = scroller.current;
     if (!element) return;
-    const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
-    if (distance < NEAR) pinned.current = true;
-    else if (element.scrollTop < lastTop.current - 2) pinned.current = false;
-    lastTop.current = element.scrollTop;
+    const reader = dragging.current || performance.now() - readerAt.current < INTENT_MS;
+    const decision = decideScroll({ pinned: pinned.current, last: last.current }, sample(element), reader);
+    if (decision === "hidden") { whenShown(); return; }
+    if (decision === "follow" || decision === "restore") { restore(); return; }
+    if (decision === "pin") pinned.current = true;
+    if (decision === "unpin") pinned.current = false;
+    remember(element);
     setAway(!pinned.current);
     if (pinned.current) setFresh(false);
+  }, [whenShown, restore]);
+
+  // The reader's own input is what may unpin; programmatic and layout scrolling never does.
+  useEffect(() => {
+    const element = scroller.current;
+    if (!element) return;
+    const mark = () => { readerAt.current = performance.now(); };
+    const down = () => { dragging.current = true; mark(); };
+    const up = () => { if (dragging.current) { dragging.current = false; mark(); } };
+    const options = { passive: true } as const;
+    for (const type of ["wheel", "touchstart", "touchmove", "keydown"]) element.addEventListener(type, mark, options);
+    element.addEventListener("pointerdown", down, options);
+    window.addEventListener("pointerup", up, options);
+    window.addEventListener("pointercancel", up, options);
+    return () => {
+      for (const type of ["wheel", "touchstart", "touchmove", "keydown"]) element.removeEventListener(type, mark);
+      element.removeEventListener("pointerdown", down);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
   }, []);
 
-  // Images, Markdown, folded activity and the footer settle after React's layout pass: keep following while pinned.
+  // Images, Markdown, folded activity, fonts and the footer settle after React's layout pass, and a frame can be resized
+  // or re-shown: keep following while pinned.
   useEffect(() => {
     const observer = new ResizeObserver(() => { if (pinned.current && !anchor.current) toBottom(); });
     if (scroller.current) observer.observe(scroller.current);
     if (content.current) observer.observe(content.current);
-    return () => observer.disconnect();
-  }, [toBottom, view]);
+    const shown = () => { if (document.visibilityState === "visible") whenShown(); };
+    document.addEventListener("visibilitychange", shown);
+    window.addEventListener("pageshow", shown);
+    return () => { observer.disconnect(); document.removeEventListener("visibilitychange", shown); window.removeEventListener("pageshow", shown); };
+  }, [toBottom, whenShown, view]);
 
   // After every update: keep the anchor when earlier history was prepended, follow when pinned, otherwise flag news.
   const previousTurns = useRef(turns);
@@ -110,7 +170,7 @@ export function Thread() {
     if (turns.length === before.length && turns.every((turn, index) => turn === before[index])) return;
     if (anchor.current) {
       element.scrollTop = anchor.current.top + element.scrollHeight - anchor.current.height;
-      lastTop.current = element.scrollTop;
+      remember(element);
       anchor.current = null;
     } else if (pinned.current) toBottom();
     else setFresh(true);
