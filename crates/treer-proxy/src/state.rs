@@ -29,7 +29,12 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(35);
 const NETWORK_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 const NETWORK_INITIAL_WINDOW: usize = 256 * 1024;
 const NETWORK_MAX_CHUNK: usize = 16 * 1024;
-pub(crate) const TERMINAL_BROWSER_QUEUE_CAPACITY: usize = 32;
+/// Frames a browser terminal may lag behind while its flow window is closed
+/// before the session is detached (to resume from its cursor). Each PTY chunk
+/// (<= 8 KiB) takes two entries (output + cursor) and an attach replay up to
+/// 17, so this must absorb ordinary stalls of a slow or backgrounded browser:
+/// at 32 a phone parsing one window of replay detached and re-replayed forever.
+pub(crate) const TERMINAL_BROWSER_QUEUE_CAPACITY: usize = 1024;
 const TERMINAL_REPLAY_CHUNK_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
