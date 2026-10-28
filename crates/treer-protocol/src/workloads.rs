@@ -558,6 +558,10 @@ pub enum AgentCommand {
         request: MachineFileTransferRequest,
     },
     FileTransferInfo {},
+    /// Recent hardware history, newest `window_seconds` (capped at 24 h).
+    MachineMetrics {
+        window_seconds: u32,
+    },
     ShutdownMachine,
 }
 
@@ -594,6 +598,7 @@ impl AgentCommand {
             Self::FileTransfer { .. } | Self::FileTransferInfo {} => {
                 Some(CAPABILITY_MACHINE_FILE_TRANSFER)
             }
+            Self::MachineMetrics { .. } => Some(CAPABILITY_MACHINE_METRICS),
             Self::UploadBegin { size: Some(_), .. }
             | Self::UploadChunk {
                 offset: Some(_), ..

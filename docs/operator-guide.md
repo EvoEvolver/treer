@@ -524,6 +524,22 @@ migrated by a newer one without its matching backup.
 
 Control-plane updates do not touch machines.
 
+### Machine hardware metrics
+
+The Console machine page shows current CPU, memory and NVIDIA GPU load with
+15m/1h/6h/24h history. From a shell or an Agent:
+
+```bash
+treer machine metrics <machine> --window 15m
+curl "$PROXY/api/workspaces/$WS/machines/$SERVER/metrics?window_seconds=900"
+```
+
+The Controller keeps this history in memory only (one hour of 5-second samples,
+24 hours of minute means), so it restarts empty after a Controller restart.
+GPU readings need `nvidia-smi` on the Controller's `PATH` (Linux, Windows);
+other GPUs and macOS are not reported. Controllers built before this feature do not
+advertise `machine.metrics.v1`; update them to see the panel.
+
 ### Machines
 
 Update a machine from its Console page (enter a version such as `v0.2.0`), or

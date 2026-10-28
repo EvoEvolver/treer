@@ -434,6 +434,7 @@ pub fn router(state: LocalApiState) -> Router {
             axum::routing::patch(rename_machine).delete(delete_machine),
         )
         .route("/api/machines/{server_id}/exec", post(exec_machine))
+        .route("/api/machines/{server_id}/metrics", get(machine_metrics))
         .route(
             "/api/machines/{server_id}/file-transfer",
             get(file_transfer_info)

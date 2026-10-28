@@ -13,6 +13,8 @@ pub use workload_tree::*;
 mod policy_path;
 pub use policy_path::*;
 pub mod controller_update;
+mod machine_metrics;
+pub use machine_metrics::*;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -93,6 +95,7 @@ pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_RUNTIME_RESTORE,
     CAPABILITY_SERVICE_HTTP_FETCH,
     CAPABILITY_POLICY_PATH_RULES,
+    CAPABILITY_MACHINE_METRICS,
     CAPABILITY_MESSAGE_ENDPOINT_INBOX,
 ];
 pub const AGENT_INTERFACE_PROTOCOL_V1: &str = "treer.agent-interface/v1";

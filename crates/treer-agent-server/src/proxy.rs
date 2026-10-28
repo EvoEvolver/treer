@@ -1132,6 +1132,10 @@ impl ProxyClient {
                 command_id.clone(),
                 self.runtime.machine_file_transfer_info(),
             ),
+            AgentCommand::MachineMetrics { window_seconds } => CommandResult::success(
+                command_id.clone(),
+                crate::machine_metrics::query(window_seconds),
+            ),
             AgentCommand::UploadChunk {
                 upload_id,
                 content_base64,

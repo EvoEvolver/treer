@@ -1170,3 +1170,33 @@ fn streamed_upload_capability_and_limits() {
     assert_eq!(MACHINE_TRANSFER_DEFAULT_LIMIT, 128 * 1024 * 1024);
     assert_eq!(MACHINE_TRANSFER_HARD_LIMIT, 1024 * 1024 * 1024);
 }
+
+#[test]
+fn machine_metrics_command_is_capability_gated_and_omits_missing_gpu_fields() {
+    let command = AgentCommand::MachineMetrics {
+        window_seconds: 900,
+    };
+    assert_eq!(
+        serde_json::to_value(&command).unwrap(),
+        serde_json::json!({"action": "machine_metrics", "window_seconds": 900})
+    );
+    assert_eq!(
+        command.required_capability(),
+        Some(CAPABILITY_MACHINE_METRICS)
+    );
+    assert!(CONTROLLER_CAPABILITIES.contains(&CAPABILITY_MACHINE_METRICS));
+    let gpu = GpuSample {
+        index: 0,
+        utilization_percent: None,
+        memory_used_bytes: Some(1),
+        memory_total_bytes: Some(2),
+    };
+    assert_eq!(
+        serde_json::to_value(&gpu).unwrap(),
+        serde_json::json!({"index": 0, "memory_used_bytes": 1, "memory_total_bytes": 2})
+    );
+    assert_eq!(
+        serde_json::to_value(GpuStatus::NotDetected).unwrap(),
+        "not_detected"
+    );
+}

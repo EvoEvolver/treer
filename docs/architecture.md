@@ -403,6 +403,29 @@ Treer state directory: `treer machine put/get` (64 KiB acknowledged chunks,
 SHA-256 verified, 128 MiB default limit) and the Console's resumable chunked
 upload.
 
+## Machine hardware metrics
+
+A Controller advertising `machine.metrics.v1` samples whole-machine CPU
+utilization and RAM (`used = total - available`, via `sysinfo` with only CPU
+and memory refresh) every five seconds into an in-memory history: raw samples
+for the last hour and per-minute means for the last 24 hours. NVIDIA GPUs
+(utilization and memory per device) come from one long-running
+`nvidia-smi --query-gpu=... --loop=5` child on Linux and Windows; without it
+the response says `not_detected`, and macOS reports `unsupported`. Nothing is
+persisted; a Controller restart starts an empty history.
+
+`GET /api/workspaces/{ws}/machines/{id}/metrics?window_seconds=N` (also under
+`/agent/...`, default 3600, at most 86400) sends the `machine_metrics` command
+over the existing Controller connection and returns the window unchanged
+(`Cache-Control: no-store`); the Proxy stores nothing. Windows up to one hour
+return 5-second samples, longer ones minute means. Access follows machine
+visibility in the workspace snapshot: members and the workspace's Agents may
+read any machine, a machine credential only itself; there is no separate
+Policy action because the data grants no control. Controllers without the
+capability get `501 machine_metrics_unsupported`, offline machines
+`503 server_offline`. `treer machine metrics <machine> [--window 15m]` calls
+the same route.
+
 ## Controller update
 
 Machines update independently of the control plane:

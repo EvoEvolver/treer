@@ -974,6 +974,71 @@ test("clicking a machine opens an overview with identity, agents, services, virt
   await expect(page.getByRole("heading", { name: "workstation" })).toBeHidden()
 })
 
+test("machine overview shows live CPU, memory and GPU load with history ranges", async ({ page }) => {
+  const now = Date.now()
+  const at = (secondsAgo: number) => new Date(now - secondsAgo * 1000).toISOString()
+  const samples = Array.from({ length: 12 }, (_, index) => ({
+    at: at((11 - index) * 5),
+    cpu_percent: 20 + index * 5,
+    memory_used_bytes: 8 * 1024 ** 3,
+    memory_total_bytes: 16 * 1024 ** 3,
+    gpus: [{ index: 0, utilization_percent: 73, memory_used_bytes: 6 * 1024 ** 3, memory_total_bytes: 24 * 1024 ** 3 }],
+  }))
+  const windows: string[] = []
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, servers: [{ ...machineA, capabilities: ["machine.metrics.v1"] }, machineB] }))
+  await page.route("**/api/workspaces/ws-1/machines/srv-a/metrics?*", (route) => {
+    const window = new URL(route.request().url()).searchParams.get("window_seconds")!
+    windows.push(window)
+    return ok(route, {
+      cpu_count: 16,
+      gpu_status: "available",
+      gpus: [{ index: 0, name: "NVIDIA RTX 4090" }],
+      sample_seconds: 5,
+      resolution_seconds: Number(window) > 3600 ? 60 : 5,
+      window_seconds: Number(window),
+      samples,
+      latest: samples.at(-1),
+    })
+  })
+  await page.goto("/")
+  await browseTreeOnMobile(page)
+  await openWorkspaceSettings(page)
+  await workstationRow(page).click()
+  const panel = page.getByTestId("machine-metrics")
+  await expect(panel.getByRole("heading", { name: "Hardware" })).toBeVisible()
+  await expect(panel.getByText("75%", { exact: true })).toBeVisible()
+  await expect(panel.getByText("16 logical CPUs")).toBeVisible()
+  await expect(panel.getByText("50%", { exact: true })).toBeVisible()
+  await expect(panel.getByText("8.00 GB / 16.0 GB")).toBeVisible()
+  await expect(panel.getByText("GPU 0 · NVIDIA RTX 4090", { exact: true })).toBeVisible()
+  await expect(panel.getByText("73%", { exact: true })).toBeVisible()
+  await expect(panel.getByText("6.00 GB / 24.0 GB VRAM")).toBeVisible()
+  await expect(panel.getByText("Sampled every 5s")).toBeVisible()
+  await expect(panel.getByRole("img", { name: "CPU utilization history (0–100%)" })).toBeVisible()
+  await expect(panel.locator("svg path.stroke-primary")).toHaveCount(3)
+  expect(windows[0]).toBe("3600")
+  await panel.getByRole("button", { name: "24h" }).click()
+  await expect(panel.getByText("Per-minute averages of 5s samples")).toBeVisible()
+  expect(windows).toContain("86400")
+})
+
+test("machine overview explains missing hardware metrics for older Controllers and offline machines", async ({ page }) => {
+  let requested = false
+  await page.route("**/api/workspaces/ws-1/machines/*/metrics?*", (route) => { requested = true; return route.fulfill({ status: 501, contentType: "application/json", body: "{}" }) })
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, servers: [machineA, { ...machineB, status: "offline", capabilities: ["machine.metrics.v1"] }] }))
+  await page.goto("/")
+  await browseTreeOnMobile(page)
+  await openWorkspaceSettings(page)
+  await workstationRow(page).click()
+  const panel = page.getByTestId("machine-metrics")
+  await expect(panel.getByText(/does not report hardware metrics/)).toBeVisible()
+  await expect(panel.getByRole("button", { name: "1h" })).toHaveCount(0)
+  await page.getByRole("button", { name: "Close" }).click()
+  await cloudboxRow(page).click()
+  await expect(page.getByTestId("machine-metrics").getByText(/Machine offline/)).toBeVisible()
+  expect(requested).toBe(false)
+})
+
 test("agent toolbar uploads a file to its machine", async ({ page }) => {
   let requestBody: unknown
   await page.route("**/api/workspaces/ws-1/machines/srv-a/files", async (route) => {

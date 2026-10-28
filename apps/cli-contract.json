@@ -345,6 +345,13 @@
     "positionals": 0,
     "variadic": false
   },
+  "machine metrics": {
+    "flags": {
+      "--window": "value"
+    },
+    "positionals": 1,
+    "variadic": false
+  },
   "machine put": {
     "flags": {
       "--force": "none",

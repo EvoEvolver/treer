@@ -151,6 +151,10 @@ pub fn router(
             post(exec_machine),
         )
         .registered_route(
+            "/agent/workspaces/{workspace_id}/machines/{server_id}/metrics",
+            get(machine_metrics),
+        )
+        .registered_route(
             "/agent/workspaces/{workspace_id}/machines/{server_id}/controller-update",
             get(controller_update_status).post(controller_update_start),
         )
@@ -570,6 +574,10 @@ pub fn router(
         .registered_route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/restore",
             post(restore_machine_runtime),
+        )
+        .registered_route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/metrics",
+            get(machine_metrics),
         )
         .registered_route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/controller-update",
