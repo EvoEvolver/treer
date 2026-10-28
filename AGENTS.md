@@ -55,7 +55,7 @@ second manual.
 | `crates/treer-protocol` | Shared Proxy, Controller, browser, and CLI models |
 | `crates/treer-host-protocol` | Controller-to-Host socket contract |
 | `apps` | Managed workspace Apps, channel presentation, configuration, state, and docs; no Agent adapters or AIS |
-| `launchers/agent` | Single optional Agent launcher: AIS/browser UI, harness adapters, profiles, installation and switching |
+| `launchers/agent` | Single optional Agent launcher: native Rust runtime (Codex/Claude adapters, AIS), shared browser UI, Node dispatcher/installer, profiles |
 | `web` | Standalone React control plane with runtime Proxy URL configuration |
 
 ## Change discipline

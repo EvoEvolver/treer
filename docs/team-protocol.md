@@ -175,7 +175,7 @@ required; see [Graded gates](releases.md#graded-gates-and-staging-batches).
 | `docs/`, root `*.md` | `node scripts/check-docs.mjs` |
 | one App under `apps/` | the printed gate: docs check, that App's tests, and `npm run check` when its `package.json` defines it |
 | `web/` | `cd web && pnpm typecheck && pnpm build && pnpm test:e2e` (build first, then test; use random or exclusive ports) |
-| `launchers/agent` | `just agent-launcher-test`, plus the Windows launcher smoke (`launchers/agent/tests/windows-smoke.mjs`) when the change touches Windows or installer paths: run it on the `win_native` runner or state that it was not run |
+| `launchers/agent` | `just agent-launcher-test`, plus `tests/windows-native-entry.mjs` against a Windows fixture-feature build when the change touches Windows paths: run it on the `win_native` runner or state that it was not run |
 | `crates/`, `skills/`, build files, unknown paths | `just check` against an isolated PostgreSQL/NATS and a private build target (never the shared database or another agent's target), and for auth, identity or policy changes the full Proxy suite, not a focused subset; `just check` already runs the workspace tests, so no extra `cargo test -p treer-proxy` is needed when it ran with the PostgreSQL URL set |
 | `scripts/`, `.github/`, `justfile` | `just check` |
 
@@ -303,11 +303,11 @@ else a browser renders or enforces.
 support directory, not a standing service; each train brings it up from the
 SHA under test and takes it down.
 
-- *Agents.* A disposable `fixture-launcher` agent (launcher from the SHA, fake
-  Codex harness) and, for launcher UI that only the Claude harness shows, a
-  `fixture-claude` agent (fake Claude). Both live on canary-a only, run the
-  launcher archived from `git archive <sha> launchers/agent` with
-  `npm ci --omit=dev --ignore-scripts`, hold no credentials and are removed
+- *Agents.* A disposable `fixture-launcher` agent (launcher from the SHA, a
+  `fixture-harness` native build with fake Codex) and, for launcher UI that only
+  the Claude harness shows, a `fixture-claude` agent (fake Claude). Both live on
+  canary-a only, run the launcher archived from `git archive <sha> launchers/agent`,
+  hold no credentials and are removed
   when the run ends. A launcher-side change is accepted only on a fixture built
   from the SHA being shipped, never from an older copy; the SHA is recorded in
   the fixture state.
@@ -320,7 +320,7 @@ SHA under test and takes it down.
 - *Pinned scripts.* Every acceptance script is run by a wrapper that refuses
   any other sha256. A script change is a reviewed new hash: the record names the
   hash, the old one is retired, and the script lives in the repository under
-  `launchers/agent/tests/acceptance` so its self-test is versioned with it.
+  `launchers/agent/tests/acceptance`.
 - *Session.* The canary-tester login is made fresh for each run, written to a
   mode-0600 temporary file and deleted afterwards; logs hold statuses, header
   names, counts and close codes only.

@@ -1330,7 +1330,7 @@ are removed; trusted CLI children still need the caller's authenticated identity
 Hashes do not prevent an equal-privilege account from replacing installed code
 after verification. No launcher installation restarts an existing workload.
 
-Native Codex/Claude and ACP launch modes default to unattended full authority
+Native Codex/Claude launch modes default to unattended full authority
 and inherit the Agent's own Treer credential for tools. Session export excludes
 known credential/configuration files, but it does not redact secrets embedded
 in allowed conversation or memory files. Transcript, provider stderr, tool
@@ -1342,8 +1342,8 @@ the model will resist prompt injection or decline malicious instructions.
 Repository launchers are optional code executed with the Agent's operating-
 system authority. Treer's binary installer, updater, and release artifacts do
 not fetch or install them. The optional `launchers/agent` launcher is obtained
-separately; its explicitly invoked installer owns harness dependencies and UI
-setup. Ordinary Agent startup does not fetch or update software. Its browser
+separately; its explicitly invoked installer owns the native runtime binding and UI
+assets. Ordinary Agent startup does not fetch or update software. Its browser
 UI is served through the private Agent Interface tunnel. Selecting a launcher
 trusts that launcher and its selected harness with the Agent's authority; a
 private UI tunnel does not create an operating-system sandbox.

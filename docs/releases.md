@@ -349,8 +349,8 @@ run or a run for another commit does not count, the latest run decides, and it w
 up to `TREER_RELEASE_CI_TIMEOUT` seconds, 2700 by default) and its native artifacts are
 green: a successful `Machine artifacts <commit>` run for that exact revision (the run
 title decides, so a dispatch on this ref that built another revision does not
-count; the run receipt must belong to the candidate and, when the candidate's
-workflow defines it, exactly one "Native Windows embedded launcher and ACP UI" job must be
+count; the run receipt must belong to the candidate and, for older candidates whose
+workflow still defines it, exactly one "Native Windows embedded launcher and ACP UI" job must be
 completed and successful; an existing `dist/` is still verified against it), or a verified reuse
 anchor (`scripts/reuse-machine-artifacts.sh --check-only`, or `--verify-dist` for a
 `dist/` that already carries reuse provenance). A local `dist/` alone is never
@@ -561,21 +561,18 @@ integrity pin, not a publisher signature. It needs only Windows
 PowerShell 5.1 or PowerShell 7 and Windows/.NET facilities, not git, Python, npm
 or a Unix shell. See the operator guide for split steps and receipts.
 
-The independent `windows-launcher-smoke` job is a required promotion gate.
-It downloads the already uploaded immutable Windows artifact, checks the
-Controller copy against that artifact's SHA256SUMS and runs browser/ACP tests
-without a write-back path to release bytes. Artifact collection requires the
-whole workflow and this job to succeed, including when an explicit run ID is
-supplied. Record its job/run link, `windows-smoke.json`, screenshots and the
-Playwright lockfile's Chromium revision in the release receipt.
+The former `windows-launcher-smoke` job exercised the removed Node/ACP
+launcher runtime and was dropped with it. Artifact collection still requires it
+for older candidates whose workflow defines it. There is currently no CI proof of
+the native Windows launcher runtime; record a manual `win_native` check in the
+release receipt when a release changes Windows launcher paths.
 
 Next-version Windows acceptance must actually run Node 22, PowerShell crypto
 and tasklist through exec and through App/Agent workload launch paths; verifying
 environment maps alone is insufficient. The artifact job runs the update
 transaction fixtures under both PowerShell shells, including real running-image
 rename and private DACL assertions, with the candidate's native binaries.
-Launcher installation plus a fake ACP Agent with its registered UI must also
-pass in a closed native Windows fixture. Pending native tests are not evidence
+Pending native tests are not evidence
 of success; a failing job blocks release rather than being retried into green.
 The operator then updates win_native explicitly and checks its App/UI Agent;
 release automation must not update that machine or restart existing Agents.

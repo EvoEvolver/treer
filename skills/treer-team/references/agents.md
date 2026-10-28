@@ -1,7 +1,6 @@
 # Bring an existing Agent into Treer
 
-Use this reference for an existing provider/session, a new ACP provider, or the
-built-in Agent UI. Treer manages the process and identity; the optional
+Use this reference for an existing provider/session or the built-in Agent UI. Treer manages the process and identity; the optional
 `launchers/agent` runtime adapts its conversation protocol. It is not a workspace
 App. Prefer the existing launcher over another AIS server or copied UI.
 
@@ -11,9 +10,8 @@ App. Prefer the existing launcher over another AIS server or copied UI.
 | --- | --- | --- |
 | Codex | Native `codex` harness (`codex app-server`) | Native thread ID and history |
 | Claude Code | Native `claude` harness (stream-json) | Native session ID/history and background-task events |
-| CLI with ACP over stdio | Shared `acp` harness | Provider-supported session loading, events and settings |
 | CLI without a machine protocol | Plain command Agent | Terminal replay/input; no structured conversation or built-in UI |
-| New non-ACP protocol | Implement `HarnessRuntime` | One adapter; reuse AIS, queue, persistence and UI |
+| New structured protocol | Add an adapter to the launcher's Rust runtime | One adapter; reuse AIS, queue, persistence and UI |
 
 This launches/resumes a provider under a Treer Agent identity; it does **not**
 attach to an arbitrary already-running process. Confirm the existing session is
@@ -36,7 +34,7 @@ treer-agent-server launcher --node /absolute/trusted/path/to/node status
 
 On Windows, select the trusted absolute `node.exe` path instead; no `sh` is
 needed. The official Controller installs its verified embedded payload and a
-machine-local `treer-agent` shim, and saves six shared workspace profiles. It
+machine-local `treer-agent` shim, and saves the shared Codex and Claude workspace profiles. It
 does not install/login provider CLIs, create Agents, or restart anything. Install
 on **each** destination machine before using a shared profile there. Missing
 provider executables are runtime errors, not an invitation to use another
@@ -48,12 +46,11 @@ the Agent's final PATH, never its working directory. If it reports
 a relative path such as `./treer-agent`.
 
 The shim pins Node and the local launcher; do not paste another machine's
-absolute launcher path into a profile. Native Windows `.exe` and supported
-standard npm `.cmd` provider shims are resolved by the **launcher** without
-enabling arbitrary shell command execution. This is not Controller command
-discovery: on Windows its bare executable lookup accepts `.exe`/`.com`, not an
-arbitrary `.cmd` as the Agent/profile command. A nonstandard batch file may require a trusted JS or native
-entry point instead. See the [launcher installation guide](../../../launchers/agent/README.md).
+absolute launcher path into a profile. Provider executables are bound into the
+machine's native runtime image at build time and verified by its
+`native-runtime.json`; a missing provider is reported as unavailable. On Windows
+the Controller's bare executable lookup accepts `.exe`/`.com`, not an arbitrary
+`.cmd` as the Agent/profile command. See the [launcher installation guide](../../../launchers/agent/README.md).
 
 ## Resume a native session, or start a new one
 
@@ -70,11 +67,11 @@ treer agent admin create --kind command --name reviewer --machine build-box \
 
 For Claude, use `--harness claude` and that provider's session ID. Omit
 `--session-id` for a new conversation. The launcher stores the confirmed ID in
-`<cwd>/.treer/agents/<agent-id>/agent-ui.json`; retain that state and the same
-working directory for later recovery. `--session-id` is not a Treer Agent ID.
+the Agent's Controller-provided private state directory; retain that state and
+the same working directory for later recovery. `--session-id` is not a Treer Agent ID.
 Do not reuse a saved Codex session as a Claude session or edit another Agent's
-state file. Native Codex/Claude session export/import is available for deliberate
-transfers; ACP does not advertise it. Exports can contain sensitive conversation
+state file. Offline Claude session export/import (`treer-agent session ...`) is available
+for deliberate transfers. Exports can contain sensitive conversation
 content even though auth/config files are excluded.
 Keep `.treer/` in the project's `.gitignore`: its session state, queues and
 transcripts can contain sensitive conversation data. Treat backups accordingly.
@@ -92,40 +89,13 @@ The default queued semantic prompt requires an AIS advertising `prompt.queue`;
 it is not a general way to type into any terminal. Explicit terminal insertion
 (`treer agent prompt --steer`) has different, potentially disruptive semantics.
 
-## Worked ACP onboarding
-
-Suppose an existing, trusted executable `/absolute/path/to/acp-provider` speaks
-ACP on stdin/stdout. Register its process through the existing launcher:
-
-```sh
-treer agent admin create --kind command --name acp-reviewer --machine build-box \
-  --cwd projects/example --folder /team -- treer-agent \
-  --harness acp --acp-command /absolute/path/to/acp-provider --name "ACP Reviewer"
-```
-
-If the provider needs flags/subcommands to select ACP, append one
-`--acp-arg VALUE` **per argument**, including values starting with `--`; these are
-argv entries, not a shell string. For example, the shipped OpenCode profile uses
-`--acp-command opencode --acp-arg acp`. Verify the installed provider's ACP mode
-against its own help; generic text output is not ACP. Diagnostic output belongs
-on stderr, not the JSON-RPC stdout stream. A `.mjs`/`.cjs`/`.js` ACP entry can be
-selected directly and runs with the launcher's Node.
-
-The shared ACP adapter handles initialize/session creation or supported load,
-prompt/cancel, session updates, tools/diffs/plans, and provider config options.
-It does not advertise client filesystem/terminal tools: the provider owns its
-tools. Unsupported steering, goal, background-task or session-transfer features
-stay unsupported; do not claim parity with native Claude/Codex. Requested resume
-failure must be explicit, not a fallback new session.
-
 ## Custom adapter versus custom AIS
 
-For a non-ACP protocol, implement `HarnessRuntime` in
-`launchers/agent/src/harness/<name>.ts`: start/resume, prompt, interrupt, settings,
-snapshot and state/log/exit events. Map events to shared `src/model.ts` types,
-report only implemented capabilities, and reuse `harness/diff.ts`. Add selection
-in the entry points and fake-backend tests using `tests/hermetic.mjs`. Reuse the
-existing server, UI, durable queue and file guards; do not create an AIS App.
+For another provider protocol, add an adapter to the launcher's Rust runtime
+(`launchers/agent/src/`) next to the Codex and Claude backends: start/resume,
+prompt, interrupt, settings and event mapping onto the shared history and
+receipt model, reporting only implemented capabilities. Reuse the existing
+server, UI, durable journal and file guards; do not create an AIS App.
 See [Add a harness adapter](../../../launchers/agent/README.md#add-a-harness-adapter).
 
 If an existing product already implements AIS, it may register itself from its
@@ -140,8 +110,8 @@ relative assets/fetch/WS paths. No public port or service record is needed.
 Use `treer interface register --help` for `--port`, `--instance-id`, repeated
 `--capability`, and optional `--ui-path`. Derive registration values from the
 **live manifest**, not a second handwritten list: protocol, instance, capabilities
-and UI path must match exactly. The bundled launcher already does this in
-`scripts/register-interface.mjs`. Re-register the actual allocated port at
+and UI path must match exactly. The bundled launcher's runtime already does this
+itself after reading its own manifest. Re-register the actual allocated port at
 startup; use `treer interface clear` on clean shutdown. Do not repeatedly register
 as a health poll. Inspect with `treer interface show` in that Agent's runtime.
 
@@ -155,16 +125,12 @@ these protections.
 
 ## Preset Agent UIs
 
-All six profiles use **one** embedded React UI and machine-local `treer-agent`:
+Both profiles use **one** embedded React UI and machine-local `treer-agent`:
 
 | Workspace profile | Provider executable/mode |
 | --- | --- |
 | `Codex + UI` | `codex`, native app-server |
 | `Claude + UI` | `claude`, native stream-json |
-| `Gemini + UI` | `gemini --experimental-acp --yolo` |
-| `Grok + UI` | `grok agent stdio` |
-| `Cursor + UI` | `cursor-agent acp` (not a generic `agent` binary) |
-| `OpenCode + UI` | `opencode acp` |
 
 These are the shipped `launchers/agent/profiles.json` recipes, not a promise that
 every provider version exposes the same options. Inspect the saved profile and
@@ -183,8 +149,7 @@ model/effort, goals and background tasks appear only where the adapter supports
 them. There is no separate Agent UI App to deploy or custom host to configure.
 
 **Authority warning:** built-in harnesses are unattended full-authority modes:
-Codex disables approvals with full access; Claude skips permissions; ACP approves
-permission requests and selects a no-prompt/full-access mode where available.
+Codex disables approvals with full access; Claude skips permissions.
 Treer identity/folders are not a sandbox. Use an OS account/container/VM when
 tasks need isolation; no UI confirmation protects the machine. Do not weaken
 browser guards to make direct local browser URLs work; use the Treer UI tunnel.

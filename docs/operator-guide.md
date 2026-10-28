@@ -817,15 +817,13 @@ Installation, `PATH`, profile migration and bundle delivery are in the
 [launcher guide](../launchers/agent/README.md#create-an-agent). The runtime and its
 provider login remain the user's responsibility.
 
-New workspaces start with six portable `treer-agent` profiles: **Claude + UI**,
-**Codex + UI**, **Cursor + UI**, **Gemini + UI**, **Grok + UI**, and
-**OpenCode + UI**. Their descriptions and arguments come from the launcher's
+New workspaces start with two portable `treer-agent` profiles, **Claude + UI**
+and **Codex + UI**. Their descriptions and arguments come from the launcher's
 `profiles.json`; all use `cwd=.`. **Claude (terminal)** and **Codex (terminal)**
 are additional options without the launcher. Core does not migrate existing
 workspace profiles; the launcher installer manages its own UI profiles.
 The UI profiles default to unattended full authority: Codex disables approvals,
-Claude skips permissions, and ACP adapters approve permission requests (Gemini
-also uses `--yolo`). Members with `agent.create` authorization can launch them;
+and Claude skips permissions. Members with `agent.create` authorization can launch them;
 neither a profile nor folder placement provides a sandbox. Use separate OS
 accounts, containers or VMs when isolation is needed. Terminal profiles resolve
 bare `claude`/`codex` only through absolute directories in the Agent's final
@@ -1370,9 +1368,8 @@ treer agent admin profile launch reviewer --machine build-machine \
 
 Optional repository launchers package more involved runtimes behind the same
 profile contract. The [Agent launcher](../launchers/agent/README.md) provides one
-shared browser UI/AIS server with native Codex/Claude and generic ACP adapters
-for Gemini, Grok, Cursor and OpenCode. Matching release Controllers embed its
-verified portable runtime. Install it without cloning a repository or running
+shared browser UI/AIS server with a native Rust runtime for Codex and Claude.
+Matching release Controllers embed its verified portable payload. Install it without cloning a repository or running
 npm on the target:
 
 ```bash
@@ -2106,7 +2103,7 @@ processes register once at startup and should deduplicate prompts by
 `operation_id`. Raw keys, terminal attach, stop, and delete remain PTY/Host
 operations. The single [Agent launcher](../launchers/agent/README.md) performs
 registration automatically and serves the same embedded UI for all harnesses.
-Provider adapters live under `launchers/agent/src/harness/`; `apps/` contains
+Provider adapters live in the launcher's Rust runtime (`launchers/agent/src/`); `apps/` contains
 workspace services. Terminal-only Agents use ordinary command/shell profiles.
 
 Agents can discover humans who belong to the workspace's organization. The

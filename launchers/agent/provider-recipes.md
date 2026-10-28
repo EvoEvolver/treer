@@ -95,7 +95,7 @@ These are candidate pins for review, not assertions of runtime compatibility:
 | Gemini | `@google/gemini-cli@0.64.0` | Published metadata has no scripts; propose ignore-scripts, with native dependency behavior still to validate. | [Gemini documentation](https://geminicli.com/docs/) |
 | OpenCode | `opencode-ai@1.19.3` | `postinstall: node ./postinstall.mjs`; requires lifecycle review. | [OpenCode documentation](https://opencode.ai/docs/) |
 | Cursor | No npm pin | Official instructions execute a mutable shell/PowerShell download. Unsupported until a fixed URL/hash download-and-verify strategy is vetted. Binary is now documented as `agent`; keep legacy `cursor-agent` as an exact recognition alias, not an automatic profile rewrite. | [Cursor installation](https://cursor.com/docs/cli/installation) |
-| Grok | No vetted pin | Unsupported; do not substitute similarly named third-party npm packages. | Existing launcher ACP profile is not evidence of an official installer. |
+| Grok | No vetted pin | Unsupported; do not substitute similarly named third-party npm packages. | No official installer has been verified. |
 
 Exact top-level package pins do not pin all transitive dependency resolutions.
 npm checks registry integrity, but this is not a reviewed transitive lockfile or

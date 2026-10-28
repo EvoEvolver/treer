@@ -56,8 +56,8 @@ the Agent still needs a prompt/message-consumption loop and clear task authority
 
 ## Agent UIs and profiles
 
-Read [Preset Agent UIs](agents.md#preset-agent-uis) for Claude/Codex native
-adapters, the Cursor/Gemini/Grok/OpenCode ACP profiles, provider prerequisites,
+Read [Preset Agent UIs](agents.md#preset-agent-uis) for the Claude/Codex native
+adapters, provider prerequisites,
 and plain terminal Agents. They share `treer-agent` and the registered AIS UI;
 there is no standalone `apps/agent-ui` to install. A saved profile neither logs
 into the provider nor starts an Agent automatically.

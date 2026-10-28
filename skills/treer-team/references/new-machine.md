@@ -78,7 +78,7 @@ entry; it does not create or restart Agents. Ensure that bin directory is on the
 Agent's PATH. Install and log into only the provider CLIs the user selected,
 using their own login flow; never read or transmit login files. A profile being
 present does not prove that its provider executable or account is usable.
-Read [Agent integration](agents.md) for ACP and other supported profiles.
+Read [Agent integration](agents.md) for the supported profiles.
 
 ## 3. Create folders and role Agents
 

@@ -9,7 +9,7 @@ Load only the reference matching the task:
 
 | Task | Read |
 | --- | --- |
-| Connect an existing agent, use native/ACP adapters, register an AIS, or run without a UI | [Agent integration](references/agents.md) |
+| Connect an existing agent, use the native Codex/Claude adapters, register an AIS, or run without a UI | [Agent integration](references/agents.md) |
 | Develop an App, onboard an existing HTTP service, or ship a versioned App | [App integration](references/apps.md) |
 | Choose bundled Apps and Agent UIs/profiles | [Presets](references/presets.md) |
 | Enroll a new machine and create a working folder-based team | [New machine](references/new-machine.md) |

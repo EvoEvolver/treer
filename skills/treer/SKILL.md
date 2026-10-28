@@ -351,13 +351,12 @@ treer interface clear
 ```
 
 The single `launchers/agent` launcher registers this protocol and serves the
-shared browser UI. Its `src/harness/` adapters speak native Codex app-server,
-native Claude stream-json, or generic ACP (Gemini, Grok, Cursor, OpenCode).
-Install/update explicitly with `launchers/agent/install.sh --agent PROVIDER`,
-then inspect the saved profile with `treer agent admin profile show NAME`.
-Installation does not create or restart an Agent. Launch Cursor with
-`cursor-agent`, not `agent`. Each Agent owns one thread/session. New integrations
-implement `HarnessRuntime` and reuse the server/UI; do not add another AIS App.
+shared browser UI. Its native Rust runtime speaks Codex app-server or Claude
+stream-json (`--harness codex|claude`). Install/update explicitly with
+`treer-agent-server launcher install|update`, then inspect the saved profile
+with `treer agent admin profile show NAME`. Installation does not create or
+restart an Agent. Each Agent owns one thread/session. New integrations add an
+adapter to that runtime and reuse the server/UI; do not add another AIS App.
 Provider runtimes belong in explicit commands/profiles, not built-in Agent kinds.
 
 ## Communicate with another Agent over HTTP

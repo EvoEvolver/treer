@@ -98,10 +98,10 @@ two-origin public HTTPS setup, updates and backup/restore.
    profile such as Claude + UI or Codex + UI. A plain terminal needs no
    launcher. Install and sign in to the Agent runtime yourself.
 
-New workspaces include six launcher profiles: Claude, Codex, Cursor, Gemini,
-Grok, and OpenCode, each with **+ UI**, plus **Claude (terminal)** and
-**Codex (terminal)** for machines without the launcher. Existing workspace
-profiles are left unchanged; installing the launcher manages its six UI profiles.
+New workspaces include two launcher profiles, **Claude + UI** and **Codex + UI**,
+plus **Claude (terminal)** and **Codex (terminal)** for machines without the
+launcher. Existing workspace profiles are left unchanged; installing the
+launcher manages its UI profiles.
 UI profiles default to unattended full authority; use a separate OS account,
 container or VM when isolation is needed. Terminal profiles resolve bare
 `claude`/`codex` only from absolute directories in the Agent's final `PATH`.
