@@ -581,16 +581,13 @@ or configuration contents. Failed launch retains the newly saved specification.
   header set; and if the App shares the Proxy origin, embedded App interfaces
   and virtual-host tunnels are refused so App content never runs on the
   Console origin.
-- Provider CLI installation runs only recipes embedded in the Core release,
-  never browser argv, user-editable tables or remote recipe URLs; see
-  [Provider CLI installation](#provider-cli-installation).
 - CLI file transfer uses separate `machine.file.read` and `machine.file.write`
   actions on every chunk and commit, with caller/path/generation-bound handles.
   Treer private state is hard-denied by reserved namespace, physical-parent/name
   reservations (including absent files), and opened object identity, independent
   of Policy. The Controller passes the whole canonical Treer state directory
-  (`service::state_dir()`: startup stores, private state, provider CLI results,
-  service logs, machine identity and any future per-server file) plus its
+  (`service::state_dir()`: startup stores, private state, service
+  logs, machine identity and any future per-server file) plus its
   service configuration as protected paths, so an enrolled root that contains
   that directory (root = HOME with `~/.local/state/treer`) cannot read or write
   below it through file transfer under any Policy; sibling directories stay
@@ -647,172 +644,6 @@ routes and false whenever Policy denies or fails; the write routes authorise
 independently. The workspace event stream itself delivers every workspace
 event to every member session without a per-subscriber Policy filter; that
 pre-existing boundary is tracked in #141, not changed here.
-
-## Provider CLI installation
-
-Installing a provider CLI (Codex, Gemini; others are explicitly unsupported in
-the first table) executes third-party code from the npm registry as the machine
-account under a human's explicit confirmation. It is not a sandbox and does not
-pin transitive dependencies: npm's own registry integrity checks apply to them.
-What Core does promise:
-
-- Only a human workspace session with Policy `machine.exec` on that machine can
-  list, prepare, install, check or poll; App, service and machine credentials
-  are refused. Prepare and install both re-check membership and Policy.
-- The table is release bytes validated at Controller start (typed `npm-global`
-  package, exact version, SHA-512 integrity, allowlisted registry, no free
-  argv). The confirmation shows the exact plan that runs: `npm pack`, SHA-512
-  verification of the single tarball against the recipe, `npm install --global`
-  of that verified local tarball, prefix resolution and a version probe from
-  the installed prefix's `bin`. A different fresh expansion (for example a
-  moved npm) is refused as `provider_cli_plan_changed`; a table or Controller
-  change since confirmation is refused, never substituted.
-- npm runs from a Controller-owned `0700` job directory with a cleared
-  environment: the machine exec allowlist minus `npm_config_*`, `NODE_OPTIONS`,
-  `NODE_PATH`, proxy and TLS override variables, with `HOME` and temp inside
-  the job directory, empty private `--userconfig`/`--globalconfig`, an explicit
-  `--registry` and scope registry, `--ignore-scripts` on pack and (unless the
-  recipe carries a reviewed lifecycle entry) on install. The user's `~/.npmrc`
-  is never read, so a user-configured global prefix is ignored and the install
-  lands in npm's default prefix for that Node; enterprise proxies are out of
-  scope. Step 3 contacts the recipe's registry to resolve dependencies and
-  writes the global prefix. A non-writable global prefix fails visibly; Core
-  never elevates or edits PATH, so a successful install does not promise that
-  Agent creation finds the binary: the probe reports the absolute path inside
-  the prefix for a profile, or the user adds that `bin` directory to the
-  service environment themselves.
-- A lifecycle-enabled entry runs npm lifecycle scripts, so the table allows
-  it only for a native-binary entry (#131): the one whose reviewed postinstall
-  places a platform binary that the recipe pins. Such an entry carries the
-  review (file hashes, the script map, which scripts npm runs, the expected
-  closure of root plus exactly one native package), `omit_optional: false`,
-  `binary_path` and one `native_binaries` pin per supported platform (native
-  package, version, tarball SHA-512, member, size, SHA-256, unpacked size).
-  Scripts without a pin or a pin without scripts invalidate the whole table.
-  Its plan has nine steps: `node -p process.arch` from the allowlisted PATH
-  must print the platform's native architecture (an x64 Node under Rosetta
-  would select another native package; `provider_cli_node_arch_mismatch`,
-  also refused at `prepare` from the observation), `npm pack` of the root and
-  of the native package, SHA-512 verification of both tarballs, one
-  `npm install --global` of both verified local tarballs with `--offline`, an
-  empty private cache and every registry pinned to a closed port (nothing
-  fetched during scripts can succeed, so a missing native fails closed), the
-  prefix resolution, a read-only verify-file step and the version probe.
-  Verify-file opens the canonical prefix once and every component below it
-  with `O_NOFOLLOW`, requires each directory and the file to be owned by root
-  or the account and not group/world-writable, the file to be regular with
-  exactly the pinned size and SHA-256 (the postinstall's hard link makes it the
-  same inode as the native package's member; nlink is not checked), and
-  `<prefix>/bin/<binary>` to be a symlink resolving inside the prefix to that
-  inode. Any mismatch is `provider_cli_binary_mismatch` with the failed check's
-  category in the report, the probe never runs, and the report's
-  `prefix_modified` tells the user to remove the package through the existing
-  uninstall path; nothing retries. The probe's first line must carry
-  `expected_version` as a complete token (`2.1.302`, not `2.1.3020` or
-  `v2.1.302`) or the operation fails as `provider_cli_version_mismatch`; this
-  rule applies to every supported entry. Native entries also require free
-  space of 1 GiB plus twice the unpacked native size on the job and prefix
-  volumes (`provider_cli_space_insufficient`) and may carry their own
-  `deadline_seconds` within 60 to 900 seconds. Residuals: the native bytes
-  are proven against the pin before anything runs them, but the reviewed
-  postinstall itself runs as the account inside the scrubbed job environment;
-  its placement is not atomic (verify-file catches partial results);
-  same-account processes can race between verify-file and the probe; musl
-  Linux is unsupported because npm would select a different native package.
-  The unit tests prove the plan shape and the fail-closed checks against
-  fixtures; that the offline install really satisfies the root's optional
-  dependency with a single copy of the verified native package, refuses an
-  injected native and uninstalls back to baseline is proven only by the
-  release-owned sealed acceptance in a disposable environment.
-  The packed tarballs are verified and installed by the same account in the
-  same private directory; a same-account process replacing them between the
-  verification and install steps is inside the trust domain Core already
-  grants that account.
-- The install step overwrites whatever lives in npm's global prefix, so the
-  consent names what it replaces (#134). `prepare` first has the Controller
-  observe the prefix with the same constraints as `check` (cleared
-  environment, private `HOME`, process-group timeout and cleanup confirmation,
-  bounded output; the probe executes the already-installed binary, which is
-  third-party code the machine account already trusts). The observed state is
-  `absent` only when the prefix resolved and the binary's `lstat` returned
-  not-found, `installed` only when a regular file inside the prefix exited 0
-  with a strict version on its first line (bounded numeric components, no
-  leading zeros, bounded prerelease identifiers; the first matching token
-  wins, so extra output cannot spoof a version into an upgrade), and
-  `unknown` otherwise with the reason named (`provider_cli_prefix_unresolved`,
-  `provider_cli_binary_outside_prefix`, `provider_cli_probe_failed`,
-  `provider_cli_probe_timed_out`, `provider_cli_probe_output_truncated`,
-  `provider_cli_version_unparsed`, `cleanup_unconfirmed`). Output that
-  exceeded the retained tail has no trustworthy first line and never yields a
-  version, so a crafted tail cannot turn a newer installation into an
-  "upgrade" or a "noop". A probe whose descendants were not confirmed gone is
-  not evidence at all: `prepare` refuses it (409
-  `provider_cli_probe_unconfirmed`) and issues nothing. The action shown and bound is `install`, `replace`
-  (relation `upgrade`, `downgrade`, `incomparable` or `unknown`) or `noop`;
-  `noop` issues no token and nothing runs, an unobservable prefix refuses the
-  prepare, and a spoofed probe that prints the pinned version only ever yields
-  `noop`. A `downgrade`, `incomparable` or `unknown` relation must be
-  acknowledged in the install request with exactly that relation; a missing or
-  different value is 400 and leaves the token usable, so no client can confirm
-  a downgrade blindly.
-- The Controller re-derives the action from a fresh observation before any
-  step and again immediately before the install step, under the operation's
-  single five-minute deadline (each observation process gets at most the probe
-  budget, never beyond that deadline, and nothing spawns once it has passed).
-  Process facts are decided first: an observation whose descendants were not
-  confirmed gone ends the operation `unknown` (`cleanup_unconfirmed`) with
-  nothing executed after it, and a spent budget ends it timed out
-  (`provider_cli_deadline`). Only then are hash, action and relation compared
-  strictly; any difference (a prefix that moved, a binary that appeared,
-  changed or became unreadable, an action that became `noop`) fails the
-  operation as `provider_cli_state_changed` with nothing written to the prefix
-  and the job directory removed. What remains is a time-of-check/time-of-use
-  window between the second observation and npm writing the prefix: it is
-  bounded by the remaining operation budget, not by any millisecond promise,
-  and lies inside the same account's trust domain. Tokens minted before
-  observation existed are never accepted, and a v1-only Controller is refused
-  with `provider_cli_controller_outdated` rather than served unobserved.
-- The Controller's observation is treated as input, not truth: the Proxy
-  validates its shape before storing, auditing or showing it (canonical strict
-  version, bounded control-free text, bounded absolute executable path, a
-  probe code from the known set, and state/evidence agreement such as
-  `installed` requiring a found binary and a clean probe); a malformed
-  observation is a Controller error (502) that mints nothing. Every `prepare`
-  is admitted against the per-minute and live-token ceilings before any
-  Controller command, and counts whatever its outcome (`noop`, unobservable,
-  refused recipe), so a session cannot make the machine run `npm prefix` and
-  the probe without bound.
-- The observed executable path (`<prefix>/bin/<binary>`, under the machine
-  account's home) is returned only to the creator's `prepare` and `check`
-  responses for display. Proxy rows, audit payloads, operation reports
-  (`observed_before`) and logs carry the path-free summary: state, normalized
-  version, presence and the observation hash.
-- Confirmation tokens are 256-bit, stored hashed, expire after 120 seconds of
-  database time, are consumed once by `UPDATE … RETURNING`, and are bound to
-  workspace, machine, user, session, recipe triple, table hash, Controller
-  build, plan hash, observation hash, action and relation. Expired, consumed,
-  foreign and mismatched tokens share one 409. At most four live tokens and
-  ten prepare attempts per minute per user and machine.
-- One active installation per machine, enforced by a PostgreSQL partial unique
-  index, with a five-minute deadline. Provider CLI commands are excluded from
-  reconnect replay. Each step runs in its own Unix process group that is
-  SIGKILLed at the deadline; descendants that leave the group but still hold
-  the step's output pipes are detected and the operation ends `unknown`
-  (`cleanup_unconfirmed`). Descendants that both detach and close those pipes
-  are outside what Core can prove; `unknown` is never resolved by assumption,
-  only by the machine's own later report.
-  An `unknown` operation releases the Proxy's per-machine slot (the unique index
-  covers `queued` and `running` only), while the Controller still refuses a
-  second installation as long as its own job is active, so a job that is
-  `unknown` to the Proxy but still running on the machine cannot be joined by
-  a concurrent installation.
-- Output never enters Proxy storage, audit or logs. Results stay in the
-  Controller's private `0600` store for 24 hours (64 results; a full store
-  refuses new installations rather than evicting). Audit rows record actor,
-  machine, recipe triple, table hash, plan hash, action, relation, observation
-  hash, observed state and version, status and exit code.
-- Windows entries are all unsupported in this iteration; nothing executes
-  there. Provider login is never performed or handled by Core.
 
 ## Machine connection ownership
 
@@ -1348,11 +1179,9 @@ UI is served through the private Agent Interface tunnel. Selecting a launcher
 trusts that launcher and its selected harness with the Agent's authority; a
 private UI tunnel does not create an operating-system sandbox.
 
-Treer does not install software by default, capture network traffic, manage OS
-DNS, create namespaces, or configure a sandbox. The one exception is the
-explicitly confirmed, release-pinned
-[provider CLI installation](#provider-cli-installation). Profiles and external
-launchers own the remaining choices. Ordinary internet traffic is outside Treer's authorization and
+Treer does not install software, capture network traffic, manage OS DNS,
+create namespaces, or configure a sandbox. Profiles and external launchers own
+those choices. Ordinary internet traffic is outside Treer's authorization and
 metering boundary.
 
 The thin CLI carries an Agent credential separately from the Controller's
