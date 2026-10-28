@@ -1,6 +1,6 @@
 # Treer Soul
 
-Store immutable, private-by-default Claude/Codex snapshots and resume them in a
+Store immutable, private-by-default Claude session snapshots and resume them in a
 new Agent using the caller's own permissions. Browsers receive the human page
 from this same root; scripts/styles/APIs are relative to the App root.
 
@@ -15,7 +15,6 @@ treer-soul show name@1
 ## Mutate only with task authorization
 
 ```sh
-treer-soul save --harness codex --name checkpoint
 treer-soul save --harness claude --name checkpoint --visibility workspace
 treer-soul incarnate checkpoint --machine target-machine
 treer-soul delete soul_ID
@@ -28,9 +27,9 @@ only. The server rejects detected secrets unless --allow-secrets is explicit;
 transcripts remain sensitive even when scanning finds nothing. Generic upload
 supports --manifest and --file ARCHIVE_PATH=LOCAL_PATH.
 
-Codex saves omit shell snapshots and report `omitted=["shell_snapshot"]` in JSON.
-There is no inclusion option; `--allow-secrets` does not expand the launcher's
-export allowlist. Legacy archived shell snapshots are not imported or executed.
+Only Claude sessions can be saved/restored (`treer-agent session` is
+Claude-only). Archived Codex Souls stay readable but cannot be incarnated.
+`--allow-secrets` does not expand the launcher's export allowlist.
 
 All /v1 routes require per-request service-scoped Treer identity; injected headers
 are verified before Bearer or human OAuth. Owner alone deletes; private/reader/

@@ -130,6 +130,7 @@ are retired (`agent_kind_retired`). Native arguments go after `--`, and `--cwd` 
 
 ```bash
 treer agent admin create --machine <server-id> --kind command --name reviewer --cwd . -- codex
+treer agent admin create --machine <server-id> --kind command --name codex-ui --cwd . -- treer-agent --harness codex
 treer agent admin create --kind command --name helper --folder /research --cwd repo -- /bin/sh
 ```
 

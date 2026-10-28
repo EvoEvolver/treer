@@ -1,7 +1,8 @@
 # Soul
 
-Soul is an experimental Managed App for immutable, versioned Claude/Codex
-session snapshots. Humans browse their visible snapshots, inspect manifests,
+Soul is an experimental Managed App for immutable, versioned Claude session
+snapshots (archived Codex snapshots stay listable, showable and deletable but
+cannot be restored). Humans browse their visible snapshots, inspect manifests,
 copy incarnation commands and delete their own snapshots. Agents use the
 standalone `treer-soul` client. The server never creates Agents; incarnation
 runs under the caller's own authority. The wire contract is [API.md](API.md);
@@ -46,7 +47,7 @@ Python standard library only, with no frontend build step.
 ```sh
 curl -fsSL http://soul.treer/install.sh | sh
 treer-soul save --harness claude --name leader-state
-treer-soul save --harness codex --session self --name leader-state
+# New Agents have different identities: sharing must be explicit.
 treer-soul save --harness claude --name leader-state --visibility workspace
 treer-soul incarnate leader-state --machine target-machine
 ```
@@ -54,40 +55,44 @@ treer-soul incarnate leader-state --machine target-machine
 `save` accepts `--session UUID|self`, `--cwd DIR`, `--parent SOUL_ID`,
 `--label TEXT`, `--reader STABLE_ID`, `--visibility private|workspace`,
 `--redact/--no-redact` and `--allow-secrets`. Redaction is on by default and
-changes only private temporary copies. `capture-codex` is an alias for
-`save --harness codex`. `upload --manifest ... --file PATH=LOCAL` stores generic
-archives. `list` (`--name`, `--harness`, `--owner`, `--limit`, `--offset`; follow
-`next_offset`), `show NAME_OR_ID[@VERSION]` and `delete NAME_OR_ID[@VERSION]`
-print JSON. A name resolves to its latest version; an ID pins a snapshot.
+changes only private temporary copies. `upload --manifest ... --file PATH=LOCAL`
+stores generic archives. `list` (`--name`, `--harness`, `--owner`, `--limit`,
+`--offset`; follow `next_offset`), `show NAME_OR_ID[@VERSION]` and
+`delete NAME_OR_ID[@VERSION]` print JSON. A name resolves to its latest version;
+an ID pins a snapshot.
 
 `--session self` asks the Agent's own registered Agent Interface for its current
 thread, then its saved native session ID; it never guesses from a shared cwd.
-Claude snapshots contain project JSONL, project `memory/` and `CLAUDE.md`; Codex
-snapshots contain the rollout. Shell snapshots and auth/config credential files
-are never exported. Source sessions are not modified.
+Claude snapshots contain project JSONL, project `memory/` and `CLAUDE.md`. Codex
+snapshots can no longer be saved (`save --harness codex` and `capture-codex` are
+gone) and `incarnate`/`run` refuse archived ones. Shell snapshots and auth/config
+credential files are never exported or executed. Source sessions are not
+modified.
+
+Native session transfer is delegated to the Agent launcher: Soul runs
+`treer-agent session export|import` (export passes `--config-dir`, which is
+`CLAUDE_CONFIG_DIR` or `~/.claude`), validates the bundle and scans the actual
+bytes before import. The launcher is found through `TREER_AGENT_LAUNCHER`, else
+`treer-agent` on `PATH`, else `~/.local/bin/treer-agent`; install it on both the
+source and the target machine.
 
 `incarnate` resolves the version, then uses read-only `treer exec --machine` to
-check the harness executable/version (minimum Codex 0.149.0, Claude 2.0.0),
-presence of login material, the installed launcher and free disk, without
-reading credential contents. Missing requirements refuse unless `--force` is
-given. It then runs `treer agent admin create` as the caller (`--folder F`
-optional, `--name` optional). A private Soul cannot be handed to a new identity;
-save a workspace-visible version instead.
+check the Claude executable/version (minimum 2.0.0), presence of login material,
+the launcher (`treer-agent session --help`) and free disk, without reading
+credential contents. Missing requirements refuse unless `--force` is given. It
+then runs `treer agent admin create` as the caller (`--folder F` and `--name`
+optional). A private Soul cannot be handed to a new identity; save a
+workspace-visible version instead.
 
 The new Agent downloads the client, gets its own Soul token, verifies archive
 size/hash and restores into `~/.local/state/treer-soul/AGENT_ID/workspace`
-(`TREER_SOUL_STATE_DIR` overrides) with a new native session UUID. After a
+(`TREER_SOUL_STATE_DIR` overrides) with a new native session UUID. Each restored
+Claude Agent gets its own Claude home inside that directory (the launcher's
+`native/.harness/claude`); unrelated external config paths are rejected. It
+starts with `treer-agent --harness claude --session-id ID --cwd DIR`. After a
 completed restore, restarts never re-import or overwrite later work.
 `TREER_SOUL_URL` overrides the server URL (default `http://soul.treer`);
 `TREER_SOUL_SERVICE` (default `soul`) names the service for `treer token create`.
-
-Native session export/import is delegated to the Agent launcher. The client
-locates it through `TREER_AGENT_LAUNCHER`, `TREER_AGENT_INSTALL_ROOT/current`, or
-`<machine root>/.treer/launchers/agent/current`, and looks for
-`treer-agent.sh` with a sibling `session.sh`. The current launcher ships
-`scripts/treer-agent.mjs` (with a `session` subcommand) instead, so native
-save/incarnate works only when `TREER_AGENT_LAUNCHER` points at an executable
-that provides that layout. Generic souls (`upload`) are unaffected.
 
 ## Permissions and scanning
 
@@ -142,8 +147,12 @@ unprivileged user or container/VM on critical-service machines.
 python3 apps/soul/tests/test_soul.py
 python3 apps/soul/tests/test_client.py
 SOUL_PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node --test apps/soul/tests/browser.mjs
-SOUL_TEST_SESSION_CLI=/path/to/session-cli python3 apps/soul/tests/test_launcher_integration.py
+cargo build --locked --features fixture-harness --manifest-path launchers/agent/Cargo.toml
+SOUL_TEST_LAUNCHER=$PWD/launchers/agent/target/debug/treer-agent-launcher \
+  python3 apps/soul/tests/test_launcher_integration.py
 ```
 
 Tests use temporary HOME/state, a fake Treer and a local identity Proxy; they
-never create a real Agent or contact a real machine.
+never create a real Agent or contact a real machine. The launcher integration
+test drives the real launcher session CLI with fake Claude files
+(`SOUL_TEST_LAUNCHER` may also be an installed `treer-agent`).

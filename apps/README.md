@@ -36,11 +36,11 @@ Browser Apps first accept `X-Treer-Identity-Token` and verify it against their
 own service/workspace through `/.treer/apps/identity/verify`. Authenticated
 Workspace ingress and the embedded Managed App UI tunnel supply fresh 60-second
 human tokens, so a logged-in Treer user needs no separate App sign-in. Missing
-headers may fall back to standard App OAuth for direct access; OAuth human
-tokens are 12-hour grants. An invalid or expired supplied token must
+headers may fall back to standard App OAuth for direct/legacy access; OAuth
+human tokens remain 12-hour grants. An invalid or expired supplied token must
 be rejected, not silently replaced by a cookie identity. Public ingress does
-not issue human identity. Every App must implement this authentication order
-itself; the Proxy does not convert private cookie/session logic.
+not issue human identity. Existing Apps must implement this authentication
+order; the Proxy does not convert their private cookie/session logic for them.
 
 App code receives the current user's service-scoped authority for 60 seconds.
 Treat it as sensitive, verify every request, and check Origin/Sec-Fetch-Site for
@@ -53,8 +53,8 @@ configuration, state, upgrades, and network access remain deployment concerns.
 New Managed App runtimes also inherit their own `http_proxy`/`https_proxy` entry.
 HTTP calls to `http://NAME.treer/` or `http://SERVICE_ID.treer/` automatically
 carry that runtime's service-audience identity; Apps need no token
-acquisition/refresh code. Apps use their durable App ID as their stable Agent
-identity. Service IDs
+acquisition/refresh code. New Apps use their durable App ID as their stable Agent
+identity; existing active Apps retain their established Agent ID. Service IDs
 remain separate stable endpoint identities. Restart changes the process
 generation while preserving the workload's identity and credential.
 See [workload identity](../docs/operator-guide.md#workload-identity) for headers,
@@ -63,27 +63,21 @@ Externally supervised Apps configure their own identity/transport explicitly.
 
 Every standalone App follows the [App guidelines](GUIDELINES.md): `/` negotiates
 between an Agent-readable GitHub Flavored Markdown manual and the human HTML
-interface, while data pages remain JSON. Agent Interfaces belong to the
-[Agent launcher](../launchers/agent/README.md), not this App index; they expose
-their registered `ui_path`.
-
-- [`agent-hub`](agent-hub/README.md) is an example of App-owned recursive
-  Agents addressed through Core Message.
+interface, while data pages remain JSON. Agent Interfaces belong to the unified launcher, rather than this App index.
+They continue to expose their registered `ui_path`.
 
 - [`issues`](issues/README.md) is a shared human/Agent issue tracker with SQLite,
   hierarchy, dependencies, comments and expiring claims.
-- [`mail`](mail/README.md) is a browser App over Core Message.
+- [`mail`](mail/README.md) is a browser App over App OAuth and Core Message.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.
 - [`soul`](soul/README.md) is an experimental Managed App file server that
   uploads environment-bound state bundles and launches command Agents from them.
 - [`gits`](gits/README.md) is a small workspace-local Git Smart HTTP host for
   repositories shared by Agents and humans.
-- [`tower`](tower/README.md) is an experimental append-only evidence archive
-  for prefix-deduplicated JSON-RPC traces and evidence-linked reviewer findings.
 - [`policy`](policy/README.md) is a versioned workspace Policy Provider with a
   browser editor, publication status, cache invalidation, and decision simulator.
 
 Each bundled App is source code, configuration schema, documentation, and
-tests. Managed Apps accept one command and one HTTP UI port; there is
+tests. Managed Apps currently accept one command and one HTTP UI port; there is
 no package manifest, installer, secret broker, migration protocol, or
 App-specific session capability.

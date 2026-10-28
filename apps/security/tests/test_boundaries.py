@@ -29,7 +29,6 @@ secrets=load('audit_soul_secrets',APPS/'soul/soul_secrets.py')
 archive_bounds=load('audit_soul_archive',APPS/'soul/soul_archive.py')
 sys.modules['auth']=issues_auth
 issues_store=load('audit_issues_store',APPS/'issues/store.py')
-tower=load('audit_tower',APPS/'tower/tower.py')
 sys.path.insert(0,str(APPS/'telegram'))
 from telegram_app.state import StateStore as TelegramStore
 
@@ -185,7 +184,7 @@ class Boundaries(unittest.TestCase):
             self.assertEqual(archive_bounds.archive_mode(compressed,len(raw)),mode)
 
     def test_state_is_private_even_with_permissive_umask(self):
-        constructors=[mail.SessionStore,issues_store.Store,tower.TowerStore,TelegramStore]
+        constructors=[mail.SessionStore,issues_store.Store,TelegramStore]
         with tempfile.TemporaryDirectory() as tmp:
             previous=os.umask(0o022)
             try:
