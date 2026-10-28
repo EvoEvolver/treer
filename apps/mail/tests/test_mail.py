@@ -154,11 +154,16 @@ class FakeProxyHandler(BaseHTTPRequestHandler):
         pass
 
 
-class MailServerTest(unittest.TestCase):
+class MailProcessCase(unittest.TestCase):
+    """Runs mail.py against a fake Proxy; subclasses may swap either."""
+
+    proxy_class = FakeProxy
+    extra_config: dict[str, object] = {}
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        self.proxy = FakeProxy()
+        self.proxy = self.proxy_class()
         self.proxy_thread = threading.Thread(
             target=self.proxy.serve_forever, daemon=True
         )
@@ -176,6 +181,7 @@ class MailServerTest(unittest.TestCase):
                     "public_url": f"http://127.0.0.1:{self.port}/",
                     "proxy_public_url": f"http://127.0.0.1:{self.proxy.server_address[1]}/",
                     "web_dir": str(web),
+                    **self.extra_config,
                 }
             ),
             encoding="utf-8",
@@ -218,7 +224,7 @@ class MailServerTest(unittest.TestCase):
     ) -> tuple[int, dict[str, str], object | None]:
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         headers = {"Cookie": self.cookie} if self.cookie else {}
-        if method == "POST":
+        if method in {"POST", "PATCH"}:
             headers["Origin"] = f"http://127.0.0.1:{self.port}"
         headers.update(request_headers or {})
         encoded = None
@@ -248,6 +254,8 @@ class MailServerTest(unittest.TestCase):
         self.assertIn("HttpOnly", headers["set-cookie"])
         self.cookie = headers["set-cookie"].split(";", 1)[0]
 
+
+class MailServerTest(MailProcessCase):
     def test_browser_contract_uses_app_api_and_preserves_mail_shapes(self) -> None:
         status, _, value = self.request("GET", "/api/health")
         self.assertEqual((status, value), (200, {"status": "ok", "service": "treer-mail"}))
