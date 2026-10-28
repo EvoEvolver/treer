@@ -25,7 +25,7 @@ check:
 check-unlocked:
     node scripts/check-docs.mjs
     python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-    node --test scripts/release-r2.test.mjs scripts/release-authority.test.mjs scripts/machine-artifacts.test.mjs scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs scripts/machine-rollout.test.mjs
+    node --test scripts/release-r2.test.mjs scripts/release-authority.test.mjs scripts/machine-artifacts.test.mjs scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs
     node --test scripts/install-path.test.mjs scripts/install-checksums.test.mjs
     cd web && pnpm typecheck
     cd web && pnpm build
@@ -90,11 +90,6 @@ agent-launcher-test-unlocked:
 messaging-e2e:
     cargo test -p treer-proxy message_
     just app-test
-
-# Closed fake machines only; this never invokes an enrolled service.
-machine-update-test:
-    python3 -m unittest discover -s scripts/tests -p 'test_update_machine.py' -v
-    node --test scripts/machine-rollout.test.mjs
 
 release-tooling-test:
     python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v

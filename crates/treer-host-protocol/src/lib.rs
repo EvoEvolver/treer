@@ -13,15 +13,6 @@ pub struct HostBuildInfo {
     pub git_commit: String,
 }
 
-/// Host-supervisor observation of its original live Controller Child. This is
-/// not a bearer credential, restart authorization or readiness evidence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostControllerIdentity {
-    pub host_epoch: String,
-    pub instance_id: String,
-    pub pid: u32,
-}
-
 pub fn encode_message<T: Serialize>(value: &T) -> Result<Vec<u8>, String> {
     bincode::serde::encode_to_vec(value, bincode::config::standard())
         .map_err(|error| error.to_string())
@@ -138,12 +129,8 @@ pub enum HostCommand {
     Stop {
         process_id: String,
     },
-    RestartController,
     // Append only: existing bincode command discriminants stay unchanged.
-    ObserveController,
-    RestartControllerIfCurrent {
-        expected: HostControllerIdentity,
-    },
+    RestartController,
 }
 
 impl HostCommand {
@@ -155,7 +142,6 @@ impl HostCommand {
                 | Self::Resize { .. }
                 | Self::Stop { .. }
                 | Self::RestartController
-                | Self::RestartControllerIfCurrent { .. }
         )
     }
 }
@@ -184,9 +170,6 @@ pub enum HostResponse {
         replay: HostOutputReplay,
     },
     Ack,
-    ControllerIdentity {
-        identity: HostControllerIdentity,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

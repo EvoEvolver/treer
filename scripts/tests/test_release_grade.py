@@ -45,7 +45,7 @@ class ReleaseGradeTest(unittest.TestCase):
 
     def test_release_pipeline_scripts_still_need_native_and_canary_and_ship_alone(self):
         for paths in (["scripts/canary-release.py"], ["scripts/deploy-canary.sh"], ["scripts/verify-served-frontend.py"],
-                      [".github/workflows/build-release-artifacts.yml"], ["scripts/update-machine.py"]):
+                      [".github/workflows/build-release-artifacts.yml"], ["scripts/prepare-launcher-release.mjs"]):
             result = grade.plan(paths)
             self.assertEqual(result["components"], ["pipeline"], paths)
             self.assertTrue(result["native_build_and_canary"])

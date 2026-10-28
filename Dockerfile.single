@@ -30,7 +30,7 @@ COPY --from=local-launcher /launcher-payload /launcher-payload
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY keys/official-release-ed25519.pub.pem ./keys/official-release-ed25519.pub.pem
-COPY launchers/agent/profiles.json launchers/agent/provider-recipes.json ./launchers/agent/
+COPY launchers/agent/profiles.json ./launchers/agent/
 COPY skills ./skills
 COPY scripts/install.ps1 ./scripts/install.ps1
 COPY apps/policy/AGENT.md apps/policy/policy.py apps/policy/treer-policy ./apps/policy/

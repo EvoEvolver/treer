@@ -3723,7 +3723,6 @@ dependencies = [
 name = "treer-platform"
 version = "0.1.15"
 dependencies = [
- "libc",
  "rustix",
  "tokio",
  "tracing",

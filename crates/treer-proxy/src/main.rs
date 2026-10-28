@@ -17,8 +17,6 @@ mod traffic;
 mod updater;
 mod upload_gate;
 mod upload_store;
-mod voice;
-mod voice_llm;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -106,12 +104,6 @@ struct Args {
         help = "Fallback URL for platform binaries absent from the local artifact directory"
     )]
     release_artifact_base_url: Url,
-    #[arg(
-        long,
-        env = "TREER_CONTROLLER_UPDATE_CATALOG",
-        help = "Operator-reviewed local JSON catalog of Controller release identities (no download URLs)"
-    )]
-    controller_update_catalog: Option<PathBuf>,
     #[arg(long, env = "ADMIN_PASSWORD", hide_env_values = true)]
     admin_password: Option<String>,
     #[arg(long, env = "CLOUDFLARE_API_TOKEN", hide_env_values = true)]
@@ -328,18 +320,6 @@ async fn main() -> anyhow::Result<()> {
     )
     .await
     .context("failed to connect to PostgreSQL")?;
-    if let Some(path) = args.controller_update_catalog {
-        use std::io::Read;
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)
-            .context("cannot open Controller update catalog")?
-            .take(64 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .context("cannot read Controller update catalog")?;
-        auth.provision_controller_update_catalog(&bytes)
-            .await
-            .map_err(|_| anyhow::anyhow!("invalid or regressed Controller update catalog"))?;
-    }
     audit::maintenance::configure(&auth.pool(), args.audit_retention_days)
         .await
         .context("failed to configure audit retention")?;
@@ -437,13 +417,6 @@ async fn main() -> anyhow::Result<()> {
     };
     api::spawn_network_metadata_refresh(state.clone(), auth.clone());
     api::spawn_machine_upload_expiry(state.clone(), auth.clone());
-    let voice = voice::VoiceServices::from_env();
-    if voice.asr.enabled() {
-        info!(config = ?voice.asr, "qwen voice ASR is enabled");
-    }
-    if voice.llm.enabled() {
-        info!(config = ?voice.llm, "voice command LLM is enabled");
-    }
     let audit_worker = audit::maintenance::Worker::start(auth.pool());
     let app = api::router(
         state,
@@ -456,7 +429,6 @@ async fn main() -> anyhow::Result<()> {
         messages,
         api::CapabilityRollout::new(args.enable_core_messages),
         updater,
-        voice,
     )
     .layer(TraceLayer::new_for_http());
     let listener = tokio::net::TcpListener::bind(listen)

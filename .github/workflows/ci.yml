@@ -100,8 +100,6 @@ jobs:
         run: |
           TREER_TEST_NODE="$(command -v node)" TREER_SPIKE_BUILD_CODEX=/usr/bin/true TREER_SPIKE_BUILD_TREER=/usr/bin/true \
             cargo test --locked --features fixture-harness --manifest-path launchers/agent/Cargo.toml
-      - name: Machine rollout tooling
-        run: node --test scripts/machine-rollout.test.mjs
 
   release-tooling:
     name: Release tooling and fake machine updates
@@ -122,4 +120,3 @@ jobs:
       - name: Documentation links and launcher test isolation
         run: |
           node scripts/check-docs.mjs
-          node --test scripts/machine-rollout.test.mjs

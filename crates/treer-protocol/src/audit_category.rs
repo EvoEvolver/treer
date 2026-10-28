@@ -149,7 +149,6 @@ pub const AUDIT_CATEGORY_PREFIXES: &[(&str, AuditCategory)] = &[
     ("network", AuditCategory::AppsIngress),
     ("app", AuditCategory::AppsIngress),
     ("machine.file", AuditCategory::MachinesFiles),
-    ("provider_cli", AuditCategory::MachinesFiles),
     ("member", AuditCategory::AccessAdmin),
     ("invitation", AuditCategory::AccessAdmin),
     ("session", AuditCategory::AccessAdmin),
@@ -219,7 +218,6 @@ pub const NOTABLE_ACTIONS: &[&str] = &[
     "machine.enroll",
     "machine.reenroll",
     "machine.deleted",
-    "provider_cli.install.finished",
     "workspace.deleted",
     "workspace.renamed",
 ];

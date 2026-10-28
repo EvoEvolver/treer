@@ -7,8 +7,6 @@ matching the question; follow its source links for implementation detail.
 
 | Document | Use it for |
 | --- | --- |
-| [Team roles and ownership](team-roles.md) | Directory owners, review boundaries and collaboration rules |
-| [Team collaboration protocol](team-protocol.md) | Tickets as source of truth, review and release comments, tiered releases |
 | [Product direction](product.md) | Purpose, current audience, product promise, and delivery boundaries |
 | [Capability roadmap](roadmap.md) | Real scenarios, capability planes, dependencies, and sequencing |
 | [Architecture](architecture.md) | Components, ownership rules, protocols, state, and information flows |
@@ -32,8 +30,6 @@ matching the question; follow its source links for implementation detail.
 | [Treer agent skill](../skills/treer/SKILL.md) | Runtime CLI contract exposed to managed coding agents |
 | [Treer install skill](../skills/treer-install/SKILL.md) | Recipe-install contract prompted when creating an installer with a git URL |
 | [macOS container skill](../skills/treer-macos-container/SKILL.md) | Apple container machine Host setup on a Mac |
-| [Treer voice skill](../skills/treer-voice/SKILL.md) | Spoken assistant context used by the Proxy Voice LLM; not printed by `treer --skill` |
-| [Voice APIs](operator-guide.md#voice-apis-opt-in) | Opt-in Proxy ASR and spoken command; native clients retired |
 | [Treer UI skill](../skills/treer-ui/SKILL.md) | UI conventions and review checklist for the Console, launcher UI and App browser UIs; not printed by `treer --skill` |
 
 ## Active execution plans
@@ -159,7 +155,6 @@ setup; `treer --skill macos-container` prints it. The image Dockerfile is
 | Component ownership, route, protocol, or state | Architecture |
 | Auth, credentials, policy, isolation, or security wording | Security model |
 | Verification command, CI, known gap, or doc convention | Quality and maintenance |
-| Voice ASR or command LLM | Operator guide Voice APIs, architecture, security model |
 
 Run `node scripts/check-docs.mjs` after documentation changes. The check verifies
 required entry points, the embedded-skill contract, and repository-relative

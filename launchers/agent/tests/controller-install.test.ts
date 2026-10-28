@@ -62,9 +62,8 @@ test("portable install is offline, saves all bundled profiles, idempotently reta
   assert.equal(result.portable, true); assert.equal(result.profiles.length, 2);
   assert.equal(f.call({ operation: "status" }).current_runtime.default, "rust");
   const installed = join(f.base, f.request.version); assert.equal(existsSync(join(installed, "node_modules")), false);
-  assert.deepEqual(readFileSync(join(installed, "provider-recipes.json")), readFileSync(join(launcher, "provider-recipes.json")));
   const manifest = JSON.parse(readFileSync(join(installed, "bundle-manifest.json"), "utf8"));
-  assert.equal(manifest.files.find((file: any) => file.path === "provider-recipes.json").sha256, digest(readFileSync(join(installed, "provider-recipes.json"))));
+  assert.equal(manifest.files.find((file: any) => file.path === "profiles.json").sha256, digest(readFileSync(join(installed, "profiles.json"))));
   const profile = JSON.parse(readFileSync(join(f.root, "Codex + UI.json"), "utf8"));
   assert.equal(profile.command, "treer-agent"); assert.deepEqual(profile.args, ["--harness", "codex"]);
   const bytes = readFileSync(join(installed, "runtime.mjs")); f.call(); assert.deepEqual(readFileSync(join(installed, "runtime.mjs")), bytes);

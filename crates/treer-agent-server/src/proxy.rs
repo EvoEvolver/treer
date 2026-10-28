@@ -127,8 +127,6 @@ pub struct ProxyClient {
     pub network: NetworkRuntime,
     controller_instance_id: String,
     command_cache: Arc<Mutex<HashMap<String, CommandResult>>>,
-    #[cfg(windows)]
-    controller_updates: crate::controller_update::windows::consumer::Consumer,
     advertised_agents: Arc<Mutex<Vec<String>>>,
     last_activity: Arc<Mutex<Instant>>,
     continue_signal: Arc<Notify>,
@@ -161,10 +159,6 @@ impl ProxyClient {
             });
         }
         Self {
-            #[cfg(windows)]
-            controller_updates: crate::controller_update::windows::consumer::Consumer::new(
-                runtime.clone(),
-            ),
             proxy_ws,
             machine_token,
             server,
@@ -613,10 +607,6 @@ impl ProxyClient {
                             if matches!(
                                 envelope.command,
                                 AgentCommand::Exec { .. }
-                                    | AgentCommand::ProviderCliCheck { .. }
-                                    | AgentCommand::ControllerUpdateInspect {}
-                                    | AgentCommand::ControllerUpdateDispatch { .. }
-                                    | AgentCommand::ControllerUpdateOperation { .. }
                             ) {
                                 if exec_ids.contains(&envelope.command_id) {
                                     continue;
@@ -1035,112 +1025,14 @@ impl ProxyClient {
                 .await
                 .map(|response| CommandResult::success(command_id.clone(), response))
                 .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
-            // The typed web path must not fall back to Exec or the legacy
-            // updater before native whole-worker/launcher acceptance is available.
-            AgentCommand::ControllerUpdateInspect {} => {
-                crate::controller_update::inspect(&self.server.workspace_id, &self.server.server_id)
-                    .await
-                    .map(|report| CommandResult::success(command_id.clone(), report))
+            AgentCommand::ControllerUpdateStart { version } => {
+                crate::controller_update::start(version, self.runtime.host())
+                    .map(|status| CommandResult::success(command_id.clone(), status))
                     .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error))
             }
-            AgentCommand::ControllerUpdateDispatch { binding } => {
-                #[cfg(windows)]
-                {
-                    self.controller_updates
-                        .dispatch(&self.server.workspace_id, &self.server.server_id, binding)
-                        .map(|operation| CommandResult::success(command_id.clone(), operation))
-                        .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error))
-                }
-                #[cfg(not(windows))]
-                {
-                    crate::controller_update::dispatch(
-                        &self.server.workspace_id,
-                        &self.server.server_id,
-                        binding,
-                    )
-                    .await
-                    .map(|operation| CommandResult::success(command_id.clone(), operation))
-                    .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error))
-                }
+            AgentCommand::ControllerUpdateStatus {} => {
+                CommandResult::success(command_id.clone(), crate::controller_update::status())
             }
-            AgentCommand::ControllerUpdateOperation { operation_id } => {
-                #[cfg(unix)]
-                {
-                    let workspace = self.server.workspace_id.clone();
-                    let server = self.server.server_id.clone();
-                    match tokio::task::spawn_blocking(move || {
-                        crate::self_update::web_adapter::operation(
-                            &workspace,
-                            &server,
-                            &operation_id,
-                        )
-                    })
-                    .await
-                    {
-                        Ok(Ok(operation)) => CommandResult::success(command_id.clone(), operation),
-                        _ => CommandResult::failure(
-                            command_id.clone(),
-                            ProtocolError::new(
-                                "controller_update_receipt_invalid",
-                                "Native update evidence is unavailable",
-                            ),
-                        ),
-                    }
-                }
-                #[cfg(windows)]
-                {
-                    self.controller_updates
-                        .observe(
-                            &self.server.workspace_id,
-                            &self.server.server_id,
-                            &operation_id,
-                        )
-                        .map(|operation| CommandResult::success(command_id.clone(), operation))
-                        .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error))
-                }
-                #[cfg(not(any(unix, windows)))]
-                {
-                    let _ = operation_id;
-                    CommandResult::failure(
-                        command_id.clone(),
-                        ProtocolError::new(
-                            "controller_update_unsupported",
-                            "Native Controller update adapter is unavailable",
-                        ),
-                    )
-                }
-            }
-            AgentCommand::ProviderCliRecipes {} => self
-                .runtime
-                .provider_cli()
-                .recipes()
-                .map(|response| CommandResult::success(command_id.clone(), response))
-                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
-            AgentCommand::ProviderCliCheck { recipe } => self
-                .runtime
-                .provider_cli()
-                .check(&recipe)
-                .await
-                .map(|response| CommandResult::success(command_id.clone(), response))
-                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
-            AgentCommand::ProviderCliInstall {
-                operation_id,
-                recipe,
-                table_hash,
-                argv_hash,
-                consent,
-            } => self
-                .runtime
-                .provider_cli()
-                .install(&operation_id, &recipe, &table_hash, &argv_hash, &consent)
-                .map(|response| CommandResult::success(command_id.clone(), response))
-                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
-            AgentCommand::ProviderCliOperation { operation_id } => self
-                .runtime
-                .provider_cli()
-                .operation(&operation_id)
-                .map(|response| CommandResult::success(command_id.clone(), response))
-                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
             AgentCommand::UploadBegin {
                 upload_id,
                 directory,
@@ -1557,7 +1449,6 @@ mod tests {
                 interface_cache_path: root.join("interface.json"),
                 startup_store_path: root.join("startup.json"),
                 private_state_root: root.join("agent-private"),
-                provider_cli_root: root.join("provider-cli"),
             },
         )
         .unwrap();

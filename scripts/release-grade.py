@@ -24,7 +24,7 @@ RULES = [
                   "scripts/release-checkpoint.py", "scripts/release-r2.mjs",
                   "scripts/verify-", "scripts/stage-", "scripts/collect-build-artifacts.sh",
                   "scripts/ensure-machine-artifacts.sh", "scripts/install.ps1",
-                  "scripts/update-machine", "scripts/prepare-launcher-release.mjs",
+                  "scripts/prepare-launcher-release.mjs",
                   "scripts/railway-error-summary.sh", "scripts/retag-ghcr.sh",
                   ".github/workflows/build-release-artifacts.yml", ".github/workflows/publish-ghcr.yml")),
     ("tooling", ("scripts/", ".github/", "justfile")),

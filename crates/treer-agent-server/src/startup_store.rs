@@ -48,14 +48,7 @@ struct StoreState {
     entries: HashMap<String, StoredAgentStartup>,
     denied_agent_ids: BTreeSet<String>,
     revision: u64,
-    update_unknown: bool,
-    // Loaded-instance transaction owner only; never persisted as startup data.
-    update_owner: Option<Uuid>,
 }
-
-#[cfg(any(windows, test))]
-#[path = "startup_store_update.rs"]
-pub(crate) mod update;
 
 #[derive(Clone)]
 pub struct StartupStore {
@@ -69,21 +62,10 @@ struct StartupStoreInner {
 
 impl StartupStore {
     fn write_state(&self) -> io::Result<std::sync::MutexGuard<'_, StoreState>> {
-        let state = self
-            .inner
+        self.inner
             .state
             .lock()
-            .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
-        if state.update_unknown || state.update_owner.is_some() {
-            return Err(io::Error::other(
-                "Agent startup update requires reconciliation",
-            ));
-        }
-        Ok(state)
-    }
-    #[cfg(any(windows, test))]
-    pub(crate) fn configured_path(&self) -> &Path {
-        &self.inner.path
+            .map_err(|_| io::Error::other("Agent startup store lock poisoned"))
     }
 
     pub fn load(path: PathBuf) -> io::Result<Self> {

@@ -26,7 +26,6 @@ The directory also holds what surrounds the runtime:
 | `ui/`, `public/` | React page sources and the committed, byte-verified build the runtime serves |
 | `scripts/` | Node 22+ dispatcher (`treer-agent.mjs`), installer, bundle/update tooling, Windows/PATH shims |
 | `profiles.json` | Bundled launch profiles; also embedded by the Proxy as workspace defaults |
-| `provider-recipes.json`, `provider-review.json` | Provider CLI installation recipes embedded by Core ([handoff](provider-recipes.md)) |
 | `interface-contract.json` | AIS contract compiled into the runtime and checked by the installer |
 | `tests/` | Node integration tests for the runtime and installer, plus fake providers |
 
@@ -206,7 +205,7 @@ node launchers/agent/scripts/prepare-bundle.mjs --output /absolute/prepared \
 ```
 
 `prepare-bundle.mjs` rebuilds the UI and refuses stale or extra `public/`
-assets, copies scripts/profiles/contract/recipes, and writes
+assets, copies scripts/profiles/contract, and writes
 `bundle-manifest.json` (schema `treer.launcher-payload/v1`). The schema's
 `runtime.mjs` entry is kept for compatibility with installed launchers and
 Controllers; it is a fail-closed stub because every launch goes through

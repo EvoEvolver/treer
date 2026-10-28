@@ -25,7 +25,7 @@ There is one launcher:
 - [`agent`](agent/README.md) is a native Rust runtime (Codex app-server and
   Claude stream-json adapters) that owns the AIS HTTP server and serves the
   shared React UI, plus the Node 22+ dispatcher, installer and bundle/update
-  scripts, launch profiles and provider recipes. New providers become another
+  scripts and launch profiles. New providers become another
   adapter in the same runtime; Agent interfaces do not belong under `apps/`.
 
 ## Instructions For Agents

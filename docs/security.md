@@ -96,370 +96,19 @@ arbitrary third-party secrets cannot be detected reliably. Use private App
 configuration. Audit events identify the App and routing metadata, never argv
 or configuration contents. Failed launch retains the newly saved specification.
 
-- Controller hot updates authenticate the signed release channel and manifest
-  against a preconfigured local Ed25519 public key, then verify both binary
-  lengths and SHA256 hashes before executing either binary, including `--help`.
-  Missing signatures, keys, invalid metadata, or corrupt binaries fail closed.
-  Explicit and existing local trust keys take precedence; failures reading or
-  parsing them never silently select another key. Only the exact official
-  distributor may use a key pinned by its trusted installation/package when
-  the implicit local key is absent. Custom distributors require separate local
-  trust configuration. The trust key is never obtained from the channel or
-  manifest being verified, and a package without a pinned official key refuses
-  the default update. This does not cover
-  bootstrap installers, Windows in-place updates, or replay/downgrade protection.
-
-  Internal Windows confirmed-plan admission also matches the fixed private local
-  catalog and complete operation scope against the four actual signed/held input
-  files and selected runtime. Reservation rereads the catalog before claim;
-  changed bytes or stale plans refuse. This is not caller authorization, catalog
-  CAS, measured running-image provenance or production Windows updater enablement.
-  The runtime's loaded StartupStore remains the separate state-root authority.
-
-  The internal same-Holding worker publication continuation additionally requires
-  explicit sender image release, the original released custody, normal Trust,
-  confirmed catalog, selected runtime and loaded writer fence. The receiver
-  retains its independent job/lease/claim/backup/state guards, records an
-  exclusive started phase before either rename, and verifies physical identities
-  plus all four complete hashes before recording publication. Two renames are
-  not pair-atomic: a second-rename failure leaves a mixed pair and unknown with
-  guards retained for the original bounded lifetime; it never retries or guesses
-  rollback. Candidate write objects are replaced through retained identity
-  bridges by restrictive read objects, then rehashed before acceptance. File
-  publication and terminal PE execution are not Controller restart, health,
-  startup recovery, durable terminal outcome or claim retirement. The public
-  Windows capability remains off.
-
-  The internal worker-side input receiver verifies both signatures with an
-  independently supplied trust key and all four whole-image digests under
-  independently opened physical pins. Its state snapshot is compared with the
-  original selected-runtime sender's loaded-store observation, including raw
-  digest/file identity and denial fences; this is not independently established
-  child-side runtime authorization or a freeze against subsequent writes.
-  The bounded wire offer includes no trust key or raw startup credentials.
-  A distinct received receipt binds the entire offer and fresh challenge only
-  after verification, while receiver handles and the sender reservation remain
-  held. It is not a sender-release permit, lifecycle authority, readiness,
-  durable replay protection or proof of worker survival after creator exit.
-  Production worker argv/coordinator wiring and capability remain unchanged.
-
-  The internal Windows worker bootstrap additionally has a one-use, bounded
-  binding exchange on the original Child's private transport. Its fixed ACK
-  agrees to an operation, fresh challenge and digest of the retained selected
-  runtime/input evidence. Child-side creator-handle checking proves transport
-  origin only; echoing the context is not independent runtime authorization.
-  Neither an ACK nor its wire data constructs admission, transfers locks,
-  permits lifecycle commands or proves readiness. The Windows private entry can
-  only complete this exchange and exit, before ordinary configuration or Host
-  initialization. The transaction coordinator and capability remain unwired;
-  normal identity/Policy and signed admission are still required. A zero exit
-  after ACK is not update success or readiness. The original Child owner can
-  separately observe zero exit within one three-second completion budget only
-  after a successful ACK. Timeout, cancellation or error consumes that attempt
-  without granting authority or releasing its reservation; independent teardown
-  remains one-shot and unknown Drop does not prove exit.
-
-  A separate internal `ObserveController` read asks the stable Host supervisor
-  for its original live Child's epoch/instance/PID. The instance UUID changes on
-  each successful spawn, even if a PID is later reused. This is an observation,
-  not independently authenticated mapped-image evidence or a restart token.
-  It neither extends the local Host socket's OS-owner trust boundary nor binds
-  a workspace/operation/selected runtime by itself. The updater has not wired
-  it to a production restart or enabled capability. The existing unconditional
-  Host restart command is not made conditional by this addition.
-  The internal selected-Controller reader uses only that retained runtime's
-  existing HostClient and checks its operation/workspace/server/runtime scope
-  before sending and after receiving. It requires the synced Host epoch, this
-  Controller process PID and a canonical UUIDv4/RFC instance. Unexpected wire
-  responses or Host errors produce a fixed refusal, with no restart fallback.
-  The returned identity is still ordinary observation data: it cannot recreate
-  the selected runtime/state authority or authorize a later lifecycle mutation.
-
-  The separate conditional Host restart mutation compares that observation
-  against the original live Child at execution time. It uses the existing
-  local Host socket's OS-owner authorization, not possession of the observation
-  as a credential. Its bounded operation cache binds the expected identity and
-  refuses collisions with the legacy unconditional command. After signalling,
-  uncertainty latches before any further action: no automatic supervision or
-  conditional retry occurs until explicit recovery. This latch and cache are
-  in memory, not a durable cross-Host-restart fence. Explicit legacy operator
-  restart remains available; an updater must not fall back to it. A successful
-  replacement resumes normal existing supervision and proves creation only,
-  not health, workload continuity or update completion. No selected-runtime
-  mutation admission or production coordinator is connected by this primitive.
-
-  The internal selected-state request wrapper performs fresh same-HostClient
-  observation and binds the conditional mutation's operation UUID and expected
-  identity itself, never accepting a caller-supplied observation. Foreign
-  runtime/operation/workspace/server refuses before consumption; a valid call
-  consumes its in-memory attempt before any await. Cancellation, bad response
-  and transport failure never trigger an unconditional fallback or internal
-  retry. The wrapper does not grant Policy permission, transfer authority to a
-  worker or survive creator exit. Existing normal admission must precede any
-  future product entry; no such entry or capability is enabled here.
-
-  Child-side creator pipe admission now retains a non-inheritable duplicate of
-  the inherited process handle with query/synchronize rights only. The borrowed
-  standard handle is never closed or owned by this constructor. The retained
-  handle remains stable across stdin replacement and transport loss. Creator
-  exit uses the process handle's wait state, not exit-code 259 or a reopened PID.
-  A consuming three-second wait closes the pipe first and refuses a live creator
-  at deadline; cancellation drops custody. Neither exit nor pipe EOF authorizes
-  any mutation. This adds no worker lock/pin transfer, Job policy/breakaway,
-  independent Controller/Policy authorization or automatic reconnect/retry.
-
-  Returning the retained connection after a validated binding ACK preserves
-  custody only. The child still echoes opaque runtime context, rather than
-  independently authorizing it. Its retained-ACK helper has no mutation dispatch,
-  command parser, lock transfer or reconnect. The terminal bootstrap explicitly
-  drops this connection on success; its finite refusal/no normal-startup fallback
-  is unchanged. An eventual worker must separately establish admitted input,
-  lease/pin ownership, authorization and survival before using any lifecycle API.
-
-  The fixed private worker's stderr slot now explicitly carries a reduced-rights
-  duplicate of the SAME held installation lock file (read attributes and
-  synchronize only), not log output. The child does not deserialize a handle
-  number or reopen a lock pathname. Retention requires an already verified live
-  creator connection and the expected physical lock-file identity, with live
-  checks before/after. That expected identity must eventually come from admitted
-  operation handoff; matching a caller-supplied tuple alone is not authority.
-  Nonfile/changed-identity inputs refuse. The borrowed standard handle is not
-  closed by the receiver, so no ACK, transport cancellation or retained-object
-  drop promises lock release before child exit. This is conservative reference
-  lifetime only: it neither transfers ancestor/image/state pins nor retires a
-  claim, permits replay, authorizes restart or enables a production worker.
-
-  The new internal lock-binding variant obtains the expected lock-file identity
-  from the retained reservation, binds it to the selected runtime/input context,
-  operation and fresh challenge, and accepts only the exact separate-role ACK.
-  Child ACK requires a matching actual inherited lock and the private bootstrap
-  operation, not merely echoing a digest. Both sides have a three-second total
-  budget; child checks elapsed time after synchronous lock inspection and before
-  returning success. A late/partial/failed/cancelled exchange consumes the same
-  latch as the legacy binding exchange, with no downgrade/reconnect. Parent
-  scope is rechecked after ACK and its reservation/pins/claim remain held. This
-  proves limited context/lock-reference agreement, not independent child Policy,
-  signed-input admission, all-pins ownership transfer, restart/health authority
-  or production readiness. No normal startup or terminal-bootstrap entry changes.
-
-  `PinnedPair::open_matching` is a separate mechanical receiver primitive: it
-  independently opens the existing private fixed-NTFS directory, physical
-  ancestors and two fixed read-only images, then compares all three physical
-  identities to sender observations. Sender pins must remain held throughout;
-  this is not a way to adopt stale observations after a release/reopen gap.
-  The public identity tuple is not an authenticated descriptor, signed-content
-  proof, state-root authority or permission to release the sender. The internal
-  signed receiver takes no caller tuple/path: only the original reservation can
-  mint its opaque borrowed descriptor after full selected-runtime matching.
-  Successful receiver pins retain that borrow, so sender originals cannot be
-  released while the result lives. The separately supplied trusted key must
-  match the original admission key; no manifest-provided key is used. Both
-  signatures and four whole held images are rechecked, with every original
-  binding digest compared rather than replaced by observed values. Failure
-  drops new pins and emits only a static refusal; its consumed latch prevents
-  another receiver attempt, fixed worker spawn or parent pair publication.
-  This is an in-process source boundary, not child-side IPC authentication,
-  caller Policy admission or a permission transfer. Original runtime state and
-  fences remain owned by the sender. The consuming receiver-state stage gets
-  its directory only from that loaded runtime authority and independently pins
-  it before comparing fixed-file snapshots by physical ID and full raw digest.
-  It reuses complete v1/v2 scope/denial-fence validation, retains no raw entries
-  or credentials, and exposes no restore method. A changed/missing/invalid
-  snapshot or read error permanently invalidates its read-only observation.
-  Directory pins do not freeze legitimate StartupStore file replacements;
-  successful snapshot inspection is not a concurrent-write CAS or permission to
-  restore stale state. Cross-process authority, explicit custody transfer and
-  original-owner release are still required for a production worker handoff.
-  Success/creator exit never grants them.
-
-  The private input-receiver terminal entry separately resolves trust before
-  reading any offer. Its creator reuses the normal release resolver, preserving
-  explicit/local-key priority and fail-closed errors; only a missing local key
-  on the exact official base selects the bundled official key. The child uses
-  that fixed bundle or the selected absolute public-key path, never a key from
-  metadata, a receipt or the offer. Key reads are limited to 16 KiB. The launch
-  preflight requires the configured key to match the original admission and
-  rejects configuration changes before spawning. This remains a local OS-owner
-  trust boundary, not independent child Policy or protection from that owner
-  changing configuration. All creation failures return original sender custody;
-  the consumed creation attempt is not a retry token. Successful reception and
-  a terminal zero exit do not release sender pins/lease/claim or grant mutation,
-  restart, recovery or readiness. Product activation remains disabled.
-
-  The holding receiver uses that same independent trust and signed-input
-  verification. Its coordinator consumes already confirmed installation handles
-  and the selected loaded runtime; it does not authenticate a new caller or
-  replace upstream Policy. Inspect/close frames bind the original whole-offer
-  receipt context and exact monotone sequence, with distinct request/reply roles.
-  Successful inspection is only a point-in-time startup/fence recheck. Explicit
-  close and observed original Child zero exit move the original sender guards
-  back without dropping them, retiring claim or granting mutation. ACK or creator
-  exit alone never permits sender release. Errors/cancellation poison the
-  session before await; no automatic reconnect/replay. Receiver custody ends on
-  session exit, but sender guards remain owned by the live coordinator. Unknown
-  owner destruction retains the existing best-effort teardown limitation, not
-  proof of child exit or continued guard ownership; durable claim still fences
-  another operation. No public capability or production mutation route is added.
-
-  Windows saved-installation preparation reads only the normal service config
-  root, with fixed safe JSON names, 256 KiB per file, 1024 directory entries and
-  16 MiB aggregate config input. Minimal projections omit credentials from
-  diagnostics; original private single-link files and ancestor handles remain
-  held. Host/controller path, socket and root bindings, exact workspace/server,
-  selected runtime machine root and physical pair identities are checked.
-  Shared physical images require the catalog's existing permission plus the
-  exact confirmed affected-server list. Snapshot identity is not process
-  authority, a freeze of future enrollments, or permission inferred from privacy
-  or same-volume paths. Enrollment-name changes poison phase-boundary checks.
-  Config/catalog writers may be refused while these read pins are held.
-
-  Staging uses verified normal-config trust, both signed documents and complete
-  artifact bytes, never an offer-selected key. Only a fresh exclusive operation
-  directory under runtime-owned state is created. After writing and flushing,
-  strict pinned files are reopened; this initial unadmitted staging boundary
-  makes no continuous-file-custody claim. Existing confirmed admission verifies
-  all held bytes again before claim. Errors keep partial staging/claim evidence,
-  with no automatic cleanup, overwrite, adoption or replay. Closed-session
-  custody returns the original reservation WITH saved-config/installation pins;
-  ACK/creator exit never releases them. This is internal preparation only, not
-  enabled product dispatch, child mutation authorization or a complete updater.
-
-  The normal release download seam retains the actual four signed metadata
-  bodies and complete verified binary inputs using the existing release
-  consumer, not a second downloader or newly manufactured signatures. Local
-  trust resolves before network access; preparation reloads it and verifies the
-  same bytes before staging. No proxy or redirect fallback is permitted. Connect
-  is bounded to 10 seconds, each request and the full download to 120 seconds;
-  existing 1 MiB metadata and signed artifact-size/128 MiB binary bounds apply.
-  Download error/cancellation cannot leave a claim or stage because preparation
-  has not begun. Errors are static at the preparation boundary, with no automatic
-  retry or unsigned fallback. Retained HTTP documents are input evidence only,
-  never lifecycle authority or a sender-release permit.
-
-  The Windows confirmed-command consumer lives on the existing authenticated
-  Proxy client, not a new login, Policy or confirmation route. Production command
-  handling retains the capability check, currently OFF. One full binding owns
-  a detached task and pinned normal local catalog across download and receiver
-  closure; exact repeats observe, conflicts refuse, and error/cancellation does
-  not reset the slot. Explicit signed-release settings are local configuration,
-  not offer-selected trust. The exact shared-server list in that configuration
-  is a local operator confirmation; it does not prove the current browser
-  confirmed those impacts. Enabling the product still requires the complete
-  transaction and confirmation contract. All reports after finite session close
-  remain Unconfirmed, including successful input reception. The owner retains
-  original custody without a release permit. Process/client destruction is not
-  an explicit custody transfer or proof that a child exited; the retained claim
-  remains a denial fence. There is no durable owner recovery/adoption API here.
-
-  The same Holding owner may explicitly grant one limited backup-preparation
-  write. Its internal non-serializable permit borrows the original confirmed
-  reservation/runtime; fixed catalog, operation, claim and configured trust are
-  checked before sending a distinct full-context/sequence-bound command.
-  Inspection, initial reception, close ACK and creator exit are not that grant.
-  Receiver-created backups use only the original independently pinned target,
-  old images and runtime-derived raw state. The fixed child directory and each
-  output/evidence file are exclusive; existing or partial outputs are never
-  adopted, repaired or retried. Whole-file hashes/raw snapshot fences and evidence
-  are read back before acknowledgement, with read-only backup handles retained
-  alongside input pins and the inherited lock. State comparison is point-in-time,
-  not StartupStore CAS or a freeze of concurrent writes. Failure before a reply
-  can leave backup files, and receiver custody ends when its session exits;
-  sender guards and durable claim still do not become a release permit. This
-  grant adds no installed-image/startup overwrite, cross-creator lifetime,
-  independent child Policy, restart authority, or public capability.
-
-  A separate internal continuation after that explicit backup grant can perform
-  one synchronous compare/write on the selected runtime's actual loaded
-  StartupStore. Its non-wire token retains the same Arc, revision, operation and
-  original physical/raw snapshot. Normal writers and CAS share the same mutex
-  through fence validation, existing persistence, readback and memory commit.
-  Replacement entries must retain workspace/server scope and all existing v2
-  deletion/denial fences. Unknown persistence/readback fences normal writers on
-  that instance; neither reloading a path nor replaying a token reconciles it.
-  The same Holding worker independently checks the new physical/raw snapshot and
-  original backup fences before a sequenced acceptance. Both sender custody and
-  the old backup remain held. Acceptance is not a release or lifetime grant.
-  This is loaded-instance CAS, not OS-wide CAS, a freeze of later writers or
-  durable cross-creator recovery. The finite public consumer remains read-only
-  and public Windows capability remains OFF.
-
-  An explicit fenced CAS continuation prepares mutation by installing a
-  non-serializable operation owner on that SAME loaded Store under its mutex
-  before persistence can have effects. Successful readback retains the owner;
-  ordinary cloned writers cannot change the accepted startup state during later
-  Holding/candidate work. The coordinator retains the committed owner before
-  awaiting worker acceptance. Unknown/error/cancel/close/Drop do not clear it,
-  and a changed physical/raw snapshot permanently poisons it. Wrong operation
-  queries refuse without poisoning the legitimate owner. The existing ordinary
-  CAS remains unfenced. The new fence is in memory only, not a denial fence in
-  startup JSON, durable takeover, OS-wide exclusion or a sender-release token.
-  A separately loaded Store/process is outside its scope; no reload-by-path or
-  automatic recovery is exposed to reconcile this operation. Public Windows
-  capability remains OFF pending durable transfer and outcome acceptance.
-
-  A distinct SAME Holding transfer continuation requires the original confirmed
-  reservation/normal Trust, operation-owned loaded writer fence and verified
-  backup plus all new/restore candidates. Its complete strict transfer contract
-  binds operation/workspace/server/installation/digests, whole-offer context and
-  challenge, current raw startup snapshot and a maximum 120-second deadline.
-  The receiver writes one fixed exclusive job record, flushes and reads it back,
-  retains a readonly duplicate of that SAME object (whose sharing denies new
-  writers/deleters), and keeps independent job/lease/claim/target/state/backup/
-  candidate custody before ACK. The sender's readonly observer shares WRITE to
-  coexist with the receiver object's original access; its immutability depends
-  on that live receiver object, not the serialized record after owner exit.
-  Records are denial evidence only; no restart/adoption/replay constructor exists.
-
-  An ACK does not drop original images. A separate explicit synchronous sender
-  release rechecks loaded owner, selected runtime/plan/Trust, original live Child
-  and exact durable record, then consumes only image pins, including saved
-  inventory duplicates. It retains original parents/config snapshots/job/lease/
-  state. The receiver may hold custody after connection loss or creator exit
-  until its accepted deadline; EOF never authorizes mutation or reconnect.
-  Private worker creation preserves enclosing Job policy and stable Host tree
-  cleanup. Original Child liveness is checked before/after record verification;
-  bounded custody does not promise survival of Job/Host/OS termination, reboot
-  or power loss. No Job settings or Host process are changed.
-  Partial/unknown records are preserved and never adopted or retried; expiry/
-  close never clears the loaded writer fence or retires claim. Pair publication,
-  Controller-only restart/health, rollback, durable outcome and safe retirement
-  remain separate. No public capability, production dispatch or Host action is
-  enabled by this finite custody continuation.
-
-  Receiver custody includes an independently opened fixed installation claim
-  after normal configured-trust whole-input authentication. Core supplies the
-  exact canonical full operation binding; Platform retains a private regular
-  single-link read-only handle with no write/delete sharing and bounded byte
-  comparison. Receipt is sent only after that check, and later Holding checks
-  reread the same file handle. A matching durable claim remains a denial fence,
-  not independent Policy, takeover permission or sender release. No claim
-  creation, overwrite, recovery or retirement is exposed by this reader.
-
-  Receiver job custody duplicates only the original sender's job lock into its
-  original held Child, with read-attributes/synchronize rights and no inheritance
-  flag, PID lookup or write/delete rights. The borrowed child-local handle value
-  is duplicated locally rather than adopted or closed. After independent signed
-  input verification, physical directory/lock IDs and the complete canonical
-  intent must match; the receiver retains private ancestor and receipt pins and
-  rechecks the same receipt during Holding. Offer locators/receipt hashes do not
-  grant Policy or mutation authority. A failed/unknown offer leaves any remote
-  reference until child exit; remote-close could otherwise target a reused handle.
-  Sender originals remain held. Creator liveness, finite session and unknown
-  no-replay constraints remain; this does not permit creator exit or sender release.
-
-  A distinct, explicitly requested fixed-candidate grant on the SAME Holding
-  connection follows backup preparation. Its non-wire constructor rechecks the
-  original confirmed/runtime/claim contract and normal trust, not offer-selected
-  keys or creator identity as authorization. Worker creation is restricted to
-  four fixed CREATE_NEW candidate names under the independently pinned saved
-  installation. New images come from held signed inputs; restoration images
-  come from independently verified backups. Whole hashes, flush and retained
-  physical handles precede ACK; existing names and partial outcomes refuse
-  replay. Reduced lock custody and all original image/state/job/claim pins stay
-  held. This is candidate-file mutation only: no installed-image rename,
-  publication, sender release, cross-creator lifetime, ready or update outcome.
-  Close does not clean/reuse candidates, and the public consumer/capability
-  behavior remains unchanged.
+- Controller updates authenticate the signed release manifest for the
+  requested version against a preconfigured local Ed25519 public key, then
+  verify each binary's length and SHA256 before staging it. Missing signatures,
+  keys, invalid metadata, or corrupt binaries fail closed. Explicit and existing
+  local trust keys take precedence; failures reading or parsing them never
+  silently select another key. Only the exact official distributor may use the
+  key bundled with the official package when the implicit local key is absent.
+  Custom distributors require separate local trust configuration. The trust key
+  is never obtained from the documents being verified. Requesting an update
+  requires `machine.exec` on the machine. This does not cover bootstrap
+  installers or downgrade protection (an authorized caller may install any
+  signed version), and it does not defend the installed binaries against
+  same-user tampering, which is out of scope.
 
 - Machines enroll once, then authenticate with a workspace-bound credential.
 - Managed Agents have separate workload credentials, verified by both the
@@ -581,16 +230,13 @@ or configuration contents. Failed launch retains the newly saved specification.
   header set; and if the App shares the Proxy origin, embedded App interfaces
   and virtual-host tunnels are refused so App content never runs on the
   Console origin.
-- Provider CLI installation runs only recipes embedded in the Core release,
-  never browser argv, user-editable tables or remote recipe URLs; see
-  [Provider CLI installation](#provider-cli-installation).
 - CLI file transfer uses separate `machine.file.read` and `machine.file.write`
   actions on every chunk and commit, with caller/path/generation-bound handles.
   Treer private state is hard-denied by reserved namespace, physical-parent/name
   reservations (including absent files), and opened object identity, independent
   of Policy. The Controller passes the whole canonical Treer state directory
-  (`service::state_dir()`: startup stores, private state, provider CLI results,
-  service logs, machine identity and any future per-server file) plus its
+  (`service::state_dir()`: startup stores, private state, service
+  logs, machine identity and any future per-server file) plus its
   service configuration as protected paths, so an enrolled root that contains
   that directory (root = HOME with `~/.local/state/treer`) cannot read or write
   below it through file transfer under any Policy; sibling directories stay
@@ -647,172 +293,6 @@ routes and false whenever Policy denies or fails; the write routes authorise
 independently. The workspace event stream itself delivers every workspace
 event to every member session without a per-subscriber Policy filter; that
 pre-existing boundary is tracked in #141, not changed here.
-
-## Provider CLI installation
-
-Installing a provider CLI (Codex, Gemini; others are explicitly unsupported in
-the first table) executes third-party code from the npm registry as the machine
-account under a human's explicit confirmation. It is not a sandbox and does not
-pin transitive dependencies: npm's own registry integrity checks apply to them.
-What Core does promise:
-
-- Only a human workspace session with Policy `machine.exec` on that machine can
-  list, prepare, install, check or poll; App, service and machine credentials
-  are refused. Prepare and install both re-check membership and Policy.
-- The table is release bytes validated at Controller start (typed `npm-global`
-  package, exact version, SHA-512 integrity, allowlisted registry, no free
-  argv). The confirmation shows the exact plan that runs: `npm pack`, SHA-512
-  verification of the single tarball against the recipe, `npm install --global`
-  of that verified local tarball, prefix resolution and a version probe from
-  the installed prefix's `bin`. A different fresh expansion (for example a
-  moved npm) is refused as `provider_cli_plan_changed`; a table or Controller
-  change since confirmation is refused, never substituted.
-- npm runs from a Controller-owned `0700` job directory with a cleared
-  environment: the machine exec allowlist minus `npm_config_*`, `NODE_OPTIONS`,
-  `NODE_PATH`, proxy and TLS override variables, with `HOME` and temp inside
-  the job directory, empty private `--userconfig`/`--globalconfig`, an explicit
-  `--registry` and scope registry, `--ignore-scripts` on pack and (unless the
-  recipe carries a reviewed lifecycle entry) on install. The user's `~/.npmrc`
-  is never read, so a user-configured global prefix is ignored and the install
-  lands in npm's default prefix for that Node; enterprise proxies are out of
-  scope. Step 3 contacts the recipe's registry to resolve dependencies and
-  writes the global prefix. A non-writable global prefix fails visibly; Core
-  never elevates or edits PATH, so a successful install does not promise that
-  Agent creation finds the binary: the probe reports the absolute path inside
-  the prefix for a profile, or the user adds that `bin` directory to the
-  service environment themselves.
-- A lifecycle-enabled entry runs npm lifecycle scripts, so the table allows
-  it only for a native-binary entry (#131): the one whose reviewed postinstall
-  places a platform binary that the recipe pins. Such an entry carries the
-  review (file hashes, the script map, which scripts npm runs, the expected
-  closure of root plus exactly one native package), `omit_optional: false`,
-  `binary_path` and one `native_binaries` pin per supported platform (native
-  package, version, tarball SHA-512, member, size, SHA-256, unpacked size).
-  Scripts without a pin or a pin without scripts invalidate the whole table.
-  Its plan has nine steps: `node -p process.arch` from the allowlisted PATH
-  must print the platform's native architecture (an x64 Node under Rosetta
-  would select another native package; `provider_cli_node_arch_mismatch`,
-  also refused at `prepare` from the observation), `npm pack` of the root and
-  of the native package, SHA-512 verification of both tarballs, one
-  `npm install --global` of both verified local tarballs with `--offline`, an
-  empty private cache and every registry pinned to a closed port (nothing
-  fetched during scripts can succeed, so a missing native fails closed), the
-  prefix resolution, a read-only verify-file step and the version probe.
-  Verify-file opens the canonical prefix once and every component below it
-  with `O_NOFOLLOW`, requires each directory and the file to be owned by root
-  or the account and not group/world-writable, the file to be regular with
-  exactly the pinned size and SHA-256 (the postinstall's hard link makes it the
-  same inode as the native package's member; nlink is not checked), and
-  `<prefix>/bin/<binary>` to be a symlink resolving inside the prefix to that
-  inode. Any mismatch is `provider_cli_binary_mismatch` with the failed check's
-  category in the report, the probe never runs, and the report's
-  `prefix_modified` tells the user to remove the package through the existing
-  uninstall path; nothing retries. The probe's first line must carry
-  `expected_version` as a complete token (`2.1.302`, not `2.1.3020` or
-  `v2.1.302`) or the operation fails as `provider_cli_version_mismatch`; this
-  rule applies to every supported entry. Native entries also require free
-  space of 1 GiB plus twice the unpacked native size on the job and prefix
-  volumes (`provider_cli_space_insufficient`) and may carry their own
-  `deadline_seconds` within 60 to 900 seconds. Residuals: the native bytes
-  are proven against the pin before anything runs them, but the reviewed
-  postinstall itself runs as the account inside the scrubbed job environment;
-  its placement is not atomic (verify-file catches partial results);
-  same-account processes can race between verify-file and the probe; musl
-  Linux is unsupported because npm would select a different native package.
-  The unit tests prove the plan shape and the fail-closed checks against
-  fixtures; that the offline install really satisfies the root's optional
-  dependency with a single copy of the verified native package, refuses an
-  injected native and uninstalls back to baseline is proven only by the
-  release-owned sealed acceptance in a disposable environment.
-  The packed tarballs are verified and installed by the same account in the
-  same private directory; a same-account process replacing them between the
-  verification and install steps is inside the trust domain Core already
-  grants that account.
-- The install step overwrites whatever lives in npm's global prefix, so the
-  consent names what it replaces (#134). `prepare` first has the Controller
-  observe the prefix with the same constraints as `check` (cleared
-  environment, private `HOME`, process-group timeout and cleanup confirmation,
-  bounded output; the probe executes the already-installed binary, which is
-  third-party code the machine account already trusts). The observed state is
-  `absent` only when the prefix resolved and the binary's `lstat` returned
-  not-found, `installed` only when a regular file inside the prefix exited 0
-  with a strict version on its first line (bounded numeric components, no
-  leading zeros, bounded prerelease identifiers; the first matching token
-  wins, so extra output cannot spoof a version into an upgrade), and
-  `unknown` otherwise with the reason named (`provider_cli_prefix_unresolved`,
-  `provider_cli_binary_outside_prefix`, `provider_cli_probe_failed`,
-  `provider_cli_probe_timed_out`, `provider_cli_probe_output_truncated`,
-  `provider_cli_version_unparsed`, `cleanup_unconfirmed`). Output that
-  exceeded the retained tail has no trustworthy first line and never yields a
-  version, so a crafted tail cannot turn a newer installation into an
-  "upgrade" or a "noop". A probe whose descendants were not confirmed gone is
-  not evidence at all: `prepare` refuses it (409
-  `provider_cli_probe_unconfirmed`) and issues nothing. The action shown and bound is `install`, `replace`
-  (relation `upgrade`, `downgrade`, `incomparable` or `unknown`) or `noop`;
-  `noop` issues no token and nothing runs, an unobservable prefix refuses the
-  prepare, and a spoofed probe that prints the pinned version only ever yields
-  `noop`. A `downgrade`, `incomparable` or `unknown` relation must be
-  acknowledged in the install request with exactly that relation; a missing or
-  different value is 400 and leaves the token usable, so no client can confirm
-  a downgrade blindly.
-- The Controller re-derives the action from a fresh observation before any
-  step and again immediately before the install step, under the operation's
-  single five-minute deadline (each observation process gets at most the probe
-  budget, never beyond that deadline, and nothing spawns once it has passed).
-  Process facts are decided first: an observation whose descendants were not
-  confirmed gone ends the operation `unknown` (`cleanup_unconfirmed`) with
-  nothing executed after it, and a spent budget ends it timed out
-  (`provider_cli_deadline`). Only then are hash, action and relation compared
-  strictly; any difference (a prefix that moved, a binary that appeared,
-  changed or became unreadable, an action that became `noop`) fails the
-  operation as `provider_cli_state_changed` with nothing written to the prefix
-  and the job directory removed. What remains is a time-of-check/time-of-use
-  window between the second observation and npm writing the prefix: it is
-  bounded by the remaining operation budget, not by any millisecond promise,
-  and lies inside the same account's trust domain. Tokens minted before
-  observation existed are never accepted, and a v1-only Controller is refused
-  with `provider_cli_controller_outdated` rather than served unobserved.
-- The Controller's observation is treated as input, not truth: the Proxy
-  validates its shape before storing, auditing or showing it (canonical strict
-  version, bounded control-free text, bounded absolute executable path, a
-  probe code from the known set, and state/evidence agreement such as
-  `installed` requiring a found binary and a clean probe); a malformed
-  observation is a Controller error (502) that mints nothing. Every `prepare`
-  is admitted against the per-minute and live-token ceilings before any
-  Controller command, and counts whatever its outcome (`noop`, unobservable,
-  refused recipe), so a session cannot make the machine run `npm prefix` and
-  the probe without bound.
-- The observed executable path (`<prefix>/bin/<binary>`, under the machine
-  account's home) is returned only to the creator's `prepare` and `check`
-  responses for display. Proxy rows, audit payloads, operation reports
-  (`observed_before`) and logs carry the path-free summary: state, normalized
-  version, presence and the observation hash.
-- Confirmation tokens are 256-bit, stored hashed, expire after 120 seconds of
-  database time, are consumed once by `UPDATE … RETURNING`, and are bound to
-  workspace, machine, user, session, recipe triple, table hash, Controller
-  build, plan hash, observation hash, action and relation. Expired, consumed,
-  foreign and mismatched tokens share one 409. At most four live tokens and
-  ten prepare attempts per minute per user and machine.
-- One active installation per machine, enforced by a PostgreSQL partial unique
-  index, with a five-minute deadline. Provider CLI commands are excluded from
-  reconnect replay. Each step runs in its own Unix process group that is
-  SIGKILLed at the deadline; descendants that leave the group but still hold
-  the step's output pipes are detected and the operation ends `unknown`
-  (`cleanup_unconfirmed`). Descendants that both detach and close those pipes
-  are outside what Core can prove; `unknown` is never resolved by assumption,
-  only by the machine's own later report.
-  An `unknown` operation releases the Proxy's per-machine slot (the unique index
-  covers `queued` and `running` only), while the Controller still refuses a
-  second installation as long as its own job is active, so a job that is
-  `unknown` to the Proxy but still running on the machine cannot be joined by
-  a concurrent installation.
-- Output never enters Proxy storage, audit or logs. Results stay in the
-  Controller's private `0600` store for 24 hours (64 results; a full store
-  refuses new installations rather than evicting). Audit rows record actor,
-  machine, recipe triple, table hash, plan hash, action, relation, observation
-  hash, observed state and version, status and exit code.
-- Windows entries are all unsupported in this iteration; nothing executes
-  there. Provider login is never performed or handled by Core.
 
 ## Machine connection ownership
 
@@ -1036,12 +516,6 @@ isolation, or encryption at rest. Secret scanning is heuristic and cannot promis
 to detect encoded or unknown secrets. Deploy critical Apps under separate accounts
 or externally managed containers with minimal mounts and resource limits; the
 shared machine account is not a sandbox.
-
-For the message endpoint hub, processes running under the same UID can read the
-bot token file, SQLite state and held message content, and impersonate the
-endpoint. The hub cannot attest OS/container confinement or Policy isolation.
-An owner's explicit acceptance of unverified isolation records that risk; it
-does not establish or verify an isolation boundary.
 
 Treer does not currently provide deny-by-default workspace permissions. Absent
 an enforcing Policy, the default permits authenticated workspace actions; monitor
@@ -1348,11 +822,9 @@ UI is served through the private Agent Interface tunnel. Selecting a launcher
 trusts that launcher and its selected harness with the Agent's authority; a
 private UI tunnel does not create an operating-system sandbox.
 
-Treer does not install software by default, capture network traffic, manage OS
-DNS, create namespaces, or configure a sandbox. The one exception is the
-explicitly confirmed, release-pinned
-[provider CLI installation](#provider-cli-installation). Profiles and external
-launchers own the remaining choices. Ordinary internet traffic is outside Treer's authorization and
+Treer does not install software, capture network traffic, manage OS DNS,
+create namespaces, or configure a sandbox. Profiles and external launchers own
+those choices. Ordinary internet traffic is outside Treer's authorization and
 metering boundary.
 
 The thin CLI carries an Agent credential separately from the Controller's
@@ -1419,8 +891,6 @@ not the bearer. Existing stored audit records are not rewritten by this change.
 | Platform admin session | Cookie scoped to `/api/admin`; separate from user accounts; aggregate counts/traffic, platform invitations and image updates; no user/machine/Agent/organization inventories or activity detail |
 | Updater token | Shared Bearer secret between Proxy and the Compose updater sidecar; never exposed to browsers |
 | Mail cookie | Local opaque handle to an App token; compromise of Mail state grants that token until expiry |
-| Voice ASR vendor key | Proxy process only (`TREER_VOICE_ASR_API_KEY` / `DASHSCOPE_API_KEY`); never client code |
-| Voice LLM vendor key | Proxy process only (`TREER_VOICE_LLM_API_KEY`); used for utterance-to-command; never client code |
 | Telegram bot token | One Telegram bot; Telegram and any process that can inspect it can act as the bot |
 | Release signing key | All official release manifests; must remain offline and outside runtime systems |
 
@@ -2027,14 +1497,6 @@ From, and Reply-To are rejected; HTML is generated from escaped text. Credential
 stay in the Proxy. Body-free PostgreSQL audit rows retain App ID, time,
 recipient SHA-256 and sending/sent/failed outcome; hashes are pseudonymous, not
 anonymous. Policy denials also use the ordinary Policy audit path.
-
-The email-endpoint App defaults to workspace access and local outbox. It admits
-only administrator-bound, current workspace human recipients and rechecks thread
-ownership for every read and reply. It forwards Agent/human service tokens to
-Core Message so the actual caller authors the canonical message. Emails contain
-only explicit summaries and links; operators and callers must keep secrets out
-of summaries and subjects. Optional Agent wake requires both administrator
-opt-in and `agent.prompt` Policy. Same-UID App isolation is still not promised.
 
 Queued prompt delivery uses the existing `agent.prompt` authorization. Public
 request bodies cannot supply sender identity: the Proxy resolves the verified

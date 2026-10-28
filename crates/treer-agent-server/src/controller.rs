@@ -38,14 +38,6 @@ use launch::*;
 mod output;
 use output::*;
 
-#[cfg(any(windows, test))]
-#[path = "controller_update_state.rs"]
-mod update_state;
-#[cfg(windows)]
-pub(crate) use update_state::{
-    ControllerStateEvidence, ControllerUpdateChild, ControllerUpdateState,
-};
-
 const OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 const OUTPUT_TRIM_SLACK_BYTES: usize = 64 * 1024;
 const STATUS_SCAN_LIMIT_BYTES: usize = 16 * 1024;
@@ -261,27 +253,10 @@ pub struct ControllerConfig {
     pub startup_store_path: PathBuf,
     /// Controller-derived `agent-private` directory (below the Treer state dir).
     pub private_state_root: PathBuf,
-    /// Controller-owned `provider-cli` directory (job directories, results).
-    pub provider_cli_root: PathBuf,
     pub root: PathBuf,
 }
 
-/// Resolve a bare machine command against absolute PATH directories only;
-/// shared by machine exec-style features that must display what they run.
-pub(crate) fn resolve_machine_command(
-    command: &str,
-    environment: &BTreeMap<String, String>,
-) -> Result<String, ProtocolError> {
-    resolve_agent_command(command, environment)
-}
-
-pub(crate) fn build_commit() -> String {
-    treer_build_info::GIT_COMMIT.to_string()
-}
-
 struct ControllerInner {
-    #[cfg(any(windows, test))]
-    update_instance_id: uuid::Uuid,
     // No field, setter, wire/config option or read of this value in production.
     // Only isolated Windows exec unit-test fixtures opt in (never real Hosts).
     #[cfg(all(test, windows))]
@@ -300,7 +275,6 @@ struct ControllerInner {
     /// then unavailable for every Agent, but the Controller keeps running.
     private_state: Result<PrivateStateRoot, &'static str>,
     private_state_ledger: Mutex<QuotaLedger>,
-    provider_cli: crate::provider_cli::ProviderCliService,
     recovery_lock: tokio::sync::Mutex<()>,
     uploads: crate::machine_upload::Uploads,
     /// Per-Agent interface (re)registration windows (#164 Controller item,
@@ -344,6 +318,10 @@ pub struct TerminalSnapshot {
 }
 
 impl ControllerRuntime {
+    pub(crate) fn host(&self) -> HostClient {
+        self.inner.host.clone()
+    }
+
     pub(crate) fn machine_root(&self) -> &Path {
         &self.inner.root
     }
@@ -419,7 +397,6 @@ impl ControllerRuntime {
             Some(config.startup_store_path.clone()),
             Some(config.interface_cache_path.clone()),
             Some(config.private_state_root.clone()),
-            Some(config.provider_cli_root.clone()),
             treer_platform::config_directory(),
         ]
         .into_iter()
@@ -428,8 +405,6 @@ impl ControllerRuntime {
         .collect();
         let runtime_result = Self {
             inner: Arc::new(ControllerInner {
-                #[cfg(any(windows, test))]
-                update_instance_id: uuid::Uuid::new_v4(),
                 #[cfg(all(test, windows))]
                 hosted_test_module_cache: Mutex::new(None),
                 uploads: crate::machine_upload::Uploads::new(
@@ -446,10 +421,6 @@ impl ControllerRuntime {
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or_else(crate::machine_file_transfer::Transfers::default_limit),
-                ),
-                provider_cli: crate::provider_cli::ProviderCliService::new(
-                    config.provider_cli_root.clone(),
-                    &config.server_id,
                 ),
                 host,
                 workspace_id: config.workspace_id,
@@ -1864,10 +1835,6 @@ impl ControllerRuntime {
         Ok(info)
     }
 
-    pub fn provider_cli(&self) -> &crate::provider_cli::ProviderCliService {
-        &self.inner.provider_cli
-    }
-
     /// Capabilities this Controller advertises on registration: the static
     /// list plus features whose embedded data validated on this machine.
     pub fn advertised_capabilities(&self) -> Vec<String> {
@@ -1883,14 +1850,6 @@ impl ControllerRuntime {
         }
         if crate::controller_update::capability_available() {
             capabilities.push(treer_protocol::controller_update::CAPABILITY.to_string());
-        }
-        if self.inner.provider_cli.capability_available() {
-            capabilities.push(treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL.to_string());
-            // v2 (#134): installations are observed and consent-gated.
-            capabilities
-                .push(treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2.to_string());
-            // Plan v2 (#131): verify-file steps and exact expected versions.
-            capabilities.push(treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_PLAN_V2.to_string());
         }
         capabilities
     }
