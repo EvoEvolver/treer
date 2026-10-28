@@ -177,14 +177,15 @@ async fn main() -> Result<()> {
     let port = listener.local_addr()?.port();
     let instance =
         env("AGENT_UI_INSTANCE_ID").unwrap_or(format!("rust-spike-{}", uuid::Uuid::new_v4()));
-    let codex_args = if harness=="claude" {
+    let (provider, mut codex_args) = tools::provider(&harness)?;
+    codex_args.extend(if harness=="claude" {
         if let Some(args)=env("RUST_SPIKE_CLAUDE_ARGS") {serde_json::from_str::<Vec<String>>(&args)?}
         else {vec!["--print","--verbose","--output-format","stream-json","--input-format","stream-json","--include-partial-messages","--dangerously-skip-permissions"].into_iter().map(String::from).collect()}
     } else if let Some(args) = env("RUST_SPIKE_CODEX_ARGS") {
         serde_json::from_str::<Vec<String>>(&args)?
     } else {
         vec!["app-server".into(), "--listen".into(), "stdio://".into()]
-    };
+    });
     let handle = runtime::spawn(runtime::Config {
         claude:harness=="claude",
         native_bootstrap: {
@@ -201,7 +202,7 @@ async fn main() -> Result<()> {
         } else {None},
         cwd,
         private_root,
-        codex: tools::provider(&harness)?,
+        codex: provider,
         codex_args,
         session: env("AGENT_UI_SESSION_ID"),
         attachments: attachments.clone(),

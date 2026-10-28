@@ -103,9 +103,12 @@ Controller. `launcher install` and `launcher update` are the same command.
 
 At run time the launcher resolves the Treer CLI from `TREER_BIN` (set by the
 Controller for Agents), then PATH, then its own directory; providers from
-`CODEX_BIN` / `CLAUDE_BIN`, else `codex` / `claude` on PATH. On Windows the
-provider must be a native `.exe` (npm `.cmd` shims are not executed); set
-`CODEX_BIN` or `CLAUDE_BIN` when PATH only has a shim. The UI is embedded;
+`CODEX_BIN` / `CLAUDE_BIN`, else `codex` / `claude` on PATH. On Windows PATH
+lookup tries `.exe`, `.cmd` and `.bat` in each directory, so npm, pnpm and
+yarn installs work as they are: a package-manager `.cmd` shim is run as the
+`node <script>` (or bundled `.exe`) it wraps, without `cmd.exe`; any other
+batch file is started through `cmd.exe` with Rust's batch argument escaping.
+`CODEX_BIN` / `CLAUDE_BIN` may name any of these. The UI is embedded;
 `AGENT_UI_PUBLIC_DIR` serves a development `public/` directory instead.
 
 ### Upgrading from the Node launcher
