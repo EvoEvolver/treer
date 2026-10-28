@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, type Dispatch, type ReactNode } from "react";
 import { openSocket, request } from "../api";
 import { t } from "../i18n";
-import type { GoalInput, PromptMode, Snapshot, TurnDto } from "../types";
+import type { GoalInput, PromptMode, Snapshot, ThreadState, TurnDto } from "../types";
 
 // Server truth (snapshot, connection) and UI-local transient state share one reducer. A snapshot always replaces the
 // previous one wholesale; there is no client-side merging. Messages are plain strings so no HTML ever enters state.
@@ -16,6 +16,8 @@ export interface State {
   goalBusy: boolean;
   /** Goal completions shown in the thread, after the turn that was last when the goal finished. */
   notices: Array<{ objective: string; afterTurn: string | undefined }>;
+  /** The last conversation seen before the runtime published no thread (provider restart). Shown, marked stale, until a thread returns. */
+  staleThread?: ThreadState | null;
 }
 export type Action =
   | { type: "snapshot"; snapshot: Snapshot; source: "http" | "ws" }
@@ -65,7 +67,12 @@ export function reducer(state: State, action: Action): State {
       const finished = (status?: string) => status === "complete" || status === "done";
       const notices = goal && finished(goal.status) && (!finished(before?.status) || before?.objective !== goal.objective)
         ? [...state.notices, { objective: goal.objective, afterTurn: action.snapshot.thread?.turns.at(-1)?.id }].slice(-20) : state.notices;
-      return { ...state, snapshot: shareTurns(state.snapshot, action.snapshot), error: null, notices };
+      // While the provider restarts, the runtime may publish no thread or an empty one; keep the last one with content.
+      const incoming = action.snapshot.thread;
+      const hasContent = Boolean(incoming && (incoming.turns.length > 0 || action.snapshot.ready));
+      const previous = state.snapshot?.thread?.turns.length ? state.snapshot.thread : state.staleThread ?? null;
+      const staleThread = hasContent ? null : previous;
+      return { ...state, snapshot: shareTurns(state.snapshot, action.snapshot), error: null, notices, staleThread };
     }
     case "connected": return { ...state, connected: action.value };
     case "error": return { ...state, error: action.message };

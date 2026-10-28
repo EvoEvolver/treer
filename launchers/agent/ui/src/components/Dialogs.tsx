@@ -30,7 +30,7 @@ function TextView({ title, text, onClose }: { title: string; text: string; onClo
   }
   return (
     <>
-      <header className="dialog-h"><h2>{title}</h2><span className="dialog-tools"><button type="button" className="btn" onClick={() => void copy()}>{copied ? t("dialog.copied") : t("dialog.copy")}</button><button type="button" className="xbtn" aria-label={t("dialog.close")} onClick={onClose}><Icon name="close" /></button></span></header>
+      <header className="dialog-h"><h2>{title}</h2><span className="dialog-tools"><button type="button" className="btn" onClick={() => void copy()}>{copied ? t("dialog.copied") : t("dialog.copy")}</button><button type="button" className="ib" aria-label={t("dialog.close")} onClick={onClose}><Icon name="close" /></button></span></header>
       <pre className="dialog-text" tabIndex={0}>{text}</pre>
     </>
   );
@@ -61,7 +61,7 @@ function ImageView({ src, alt, onClose }: { src: string; alt: string; onClose: (
           <button type="button" className="btn" onClick={() => setZoom("fit")}>{t("image.fit")}</button>
           <button type="button" className="btn" onClick={() => setZoom(1)}>{t("image.actual")}</button>
           <button type="button" className="btn" onClick={() => step(1.25)} aria-label={t("image.zoomIn")}>+</button>
-          <button type="button" className="xbtn" aria-label={t("dialog.close")} onClick={onClose}><Icon name="close" /></button>
+          <button type="button" className="ib" aria-label={t("dialog.close")} onClick={onClose}><Icon name="close" /></button>
         </span>
       </header>
       <div className="image-stage" tabIndex={0}>

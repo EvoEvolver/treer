@@ -1,4 +1,3 @@
-import { t, type MessageKey } from "../i18n";
 import type { HistoryItem } from "../types";
 
 export function duration(ms: number): string {
@@ -10,10 +9,6 @@ export function duration(ms: number): string {
 
 export function compact(count: number): string {
   return count >= 1000 ? `${(count / 1000).toFixed(count >= 10_000 ? 0 : 1)}k` : String(count);
-}
-
-export function plural(base: "command" | "change" | "tool" | "step", count: number): string {
-  return t(`count.${base}.${count === 1 ? "one" : "other"}` as MessageKey, { count });
 }
 
 export type ToolState = "done" | "failed" | "running";

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { toBlocks } from "../src/lib/blocks";
-import { parseDiff } from "../src/lib/diff";
-import { activityStats, compact, duration, plural, toolState } from "../src/lib/format";
+import { diffCounts, parseDiff } from "../src/lib/diff";
+import { changedFiles, liveStep, retryText, runStatus, shortPath } from "../src/lib/run";
+import { activityStats, compact, duration, toolState } from "../src/lib/format";
 import { safeImageUrl, safeUrl, workspaceFilePath } from "../src/lib/url";
 import { reducer, shareTurns, type State } from "../src/state/store";
 import { t } from "../src/i18n";
@@ -40,10 +41,9 @@ test("safeImageUrl allows same-origin, data raster and blob images, never svg da
   for (const bad of ["https://example.test/x.png", "http://example.test/x.png", "//example.test/x.png", "data:image/svg+xml;base64,PHN2Zz4=", "data:image/png,notbase64<", "javascript:alert(1)", "\\evil.test/x.png", "", null]) assert.equal(safeImageUrl(bad as string | null), undefined, String(bad));
 });
 
-test("durations, compact counts, plurals and tool states", () => {
+test("durations, compact counts and tool states", () => {
   assert.equal(duration(0), "0s"); assert.equal(duration(12_400), "12s"); assert.equal(duration(65_000), "1m 5s"); assert.equal(duration(3_720_000), "1h 2m");
   assert.equal(compact(999), "999"); assert.equal(compact(1_234), "1.2k"); assert.equal(compact(15_000), "15k");
-  assert.equal(plural("command", 1), "1 command"); assert.equal(plural("command", 3), "3 commands"); assert.equal(plural("change", 2), "2 file changes");
   assert.equal(toolState("completed"), "done"); assert.equal(toolState(null), "done"); assert.equal(toolState("failed"), "failed"); assert.equal(toolState("declined"), "failed"); assert.equal(toolState("inProgress"), "running");
   assert.equal(t("composer.placeholder", { name: "Codex" }), "Message Codex");
 });
@@ -113,4 +113,56 @@ test("the Markdown export covers messages, activity, diffs and plans with safe f
   for (const expected of ["# T", "## From /team/a", "hello", "$ npm test", "- [x] One", "- [ ] Two (in progress)", "> Error: stopped", "done"]) assert.ok(markdown.includes(expected), expected);
   assert.ok(markdown.includes("````diff"), "a diff containing a fence is wrapped in a longer fence");
   assert.match(exportName(snapshot(turns), new Date("2026-10-15T12:00:00Z")), /^t-2026-10-15\.md$/);
+});
+
+test("changed files merge per path with line counts; diff headers are not counted", () => {
+  const items = [
+    item("f1", "fileChange", { changes: [{ path: "src/a.ts", kind: "update", diff: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,2 @@\n-old\n+new\n keep" }, { path: "src/b.ts", kind: "add", diff: "@@ -0,0 +1,2 @@\n+one\n+two" }] }),
+    item("c", "commandExecution"),
+    item("f2", "fileChange", { changes: [{ path: "src/a.ts", kind: "update", diff: "@@ -5 +5,2 @@\n+more\n ctx" }] }),
+  ];
+  assert.deepEqual(changedFiles(items).map(({ path, kind, added, removed, diffs }) => ({ path, kind, added, removed, diffs: diffs.length })), [
+    { path: "src/a.ts", kind: "update", added: 2, removed: 1, diffs: 2 },
+    { path: "src/b.ts", kind: "add", added: 2, removed: 0, diffs: 1 },
+  ]);
+  assert.deepEqual(diffCounts("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n+c"), { added: 2, removed: 1 });
+});
+
+test("run status is always a word, and failures and restarts never read as ready", () => {
+  const base = snapshot([turn("1", "a")]);
+  assert.equal(runStatus(base, true, base.thread).key, "idle");
+  assert.equal(runStatus(base, false, base.thread).key, "reconnecting");
+  const failed = snapshot([{ ...turn("1", "a"), status: "failed", error: "502" }]);
+  assert.equal(runStatus(failed, true, failed.thread).key, "failed");
+  const restarting: Snapshot = { ...base, ready: false, thread: null, runtime: { state: "starting", error: "Provider stopped", recovery: { state: "restarting", restarts: 1 } } };
+  assert.deepEqual([runStatus(restarting, true, null).key, runStatus(restarting, true, null).tone], ["restarting", "warn"]);
+  assert.equal(runStatus({ ...base, runtime: { state: "working", error: null } }, true, base.thread).tone, "busy");
+  for (const key of ["starting", "restarting", "working", "blocked", "failed", "idle", "reconnecting"]) assert.ok(t(`status.${key}` as Parameters<typeof t>[0]).length > 0);
+});
+
+test("the live step names the running command, writing or thinking, ignoring steers", () => {
+  const live = (items: HistoryItem[]): TurnDto => ({ id: "l", startedAt: null, status: "inProgress", error: null, items });
+  assert.equal(liveStep(live([item("u", "userMessage")])), "Thinking");
+  assert.equal(liveStep(live([item("u", "userMessage"), item("c", "commandExecution", { text: "npm test\n--watch", status: "inProgress" })])), "Running npm test");
+  assert.equal(liveStep(live([item("a", "agentMessage"), item("s", "userMessage")])), "Writing");
+});
+
+test("retry re-sends only a typed message of a turn, and paths shorten to two segments", () => {
+  const failed = (items: HistoryItem[]): TurnDto => ({ id: "f", startedAt: null, status: "failed", error: "x", items });
+  assert.equal(retryText(failed([item("u", "userMessage", { text: "do it" })])), "do it");
+  assert.equal(retryText(failed([item("u", "userMessage", { text: "[来自 /team/a，排队于 2026-10-15T00:00:00Z]\nhi" })])), null);
+  assert.equal(retryText(failed([item("u", "userMessage", { text: "look", attachments: [{ id: "img_" + "0".repeat(32), mime: "image/png", size: 1 }] })])), null);
+  assert.equal(shortPath("/home/me/work/project"), "…/work/project");
+  assert.equal(shortPath("/work"), "/work");
+});
+
+test("a provider restart keeps the last conversation visible until a thread returns", () => {
+  const start: State = { snapshot: snapshot([turn("1", "a")]), connected: true, error: null, notice: null, submitting: false, loadingOlder: false, settingsBusy: false, goalBusy: false, notices: [] };
+  const down = { ...snapshot([]), ready: false, thread: null };
+  let state = reducer(start, { type: "snapshot", snapshot: down, source: "ws" });
+  assert.equal(state.staleThread?.turns[0]?.id, "1");
+  state = reducer(state, { type: "snapshot", snapshot: down, source: "ws" });
+  assert.equal(state.staleThread?.turns[0]?.id, "1", "repeated restart frames keep the copy");
+  state = reducer(state, { type: "snapshot", snapshot: snapshot([turn("1", "a"), turn("2", "b")]), source: "ws" });
+  assert.equal(state.staleThread, null);
 });

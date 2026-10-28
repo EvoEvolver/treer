@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { scanSource } from "../scripts/check-ui-source.mjs";
-import { buildUi, root, scopeCss } from "../scripts/ui-build.mjs";
+import { buildUi, root } from "../scripts/ui-build.mjs";
 
 test("the committed UI artifacts equal a fresh deterministic build", async () => {
   const first = await buildUi();
@@ -40,11 +40,6 @@ test("the built page is relative, script-only from self and free of inline code"
   assert.doesNotMatch(html, /<script(?![^>]*\ssrc=)/i, "no inline script");
   assert.doesNotMatch(html, /\sstyle=|<style|\son[a-z]+=/i, "no inline style or handlers");
   assert.doesNotMatch(html, /(?:src|href)="(?:\/|https?:)/, "no absolute or remote resource");
-});
-
-test("looks are scoped per look and keep media queries, keyframes and theme selectors", () => {
-  const scoped = scopeCss(":root{--a:1}\n[data-theme=dark]{--a:2}\n.x,.y:hover{color:red}\n@media (max-width:640px){.x{color:blue}}\n@keyframes k{from{opacity:0}}", "b");
-  assert.equal(scoped, ":root[data-look=b]{--a:1}:root[data-look=b][data-theme=dark]{--a:2}:root[data-look=b] .x,:root[data-look=b] .y:hover{color:red}@media (max-width:640px){:root[data-look=b] .x{color:blue}}@keyframes k{from{opacity:0}}");
 });
 
 test("the source scanner rejects HTML sinks, eval and unsafe URLs, and accepts the Markdown sink", () => {
