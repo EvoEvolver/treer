@@ -387,27 +387,23 @@ mod tests {
     }
 
     #[test]
-    fn app_without_csp_still_limits_embedding_to_control_plane() {
-        let mut headers = HeaderMap::new();
-        allow_control_plane_frame(&mut headers, &browser()).unwrap();
-        assert_eq!(
-            headers[header::CONTENT_SECURITY_POLICY],
-            "frame-ancestors 'self' https://app.treer.example"
-        );
-    }
-
-    #[test]
-    fn embedding_preserves_configured_console_origin_port() {
-        let browser = BrowserAccess::new(
-            &Url::parse("http://console.treer.localhost:8080/").unwrap(),
-            &Url::parse("http://proxy.treer.localhost:8080/").unwrap(),
-        )
-        .unwrap();
-        let mut headers = HeaderMap::new();
-        allow_control_plane_frame(&mut headers, &browser).unwrap();
-        assert_eq!(
-            headers[header::CONTENT_SECURITY_POLICY],
-            "frame-ancestors 'self' http://console.treer.localhost:8080"
-        );
+    fn app_without_csp_still_limits_embedding_to_the_configured_console_origin() {
+        for (console, proxy) in [
+            ("https://app.treer.example/", "https://proxy.treer.example/"),
+            (
+                "http://console.treer.localhost:8080/",
+                "http://proxy.treer.localhost:8080/",
+            ),
+        ] {
+            let browser =
+                BrowserAccess::new(&Url::parse(console).unwrap(), &Url::parse(proxy).unwrap())
+                    .unwrap();
+            let mut headers = HeaderMap::new();
+            allow_control_plane_frame(&mut headers, &browser).unwrap();
+            assert_eq!(
+                headers[header::CONTENT_SECURITY_POLICY],
+                format!("frame-ancestors 'self' {}", console.trim_end_matches('/'))
+            );
+        }
     }
 }

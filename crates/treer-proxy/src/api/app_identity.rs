@@ -466,37 +466,6 @@ async fn visible_workspace_app_principals(
     Ok(visible)
 }
 
-#[cfg(test)]
-pub(super) fn resolve_app_principal(
-    principals: &[AppPrincipal],
-    target: &str,
-) -> Result<AppPrincipal, ProtocolError> {
-    let mut matches = principals
-        .iter()
-        .filter(|principal| principal.id == target)
-        .cloned()
-        .collect::<Vec<_>>();
-    if matches.is_empty() {
-        matches.extend(
-            principals
-                .iter()
-                .filter(|principal| principal.name == target)
-                .cloned(),
-        );
-    }
-    match matches.as_slice() {
-        [] => Err(ProtocolError::new(
-            "recipient_not_found",
-            format!("no Agent or human recipient matches {target}"),
-        )),
-        [recipient] => Ok(recipient.clone()),
-        _ => Err(ProtocolError::new(
-            "recipient_ambiguous",
-            format!("more than one Agent or human is named {target}; use a stable id"),
-        )),
-    }
-}
-
 pub(super) async fn app_message_identity(
     state: &AppState,
     auth: &AuthStore,
