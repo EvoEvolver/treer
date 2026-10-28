@@ -790,10 +790,8 @@ for (const mobile of [false, true]) test(`new agent visibly guides an empty work
   const addMachinePrompt = page.getByRole("menuitem", { name: "Set up a machine before creating an agent" })
   await expect(addMachinePrompt).toBeEnabled()
   await addMachinePrompt.click()
-  await expect(page.getByText("Add a machine to create agents", { exact: true })).toBeVisible()
-  await expect(page.getByText("Agents run on machines.", { exact: false })).toBeVisible()
+  // Straight to enrollment: no detour through workspace settings.
   await expect(page.getByRole("heading", { name: "Create agent" })).toHaveCount(0)
-  await page.getByRole("tabpanel", { name: "Settings", exact: true }).getByRole("button", { name: "Set up a machine", exact: true }).click()
   await expect(page.getByRole("dialog").getByRole("heading", { name: "Add machine", exact: true })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
