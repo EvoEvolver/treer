@@ -441,8 +441,6 @@ impl BrowserAccess {
 }
 
 mod agents;
-mod email;
-use email::*;
 mod app_dist;
 pub use app_dist::AppDistConfig;
 mod app_identity;

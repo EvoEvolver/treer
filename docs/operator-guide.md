@@ -2315,51 +2315,18 @@ React build, updater tests, and the full Rust workspace. Workspace App and AIS
 adapter tests are focused, opt-in checks; while iterating on messaging, use
 `just app-test` and `just messaging-e2e`.
 
-### Managed App email sending
-
-`POST /api/apps/{service_id}/email` reuses the Cloudflare sender configured for
-registration/recovery. Configure `CLOUDFLARE_API_TOKEN`, the existing Cloudflare
-account configuration, and `TREER_EMAIL_FROM` on the Proxy only. Do not give an
-App these credentials. Any syntactically valid recipient email address is
-accepted, including non-member and unverified addresses. No recipient allowlist
-or organization membership is required. `email.send` is evaluated for the
-Managed App's runtime Agent against its owned `machine.service`; ordinary Agents and human tokens cannot
-use this route. No SMTP configuration is required.
-
-The Cloudflare token needs `Email Sending: Edit`, and the sender domain must be
-onboarded for Email Sending in that same account. These are configuration
-prerequisites, not conclusions that can be inferred from a generic delivery
-failure. Do not expose the token or send another email merely to check them.
-
-Request JSON contains only `to`, `subject` (1–200 bytes, no controls), `text`
-(1–4096 bytes), and `idempotency_key` (1–128 bytes). No caller HTML, From or
-Reply-To is accepted. Success returns `email_id` and `status=sent`. Errors include
-`email_not_configured` (503), `email_invalid` (400), `email_rate_limited`
-(429), `email_delivery_failed` (502), and `email_in_progress` (503). Each workspace
-limits App attempts to 20/hour and recipient attempts to 5/hour. Failed attempts
-consume limits; identical completed sends return the original result after
-current admission and Policy checks.
-
-Inspect body-free delivery history in PostgreSQL `app_email_attempts`: `app_id`,
-`recipient_hash`, `created_at`, `status`. Configure retention/backup according to
-local audit requirements; history is not automatically deleted. Provider errors
-are sanitized. The reservation and remote provider dispatch are not a single
-transaction: a crash or ambiguous provider response can cause a duplicate on a
-later retry. In-flight reservations can be retried after 60 seconds.
+### Proxy email sender diagnostics
 
 Proxy sender failures log only a fixed `category` (`transport`, `timeout`,
 `http_status`, `response_read`, `response_too_large`, `response_invalid`, or
 `provider_rejected`) and `upstream_status` when response headers were received.
-The App API still returns `email_delivery_failed`; upstream messages, response
+Upstream messages, response
 bodies, addresses and credentials are not included in diagnostics. The sender
 uses the fixed [Cloudflare API route](https://developers.cloudflare.com/email-service/get-started/send-emails/),
 refuses redirects, retains its 10-second
 deadline and bounds successful response bodies to 64 KiB. A category is not proof
 of non-delivery or authorization to retry an uncertain send. Old failures cannot
 be classified retroactively; do not resend solely to obtain a diagnostic.
-
-No bundled App currently uses this route; any Managed App may call it with its
-own runtime identity.
 
 ### Agent path targets
 
