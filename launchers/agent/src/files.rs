@@ -1,5 +1,5 @@
 //! Read-only workspace file routes (#158 M1/M2): GET /v1/files/tree, /v1/files (64 KiB preview) and /v1/files/download.
-//! A port of launchers/agent/src/files.ts and download.ts with the same confinement and the #165 limits: a 1 GiB per-file limit
+//! A port of the former Node launcher's files.ts and download.ts with the same confinement and the #165 limits: a 1 GiB per-file limit
 //! decided from the open descriptor, two concurrent downloads, a write-idle timeout (see `WriteTimeout`), a 60 minute cap per
 //! download and a refusal of cross-site navigations. Slots are RAII guards, so every exit path (including a client that goes away
 //! while the file is still being opened) releases exactly once.
