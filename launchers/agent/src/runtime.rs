@@ -646,7 +646,20 @@ impl Runtime {
                 Some("completed" | "failed" | "interrupted")
             );
             let mapped = if terminal {
-                model::final_turn(wire)?
+                // Same projection as a `turn/completed` event, so an observed
+                // final snapshot reports the same finalProjection counters.
+                self.final_projection =
+                    json!({"retainedOnly":0,"sameIdUpdates":0,"conflicts":0,"refusals":0});
+                match model::final_turn(wire) {
+                    Ok(turn) => turn,
+                    Err(error) => {
+                        // Malformed final snapshot: restart and resume, exactly
+                        // as for the event; never retry the same read forever.
+                        self.final_projection["refusals"] = json!(1);
+                        self.final_projection["conflicts"] = json!(1);
+                        return self.stop_for_history_error(error.to_string());
+                    }
+                }
             } else {
                 model::turn(wire)
             };
@@ -659,9 +672,16 @@ impl Runtime {
                         prior["status"] = json!("inProgress");
                     }
                     let fresh = turn.clone();
-                    if self.retain_projected_items(&prior, &mut turn).is_err() {
-                        eprintln!("Treer launcher: provider snapshot disagrees with streamed items; using the snapshot");
-                        turn = fresh;
+                    match self.retain_projected_items(&prior, &mut turn) {
+                        Ok((retained, updated)) => {
+                            self.final_projection["retainedOnly"] = json!(retained);
+                            self.final_projection["sameIdUpdates"] = json!(updated);
+                        }
+                        Err(_) => {
+                            eprintln!("Treer launcher: provider snapshot disagrees with streamed items; using the snapshot");
+                            self.final_projection["conflicts"] = json!(1);
+                            turn = fresh;
+                        }
                     }
                 }
             }
@@ -673,7 +693,16 @@ impl Runtime {
             if terminal && self.thread["activeTurnId"] == wire["id"] {
                 self.thread["activeTurnId"] = Value::Null;
             }
-            if self.turns.iter().any(|t| t["id"] == wire["id"]) {
+            // A read of a turn that is still running can lag the item events
+            // already streamed for it; never let it replace them. Only a
+            // terminal snapshot (merged above) or a local placeholder is
+            // overwritten.
+            let streamed = !terminal
+                && self
+                    .turns
+                    .iter()
+                    .any(|t| t["id"] == wire["id"] && t["projectionOnly"] != true);
+            if !streamed && self.turns.iter().any(|t| t["id"] == wire["id"]) {
                 self.upsert_turn(turn)?;
             }
         }
