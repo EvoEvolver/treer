@@ -59,39 +59,54 @@ sh scripts/verify-machine-artifacts.sh "$commit" "$upload/dist"
 pnpm --dir web install --frozen-lockfile
 pnpm --dir web build
 
+railway_scope="--project $project_id --environment $environment --service $proxy_service"
+# Record the serving deployment so a confirmed failure names the rollback target.
+previous=$(railway deployment list $railway_scope --json \
+    | jq -r 'map(select(.status == "SUCCESS")) | sort_by(.createdAt) | last | .id // "none"')
+echo "previous $target Proxy deployment: $previous"
+
 railway variable set \
     "TREER_PROXY_PUBLIC_URL=$proxy_url" \
     "TREER_APP_PUBLIC_URL=$app_url" \
     "TREER_INGRESS_PUBLIC_URL=${ingress_url%/}" \
     "TREER_ENABLE_CORE_MESSAGES=true" \
     "TREER_BUILD_COMMIT=$commit" \
-    --project "$project_id" --environment "$environment" \
-    --service "$proxy_service" --skip-deploys --json >/dev/null
+    $railway_scope --skip-deploys --json >/dev/null
 deploy=$(sh scripts/railway-retry.sh 1 0 -- railway up "$upload" --path-as-root --no-gitignore --detach --json \
-    --project "$project_id" --environment "$environment" \
-    --service "$proxy_service" --message "$target $short_commit")
+    $railway_scope --message "$target $short_commit")
 deployment_id=$(printf '%s' "$deploy" | jq -er '.deploymentId // .id') || {
     echo "railway up returned no deployment id: $(printf '%s' "$deploy" | sh scripts/railway-error-summary.sh)" >&2
     exit 1
 }
-(cd web && pnpm exec wrangler deploy --env "$worker_environment" \
-    --message "$target $commit" --tag "$short_commit")
+echo "Proxy deployment $deployment_id started"
+proxy_failed() {
+    echo "$1" >&2
+    echo "The Console Worker was not deployed. A deployment that never became healthy leaves $previous serving;" >&2
+    echo "if $deployment_id did go live, roll back to $previous (Railway dashboard: Deployments > Rollback)." >&2
+    exit 1
+}
 
+# The Proxy must serve this commit before the Console that depends on it ships.
 deadline=$(( $(date +%s) + timeout ))
 status=UNKNOWN
 while [ "$status" != SUCCESS ]; do
-    [ "$(date +%s)" -lt "$deadline" ] || { echo "timed out waiting for deployment $deployment_id" >&2; exit 1; }
+    [ "$(date +%s)" -lt "$deadline" ] || proxy_failed "timed out waiting for deployment $deployment_id (last status $status)"
     sleep 5
-    status=$(railway deployment list --project "$project_id" --environment "$environment" \
-        --service "$proxy_service" --json \
-        | jq -r --arg id "$deployment_id" '.[] | select(.id == $id) | .status // "UNKNOWN"')
+    status=$(railway deployment list $railway_scope --json \
+        | jq -r --arg id "$deployment_id" '.[] | select(.id == $id) | .status // "UNKNOWN"') || status=UNKNOWN
     case "$status" in
-        FAILED|CRASHED|REMOVED|CANCELLED) echo "deployment $deployment_id ended with $status" >&2; exit 1 ;;
+        FAILED|CRASHED|REMOVED|CANCELLED) proxy_failed "deployment $deployment_id ended with $status" ;;
     esac
 done
+health=$(curl -fsS --retry 12 --retry-all-errors "$proxy_url/api/health") \
+    || proxy_failed "$proxy_url/api/health is not healthy after deployment $deployment_id"
+printf '%s' "$health" | jq -e --arg commit "$commit" '.status == "ok" and .commit == $commit' >/dev/null \
+    || proxy_failed "$proxy_url/api/health does not report $commit: $health"
+sh scripts/verify-served-artifacts.sh "$proxy_url" "$upload/dist" \
+    || proxy_failed "$proxy_url serves artifacts that differ from $commit"
 
-curl -fsS --retry 12 --retry-all-errors "$proxy_url/api/health" >/dev/null
-sh scripts/verify-served-artifacts.sh "$proxy_url" "$upload/dist"
+(cd web && pnpm exec wrangler deploy --env "$worker_environment" \
+    --message "$target $commit" --tag "$short_commit")
 curl -fsS --retry 12 --retry-all-errors "$app_url/health" \
     | jq -e --arg env "$target" '.service == "treer-app" and .status == "ok" and .environment == $env' >/dev/null
 curl -fsS --retry 12 --retry-all-errors "$app_url/config.json" \
