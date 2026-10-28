@@ -141,8 +141,8 @@ jobs:
               Where-Object { $_.reason -eq 'compiler-artifact' -and $_.executable -and $_.profile.test } |
               ForEach-Object { $_.executable })
           }
-          $native = Test-Executables @('-p', 'treer-platform', '-p', 'treer-agent-runtime', '-p', 'treer-agent-host')
-          $server = Test-Executables @('-p', 'treer-agent-server', '--bin', 'treer-agent-server')
+          $native = @(Test-Executables @('-p', 'treer-platform', '-p', 'treer-agent-runtime', '-p', 'treer-agent-host'))
+          $server = @(Test-Executables @('-p', 'treer-agent-server', '--bin', 'treer-agent-server'))
           if ($native.Count -lt 3 -or $server.Count -ne 1) { throw 'expected native and agent-server test executables' }
           ./scripts/windows-standard-user-check.ps1 -InstallScript ./scripts/install.ps1 `
             -ArtifactDirectory release-artifacts/windows-x86_64 -TestExecutable $native -AgentServerTest $server[0]

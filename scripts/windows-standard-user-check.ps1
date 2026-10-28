@@ -81,6 +81,12 @@ $env:LOCALAPPDATA = Join-Path $profileDirectory 'AppData\Local'
 $env:APPDATA = Join-Path $profileDirectory 'AppData\Roaming'
 $env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp'
 $env:TMP = $env:TEMP
+# PowerShell 7 module paths inherited from the runner hide Windows PowerShell's
+# own Microsoft.PowerShell.Utility (Get-FileHash); use the 5.1 defaults.
+$env:PSModulePath = @(
+    (Join-Path $profileDirectory 'Documents\WindowsPowerShell\Modules'),
+    (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'),
+    (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules')) -join ';'
 foreach ($directory in @($env:LOCALAPPDATA, $env:APPDATA, $env:TEMP)) { [IO.Directory]::CreateDirectory($directory) | Out-Null }
 '@
     # The step runs from a script file in the staging directory (read+execute
