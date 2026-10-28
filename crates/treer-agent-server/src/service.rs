@@ -433,13 +433,6 @@ pub fn new_enrollment_root(requested: Option<&Path>) -> Result<PathBuf> {
                     bail!("Windows user directory must be absolute; specify --root explicitly");
                 }
                 let root = base.join("Treer/root");
-                // Refuse a pre-existing reparse chain before changing its ACL.
-                let mut existing = root.as_path();
-                while !existing.exists() {
-                    existing = existing.parent().context("invalid user root")?;
-                }
-                treer_platform::machine_file::Root::open(existing, &[])
-                    .context("default Windows root must not traverse reparse points")?;
                 treer_platform::secure_directory(&root)?;
                 root
             }

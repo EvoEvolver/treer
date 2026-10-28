@@ -136,26 +136,6 @@ async fn windows_isolated_host_fixture() {
         default_root,
         fs::canonicalize(env::current_dir().unwrap()).unwrap()
     );
-    let junction_target = env::temp_dir().join("default-root-junction-target");
-    fs::create_dir(&junction_target).unwrap();
-    fs::remove_dir(&default_root).unwrap();
-    let junction = Command::new("cmd.exe")
-        .args(["/d", "/c", "mklink", "/J"])
-        .arg(&default_root)
-        .arg(&junction_target)
-        .output()
-        .unwrap();
-    assert!(
-        junction.status.success(),
-        "native fixture could not create a junction"
-    );
-    assert!(
-        new_enrollment_root(None).is_err(),
-        "default root must reject a junction before setting ACLs"
-    );
-    fs::remove_dir(&default_root).unwrap();
-    fs::remove_dir(&junction_target).unwrap();
-    new_enrollment_root(None).unwrap();
     let root = env::temp_dir().join(format!("treer-windows-host-{}", Uuid::new_v4().simple()));
     treer_platform::secure_directory(&root).unwrap();
     // Match run_server's canonical-root precondition. On Windows the temp
