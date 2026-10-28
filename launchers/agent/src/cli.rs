@@ -66,18 +66,7 @@ pub(crate) fn prepare(args: &[String]) -> Result<Next> {
             }
             return Ok(Next::Run);
         }
-        // Runtime maintenance flags read directly by main.
-        Some("--restore-node-backup" | "--fixture-create-private-state") => return Ok(Next::Run),
         _ => {}
-    }
-    // Only import flags: an environment-configured runtime start, as bare.
-    if args.iter().all(|arg| {
-        matches!(
-            arg.as_str(),
-            "--import-node-state" | "--import-claude-state"
-        )
-    }) {
-        return Ok(Next::Run);
     }
     let mut harness = std::env::var("AGENT_UI_HARNESS")
         .ok()
@@ -86,10 +75,6 @@ pub(crate) fn prepare(args: &[String]) -> Result<Next> {
     let mut index = 0;
     while index < args.len() {
         let key = args[index].as_str();
-        if matches!(key, "--import-node-state" | "--import-claude-state") {
-            index += 1;
-            continue;
-        }
         let Some(value) = args.get(index + 1).filter(|value| !value.is_empty()) else {
             bail!("incomplete launcher argument {key}; see treer-launch --help");
         };

@@ -1,41 +1,21 @@
-#[cfg(unix)]
-mod attachments;
-#[cfg(windows)]
-#[path = "windows_attachments.rs"]
 mod attachments;
 use treer_agent_launcher::bounded_json;
 mod claude;
 mod claude_goal;
 mod cli;
-#[cfg(unix)]
 mod disk_history;
-#[cfg(windows)]
-#[path = "windows_disk_history.rs"]
-mod disk_history;
-#[cfg(unix)]
 mod files;
-#[cfg(windows)]
-#[path = "windows_files.rs"]
-mod files;
+mod fs_util;
 mod goals;
 mod http;
 mod image_format;
 mod model;
-#[cfg(unix)]
-mod node_import;
-#[cfg(windows)]
-#[path = "windows_node_import.rs"]
-mod node_import;
 mod provider_stream;
 mod rpc;
 mod runtime;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod session_transfer;
 mod soul_terminal;
-#[cfg(unix)]
-mod store;
-#[cfg(windows)]
-#[path = "windows_store.rs"]
 mod store;
 mod task_output;
 mod tasks;
@@ -129,29 +109,6 @@ async fn main() -> Result<()> {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         bail!("offline_session_transfer_unsupported_platform");
     }
-    #[cfg(all(windows, feature = "fixture-harness"))]
-    if std::env::args().nth(1).as_deref() == Some("--fixture-create-private-state") {
-        let root = PathBuf::from(
-            env("TREER_RUST_SPIKE_STATE_DIR")
-                .ok_or_else(|| anyhow::anyhow!("fixture_state_path_required"))?,
-        );
-        if !root.is_absolute() {
-            bail!("fixture_state_path_required");
-        }
-        let parent = root
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("fixture_state_parent_required"))?;
-        let _parent = treer_platform::machine_file::Root::open(parent, &[])?;
-        // Exclusive creation only; this hook cannot repair/adopt existing state.
-        std::fs::create_dir(&root)?;
-        let _owned = treer_platform::machine_file::Root::open(&root, &[])?;
-        treer_platform::secure_directory(&root)?;
-        if !treer_platform::private_path_is_secure(&root)? {
-            bail!("fixture_state_security_refused");
-        }
-        println!("fixture_private_state_created");
-        return Ok(());
-    }
     if !cfg!(target_os = "macos") && !cfg!(target_os = "linux") && !cfg!(windows) {
         bail!("unsupported launcher platform")
     }
@@ -207,40 +164,8 @@ async fn main() -> Result<()> {
         }
         session_transfer::claim_launch(launch, &private_root, &agent)?;
     }
-    if std::env::args().nth(1).as_deref() == Some("--restore-node-backup") {
-        node_import::restore(&private_root, &cwd, &agent)?;
-        println!("node_state_backup_restored; set startup back to Node before starting it");
-        return Ok(());
-    }
     disk_history::prepare(&private_root, &cwd)?;
-    if harness == "claude" && std::env::args().any(|arg| arg == "--import-node-state") {
-        bail!("claude_requires_explicit_supported_history_import");
-    }
-    if harness == "claude" {
-        let seed = env("RUST_CLAUDE_IMPORT_SNAPSHOT").map(PathBuf::from);
-        let importing = std::env::args().any(|arg| arg == "--import-claude-state");
-        if importing != seed.is_some() {
-            bail!("claude_import_requires_explicit_snapshot_and_flag");
-        }
-        node_import::prepare_claude(
-            &private_root,
-            &cwd,
-            &agent,
-            env("AGENT_UI_SESSION_ID").as_deref(),
-            seed.as_deref(),
-        )?;
-    } else {
-        node_import::prepare(
-            &private_root,
-            &cwd,
-            &agent,
-            env("AGENT_UI_SESSION_ID")
-                .or_else(|| env("CODEX_UI_THREAD_ID"))
-                .as_deref(),
-            std::env::args().any(|arg| arg == "--import-node-state"),
-        )?;
-    }
-    let attachments = if !agent.is_empty() && !cfg!(windows) {
+    let attachments = if !agent.is_empty() {
         Some(Arc::new(tokio::sync::Mutex::new(
             attachments::Attachments::open(
                 &private_root,
@@ -265,7 +190,8 @@ async fn main() -> Result<()> {
     let port = listener.local_addr()?.port();
     let instance =
         env("AGENT_UI_INSTANCE_ID").unwrap_or(format!("rust-spike-{}", uuid::Uuid::new_v4()));
-    let codex_args = if harness == "claude" {
+    let (provider, mut codex_args) = tools::provider(&harness)?;
+    codex_args.extend(if harness == "claude" {
         if let Some(args) = env("RUST_SPIKE_CLAUDE_ARGS") {
             serde_json::from_str::<Vec<String>>(&args)?
         } else {
@@ -287,7 +213,7 @@ async fn main() -> Result<()> {
         serde_json::from_str::<Vec<String>>(&args)?
     } else {
         vec!["app-server".into(), "--listen".into(), "stdio://".into()]
-    };
+    });
     let handle = runtime::spawn(runtime::Config {
         claude: harness == "claude",
         native_bootstrap: {
@@ -321,7 +247,7 @@ async fn main() -> Result<()> {
         },
         cwd,
         private_root,
-        codex: tools::provider(&harness)?,
+        codex: provider,
         codex_args,
         session: env("AGENT_UI_SESSION_ID"),
         attachments: attachments.clone(),
@@ -360,21 +286,7 @@ async fn main() -> Result<()> {
     let publication = (|| -> Result<()> {
         if let Some(file) = env("AGENT_UI_PORT_FILE") {
             use std::io::Write;
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::OpenOptionsExt;
-                options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
-            }
-            let mut output = options.open(&file)?;
-            #[cfg(windows)]
-            treer_platform::secure_file(std::path::Path::new(&file))?;
+            let mut output = fs_util::create_new(std::path::Path::new(&file))?;
             output.write_all(port.to_string().as_bytes())?;
             output.sync_all()?;
         }

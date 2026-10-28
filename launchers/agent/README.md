@@ -103,9 +103,12 @@ Controller. `launcher install` and `launcher update` are the same command.
 
 At run time the launcher resolves the Treer CLI from `TREER_BIN` (set by the
 Controller for Agents), then PATH, then its own directory; providers from
-`CODEX_BIN` / `CLAUDE_BIN`, else `codex` / `claude` on PATH. On Windows the
-provider must be a native `.exe` (npm `.cmd` shims are not executed); set
-`CODEX_BIN` or `CLAUDE_BIN` when PATH only has a shim. The UI is embedded;
+`CODEX_BIN` / `CLAUDE_BIN`, else `codex` / `claude` on PATH. On Windows PATH
+lookup tries `.exe`, `.cmd` and `.bat` in each directory, so npm, pnpm and
+yarn installs work as they are: a package-manager `.cmd` shim is run as the
+`node <script>` (or bundled `.exe`) it wraps, without `cmd.exe`; any other
+batch file is started through `cmd.exe` with Rust's batch argument escaping.
+`CODEX_BIN` / `CLAUDE_BIN` may name any of these. The UI is embedded;
 `AGENT_UI_PUBLIC_DIR` serves a development `public/` directory instead.
 
 ### Upgrading from the Node launcher
@@ -204,12 +207,6 @@ back to its name, then its ID) and `GIT_AUTHOR_EMAIL` and
 every process it starts. A variable the profile or environment already sets
 is left unchanged.
 
-Codex Agents previously run by the removed Node runtime kept state under
-`<cwd>/.treer/agents/<agent-id>/`. Start the native executable directly once with
-`--import-node-state` (Agent idle, queue empty) to import it after a byte
-backup to private `node-backup-v1`; `--restore-node-backup` restores those
-bytes. Legacy state is refused by default.
-
 ## Offline session transfer
 
 `treer-launch session ...` exports, inspects, prepares and launches Claude
@@ -220,15 +217,15 @@ Host and no Origin header; it is a guard, not authentication.
 
 ## Native Windows
 
-The Windows build runs the same Codex and Claude adapters in a native PE with
-separate platform backends for private state and workspace reads. Existing
-private directories must already carry the current user's private DACL; the
-runtime checks them without repairing permissions, rejects reparse points and
-hardlinks, and holds a share-mode-zero lease against a second writer. Each
-provider is assigned a nested kill-on-close Job Object. Directory enumeration
-returns HTTP 501 and images are unavailable on Windows; text sessions, queue,
-receipts and restart checkpoints are supported. `treer-launch.exe` is the
-Windows release artifact; `install.ps1` installs it next to `treer.exe`.
+The Windows build is the same launcher: the same journal, history, recovery,
+file browser (including directory listing), task output and image attachments.
+Only the platform mechanics differ: private files and directories are created
+with the current user's protected DACL instead of mode 0600/0700, the
+single-writer lease is a `LockFileEx` file lock, journal replacement is a
+write-through `MoveFileEx`, and each provider runs in a nested kill-on-close
+Job Object instead of a process group. Offline session transfer is
+macOS/Linux only. `treer-launch.exe` is the Windows release artifact;
+`install.ps1` installs it next to `treer.exe`.
 
 ## Add a harness adapter
 
@@ -269,7 +266,8 @@ RUST_SPIKE_RELEASE_BIN=$CARGO_TARGET_DIR/release/treer-launch node --test tests/
 
 The other `tests/*-entry.mjs` suites (session launch, snapshot, transfer, owner
 default, HOME cwd) take the same `RUST_SPIKE_BIN`;
-`tests/windows-native-entry.mjs` needs a Windows fixture-feature PE.
+`tests/windows-native-entry.mjs` needs a Windows fixture-feature PE; the
+Windows release job runs it with the launcher unit tests.
 UI sources live in `ui/`; after editing them run `npm run build:ui` and commit
 `public/`. `check:ui` fails on any byte difference, budget overrun or forbidden
 code pattern. `tests/acceptance/` holds the live Console embed/tasks acceptance

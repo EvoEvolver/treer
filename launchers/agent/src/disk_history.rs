@@ -1,15 +1,14 @@
 //! Disk-only checkpoint history. Never used as recovery input or loaded in RAM.
-use crate::store::Store;
+use crate::{fs_util, store::Store};
 use anyhow::{bail, Result};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs,
     io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 
 pub const DISK_LIMIT: u64 = 128 * 1024 * 1024;
-pub const LIVE_LIMIT: u64 = 32 * 1024 * 1024;
+pub const LIVE_LIMIT: u64 = crate::store::LIVE_LIMIT;
 pub const HISTORY_LIMIT: u64 = DISK_LIMIT - 2 * LIVE_LIMIT - 2 * 8192;
 const FILE_COUNT: usize = 64;
 fn checkpoint(_phase: &str) {
@@ -20,11 +19,18 @@ fn checkpoint(_phase: &str) {
 }
 
 fn valid_file(file: &fs::Metadata) -> bool {
-    file.is_file()
-        && file.nlink() == 1
-        && file.uid() == rustix::process::geteuid().as_raw()
-        && file.mode() & 0o077 == 0
-        && file.len() <= LIVE_LIMIT
+    fs_util::is_private_file(file) && file.len() <= LIVE_LIMIT
+}
+/// Whether the source changed while it was copied.
+fn changed(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.ctime() != after.ctime() || before.ctime_nsec() != after.ctime_nsec() {
+            return true;
+        }
+    }
+    before.len() != after.len() || before.modified().ok() != after.modified().ok()
 }
 pub fn prepare(root: &Path, cwd: &Path) -> Result<()> {
     Store::open(root, cwd)?;
@@ -62,7 +68,7 @@ fn retire_temporaries(root: &Path) -> Result<()> {
         }
         fs::remove_file(entry.path())?;
     }
-    File::open(root)?.sync_all()?;
+    fs_util::sync_dir(root)?;
     Ok(())
 }
 fn entries(dir: &Path) -> Result<Vec<(u64, PathBuf, u64)>> {
@@ -101,11 +107,7 @@ pub fn retain(root: &Path, cwd: &Path) -> Result<()> {
 fn retain_with_limit(root: &Path, cwd: &Path, limit: u64) -> Result<()> {
     Store::open(root, cwd)?;
     retire_temporaries(root)?;
-    let mut source = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(root.join("rust-spike.json"))
-    {
+    let mut source = match fs_util::open_read(&root.join("rust-spike.json")) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
@@ -115,12 +117,8 @@ fn retain_with_limit(root: &Path, cwd: &Path, limit: u64) -> Result<()> {
         bail!("journal_history_invalid");
     }
     let dir = root.join("rust-journal-history");
-    match fs::DirBuilder::new().mode(0o700).create(&dir) {
-        Ok(()) => {
-            File::open(root)?.sync_all()?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e.into()),
+    if fs_util::create_dir(&dir)? {
+        fs_util::sync_dir(root)?;
     }
     Store::open(&dir, cwd)?;
     let mut entries = entries(&dir)?;
@@ -138,14 +136,9 @@ fn retain_with_limit(root: &Path, cwd: &Path, limit: u64) -> Result<()> {
         total -= bytes;
         checkpoint("retire");
     }
-    File::open(&dir)?.sync_all()?;
+    fs_util::sync_dir(&dir)?;
     let path = dir.join(format!("{next:020}.json.tmp"));
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&path)?;
+    let mut output = fs_util::create_new(&path)?;
     checkpoint("create");
     // A fixed 32 KiB buffer, regardless of retained disk history size.
     let result = (|| -> Result<()> {
@@ -159,22 +152,17 @@ fn retain_with_limit(root: &Path, cwd: &Path, limit: u64) -> Result<()> {
             output.write_all(&buffer[..count])?;
             remaining -= count as u64;
         }
-        let after = source.metadata()?;
-        if before.len() != after.len()
-            || before.mtime() != after.mtime()
-            || before.mtime_nsec() != after.mtime_nsec()
-            || before.ctime() != after.ctime()
-            || before.ctime_nsec() != after.ctime_nsec()
-        {
+        if changed(&before, &source.metadata()?) {
             bail!("journal_history_source_changed");
         }
         checkpoint("copy");
         output.sync_all()?;
         checkpoint("file-sync");
-        File::open(&dir)?.sync_all()?;
-        fs::rename(&path, dir.join(format!("{next:020}.json")))?;
+        fs_util::sync_dir(&dir)?;
+        drop(output);
+        fs_util::replace(&path, &dir.join(format!("{next:020}.json")))?;
         checkpoint("rename");
-        File::open(&dir)?.sync_all()?;
+        fs_util::sync_dir(&dir)?;
         checkpoint("directory-sync");
         Ok(())
     })();
@@ -187,7 +175,6 @@ fn retain_with_limit(root: &Path, cwd: &Path, limit: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     struct Fixture {
         root: PathBuf,
         cwd: PathBuf,
@@ -198,20 +185,20 @@ mod tests {
             let base = fs::canonicalize(std::env::temp_dir())
                 .unwrap()
                 .join(format!("rust-history-{}", uuid::Uuid::new_v4()));
-            fs::DirBuilder::new().mode(0o700).create(&base).unwrap();
+            fs_util::create_dir(&base).unwrap();
             let root = base.join("private");
             let cwd = base.join("cwd");
-            fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            fs_util::create_dir(&root).unwrap();
             fs::create_dir(&cwd).unwrap();
             Self { root, cwd, base }
         }
         fn live(&self, bytes: &[u8]) {
-            fs::write(self.root.join("rust-spike.json"), bytes).unwrap();
-            fs::set_permissions(
-                self.root.join("rust-spike.json"),
-                fs::Permissions::from_mode(0o600),
-            )
-            .unwrap();
+            let path = self.root.join("rust-spike.json");
+            let _ = fs::remove_file(&path);
+            fs_util::create_new(&path)
+                .unwrap()
+                .write_all(bytes)
+                .unwrap();
         }
     }
     impl Drop for Fixture {
@@ -248,14 +235,9 @@ mod tests {
         let live = b"{\"schema\":1,\"records\":[{\"id\":\"oldest-live\",\"state\":\"queued\"}]}";
         f.live(live);
         let dir = f.root.join("rust-journal-history");
-        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        fs_util::create_dir(&dir).unwrap();
         for n in 1..=4 {
-            let file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(dir.join(format!("{n:020}.json")))
-                .unwrap();
+            let file = fs_util::create_new(&dir.join(format!("{n:020}.json"))).unwrap();
             file.set_len(LIVE_LIMIT).unwrap();
         }
         retain(&f.root, &f.cwd).unwrap();
@@ -280,11 +262,7 @@ mod tests {
         let temporary = f
             .root
             .join(format!(".rust-spike-{}.tmp", uuid::Uuid::new_v4()));
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)
+        fs_util::create_new(&temporary)
             .unwrap()
             .set_len(LIVE_LIMIT)
             .unwrap();
@@ -295,12 +273,13 @@ mod tests {
         assert_eq!(fs::read(unrelated).unwrap(), b"keep");
         assert_eq!(fs::read(f.root.join("rust-spike.json")).unwrap(), b"live");
     }
+    #[cfg(unix)]
     #[test]
     fn linked_or_unrecognized_history_refuses_without_touching_live_state() {
         let f = Fixture::new();
         f.live(b"live");
         let dir = f.root.join("rust-journal-history");
-        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        fs_util::create_dir(&dir).unwrap();
         std::os::unix::fs::symlink(
             f.root.join("rust-spike.json"),
             dir.join("00000000000000000001.json"),
@@ -373,7 +352,7 @@ mod tests {
         }
         let f = Fixture::new();
         f.live(b"{\"ok\":1}");
-        let mut live = OpenOptions::new()
+        let mut live = fs::OpenOptions::new()
             .append(true)
             .open(f.root.join("rust-spike.json"))
             .unwrap();
@@ -387,13 +366,9 @@ mod tests {
         live.sync_all().unwrap();
         drop(live);
         let dir = f.root.join("rust-journal-history");
-        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        fs_util::create_dir(&dir).unwrap();
         for n in 1..=3 {
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(dir.join(format!("{n:020}.json")))
+            fs_util::create_new(&dir.join(format!("{n:020}.json")))
                 .unwrap()
                 .set_len(LIVE_LIMIT)
                 .unwrap();

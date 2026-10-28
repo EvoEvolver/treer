@@ -73,8 +73,7 @@ publish SSH or local service ports.
    workspace.
 2. Choose **Add machine** and run the install and enrollment commands it shows
    (`curl -fsSL 'https://proxy.canary.treer.ai/install.sh' | sh` on macOS and
-   Linux; a PowerShell form for Windows, which requires an administrator
-   account).
+   Linux; a PowerShell form for Windows, run as your normal user account).
 3. Choose **+ → Add agent** and a profile such as **Claude + UI** or
    **Codex + UI** (the [Agent launcher](launchers/agent/README.md) is
    installed with Treer), or a **terminal** profile. Install and sign in to

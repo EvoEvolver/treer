@@ -69,7 +69,6 @@ async fn filesystem_slot(
 
 #[cfg(feature = "fixture-harness")]
 fn fixture_worker_gate() {
-    use std::os::unix::fs::OpenOptionsExt;
     let Ok(path) = std::env::var("RUST_SPIKE_FILES_WORKER_GATE") else {
         return;
     };
@@ -77,11 +76,8 @@ fn fixture_worker_gate() {
     if !directory.is_dir() {
         return;
     }
-    let _entry = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(directory.join(format!("started-{}", uuid::Uuid::new_v4())));
+    let _entry =
+        crate::fs_util::create_new(&directory.join(format!("started-{}", uuid::Uuid::new_v4())));
     let deadline = Instant::now() + Duration::from_secs(5);
     while directory.is_dir() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
@@ -146,39 +142,33 @@ fn workspace_path_blocking(root: &Path, rel: &str) -> Result<Resolved, FileError
 
 async fn list_files(
     root: &Path,
-    anchor: &std::fs::File,
     rel: &str,
     slot: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Result<Value, FileError> {
-    let (root, anchor, rel) = (
-        root.to_path_buf(),
-        anchor.try_clone().map_err(|e| io_error(&e))?,
-        rel.to_owned(),
-    );
+    let (root, rel) = (root.to_path_buf(), rel.to_owned());
     tokio::task::spawn_blocking(move || {
         let _slot = slot; // Cancellation must not release the slot while the worker still runs.
         #[cfg(feature = "fixture-harness")]
         fixture_worker_gate();
-        list_files_blocking(&root, &anchor, &rel)
+        list_files_blocking(&root, &rel)
     })
     .await
     .map_err(|_| FileError::new(500, "Unable to list workspace directory"))?
 }
-fn list_files_blocking(root: &Path, anchor: &std::fs::File, rel: &str) -> Result<Value, FileError> {
+fn list_files_blocking(root: &Path, rel: &str) -> Result<Value, FileError> {
     let directory = workspace_path_blocking(root, rel)?;
-    let relative = directory
-        .canonical
-        .strip_prefix(root)
-        .map_err(|_| FileError::new(403, "Path is outside the working directory"))?;
-    let reader = directory_stream(anchor, relative)?;
+    if !std::fs::metadata(&directory.canonical)
+        .map_err(|e| io_error(&e))?
+        .is_dir()
+    {
+        return Err(FileError::new(400, "Not a directory"));
+    }
+    let reader = std::fs::read_dir(&directory.canonical).map_err(|e| io_error(&e))?;
     let mut nodes: Vec<(bool, String, Value)> = Vec::new();
     let mut scanned = 0;
     for entry in reader {
-        let entry = entry.map_err(|e| io_error(&e.into()))?;
+        let entry = entry.map_err(|e| io_error(&e))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if matches!(name.as_str(), "." | "..") {
-            continue;
-        }
         scanned += 1;
         if scanned > TREE_ENTRY_LIMIT {
             return Err(FileError::new(
@@ -202,27 +192,20 @@ fn list_files_blocking(root: &Path, anchor: &std::fs::File, rel: &str) -> Result
             }
             Err(error) => return Err(error),
         };
-        let relative = child
-            .canonical
-            .strip_prefix(root)
-            .map_err(|_| FileError::new(403, "Path is outside the working directory"))?;
-        let metadata = match metadata_beneath(anchor, relative) {
+        let metadata = match std::fs::metadata(&child.canonical) {
             Ok(metadata) => metadata,
             Err(error) if matches!(io_error(&error).status.as_u16(), 403 | 404) => continue,
             Err(error) => return Err(io_error(&error)),
         };
-        let kind = rustix::fs::FileType::from_raw_mode(metadata.st_mode);
-        if !matches!(
-            kind,
-            rustix::fs::FileType::Directory | rustix::fs::FileType::RegularFile
-        ) {
+        // Only directories and regular files (never FIFOs, sockets or devices).
+        if !metadata.is_dir() && !metadata.is_file() {
             continue;
         }
-        let is_dir = kind == rustix::fs::FileType::Directory;
+        let is_dir = metadata.is_dir();
         nodes.push((
             is_dir,
             name.clone(),
-            json!({"name":name,"path":child_path,"kind":if is_dir {"directory"} else {"file"},"size":if is_dir {Value::Null} else {json!(metadata.st_size)},"has_children":is_dir}),
+            json!({"name":name,"path":child_path,"kind":if is_dir {"directory"} else {"file"},"size":if is_dir {Value::Null} else {json!(metadata.len())},"has_children":is_dir}),
         ));
     }
     // kind first ("directory" < "file"), then the name case-insensitively like the Node localeCompare.
@@ -235,67 +218,16 @@ fn list_files_blocking(root: &Path, anchor: &std::fs::File, rel: &str) -> Result
     Ok(json!({"path":directory.path,"entries":nodes.into_iter().map(|n| n.2).collect::<Vec<_>>()}))
 }
 
-/// Walk from an already-owned directory capability. Every component is opened
-/// without following symlinks, so an intermediate pathname swap cannot redirect
-/// an admitted read outside that capability. Open directories stay pinned even
-/// if subsequently renamed; this is not a same-account isolation boundary.
-fn open_beneath(root: &std::fs::File, relative: &Path) -> io::Result<std::fs::File> {
-    use rustix::fs::{openat, Mode, OFlags};
-    let mut directory = root.try_clone()?;
-    let mut components = relative.components().peekable();
-    while let Some(component) = components.next() {
-        let std::path::Component::Normal(name) = component else {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "invalid workspace path",
-            ));
-        };
-        let mut flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
-        if components.peek().is_some() {
-            flags |= OFlags::DIRECTORY;
-        }
-        directory = openat(&directory, name, flags, Mode::empty())?.into();
+/// Open an admitted (canonical, inside the root) regular file. The type is
+/// checked before opening so a FIFO or device is never opened.
+async fn open_regular(canonical: &Path) -> Result<(tokio::fs::File, std::fs::Metadata), FileError> {
+    if !std::fs::metadata(canonical)
+        .map_err(|e| io_error(&e))?
+        .is_file()
+    {
+        return Err(FileError::new(400, "Not a regular file"));
     }
-    Ok(directory)
-}
-
-/// Metadata never opens the final object (in particular FIFO/device entries).
-/// A final symlink replaced after admission is reported as a symlink and skipped.
-fn metadata_beneath(root: &std::fs::File, relative: &Path) -> io::Result<rustix::fs::Stat> {
-    // A permitted symlink to the workspace root resolves to an empty path.
-    // Inspect the pinned capability itself without reopening its pathname.
-    if relative.as_os_str().is_empty() {
-        return Ok(rustix::fs::fstat(root)?);
-    }
-    let name = relative
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "invalid workspace path"))?;
-    let parent = open_beneath(root, relative.parent().unwrap_or(Path::new("")))?;
-    Ok(rustix::fs::statat(
-        &parent,
-        name,
-        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-    )?)
-}
-
-fn directory_stream(root: &std::fs::File, relative: &Path) -> Result<rustix::fs::Dir, FileError> {
-    let handle = open_beneath(root, relative).map_err(|e| io_error(&e))?;
-    if !handle.metadata().map_err(|e| io_error(&e))?.is_dir() {
-        return Err(FileError::new(400, "Not a directory"));
-    }
-    // Independent streams prevent concurrent listings sharing iteration offsets.
-    rustix::fs::Dir::read_from(&handle).map_err(|e| io_error(&e.into()))
-}
-
-async fn open_regular(
-    root: &std::fs::File,
-    root_path: &Path,
-    canonical: &Path,
-) -> Result<(tokio::fs::File, std::fs::Metadata), FileError> {
-    let relative = canonical
-        .strip_prefix(root_path)
-        .map_err(|_| FileError::new(403, "Path is outside the working directory"))?;
-    let file = open_beneath(root, relative).map_err(|e| io_error(&e))?;
+    let file = crate::fs_util::open_read(canonical).map_err(|e| io_error(&e))?;
     let metadata = file.metadata().map_err(|e| io_error(&e))?;
     if !metadata.is_file() {
         return Err(FileError::new(400, "Not a regular file"));
@@ -305,12 +237,11 @@ async fn open_regular(
 
 async fn preview_file(
     root: &Path,
-    anchor: &std::fs::File,
     rel: &str,
     slots: Arc<tokio::sync::Semaphore>,
 ) -> Result<Value, FileError> {
     let file = workspace_path(root, rel, slots).await?;
-    let (mut handle, metadata) = open_regular(anchor, root, &file.canonical).await?;
+    let (mut handle, metadata) = open_regular(&file.canonical).await?;
     let mut bytes = Vec::with_capacity(PREVIEW_LIMIT + 1);
     (&mut handle)
         .take(PREVIEW_LIMIT as u64 + 1)
@@ -409,7 +340,6 @@ impl<R: AsyncRead + Unpin> Stream for DownloadBody<R> {
 #[derive(Clone)]
 pub struct Files {
     root: PathBuf,
-    anchor: Arc<std::fs::File>,
     active: Arc<AtomicUsize>,
     browsing: Arc<tokio::sync::Semaphore>,
     max: Duration,
@@ -430,21 +360,12 @@ impl Files {
         self.max
     }
     pub fn new(root: PathBuf) -> io::Result<Self> {
-        // main passes the configured canonical cwd. Do not canonicalize again:
-        // a swapped root symlink must fail, not retarget the configuration.
-        // Canonical paths have no symlinks at resolution time. Walking from /
-        // also refuses a newly swapped symlink in a root ancestor at open time.
-        let anchor = open_beneath(
-            &std::fs::File::open("/")?,
-            root.strip_prefix("/")
-                .map_err(|_| io::Error::other("invalid workspace root"))?,
-        )?;
-        if !anchor.metadata()?.is_dir() {
+        // main passes the configured canonical cwd; requests are confined to it.
+        if !std::fs::metadata(&root)?.is_dir() {
             return Err(io::Error::other("workspace root is not a directory"));
         }
         Ok(Self {
             root,
-            anchor: Arc::new(anchor),
             active: Arc::new(AtomicUsize::new(0)),
             browsing: Arc::new(tokio::sync::Semaphore::new(2)),
             max: millis("AGENT_UI_DOWNLOAD_MAX_MS", 60 * 60_000),
@@ -473,11 +394,11 @@ impl Files {
         }
         let result = if path == "/v1/files/tree" {
             match filesystem_slot(self.browsing.clone()).await {
-                Ok(slot) => list_files(&self.root, &self.anchor, &file_path, Some(slot)).await,
+                Ok(slot) => list_files(&self.root, &file_path, Some(slot)).await,
                 Err(error) => Err(error),
             }
         } else {
-            preview_file(&self.root, &self.anchor, &file_path, self.browsing.clone()).await
+            preview_file(&self.root, &file_path, self.browsing.clone()).await
         };
         match result {
             Ok(value) => json_response(StatusCode::OK, value),
@@ -523,9 +444,7 @@ impl Files {
             Ok(_) => return error_response(FileError::new(400, "A file path is required"), "", ""),
             Err(error) => return error_response(error, "File not found", "Unable to read file"),
         };
-        let (file, metadata) = match open_regular(&self.anchor, &self.root, &resolved.canonical)
-            .await
-        {
+        let (file, metadata) = match open_regular(&resolved.canonical).await {
             Ok(opened) => opened,
             Err(error) => return error_response(error, "File not found", "Unable to read file"),
         };
@@ -659,103 +578,166 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteTimeout<T> {
 }
 
 #[cfg(test)]
-mod confinement_tests {
+mod tests {
     use super::*;
-    use std::os::unix::fs::{symlink, DirBuilderExt};
 
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
             let path = std::env::temp_dir().join(format!("rust-files-{}", uuid::Uuid::new_v4()));
-            std::fs::DirBuilder::new()
-                .mode(0o700)
-                .create(&path)
-                .unwrap();
+            std::fs::create_dir(&path).unwrap();
             Self(std::fs::canonicalize(path).unwrap())
         }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
             // Only this test's exact exclusively-created fixture root.
-            std::fs::remove_dir_all(&self.0).unwrap();
+            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+    async fn json(response: Response) -> Value {
+        serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    }
 
     #[tokio::test]
-    async fn intermediate_and_final_symlink_swaps_cannot_redirect_admitted_reads() {
+    async fn tree_preview_and_traversal_boundaries() {
         let fixture = Fixture::new();
-        let root = fixture.0.join("workspace");
-        let outside = fixture.0.join("outside");
-        std::fs::create_dir_all(root.join("nested")).unwrap();
-        std::fs::create_dir(&outside).unwrap();
-        std::fs::write(root.join("nested/data"), "accepted").unwrap();
-        std::fs::write(outside.join("data"), "outside-sentinel").unwrap();
-        let files = Files::new(root.clone()).unwrap();
-        // Pause deterministically after canonical admission, before opening.
-        let admitted = workspace_path(&files.root, "nested/data", files.browsing.clone())
+        std::fs::create_dir(fixture.0.join("nested")).unwrap();
+        std::fs::write(fixture.0.join("hello.txt"), "hello").unwrap();
+        std::fs::write(fixture.0.join("nested/inner.txt"), "inner").unwrap();
+        let files = Files::new(fixture.0.clone()).unwrap();
+        let tree = files
+            .handle("GET", "", &HeaderMap::new(), "/v1/files/tree")
+            .await;
+        assert_eq!(tree.status(), StatusCode::OK);
+        let tree = json(tree).await;
+        let names: Vec<_> = tree["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["name"].as_str().unwrap().to_owned(),
+                    e["kind"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("nested".to_owned(), "directory".to_owned()),
+                ("hello.txt".to_owned(), "file".to_owned())
+            ]
+        );
+        let nested = json(
+            files
+                .handle("GET", "path=nested", &HeaderMap::new(), "/v1/files/tree")
+                .await,
+        )
+        .await;
+        assert_eq!(nested["entries"][0]["path"], "nested/inner.txt");
+        let preview = files
+            .handle(
+                "GET",
+                "path=nested/inner.txt",
+                &HeaderMap::new(),
+                "/v1/files",
+            )
+            .await;
+        assert_eq!(preview.status(), StatusCode::OK);
+        assert_eq!(preview.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(json(preview).await["content"], "inner");
+        let outside = if cfg!(windows) {
+            "C:/hello.txt"
+        } else {
+            "/etc/hosts"
+        };
+        for path in ["../hello.txt", "nested/../../hello.txt", outside] {
+            let response = files
+                .handle(
+                    "GET",
+                    &format!("path={path}"),
+                    &HeaderMap::new(),
+                    "/v1/files",
+                )
+                .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        }
+        assert_eq!(
+            files
+                .handle("GET", "path=missing", &HeaderMap::new(), "/v1/files")
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            files
+                .handle("GET", "path=nested", &HeaderMap::new(), "/v1/files")
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            files
+                .handle("GET", "path=hello.txt", &HeaderMap::new(), "/v1/files/tree")
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            files
+                .handle("POST", "path=hello.txt", &HeaderMap::new(), "/v1/files")
+                .await
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+    }
+
+    #[tokio::test]
+    async fn downloads_are_bounded_and_refuse_cross_site() {
+        let fixture = Fixture::new();
+        std::fs::write(fixture.0.join("source"), "hello").unwrap();
+        let files = Files::new(fixture.0.clone()).unwrap();
+        let none = HeaderMap::new();
+        let download = || files.handle("GET", "path=source", &none, "/v1/files/download");
+        let first = download().await;
+        let second = download().await;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(download().await.status(), StatusCode::TOO_MANY_REQUESTS);
+        drop(first);
+        drop(second);
+        let body = axum::body::to_bytes(download().await.into_body(), 1024)
             .await
             .unwrap();
-        std::fs::rename(root.join("nested"), root.join("original")).unwrap();
-        symlink(&outside, root.join("nested")).unwrap();
-        assert!(
-            open_regular(&files.anchor, &files.root, &admitted.canonical)
-                .await
-                .is_err()
-        );
-        assert!(metadata_beneath(&files.anchor, Path::new("nested/data")).is_err());
-        assert!(directory_stream(&files.anchor, Path::new("nested")).is_err());
-        std::fs::remove_file(root.join("nested")).unwrap();
-        std::fs::rename(root.join("original"), root.join("nested")).unwrap();
-        std::fs::remove_file(root.join("nested/data")).unwrap();
-        symlink(outside.join("data"), root.join("nested/data")).unwrap();
-        assert!(
-            open_regular(&files.anchor, &files.root, &admitted.canonical)
-                .await
-                .is_err()
-        );
-        let metadata = metadata_beneath(&files.anchor, Path::new("nested/data")).unwrap();
+        assert_eq!(&body[..], b"hello");
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-fetch-site", "cross-site".parse().unwrap());
         assert_eq!(
-            rustix::fs::FileType::from_raw_mode(metadata.st_mode),
-            rustix::fs::FileType::Symlink
-        );
-        assert_eq!(
-            std::fs::read_to_string(outside.join("data")).unwrap(),
-            "outside-sentinel"
+            files
+                .handle("GET", "path=source", &headers, "/v1/files/download")
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn directory_stream_stays_pinned_when_its_path_is_replaced() {
-        let fixture = Fixture::new();
-        let root = fixture.0.join("workspace");
-        let outside = fixture.0.join("outside");
-        std::fs::create_dir_all(root.join("nested")).unwrap();
-        std::fs::create_dir(&outside).unwrap();
-        std::fs::write(root.join("nested/inside-name"), "accepted").unwrap();
-        std::fs::write(outside.join("outside-name"), "outside-sentinel").unwrap();
-        let files = Files::new(root.clone()).unwrap();
-        let reader = directory_stream(&files.anchor, Path::new("nested")).unwrap();
-        std::fs::rename(root.join("nested"), root.join("original")).unwrap();
-        symlink(&outside, root.join("nested")).unwrap();
-        let names: Vec<_> = reader
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert!(names.iter().any(|name| name == "inside-name"));
-        assert!(!names.iter().any(|name| name == "outside-name"));
-        assert_eq!(
-            std::fs::read_to_string(outside.join("outside-name")).unwrap(),
-            "outside-sentinel"
-        );
-    }
-
-    #[tokio::test]
-    async fn root_target_symlinks_are_listed_and_navigable() {
+    async fn root_target_symlinks_are_listed_and_outside_symlinks_are_not() {
+        use std::os::unix::fs::symlink;
         let fixture = Fixture::new();
         let root = fixture.0.join("workspace");
         let outside = fixture.0.join("outside");
         std::fs::create_dir_all(root.join("nested")).unwrap();
         std::fs::create_dir(&outside).unwrap();
         std::fs::write(root.join("proof"), "accepted").unwrap();
+        std::fs::write(outside.join("data"), "outside-sentinel").unwrap();
         symlink(".", root.join("root-link")).unwrap();
         symlink("..", root.join("nested/back-to-root")).unwrap();
         symlink(&outside, root.join("outside-link")).unwrap();
@@ -764,9 +746,7 @@ mod confinement_tests {
             ("", "root-link", "root-link"),
             ("nested", "back-to-root", "nested/back-to-root"),
         ] {
-            let listing = list_files(&files.root, &files.anchor, parent, None)
-                .await
-                .unwrap();
+            let listing = list_files(&files.root, parent, None).await.unwrap();
             let entry = listing["entries"]
                 .as_array()
                 .unwrap()
@@ -775,9 +755,7 @@ mod confinement_tests {
                 .expect("root-target link must be visible");
             assert_eq!(entry["kind"], "directory");
             assert_eq!(entry["path"], link);
-            let linked = list_files(&files.root, &files.anchor, link, None)
-                .await
-                .unwrap();
+            let linked = list_files(&files.root, link, None).await.unwrap();
             assert_eq!(linked["path"], link);
             assert!(linked["entries"]
                 .as_array()
@@ -790,65 +768,46 @@ mod confinement_tests {
                 .iter()
                 .any(|entry| entry["name"] == "outside-link"));
         }
-        assert!(list_files(&files.root, &files.anchor, "outside-link", None)
-            .await
-            .is_err());
-        assert!(metadata_beneath(&files.anchor, Path::new("../outside")).is_err());
-        assert!(metadata_beneath(&files.anchor, &outside).is_err());
+        assert!(list_files(&files.root, "outside-link", None).await.is_err());
+        assert!(workspace_path_blocking(&files.root, "outside-link/data").is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fifo_entries_are_skipped_and_never_opened() {
+        let fixture = Fixture::new();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(fixture.0.join("pipe"))
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(fixture.0.join("file"), "x").unwrap();
+        let files = Files::new(fixture.0.clone()).unwrap();
+        let listing = list_files(&files.root, "", None).await.unwrap();
+        assert_eq!(listing["entries"].as_array().unwrap().len(), 1);
+        let preview = tokio::time::timeout(
+            Duration::from_secs(2),
+            files.handle("GET", "path=pipe", &HeaderMap::new(), "/v1/files"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(preview.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
-    async fn concurrent_tree_reads_have_independent_directory_offsets() {
+    async fn concurrent_tree_reads_are_independent() {
         let fixture = Fixture::new();
         for n in 0..16 {
             std::fs::write(fixture.0.join(format!("entry-{n}")), "accepted").unwrap();
         }
         let files = Files::new(fixture.0.clone()).unwrap();
         let (first, second) = tokio::join!(
-            list_files(&files.root, &files.anchor, "", None),
-            list_files(&files.root, &files.anchor, "", None)
+            list_files(&files.root, "", None),
+            list_files(&files.root, "", None)
         );
         let first = first.unwrap();
         let second = second.unwrap();
         assert_eq!(first["entries"].as_array().unwrap().len(), 16);
         assert_eq!(first, second);
-    }
-
-    #[tokio::test]
-    async fn root_replacement_does_not_retarget_the_pinned_workspace() {
-        let fixture = Fixture::new();
-        let root = fixture.0.join("workspace");
-        let outside = fixture.0.join("outside");
-        std::fs::create_dir(&root).unwrap();
-        std::fs::create_dir(&outside).unwrap();
-        std::fs::write(root.join("data"), "accepted").unwrap();
-        std::fs::write(outside.join("data"), "outside-sentinel").unwrap();
-        let files = Files::new(root.clone()).unwrap();
-        let admitted = workspace_path(&files.root, "data", files.browsing.clone())
-            .await
-            .unwrap();
-        std::fs::rename(&root, fixture.0.join("original")).unwrap();
-        symlink(&outside, &root).unwrap();
-        // A previously admitted pathname still uses the original capability.
-        let (mut file, _) = open_regular(&files.anchor, &files.root, &admitted.canonical)
-            .await
-            .unwrap();
-        let mut content = String::new();
-        file.read_to_string(&mut content).await.unwrap();
-        assert_eq!(content, "accepted");
-        // New resolutions may not redefine the workspace through the symlink.
-        assert!(workspace_path(&files.root, "data", files.browsing.clone())
-            .await
-            .is_err());
-        assert!(
-            Files::new(root.clone()).is_err(),
-            "startup must not recanonicalize a replaced canonical root"
-        );
-        assert!(open_beneath(&files.anchor, Path::new("../outside/data")).is_err());
-        assert!(open_beneath(&files.anchor, &outside.join("data")).is_err());
-        assert_eq!(
-            std::fs::read_to_string(outside.join("data")).unwrap(),
-            "outside-sentinel"
-        );
     }
 }

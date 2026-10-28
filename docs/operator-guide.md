@@ -214,9 +214,8 @@ macos-container` and never reuse a Mac's `server_id` inside the guest.
 
 ### Windows
 
-Windows 11 x64, run as an account in the Administrators group (UAC elevation
-not required; other accounts are refused with `windows_requires_administrator`).
-The Console offers the PowerShell form:
+Windows 11 x64, run as your normal (standard or administrator) user account;
+everything is per user, as on Unix. The Console offers the PowerShell form:
 
 ```powershell
 Invoke-WebRequest https://PROXY_HOST/install.ps1 -OutFile "$env:TEMP\treer-install.ps1"

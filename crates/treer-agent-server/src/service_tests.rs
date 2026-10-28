@@ -136,26 +136,6 @@ async fn windows_isolated_host_fixture() {
         default_root,
         fs::canonicalize(env::current_dir().unwrap()).unwrap()
     );
-    let junction_target = env::temp_dir().join("default-root-junction-target");
-    fs::create_dir(&junction_target).unwrap();
-    fs::remove_dir(&default_root).unwrap();
-    let junction = Command::new("cmd.exe")
-        .args(["/d", "/c", "mklink", "/J"])
-        .arg(&default_root)
-        .arg(&junction_target)
-        .output()
-        .unwrap();
-    assert!(
-        junction.status.success(),
-        "native fixture could not create a junction"
-    );
-    assert!(
-        new_enrollment_root(None).is_err(),
-        "default root must reject a junction before setting ACLs"
-    );
-    fs::remove_dir(&default_root).unwrap();
-    fs::remove_dir(&junction_target).unwrap();
-    new_enrollment_root(None).unwrap();
     let root = env::temp_dir().join(format!("treer-windows-host-{}", Uuid::new_v4().simple()));
     treer_platform::secure_directory(&root).unwrap();
     // Match run_server's canonical-root precondition. On Windows the temp
@@ -1963,8 +1943,8 @@ fn machine_replacement_is_journaled_recoverable_and_never_adopts_old_state() {
     // Barrier: while this run (A) holds the lock with its journal published and
     // 0, 1 or 2 new configuration files in place, a concurrent connect/repair
     // in ANOTHER PROCESS (B) is refused as busy and cannot run recovery:
-    // nothing is removed or uninstalled. Windows mutexes are recursive for the
-    // owning thread, so only a separate process proves the exclusion.
+    // nothing is removed or uninstalled. A separate process proves the
+    // exclusion independently of how the OS scopes locks within one process.
     for present in [2usize, 1, 0] {
         if present == 1 {
             fs::remove_file(&next_paths.host_config).unwrap();
@@ -2178,31 +2158,4 @@ fn lock_contender(config_dir: &Path, workspace: &str, mode: &str) -> String {
         }
     }
     panic!("lock contender produced no verdict: {stdout}");
-}
-
-#[test]
-fn windows_administrator_requirement_refuses_only_standard_accounts() {
-    use treer_platform::WindowsAccountClass::*;
-    assert!(administrator_requirement(Elevated).is_ok());
-    assert!(administrator_requirement(AdminCapable).is_ok());
-    let error = administrator_requirement(Standard).unwrap_err().to_string();
-    assert!(error.starts_with(WINDOWS_REQUIRES_ADMINISTRATOR));
-    assert!(error.contains("Administrators group") && error.contains("Nothing was changed"));
-    for forbidden in ["S-1-", "\\", "/", "="] {
-        assert!(!error.contains(forbidden), "{error}");
-    }
-}
-
-/// Hosted and native Windows gates run as administrators; the live token must
-/// classify as such and the requirement must pass there.
-#[cfg(windows)]
-#[test]
-fn windows_hosted_runner_token_is_an_administrator() {
-    let class = treer_platform::account_class().unwrap();
-    assert_ne!(
-        class,
-        treer_platform::WindowsAccountClass::Standard,
-        "{class:?}"
-    );
-    require_windows_administrator().unwrap();
 }

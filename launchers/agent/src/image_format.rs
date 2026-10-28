@@ -1,25 +1,19 @@
 //! Bounded container validation, matching the Node attachment boundary.
 //! This checks framing and dimensions, not compressed pixel decoding.
-#[cfg(any(unix, test))]
 use anyhow::{bail, Result};
 pub const FILE_LIMIT: usize = 10 * 1024 * 1024;
-#[cfg(unix)]
 pub const PROMPT_LIMIT: usize = 24 * 1024 * 1024;
 pub const COUNT_LIMIT: usize = 8;
 
-#[cfg(any(unix, test))]
 fn dim(w: u32, h: u32) -> bool {
     w > 0 && h > 0 && w <= 16384 && h <= 16384 && u64::from(w) * u64::from(h) <= 100_000_000
 }
-#[cfg(any(unix, test))]
 fn be(b: &[u8]) -> u32 {
     b.iter().fold(0, |n, b| n * 256 + u32::from(*b))
 }
-#[cfg(any(unix, test))]
 fn le(b: &[u8]) -> u32 {
     b.iter().rev().fold(0, |n, b| n * 256 + u32::from(*b))
 }
-#[cfg(any(unix, test))]
 fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = u32::MAX;
     for b in bytes {
@@ -30,7 +24,6 @@ fn crc32(bytes: &[u8]) -> u32 {
     }
     !crc
 }
-#[cfg(any(unix, test))]
 pub fn format(bytes: &[u8]) -> Result<(&'static str, &'static str)> {
     if bytes.is_empty() {
         bail!("attachment_empty");
@@ -40,7 +33,6 @@ pub fn format(bytes: &[u8]) -> Result<(&'static str, &'static str)> {
     }
     inspect(bytes, 0).ok_or_else(|| anyhow::anyhow!("attachment_invalid_image"))
 }
-#[cfg(any(unix, test))]
 fn inspect(b: &[u8], depth: usize) -> Option<(&'static str, &'static str)> {
     if depth > 1 {
         return None;
@@ -249,7 +241,6 @@ fn inspect(b: &[u8], depth: usize) -> Option<(&'static str, &'static str)> {
     }
     None
 }
-#[cfg(any(unix, test))]
 fn blocks(b: &[u8], p: &mut usize) -> Option<()> {
     while *p < b.len() {
         let n = b[*p] as usize;

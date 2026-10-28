@@ -107,108 +107,7 @@ impl Drop for Allocation {
     }
 }
 
-/// Classify the PROCESS token for the Windows administrator requirement.
-/// Elevated: full-elevation token, or an unsplit token that is a member of
-/// BUILTIN\Administrators (UAC off, built-in Administrator, elevated service).
-/// AdminCapable: the UAC-limited token of an Administrators member.
-/// Standard: an unsplit token that is not a member. Every query uses the
-/// process token (membership through an identification-level duplicate of
-/// it), so thread impersonation never influences the result.
-pub fn account_class() -> io::Result<super::WindowsAccountClass> {
-    unsafe {
-        let mut token = ptr::null_mut();
-        // TOKEN_DUPLICATE is required for the identification-level duplicate
-        // that the membership check below needs.
-        checked(OpenProcessToken(
-            GetCurrentProcess(),
-            TOKEN_QUERY | TOKEN_DUPLICATE,
-            &mut token,
-        ))?;
-        let token = OwnedHandle::from_raw_handle(token);
-        let mut elevation: TOKEN_ELEVATION_TYPE = 0;
-        let mut size = 0u32;
-        checked(GetTokenInformation(
-            token.as_raw_handle(),
-            TokenElevationType,
-            (&mut elevation as *mut TOKEN_ELEVATION_TYPE).cast(),
-            mem::size_of::<TOKEN_ELEVATION_TYPE>() as u32,
-            &mut size,
-        ))?;
-        if elevation == TokenElevationTypeFull {
-            return Ok(super::WindowsAccountClass::Elevated);
-        }
-        if elevation == TokenElevationTypeLimited {
-            return Ok(super::WindowsAccountClass::AdminCapable);
-        }
-        // Unsplit token (UAC off, built-in Administrator, service, or a
-        // standard user): membership decides.
-        Ok(if administrators_member(&token)? {
-            super::WindowsAccountClass::Elevated
-        } else {
-            super::WindowsAccountClass::Standard
-        })
-    }
-}
-
-/// Whether BUILTIN\Administrators is an enabled group of `token` (a process
-/// token opened with TOKEN_QUERY | TOKEN_DUPLICATE). CheckTokenMembership needs
-/// an impersonation token, so an identification-level duplicate of the given
-/// token is used: the verdict is bound to that token, never to a thread's
-/// impersonation state. For a UAC-limited administrator token the group is
-/// deny-only and this returns false.
-fn administrators_member(token: &OwnedHandle) -> io::Result<bool> {
-    unsafe {
-        let mut sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
-        let mut sid_size = SECURITY_MAX_SID_SIZE;
-        checked(CreateWellKnownSid(
-            WinBuiltinAdministratorsSid,
-            ptr::null_mut(),
-            sid.as_mut_ptr().cast(),
-            &mut sid_size,
-        ))?;
-        let mut impersonation = ptr::null_mut();
-        checked(DuplicateToken(
-            token.as_raw_handle(),
-            SecurityIdentification,
-            &mut impersonation,
-        ))?;
-        let impersonation = OwnedHandle::from_raw_handle(impersonation);
-        let mut member = 0;
-        checked(CheckTokenMembership(
-            impersonation.as_raw_handle(),
-            sid.as_mut_ptr().cast(),
-            &mut member,
-        ))?;
-        Ok(member != 0)
-    }
-}
-
-/// Exercise the membership path (DuplicateToken + CheckTokenMembership) on the
-/// current process token regardless of its elevation type. Diagnostic/test
-/// support: returns the raw membership verdict.
-pub fn process_token_administrators_member() -> io::Result<bool> {
-    unsafe {
-        let mut token = ptr::null_mut();
-        checked(OpenProcessToken(
-            GetCurrentProcess(),
-            TOKEN_QUERY | TOKEN_DUPLICATE,
-            &mut token,
-        ))?;
-        administrators_member(&OwnedHandle::from_raw_handle(token))
-    }
-}
-
 pub fn current_user_sid() -> io::Result<String> {
-    token_sid(TokenUser)
-}
-
-/// The SID the process token assigns as default owner of new objects. For an
-/// elevated administrator this is the Administrators group, not the user.
-pub fn current_token_owner_sid() -> io::Result<String> {
-    token_sid(TokenOwner)
-}
-
-fn token_sid(class: TOKEN_INFORMATION_CLASS) -> io::Result<String> {
     unsafe {
         let mut token = ptr::null_mut();
         checked(OpenProcessToken(
@@ -218,7 +117,13 @@ fn token_sid(class: TOKEN_INFORMATION_CLASS) -> io::Result<String> {
         ))?;
         let token = OwnedHandle::from_raw_handle(token);
         let mut size = 0;
-        GetTokenInformation(token.as_raw_handle(), class, ptr::null_mut(), 0, &mut size);
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            ptr::null_mut(),
+            0,
+            &mut size,
+        );
         if size == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -226,19 +131,12 @@ fn token_sid(class: TOKEN_INFORMATION_CLASS) -> io::Result<String> {
         let mut storage = vec![0usize; (size as usize).div_ceil(mem::size_of::<usize>())];
         checked(GetTokenInformation(
             token.as_raw_handle(),
-            class,
+            TokenUser,
             storage.as_mut_ptr().cast(),
             size,
             &mut size,
         ))?;
-        // TOKEN_USER starts with SID_AND_ATTRIBUTES { Sid, Attributes } and
-        // TOKEN_OWNER with { Owner }: both begin with the PSID.
-        let sid: PSID = if class == TokenOwner {
-            (*storage.as_ptr().cast::<TOKEN_OWNER>()).Owner
-        } else {
-            (*storage.as_ptr().cast::<TOKEN_USER>()).User.Sid
-        };
-        sid_string(sid)
+        sid_string((*storage.as_ptr().cast::<TOKEN_USER>()).User.Sid)
     }
 }
 
@@ -264,221 +162,6 @@ pub fn secure_path(path: &Path) -> io::Result<()> {
     let descriptor = descriptor(path.is_dir())?;
     let name = wide(path.as_os_str());
     unsafe {
-        checked(SetFileSecurityW(
-            name.as_ptr(),
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            descriptor.0,
-        ))
-    }
-}
-
-/// One discretionary ACE. Mask and principal are read only for the two plain
-/// ACE types whose layout is `{ Header, Mask, SidStart }`; every other type is
-/// recorded by header only and never parsed as that layout.
-struct AceReport {
-    ace_type: u8,
-    flags: u8,
-    /// `Some` only for ACCESS_ALLOWED / ACCESS_DENIED ACEs of a sane size.
-    plain: Option<(u32, String)>,
-}
-
-/// Owner and discretionary ACL of a file object as the system reports them.
-struct SecurityReport {
-    owner: String,
-    control: u16,
-    aces: Vec<AceReport>,
-}
-
-const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
-const ACCESS_DENIED_ACE_TYPE: u8 = 1;
-/// Bound on ACEs inspected or reported; a longer DACL is not private anyway.
-const MAX_REPORTED_ACES: u32 = 32;
-
-fn read_security(path: &Path) -> io::Result<SecurityReport> {
-    let name = wide(path.as_os_str());
-    unsafe {
-        let mut owner = ptr::null_mut();
-        let mut dacl = ptr::null_mut();
-        let mut descriptor = ptr::null_mut();
-        let status = GetNamedSecurityInfoW(
-            name.as_ptr(),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-            &mut owner,
-            ptr::null_mut(),
-            &mut dacl,
-            ptr::null_mut(),
-            &mut descriptor,
-        );
-        if status != ERROR_SUCCESS {
-            return Err(io::Error::from_raw_os_error(status as i32));
-        }
-        let descriptor = Allocation(descriptor.cast());
-        let mut control = 0u16;
-        let mut revision = 0u32;
-        checked(GetSecurityDescriptorControl(
-            descriptor.0,
-            &mut control,
-            &mut revision,
-        ))?;
-        let owner = if owner.is_null() {
-            String::from("<none>")
-        } else {
-            sid_string(owner)?
-        };
-        let mut aces = Vec::new();
-        if !dacl.is_null() {
-            let mut size = ACL_SIZE_INFORMATION {
-                AceCount: 0,
-                AclBytesInUse: 0,
-                AclBytesFree: 0,
-            };
-            checked(GetAclInformation(
-                dacl,
-                (&mut size as *mut ACL_SIZE_INFORMATION).cast(),
-                mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
-                AclSizeInformation,
-            ))?;
-            for index in 0..size.AceCount.min(MAX_REPORTED_ACES) {
-                let mut ace = ptr::null_mut();
-                checked(GetAce(dacl, index, &mut ace))?;
-                // Only the header is common to every ACE type. The plain
-                // allowed/denied layout is read solely for those two types and
-                // only when the ACE is large enough to hold it; anything else
-                // (object, callback, audit, unknown) stays header-only.
-                let header = *ace.cast::<ACE_HEADER>();
-                let plain = if matches!(
-                    header.AceType,
-                    ACCESS_ALLOWED_ACE_TYPE | ACCESS_DENIED_ACE_TYPE
-                ) && usize::from(header.AceSize)
-                    >= mem::size_of::<ACCESS_ALLOWED_ACE>()
-                {
-                    let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
-                    let sid = sid_string(ptr::addr_of!(allowed.SidStart).cast_mut().cast())?;
-                    Some((allowed.Mask, sid))
-                } else {
-                    None
-                };
-                aces.push(AceReport {
-                    ace_type: header.AceType,
-                    flags: header.AceFlags,
-                    plain,
-                });
-            }
-            if size.AceCount > MAX_REPORTED_ACES {
-                aces.push(AceReport {
-                    ace_type: u8::MAX,
-                    flags: 0,
-                    plain: None,
-                });
-            }
-        }
-        Ok(SecurityReport {
-            owner,
-            control,
-            aces,
-        })
-    }
-}
-
-const SYSTEM_SID: &str = "S-1-5-18";
-const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
-
-/// Whether `path` carries the private descriptor `secure_path` writes: owned by
-/// this process's token user or token owner (the SID the system assigns as
-/// default owner of objects this process creates), a present and protected
-/// DACL whose entries are all non-inherited plain ACCESS_ALLOWED entries for
-/// the token user or LocalSystem. Any other ACE type, principal, deny entry or
-/// inherited entry fails closed. Reads the live descriptor, so later
-/// loosening is seen.
-pub fn private_path_is_secure(path: &Path) -> io::Result<bool> {
-    let user = current_user_sid()?;
-    let token_owner = current_token_owner_sid()?;
-    let report = read_security(path)?;
-    if report.owner != user && report.owner != token_owner {
-        return Ok(false);
-    }
-    if report.control & SE_DACL_PRESENT == 0 || report.control & SE_DACL_PROTECTED == 0 {
-        return Ok(false);
-    }
-    if report.aces.is_empty() {
-        return Ok(false);
-    }
-    for ace in &report.aces {
-        if ace.ace_type != ACCESS_ALLOWED_ACE_TYPE || ace.flags & INHERITED_ACE as u8 != 0 {
-            return Ok(false);
-        }
-        match &ace.plain {
-            Some((_mask, sid)) if sid == &user || sid == SYSTEM_SID => {}
-            _ => return Ok(false),
-        }
-    }
-    Ok(true)
-}
-
-/// Categorical, bounded owner/control/ACE listing for diagnostics. Principals
-/// are classified relative to this process's token (current_user,
-/// token_owner, system, administrators, everyone, users, authenticated_users,
-/// other); raw SIDs, paths, host names and environment values never appear.
-pub fn private_path_security_report(path: &Path) -> io::Result<String> {
-    fn classify(sid: &str, user: &str, token_owner: &str) -> &'static str {
-        match sid {
-            _ if sid == user => "current_user",
-            _ if sid == token_owner => "token_owner",
-            SYSTEM_SID => "system",
-            ADMINISTRATORS_SID => "administrators",
-            "S-1-1-0" => "everyone",
-            "S-1-5-32-545" => "users",
-            "S-1-5-11" => "authenticated_users",
-            "<none>" => "none",
-            _ => "other",
-        }
-    }
-    let user = current_user_sid()?;
-    let token_owner = current_token_owner_sid()?;
-    let report = read_security(path)?;
-    let mut text = format!(
-        "owner={} token_owner_is_user={} control=0x{:04x} dacl_present={} dacl_protected={} aces={}",
-        classify(&report.owner, &user, &token_owner),
-        token_owner == user,
-        report.control,
-        report.control & SE_DACL_PRESENT != 0,
-        report.control & SE_DACL_PROTECTED != 0,
-        report.aces.len()
-    );
-    for ace in &report.aces {
-        let inherited = ace.flags & INHERITED_ACE as u8 != 0;
-        match &ace.plain {
-            Some((mask, sid)) => text.push_str(&format!(
-                " [type={} inherited={inherited} flags=0x{:02x} mask=0x{mask:08x} principal={}]",
-                ace.ace_type,
-                ace.flags,
-                classify(sid, &user, &token_owner)
-            )),
-            None => text.push_str(&format!(
-                " [type={} inherited={inherited} flags=0x{:02x} unsupported]",
-                ace.ace_type, ace.flags
-            )),
-        }
-    }
-    Ok(text)
-}
-
-/// Apply an SDDL security descriptor (DACL part) to a path. Test support for
-/// native regressions that need unusual ACE types; production code uses
-/// `secure_path`.
-pub fn apply_sddl_dacl(path: &Path, sddl: &str) -> io::Result<()> {
-    let sddl = wide(OsStr::new(sddl));
-    let name = wide(path.as_os_str());
-    unsafe {
-        let mut descriptor = ptr::null_mut();
-        checked(ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            1,
-            &mut descriptor,
-            ptr::null_mut(),
-        ))?;
-        let descriptor = Allocation(descriptor);
         checked(SetFileSecurityW(
             name.as_ptr(),
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
@@ -645,55 +328,6 @@ impl ProcessTreeGuard {
             ))?;
             checked(AssignProcessToJobObject(handle.as_raw_handle(), process))?;
             Ok(Self { _handle: handle })
-        }
-    }
-}
-
-/// Thread-bound startup lock. Windows releases an abandoned mutex on owner exit.
-pub struct LocalLock {
-    handle: OwnedHandle,
-    _thread_bound: std::marker::PhantomData<*mut ()>,
-}
-impl LocalLock {
-    pub fn acquire(key: &str) -> io::Result<Self> {
-        let endpoint = super::endpoint_name(key, &current_user_sid()?);
-        let name = wide(OsStr::new(&format!(
-            "Global\\{}",
-            endpoint
-                .file_name()
-                .unwrap_or(endpoint.as_os_str())
-                .to_string_lossy()
-        )));
-        let descriptor = descriptor(false)?;
-        let attributes = SECURITY_ATTRIBUTES {
-            nLength: mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: descriptor.0,
-            bInheritHandle: 0,
-        };
-        unsafe {
-            let handle = CreateMutexW(&attributes, 0, name.as_ptr());
-            if handle.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-            let handle = OwnedHandle::from_raw_handle(handle);
-            match WaitForSingleObject(handle.as_raw_handle(), 30_000) {
-                WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Self {
-                    handle,
-                    _thread_bound: std::marker::PhantomData,
-                }),
-                WAIT_TIMEOUT => Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Host startup lock is occupied",
-                )),
-                _ => Err(io::Error::last_os_error()),
-            }
-        }
-    }
-}
-impl Drop for LocalLock {
-    fn drop(&mut self) {
-        unsafe {
-            ReleaseMutex(self.handle.as_raw_handle());
         }
     }
 }

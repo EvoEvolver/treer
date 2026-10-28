@@ -55,8 +55,8 @@ jobs:
           cargo test --locked -p treer-cli --bin treer machine_file::tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test machine registration lock and replacement
-        # The registration lock is a named mutex on Windows and the contender case
-        # runs a separate process for about two minutes; both must execute natively.
+        # The registration lock is an OS file lock and the contender case runs a
+        # separate process; both must execute natively.
         timeout-minutes: 8
         run: |
           cargo test --locked -p treer-agent-server --bin treer-agent-server service::tests::machine_
@@ -82,15 +82,6 @@ jobs:
           cargo build --locked --release -p treer-cli -p treer-agent-host -p treer-agent-server
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release --manifest-path launchers/agent/Cargo.toml --target-dir target
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Windows administrator requirement (standard user, disposable runner)
-        # Creates a temporary standard local user: the script itself refuses to run
-        # unless this is a GitHub-hosted runner. Never enable it on self-hosted machines.
-        timeout-minutes: 10
-        env:
-          TREER_DISPOSABLE_RUNNER: '1'
-        run: |
-          ./scripts/windows-standard-user-check.ps1 -InstallScript ./scripts/install.ps1 -AgentServer ./target/release/treer-agent-server.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test real Controller and CLI
         run: |
@@ -133,6 +124,29 @@ jobs:
       - name: Test Windows PowerShell installer compatibility
         shell: powershell
         run: ./scripts/test-windows-install.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
+      - name: Standard user (disposable runner)
+        # Creates a temporary standard local user: the script itself refuses to run
+        # unless this is a GitHub-hosted runner. Never enable it on self-hosted machines.
+        # As that user: install the staged artifacts, run service status, and run the
+        # native platform/runtime/Host tests, the registration lock tests and the real
+        # detached Host/Controller test (debug binaries built by the steps above).
+        timeout-minutes: 20
+        env:
+          TREER_DISPOSABLE_RUNNER: '1'
+        run: |
+          function Test-Executables([string[]]$CargoArgs) {
+            $lines = & cargo test --locked --no-run --message-format=json @CargoArgs
+            if ($LASTEXITCODE -ne 0) { throw "cargo test --no-run failed: $CargoArgs" }
+            @($lines | ForEach-Object { try { $_ | ConvertFrom-Json } catch {} } |
+              Where-Object { $_.reason -eq 'compiler-artifact' -and $_.executable -and $_.profile.test } |
+              ForEach-Object { $_.executable })
+          }
+          $native = Test-Executables @('-p', 'treer-platform', '-p', 'treer-agent-runtime', '-p', 'treer-agent-host')
+          $server = Test-Executables @('-p', 'treer-agent-server', '--bin', 'treer-agent-server')
+          if ($native.Count -lt 3 -or $server.Count -ne 1) { throw 'expected native and agent-server test executables' }
+          ./scripts/windows-standard-user-check.ps1 -InstallScript ./scripts/install.ps1 `
+            -ArtifactDirectory release-artifacts/windows-x86_64 -TestExecutable $native -AgentServerTest $server[0]
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

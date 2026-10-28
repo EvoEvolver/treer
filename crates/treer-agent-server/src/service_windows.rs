@@ -19,6 +19,14 @@ fn log_path(paths: &ServicePaths, config: &ServiceConfig) -> PathBuf {
         component_key(&config.server_id)
     ))
 }
+/// Serializes start/stop/relocation of one Host across processes and sessions.
+fn host_lock(paths: &ServicePaths, config: &ServiceConfig) -> Result<fs::File> {
+    let path = paths.state_dir.join(format!(
+        "agent-host-{}.lock",
+        component_key(&config.server_id)
+    ));
+    lock_file(&path, Duration::from_secs(30))?.context("Host startup lock is occupied")
+}
 fn identity(paths: &ServicePaths, config: &ServiceConfig) -> Result<Option<ProcessIdentity>> {
     match fs::read(pid_path(paths, config)) {
         Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
@@ -55,7 +63,7 @@ pub fn start(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
     if config.service_manager != ServiceManager::Detached {
         bail!("use restore or connect to start a foreground Host");
     }
-    let _lock = treer_platform::LocalLock::acquire(&config.server_id)?;
+    let _lock = host_lock(paths, config)?;
     require_root_alignment(paths, config)?;
     if let Some(process) = identity(paths, config)? {
         if live(&process)? {
@@ -109,7 +117,7 @@ pub fn start(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
 }
 
 pub fn stop(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
-    let _lock = treer_platform::LocalLock::acquire(&config.server_id)?;
+    let _lock = host_lock(paths, config)?;
     let Some(process) = identity(paths, config)? else {
         if host_is_running(&config.host_socket) {
             bail!("Host metadata is missing; refusing to terminate an unknown process");

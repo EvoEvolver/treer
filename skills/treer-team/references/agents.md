@@ -45,10 +45,9 @@ the Agent's final PATH, never its working directory. If it reports
 a relative path such as `./treer-launch`.
 
 Do not paste another machine's absolute launcher path into a profile. The
-launcher finds `codex`/`claude` on PATH, or `CODEX_BIN`/`CLAUDE_BIN`. On
-Windows the provider must be a native `.exe`, and the Controller's bare
-executable lookup accepts `.exe`/`.com`, not an arbitrary `.cmd` as the
-Agent/profile command. See the [launcher installation guide](../../../launchers/agent/README.md).
+launcher finds `codex`/`claude` on PATH (on Windows also their npm `.cmd`
+shims), or `CODEX_BIN`/`CLAUDE_BIN`. The Controller's bare executable lookup
+for the Agent/profile command itself accepts `.exe`/`.com`, not `.cmd`. See the [launcher installation guide](../../../launchers/agent/README.md).
 
 ## Resume a native session, or start a new one
 

@@ -233,6 +233,12 @@ Breaking changes; read before upgrading a workspace or machine:
   machine identity (for example, a machine deleted in the Console). Running
   workloads on the old Host need one confirmation (or `--replace`).
   `service relocate-root` is removed.
-- **Windows:** service commands no longer require Administrator; launcher file
-  browsing and recovery work the same as on Unix; npm `.cmd` provider shims are
-  supported.
+- **Windows:** Treer installs and runs as a standard user, like Unix (the
+  Administrators-group rule and `windows_requires_administrator` are gone;
+  Host and registration locks are per-user file locks). `treer-launch` runs
+  the same journal, history/recovery, file browser (directory listing
+  included), image attachments and task-output code as on Unix, and finds
+  npm/pnpm/yarn `.cmd` provider shims on PATH without `CODEX_BIN`/`CLAUDE_BIN`.
+- **Legacy Node state import removed.** `--import-node-state`,
+  `--import-claude-state` and `--restore-node-backup` are gone; state left
+  under `<cwd>/.treer/agents/` by the Node launcher is ignored.
