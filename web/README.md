@@ -22,7 +22,7 @@ UI conventions and the review checklist for changing a screen live in
 | `src/components/terminal-pane.tsx` | xterm.js terminal over the Proxy PTY stream |
 | `src/components/isolated-agent-interface.tsx`, `use-agent-*.ts` | Agent Interface embed handshake, prewarm and fallbacks |
 | `src/components/app-interface.tsx`, `app-owned-tree.tsx`, `app-node-*.tsx` | Managed App embeds and App-owned subtrees |
-| `src/components/machine-view.tsx`, `machine-upload-dialog.tsx`, `controller-updater.tsx` | Machine detail, file upload, Controller update |
+| `src/components/machine-view.tsx`, `machine-metrics-panel.tsx`, `machine-upload-dialog.tsx`, `controller-updater.tsx` | Machine detail, hardware metrics, file upload, Controller update |
 | `src/components/*settings-view.tsx`, `workspace-audit*.tsx`, `policy-publish-authority.tsx` | Workspace / organization settings, audit, Policy Provider |
 | `src/components/admin-panel.tsx`, `admin-traffic.tsx` | Platform admin at `/admin` |
 | `src/components/ui/` | Radix/shadcn primitives |
@@ -348,6 +348,13 @@ The machine view shows status, Controller/Host builds and capabilities.
   seconds while `downloading`, `installing` or `restarting`. The Controller
   downloads the signed release, replaces itself and restarts through its Host.
   Older Controllers show a manual-upgrade hint.
+- **Hardware** (`machine-metrics-panel.tsx`, `lib/machine-metrics.ts`): with
+  `machine.metrics.v1`, current CPU, memory and per-GPU utilization plus a
+  sparkline over 15m/1h/6h/24h from
+  `/api/workspaces/{ws}/machines/{id}/metrics?window_seconds=N`, polled every
+  5 s (60 s for minute-mean ranges) while the page is visible. Gaps break the
+  line; missing GPU fields show as not reported, never zero. Older Controllers
+  show an update hint and offline machines a notice, without requesting.
 - **Add machine** opens the enrollment dialog with the connect commands.
 
 ### Workspace and organization settings
