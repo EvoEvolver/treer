@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { Bot, Boxes, RefreshCw } from "lucide-react"
-import { ApiError } from "@/lib/api"
-import { readAppTree, type AppNodeSelection, type AppTreeNode } from "@/lib/app-tree"
+import { ApiError, type AppDeployment } from "@/lib/api"
+import { knownAppTreeSupport, probeAppTreeSupport, readAppTree, type AppNodeSelection, type AppTreeNode } from "@/lib/app-tree"
 import { workloadLinkProps } from "@/lib/workload-link"
 import { TreeGroup, TreeRow, treeIndent } from "@/components/tree-row"
 import { t } from "@/i18n"
@@ -11,6 +11,29 @@ export type AppTreeNavigation = {
   selected: Pick<AppNodeSelection, "ownerId" | "path"> | null
   open: (selection: AppNodeSelection) => void
   href: (selection: AppNodeSelection) => string
+}
+
+// App IDs whose UI implements the App tree contract (docs/app-tree.md). Only
+// running Apps are asked, once per page session; until an App answers, and for
+// every App that does not own a directory, its row stays a plain leaf.
+export function useAppTreeSupport(workspaceId: string | null, apps: AppDeployment[]): Set<string> {
+  const running = workspaceId ? apps.filter(app => app.status === "running").map(app => app.app_id).sort() : []
+  const runningKey = running.join("\n")
+  const [, rerender] = useState(0)
+  const [retry, setRetry] = useState(0)
+  useEffect(() => {
+    if (!workspaceId || !runningKey) return
+    let active = true, timer = 0
+    const pending = runningKey.split("\n").filter(appId => knownAppTreeSupport(workspaceId, appId) === "unknown")
+    // Each answer shows its chevron at once; offline or failing Apps are asked again later, never guessed.
+    for (const appId of pending) void probeAppTreeSupport(workspaceId, appId).then(result => {
+      if (!active) return
+      if (result === "yes") rerender(value => value + 1)
+      else if (result === "unknown" && !timer) timer = window.setTimeout(() => setRetry(value => value + 1), 30000)
+    })
+    return () => { active = false; clearTimeout(timer) }
+  }, [workspaceId, runningKey, retry])
+  return new Set(workspaceId ? apps.filter(app => knownAppTreeSupport(workspaceId, app.app_id) === "yes").map(app => app.app_id) : [])
 }
 
 // The App row in the workspace Tree owns the root disclosure; this renders its contents at `depth`.
