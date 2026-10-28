@@ -230,7 +230,9 @@ encrypted by the App, and 0600 files do not isolate other processes of the same
 OS user: run the App and its administrator under a dedicated account or
 container with a private port. There is no rate limiter or durable audit export.
 Do not put secrets in policy strings. Naming an action in a rule does not create
-an enforcement hook for it.
+an enforcement hook for it. Core enforces `email.send` for App email
+(`treer email send`, `POST /api/apps/{service_id}/email`) with the App runtime
+as subject and its `machine.service` as resource.
 
 ## Test
 

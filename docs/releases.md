@@ -202,6 +202,17 @@ manifest without `treer-launch` as predating it.
 
 ## Release notes
 
+### Unreleased
+
+- **App email restored** (`app.email.v1`): Managed Apps send through the
+  Proxy's Cloudflare sender with `treer email send` or
+  `POST /api/apps/{service_id}/email`, governed by `email.send`, and look up an
+  earlier send with `treer email status KEY`. It reuses the
+  `app_email_*` tables 0.2.0 left in place.
+- **Per-endpoint App inbox** (`message.endpoint-inbox.v1`): `app_endpoint` and
+  `after` on Message receive/ack (`treer message receive|ack --endpoint KEY`).
+  Additive; needs a Proxy and Controller that both advertise it.
+
 ### 0.2.0
 
 Breaking changes; read before upgrading a workspace or machine:

@@ -2930,6 +2930,186 @@ async fn public_ingress_preserves_application_auth_and_strips_treer_headers() {
     controller.await.expect("join controller");
 }
 
+#[tokio::test]
+async fn app_email_requires_owned_managed_app_identity_and_policy() {
+    let (auth, _state, app, _rx) = app_lifecycle_fixture().await;
+    let identity = IdentityIssuer::load(&auth, &Url::parse("https://treer.example/").unwrap())
+        .await
+        .unwrap();
+    let token = identity
+        .issue(
+            "default",
+            "machine-a",
+            app.runtime_agent_id.as_deref().unwrap(),
+            &app.service_id,
+        )
+        .unwrap();
+    let request = treer_protocol::SendAppEmailRequest {
+        to: "person@example.test".into(),
+        subject: "test".into(),
+        text: "private".into(),
+        idempotency_key: "k".into(),
+    };
+    let mut headers = HeaderMap::new();
+    assert_eq!(
+        send_app_email(
+            Extension(auth.clone()),
+            Extension(identity.clone()),
+            Extension(PolicyEngine::allow_all()),
+            Path(app.service_id.clone()),
+            headers.clone(),
+            Json(request.clone())
+        )
+        .await
+        .unwrap_err()
+        .status,
+        StatusCode::UNAUTHORIZED
+    );
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", token.access_token)).unwrap(),
+    );
+    // A legitimate Managed App with permission reaches sender configuration
+    // even for a non-member recipient. Missing credentials above still fail.
+    assert_eq!(
+        send_app_email(
+            Extension(auth.clone()),
+            Extension(identity.clone()),
+            Extension(PolicyEngine::allow_all()),
+            Path(app.service_id.clone()),
+            headers.clone(),
+            Json(request.clone())
+        )
+        .await
+        .unwrap_err()
+        .error
+        .code,
+        "email_not_configured"
+    );
+    let policy_store = WorkspacePolicyStore::new(auth.pool());
+    policy_store
+        .replace(
+            "default",
+            0,
+            PolicyMode::Enforce,
+            WorkspacePolicyDocument {
+                schema_version: POLICY_SCHEMA_VERSION,
+                defaults: BTreeMap::from([("email.send".into(), PolicyEffect::Deny)]),
+                groups: BTreeMap::new(),
+                rules: vec![],
+            },
+            PolicyPrincipalRef {
+                kind: PolicyPrincipalKind::Human,
+                id: "owner".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        send_app_email(
+            Extension(auth.clone()),
+            Extension(identity.clone()),
+            Extension(PolicyEngine::durable(policy_store)),
+            Path(app.service_id.clone()),
+            headers.clone(),
+            Json(request.clone())
+        )
+        .await
+        .unwrap_err()
+        .status,
+        StatusCode::FORBIDDEN
+    );
+    let wrong = identity
+        .issue("default", "machine-a", "ordinary-agent", &app.service_id)
+        .unwrap();
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", wrong.access_token)).unwrap(),
+    );
+    assert_eq!(
+        send_app_email(
+            Extension(auth.clone()),
+            Extension(identity.clone()),
+            Extension(PolicyEngine::allow_all()),
+            Path(app.service_id.clone()),
+            headers.clone(),
+            Json(request.clone())
+        )
+        .await
+        .unwrap_err()
+        .error
+        .code,
+        "email_app_required"
+    );
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", token.access_token)).unwrap(),
+    );
+    assert_eq!(
+        send_app_email(
+            Extension(auth.clone()),
+            Extension(identity.clone()),
+            Extension(PolicyEngine::allow_all()),
+            Path("svc_wrong".into()),
+            headers,
+            Json(request.clone())
+        )
+        .await
+        .unwrap_err()
+        .status,
+        StatusCode::UNAUTHORIZED
+    );
+    // The Controller-relayed route (`treer email send`) shares the same checks:
+    // only the App runtime on its own machine reaches the sender.
+    let runtime = app.runtime_agent_id.clone().unwrap();
+    for (server, agent, code) in [
+        ("machine-a", runtime.as_str(), "email_not_configured"),
+        ("machine-b", runtime.as_str(), "email_app_required"),
+        ("machine-a", "ordinary-agent", "email_app_required"),
+    ] {
+        assert_eq!(
+            super::email::relayed_email_code(&auth, server, agent, &request).await,
+            code
+        );
+    }
+    // Status lookup uses the same App-runtime authentication and ownership.
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", token.access_token)).unwrap(),
+    );
+    let missing = app_email_status(
+        Extension(auth.clone()),
+        Extension(identity.clone()),
+        Path((app.service_id.clone(), "never-used".into())),
+        headers,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (missing.status, missing.error.code.as_str()),
+        (StatusCode::NOT_FOUND, "email_not_found")
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", wrong.access_token)).unwrap(),
+    );
+    assert_eq!(
+        app_email_status(
+            Extension(auth),
+            Extension(identity),
+            Path((app.service_id.clone(), "never-used".into())),
+            headers,
+        )
+        .await
+        .unwrap_err()
+        .error
+        .code,
+        "email_app_required"
+    );
+}
+
 /// Keys a streamed `AgentInfo` may carry (#141): the member-visible flat
 /// inventory. `path` is tolerated only as null; folders, placements and pins
 /// never appear on the stream.

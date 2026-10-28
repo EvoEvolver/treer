@@ -248,6 +248,15 @@ pub fn router(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/terminal",
             get(agent_terminal),
         );
+    let agent_control = agent_control
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/email",
+            post(send_core_app_email),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/email/{idempotency_key}",
+            get(core_app_email_status),
+        );
     let agent_control = if rollout.core_messages {
         agent_control
             .registered_route(
@@ -756,6 +765,11 @@ pub fn router(
         .registered_route("/.treer/apps/identity/verify", post(verify_app_identity))
         .registered_route("/api/apps/oauth/authorize", get(authorize_workspace_app))
         .registered_route("/api/apps/oauth/token", post(exchange_workspace_app_code))
+        .registered_route("/api/apps/{service_id}/email", post(send_app_email))
+        .registered_route(
+            "/api/apps/{service_id}/email/{idempotency_key}",
+            get(app_email_status),
+        )
         .registered_route(
             "/api/apps/{service_id}/policy/explain",
             post(app_explain_policy),

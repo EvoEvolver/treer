@@ -65,6 +65,7 @@ pub const ACTION_INGRESS_LIST: &str = "ingress.list";
 pub const ACTION_INGRESS_CREATE: &str = "ingress.create";
 pub const ACTION_INGRESS_UPDATE: &str = "ingress.update";
 pub const ACTION_INGRESS_DELETE: &str = "ingress.delete";
+pub const ACTION_EMAIL_SEND: &str = "email.send";
 pub const ACTION_MESSAGE_SEND: &str = "message.send";
 pub const ACTION_MESSAGE_READ: &str = "message.read";
 pub const ACTION_MESSAGE_RECEIVE: &str = "message.receive";

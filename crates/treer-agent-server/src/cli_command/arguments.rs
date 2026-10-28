@@ -83,6 +83,11 @@ pub(super) enum Command {
         #[command(subcommand)]
         command: MessageCommand,
     },
+    #[command(about = "Send email as the calling Managed App (Proxy-held sender)")]
+    Email {
+        #[command(subcommand)]
+        command: EmailCommand,
+    },
     #[command(about = "Show the current managed agent identity")]
     Whoami,
     #[command(about = "Show this workspace, its machines, and its agents")]
@@ -282,6 +287,12 @@ pub(super) enum MessageCommand {
         wait: u64,
         #[arg(long, default_value_t = 50)]
         limit: u16,
+        /// Only deliveries addressed to this endpoint of the caller's own App mailbox
+        #[arg(long, value_name = "KEY")]
+        endpoint: Option<String>,
+        /// Continue a scan from an earlier `next_cursor` (does not acknowledge)
+        #[arg(long, value_name = "CURSOR")]
+        after: Option<String>,
     },
     #[command(about = "Explicitly acknowledge one or more deliveries")]
     Ack {
@@ -289,6 +300,9 @@ pub(super) enum MessageCommand {
         delivery_ids: Vec<String>,
         #[arg(long)]
         operation_id: Option<String>,
+        /// Require every delivery to belong to this endpoint of the caller's App mailbox
+        #[arg(long, value_name = "KEY")]
+        endpoint: Option<String>,
     },
     #[command(about = "Import a bounded operator-authorized legacy Message batch")]
     Import {
@@ -607,6 +621,31 @@ fn parse_file_mode(value: &str) -> Result<u32, String> {
         .ok()
         .filter(|mode| *mode <= 0o777)
         .ok_or_else(|| "mode must contain ordinary octal permission bits (000-777)".to_owned())
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum EmailCommand {
+    #[command(about = "Send one plain-text email; only a Managed App runtime may send")]
+    Send {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        subject: String,
+        #[arg(long, help = "Plain-text body; omit to read it from piped stdin")]
+        body: Option<String>,
+        #[arg(
+            long,
+            help = "App-scoped key; a retry with the same content returns the original result"
+        )]
+        idempotency_key: String,
+    },
+    #[command(
+        about = "Show an earlier send's outcome (sent, failed or pending) without resending"
+    )]
+    Status {
+        #[arg(value_name = "IDEMPOTENCY_KEY")]
+        idempotency_key: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

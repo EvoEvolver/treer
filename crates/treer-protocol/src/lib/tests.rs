@@ -958,10 +958,26 @@ fn message_requests_reject_unknown_fields() {
         serde_json::from_value::<ReceiveMessagesRequest>(serde_json::json!({}))
             .expect("default receive request"),
         ReceiveMessagesRequest {
+            app_endpoint: None,
+            after: None,
             limit: 50,
             wait_milliseconds: 0,
         }
     );
+    // Endpoint fields are additive: absent fields keep the legacy wire shape.
+    let legacy = serde_json::to_value(AcknowledgeMessagesRequest {
+        app_endpoint: None,
+        delivery_ids: vec!["dlv".into()],
+        operation_id: "op".into(),
+    })
+    .unwrap();
+    assert!(legacy.get("app_endpoint").is_none());
+    let scoped: ReceiveMessagesRequest = serde_json::from_value(serde_json::json!({
+        "app_endpoint": "alice", "after": "cursor", "limit": 5
+    }))
+    .unwrap();
+    assert_eq!(scoped.app_endpoint.as_deref(), Some("alice"));
+    assert_eq!(scoped.after.as_deref(), Some("cursor"));
 }
 
 #[test]

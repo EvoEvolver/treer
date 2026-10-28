@@ -151,7 +151,7 @@ pub(super) async fn health(State(state): State<LocalApiState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "service": "treer-agent-server",
-        "cli_capabilities": [treer_protocol::CAPABILITY_AGENT_PATH_TARGETS, treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY, treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE],
+        "cli_capabilities": [treer_protocol::CAPABILITY_AGENT_PATH_TARGETS, treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY, treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE, treer_protocol::CAPABILITY_APP_EMAIL, treer_protocol::CAPABILITY_MESSAGE_ENDPOINT_INBOX],
         "workspace_id": state.workspace_id,
         "server_id": state.server_id,
         "controller_epoch": state.controller_epoch,
@@ -436,6 +436,28 @@ pub(super) async fn acknowledge_core_messages(
     Ok(Json(
         state.post_as("messages/ack", &body, Some(&agent)).await?,
     ))
+}
+
+/// Relays the calling workload; the Proxy admits only a Managed App runtime.
+pub(super) async fn send_app_email(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<treer_protocol::SendAppEmailRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let body = serde_json::to_value(request)
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    Ok(Json(state.post_as("email", &body, Some(&agent)).await?))
+}
+
+pub(super) async fn app_email_status(
+    State(state): State<LocalApiState>,
+    Path(idempotency_key): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let suffix = format!("email/{}", encode_path_segment(&idempotency_key));
+    Ok(Json(state.get_as(&suffix, Some(&agent)).await?))
 }
 
 pub(super) async fn import_core_messages(

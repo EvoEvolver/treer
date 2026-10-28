@@ -446,6 +446,7 @@ impl MessageStore {
         })
     }
 
+    #[cfg(test)]
     pub async fn receive(
         &self,
         workspace_id: &str,
@@ -453,7 +454,24 @@ impl MessageStore {
         limit: u16,
         wait_milliseconds: u64,
     ) -> Result<ReceiveMessagesResponse, MessageStoreError> {
+        self.receive_after(workspace_id, principal, limit, wait_milliseconds, None)
+            .await
+    }
+
+    /// Unacknowledged deliveries in `(created_at, delivery_id)` order. A
+    /// principal with `app_endpoint` reads only that endpoint of its own
+    /// mailbox; `after` continues a scan and never acknowledges anything.
+    pub async fn receive_after(
+        &self,
+        workspace_id: &str,
+        principal: &MessagePrincipal,
+        limit: u16,
+        wait_milliseconds: u64,
+        after: Option<&str>,
+    ) -> Result<ReceiveMessagesResponse, MessageStoreError> {
         validate_page_size(limit)?;
+        validate_endpoint_scope(principal.app_endpoint.as_deref())?;
+        let after = after.map(decode_cursor).transpose()?;
         if wait_milliseconds > MAX_MESSAGE_WAIT_MILLISECONDS {
             return Err(MessageStoreError::contract(
                 "message_wait_invalid",
@@ -463,12 +481,15 @@ impl MessageStore {
             ));
         }
         let notified = self.changed.notified();
-        let first = self.receive_now(workspace_id, principal, limit).await?;
+        let first = self
+            .receive_now(workspace_id, principal, limit, after.as_ref())
+            .await?;
         if !first.deliveries.is_empty() || wait_milliseconds == 0 {
             return Ok(first);
         }
         let _ = tokio::time::timeout(Duration::from_millis(wait_milliseconds), notified).await;
-        self.receive_now(workspace_id, principal, limit).await
+        self.receive_now(workspace_id, principal, limit, after.as_ref())
+            .await
     }
 
     async fn receive_now(
@@ -476,6 +497,7 @@ impl MessageStore {
         workspace_id: &str,
         principal: &MessagePrincipal,
         limit: u16,
+        after: Option<&(DateTime<Utc>, String)>,
     ) -> Result<ReceiveMessagesResponse, MessageStoreError> {
         let mut connection = self.pool.acquire().await?;
         let rows = sqlx::query(
@@ -484,6 +506,8 @@ impl MessageStore {
              FROM core_message_deliveries WHERE workspace_id = $1 AND recipient_kind = $2 \
              AND recipient_id = $3 AND acknowledged_at IS NULL \
              AND (expires_at IS NULL OR expires_at > $4) \
+             AND ($6::text IS NULL OR recipient_endpoint = $6) \
+             AND ($7::text IS NULL OR (created_at, delivery_id) > ($7, $8)) \
              ORDER BY created_at, delivery_id LIMIT $5",
         )
         .bind(workspace_id)
@@ -491,6 +515,9 @@ impl MessageStore {
         .bind(&principal.id)
         .bind(Utc::now().to_rfc3339())
         .bind(i64::from(limit))
+        .bind(&principal.app_endpoint)
+        .bind(after.map(|(time, _)| time.to_rfc3339()))
+        .bind(after.map(|(_, id)| id.as_str()))
         .fetch_all(&mut *connection)
         .await?;
         let mut deliveries = Vec::with_capacity(rows.len());
@@ -503,7 +530,16 @@ impl MessageStore {
         }
         let remaining_unacknowledged =
             unacknowledged_count(&mut connection, workspace_id, principal).await?;
+        // The aggregate legacy poll keeps its original wire shape.
+        let next_cursor = if principal.app_endpoint.is_some() || after.is_some() {
+            deliveries
+                .last()
+                .map(|delivery| encode_cursor(&delivery.created_at, &delivery.delivery_id))
+        } else {
+            None
+        };
         Ok(ReceiveMessagesResponse {
+            next_cursor,
             deliveries,
             remaining_unacknowledged,
         })
@@ -528,7 +564,12 @@ impl MessageStore {
         policy_revision: Option<u64>,
     ) -> Result<AcknowledgeMessagesResponse, MessageStoreError> {
         validate_ack(request)?;
-        let request_hash = request_hash(&request.delivery_ids)?;
+        validate_endpoint_scope(request.app_endpoint.as_deref())?;
+        // An endpoint-scoped ACK is a different operation from an unscoped one.
+        let request_hash = match request.app_endpoint.as_deref() {
+            Some(endpoint) => request_hash(&(endpoint, &request.delivery_ids))?,
+            None => request_hash(&request.delivery_ids)?,
+        };
         let mut transaction = self.pool.begin().await?;
         let connection = &mut *transaction;
         lock_idempotency(
@@ -569,12 +610,13 @@ impl MessageStore {
             let row = sqlx::query(
                 "SELECT message_id, acknowledged_at FROM core_message_deliveries \
                  WHERE workspace_id = $1 AND delivery_id = $2 AND recipient_kind = $3 \
-                 AND recipient_id = $4 FOR UPDATE",
+                 AND recipient_id = $4 AND ($5::text IS NULL OR recipient_endpoint = $5) FOR UPDATE",
             )
             .bind(workspace_id)
             .bind(delivery_id)
             .bind(principal.kind.as_str())
             .bind(&principal.id)
+            .bind(&request.app_endpoint)
             .fetch_optional(&mut *connection)
             .await?
             .ok_or_else(|| {
@@ -1013,6 +1055,15 @@ fn validate_page_size(limit: u16) -> Result<(), MessageStoreError> {
     Ok(())
 }
 
+fn validate_endpoint_scope(endpoint: Option<&str>) -> Result<(), MessageStoreError> {
+    match endpoint {
+        Some(endpoint) if !treer_protocol::valid_message_app_endpoint(endpoint) => Err(
+            MessageStoreError::contract("message_endpoint_invalid", "invalid App endpoint"),
+        ),
+        _ => Ok(()),
+    }
+}
+
 fn validate_ack(request: &AcknowledgeMessagesRequest) -> Result<(), MessageStoreError> {
     if request.delivery_ids.is_empty() || request.delivery_ids.len() > MAX_ACK_DELIVERIES {
         return Err(MessageStoreError::contract(
@@ -1298,12 +1349,14 @@ async fn unacknowledged_count(
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM core_message_deliveries WHERE workspace_id = $1 \
          AND recipient_kind = $2 AND recipient_id = $3 AND acknowledged_at IS NULL \
-         AND (expires_at IS NULL OR expires_at > $4)",
+         AND (expires_at IS NULL OR expires_at > $4) \
+         AND ($5::text IS NULL OR recipient_endpoint = $5)",
     )
     .bind(workspace_id)
     .bind(principal.kind.as_str())
     .bind(&principal.id)
     .bind(Utc::now().to_rfc3339())
+    .bind(&principal.app_endpoint)
     .fetch_one(connection)
     .await?;
     u64::try_from(count).map_err(|_| MessageStoreError::Corrupt)
@@ -1695,6 +1748,7 @@ mod tests {
 
     fn ack(ids: &[&String], operation_id: &str) -> AcknowledgeMessagesRequest {
         AcknowledgeMessagesRequest {
+            app_endpoint: None,
             delivery_ids: ids.iter().map(|id| id.to_string()).collect(),
             operation_id: operation_id.to_string(),
         }
@@ -1800,6 +1854,191 @@ mod tests {
         assert_eq!(left.delivery_ids, right.delivery_ids);
         assert_ne!(left.idempotent_replay, right.idempotent_replay);
         assert_eq!(inbox(&store, &recipient).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn endpoint_inbox_receive_after_and_ack_are_scoped_to_the_owner() {
+        let store = test_store().await;
+        // A Proxy that ran the old typed-inbox canary left this column behind.
+        sqlx::query("ALTER TABLE core_messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'message' CHECK (kind IN ('message','prompt'))")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let sender = agent("sender");
+        let owner = agent("app-owner");
+        let at = |base: &MessagePrincipal, endpoint: &str| {
+            let mut scoped = base.clone();
+            scoped.app_endpoint = Some(endpoint.into());
+            scoped
+        };
+        let (alice, bob) = (at(&owner, "alice"), at(&owner, "bob"));
+        let first = store
+            .send(
+                "workspace-a",
+                &sender,
+                std::slice::from_ref(&alice),
+                &request(&["app-owner/alice"], vec![], "one", "k1"),
+            )
+            .await
+            .unwrap();
+        let both = store
+            .send(
+                "workspace-a",
+                &sender,
+                &[alice.clone(), bob.clone()],
+                &request(&["app-owner/alice", "app-owner/bob"], vec![], "two", "k2"),
+            )
+            .await
+            .unwrap();
+        // The aggregate poll keeps its legacy wire shape.
+        let aggregate = store.receive("workspace-a", &owner, 10, 0).await.unwrap();
+        assert_eq!(aggregate.deliveries.len(), 3);
+        assert!(serde_json::to_value(&aggregate)
+            .unwrap()
+            .get("next_cursor")
+            .is_none());
+
+        let page = store.receive("workspace-a", &alice, 1, 0).await.unwrap();
+        assert_eq!(page.deliveries[0].delivery_id, first.delivery_ids[0]);
+        assert_eq!(
+            page.deliveries[0].recipient.app_endpoint.as_deref(),
+            Some("alice")
+        );
+        assert_eq!(page.remaining_unacknowledged, 2);
+        assert_eq!(
+            page,
+            store.receive("workspace-a", &alice, 1, 0).await.unwrap(),
+            "poll does not consume"
+        );
+        let next = store
+            .receive_after("workspace-a", &alice, 1, 0, page.next_cursor.as_deref())
+            .await
+            .unwrap();
+        assert_eq!(next.deliveries[0].delivery_id, both.delivery_ids[0]);
+        let end = store
+            .receive_after("workspace-a", &alice, 1, 0, next.next_cursor.as_deref())
+            .await
+            .unwrap();
+        assert!(end.deliveries.is_empty() && end.next_cursor.is_none());
+        assert_eq!(
+            end.remaining_unacknowledged, 2,
+            "a cursor never acknowledges"
+        );
+        assert_eq!(
+            store
+                .receive("workspace-a", &bob, 10, 0)
+                .await
+                .unwrap()
+                .deliveries
+                .len(),
+            1
+        );
+
+        // Another workload never sees or acknowledges this owner's endpoint.
+        let stranger = at(&agent("other-app"), "alice");
+        assert!(store
+            .receive("workspace-a", &stranger, 10, 0)
+            .await
+            .unwrap()
+            .deliveries
+            .is_empty());
+        let scoped_ack =
+            |ids: Vec<String>, endpoint: &str, operation: &str| AcknowledgeMessagesRequest {
+                app_endpoint: Some(endpoint.into()),
+                delivery_ids: ids,
+                operation_id: operation.into(),
+            };
+        let foreign = scoped_ack(first.delivery_ids.clone(), "alice", "foreign");
+        assert_eq!(
+            store
+                .acknowledge("workspace-a", &agent("other-app"), &foreign)
+                .await
+                .unwrap_err()
+                .code(),
+            "message_delivery_not_found"
+        );
+        // A batch with another endpoint's delivery fails entirely.
+        let mixed = scoped_ack(
+            vec![first.delivery_ids[0].clone(), both.delivery_ids[1].clone()],
+            "alice",
+            "mixed",
+        );
+        assert_eq!(
+            store
+                .acknowledge("workspace-a", &owner, &mixed)
+                .await
+                .unwrap_err()
+                .code(),
+            "message_delivery_not_found"
+        );
+        assert_eq!(
+            store
+                .receive("workspace-a", &alice, 10, 0)
+                .await
+                .unwrap()
+                .deliveries
+                .len(),
+            2
+        );
+
+        let ack = scoped_ack(first.delivery_ids.clone(), "alice", "ack-alice");
+        let acknowledged = store
+            .acknowledge("workspace-a", &owner, &ack)
+            .await
+            .unwrap();
+        assert_eq!(acknowledged.acknowledged_delivery_ids, first.delivery_ids);
+        assert_eq!(
+            store
+                .acknowledge("workspace-a", &owner, &ack)
+                .await
+                .unwrap(),
+            acknowledged,
+            "retry replays"
+        );
+        assert_eq!(
+            store
+                .acknowledge(
+                    "workspace-a",
+                    &owner,
+                    &scoped_ack(first.delivery_ids.clone(), "bob", "ack-alice")
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            "message_ack_idempotency_conflict"
+        );
+        let unscoped = AcknowledgeMessagesRequest {
+            app_endpoint: None,
+            ..ack.clone()
+        };
+        assert_eq!(
+            store
+                .acknowledge("workspace-a", &owner, &unscoped)
+                .await
+                .unwrap_err()
+                .code(),
+            "message_ack_idempotency_conflict"
+        );
+        let remaining = store.receive("workspace-a", &alice, 10, 0).await.unwrap();
+        assert_eq!(remaining.deliveries.len(), 1);
+        assert_eq!(remaining.remaining_unacknowledged, 1);
+        assert_eq!(
+            store
+                .receive("workspace-a", &bob, 10, 0)
+                .await
+                .unwrap()
+                .deliveries
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .receive("workspace-a", &at(&owner, "bad endpoint"), 10, 0)
+                .await
+                .unwrap_err()
+                .code(),
+            "message_endpoint_invalid"
+        );
     }
 
     #[tokio::test]

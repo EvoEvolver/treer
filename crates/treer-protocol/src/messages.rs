@@ -216,6 +216,12 @@ pub struct ListMessagesQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReceiveMessagesRequest {
+    /// One endpoint of the caller's own App mailbox. Absent: the whole mailbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_endpoint: Option<String>,
+    /// Opaque `next_cursor` from an earlier page; it never acknowledges anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
     #[serde(default = "default_message_page_size")]
     pub limit: u16,
     #[serde(default)]
@@ -229,6 +235,9 @@ const fn default_message_page_size() -> u16 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReceiveMessagesResponse {
+    /// Set on endpoint or `after` scans when the page is non-empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     pub deliveries: Vec<MessageDelivery>,
     pub remaining_unacknowledged: u64,
 }
@@ -236,6 +245,9 @@ pub struct ReceiveMessagesResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AcknowledgeMessagesRequest {
+    /// Requires every delivery to belong to this endpoint of the caller's mailbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_endpoint: Option<String>,
     pub delivery_ids: Vec<String>,
     pub operation_id: String,
 }

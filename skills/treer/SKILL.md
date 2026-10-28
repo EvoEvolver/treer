@@ -43,6 +43,7 @@ treer exec --help
 treer service --help
 treer interface --help
 treer message --help
+treer email --help
 treer token --help
 treer member --help
 ```
@@ -445,10 +446,35 @@ Bridges forwarding an external channel can pipe one JSON object
 the authenticated sender. Only an authenticated Managed App may send with
 `--from-endpoint` for its own logical subtree.
 
+A Managed App with logical endpoints can poll and acknowledge one endpoint of
+its own mailbox (`message.endpoint-inbox.v1`):
+
+```bash
+treer message receive --endpoint KEY [--after CURSOR] --limit 50
+treer message ack <delivery-id> --endpoint KEY --operation-id <stable-id>
+```
+
+Endpoint pages carry `next_cursor`; a cursor only advances the scan and never
+acknowledges, so omit `--after` to rescan everything still unacknowledged. A
+scoped `ack` fails entirely if any delivery belongs to another endpoint.
+
 Context edges do not grant access to a parent's body; missing and invisible
 Messages return the same error. Policy actions are `message.send`,
 `message.read`, `message.receive` and `message.ack`. `core_messages_disabled`
 means the deployment has not enabled Messages; report it.
+
+A Managed App runtime can send plain-text email through the Proxy's sender
+(`app.email.v1`; ordinary Agents get `email_app_required`):
+
+```bash
+printf '%s\n' 'Your report is ready.' | \
+  treer email send --to person@example.com --subject 'Report ready' --idempotency-key report-42
+```
+
+Reusing a key with the same content returns the original `email_id`; different
+content is `email_idempotency_conflict`. Policy action: `email.send`. After a
+timeout or other uncertain result, `treer email status KEY` reports `sent`,
+`failed` or `pending` instead of resending.
 
 A Message does not wake another Agent. When attention is needed, send the
 Message, then `treer agent prompt TARGET "<message-id>"` with only the ID;

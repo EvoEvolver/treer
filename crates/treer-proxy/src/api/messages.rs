@@ -519,9 +519,12 @@ pub(super) async fn receive_messages_for(
     messages: &MessageStore,
     workspace_id: &str,
     subject: PolicySubject,
-    principal: MessagePrincipal,
+    mut principal: MessagePrincipal,
     request: ReceiveMessagesRequest,
 ) -> Result<treer_protocol::ReceiveMessagesResponse, ApiFailure> {
+    // An endpoint only narrows the caller's own mailbox: deliveries are owned
+    // by the App runtime identity, so no other workload's endpoint is reachable.
+    principal.app_endpoint = request.app_endpoint;
     authorize_control(
         policy,
         workspace_id,
@@ -531,11 +534,12 @@ pub(super) async fn receive_messages_for(
     )
     .await?;
     Ok(messages
-        .receive(
+        .receive_after(
             workspace_id,
             &principal,
             request.limit,
             request.wait_milliseconds,
+            request.after.as_deref(),
         )
         .await?)
 }

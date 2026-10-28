@@ -68,6 +68,38 @@ each `delivery.recipient.app_endpoint` itself. Distinct child paths and the root
 mailbox are distinct deliveries, even when they share the same owner. ACKs remain
 delivery-specific and authenticated to the owning mailbox.
 
+### Per-endpoint inbox
+
+With `message.endpoint-inbox.v1` (Proxy `/api/health` and Controller
+capabilities), an App can poll and acknowledge one endpoint instead of its
+whole mailbox:
+
+```sh
+treer message receive --endpoint team/tools/agent1 [--after CURSOR] [--limit 50] [--wait MS]
+treer message ack DELIVERY_ID... --endpoint team/tools/agent1 [--operation-id ID]
+```
+
+The same JSON goes to `POST /api/messages/receive` and `/api/messages/ack`
+(Controller), `/agent/workspaces/WS/messages/receive|ack` (Proxy, machine
+credential) and `/api/apps/SERVICE_ID/messages/receive|ack` (service token):
+
+```json
+{"app_endpoint":"KEY","after":"CURSOR","limit":50,"wait_milliseconds":0}
+{"app_endpoint":"KEY","delivery_ids":["dlv_..."],"operation_id":"ID"}
+```
+
+`app_endpoint` only narrows the caller's own mailbox: deliveries are owned by
+the App runtime identity, so another workload's endpoint returns nothing and
+its delivery IDs are `message_delivery_not_found`. Receive orders by delivery
+time and ID, never consumes, and reports `remaining_unacknowledged` for that
+endpoint. An endpoint or `after` page also returns `next_cursor` (omitted on an
+empty page); a cursor only advances the scan, so omit `after` to see every
+still-unacknowledged delivery again. A scoped ACK fails entirely when any
+delivery belongs to another endpoint. Retrying the same `operation_id` returns
+the saved response; reusing it with another endpoint or delivery set is
+`message_ack_idempotency_conflict`. Whether an item is a prompt or a message is
+App metadata, not a Core field.
+
 An App replies with its explicit logical source:
 
 ```sh

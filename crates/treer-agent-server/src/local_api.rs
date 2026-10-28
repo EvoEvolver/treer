@@ -581,6 +581,8 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/api/messages/ack", post(acknowledge_core_messages))
         .route("/api/messages/import", post(import_core_messages))
         .route("/api/messages/{message_id}", get(get_core_message))
+        .route("/api/email", post(send_app_email))
+        .route("/api/email/{idempotency_key}", get(app_email_status))
         .with_state(state)
 }
 
