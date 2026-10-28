@@ -227,6 +227,38 @@ Job Object instead of a process group. Offline session transfer is
 macOS/Linux only. `treer-launch.exe` is the Windows release artifact;
 `install.ps1` installs it next to `treer.exe`.
 
+## Browser UI
+
+The page (`ui/`) is a client of the same HTTP/WebSocket API the Console and
+Agents use; it adds no endpoint. One design, light and dark, at every width
+(standalone, phone, or framed by the Console):
+
+- **Header:** a worded run status (Ready, Working, Last turn failed,
+  Restarting, Reconnecting, Blocked), the thread title and short workspace
+  path, and Files, Tasks (Claude) and Settings. The tab title carries the
+  status while it is not Ready.
+- **Conversation:** opens at the latest message and follows new content until
+  the reader scrolls up. Each turn folds its commands and tool calls into one
+  summary row, lists every changed file with +/− counts, its diff and an Open
+  action, and shows a failed turn's error with Retry (the same message through
+  `api/prompt`) and Copy. A divider marks what is new since this browser last
+  saw the conversation. During a provider restart the last conversation stays
+  visible under a banner that states the cause, the restart count and how
+  many messages were not confirmed (they are never replayed automatically).
+- **Run bar and composer:** while a turn runs, the bar above the composer shows
+  elapsed time, the current step, goal, plan and queue, and Stop. Enter sends
+  (or steers a running turn), Tab queues, Shift+Enter adds a line; while
+  running both Steer and Queue are buttons. Attach, Goal and the model/effort
+  chip sit under the text field.
+- **Drawers:** Files (tree, preview, Download, and Mention, which inserts the
+  path into the draft) and Background tasks sit beside the conversation from
+  1100px and over it below that.
+- **Settings:** model and reasoning effort, theme (System/Light/Dark) and
+  Markdown export.
+
+Only per-browser conveniences are stored locally: the theme mode and, per
+thread, the last turn seen. The Console's `look` hint is accepted and ignored.
+
 ## Add a harness adapter
 
 Implement the provider protocol in `src/` next to the Codex (`runtime.rs`,
