@@ -4,6 +4,12 @@ version = "0.0.1"
 edition = "2021"
 publish = false
 
+# The installed command. Profiles saved before the rename call `treer-agent`,
+# which installers provide as an alias of this binary.
+[[bin]]
+name = "treer-launch"
+path = "src/main.rs"
+
 # Standalone workspace with its own Cargo.lock, separate from Core.
 [workspace]
 
@@ -29,6 +35,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 uuid = { version = "1", features = ["v4"] }
 treer-platform = { path = "../../crates/treer-platform" }
+treer-build-info = { path = "../../crates/treer-build-info" }
 
 [profile.release]
 strip = true

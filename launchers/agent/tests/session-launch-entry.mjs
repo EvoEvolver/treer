@@ -83,17 +83,10 @@ test('failed initialize leaves no checkpoint/port or input; once intent prevents
   const before=await readFile(p.env.LAUNCH_CALLS,'utf8');assert.equal(before.trim().split('\n').map(JSON.parse).filter(e=>e.text).length,0);
   const fresh=join(f.root,'retry-private');await mkdir(fresh,{mode:0o700});const retry=await f.start(p.args,{...p.env,TREER_AGENT_PRIVATE_STATE_DIR:fresh});await once(retry.child,'exit');assert.notEqual(retry.child.exitCode,0);assert.equal(await readFile(p.env.LAUNCH_CALLS,'utf8'),before);await f.checkSource();
 });
-test('installed session dispatcher requires Claude binding and launches the same new native session',async t=>{
-  const f=await source(t),p=await f.target(),bundle=join(f.root,'bound-launcher'),scripts=join(bundle,'scripts'),publicDir=join(bundle,'public');await mkdir(scripts,{recursive:true,mode:0o700});await mkdir(publicDir,{mode:0o700});
-  for(const name of ['treer-agent.mjs','native-runtime.mjs','process.mjs'])await copyFile(resolve('scripts',name),join(scripts,name));
-  const image=join(bundle,'native');await copyFile(binary,image);await chmod(image,0o700);
-  const bind=async path=>{const bytes=await readFile(path);return {path,bytes:bytes.length,sha256:sha(bytes)};};
-  const executable=await bind(image),assets=[];for(const name of ['index.html','boot.js','ui.js','ui.css']){const path=join(publicDir,name);await writeFile(path,'synthetic',{mode:0o600});assets.push(await bind(path));}
-  const manifest={schema:'treer.native-launcher/v1',platform:process.platform,arch:process.arch,source_commit:'1'.repeat(40),executable,public_dir:publicDir,assets,tools:{treer:{...executable,version:'synthetic'}}};const path=join(bundle,'native-runtime.json'),entry=join(scripts,'treer-agent.mjs');await writeFile(path,JSON.stringify(manifest),{mode:0o600});
-  const refused=await f.start([entry,...p.args],p.env,process.execPath);await once(refused.child,'exit');assert.notEqual(refused.child.exitCode,0);await assert.rejects(stat(p.env.LAUNCH_CALLS));
-  manifest.tools.claude={...executable,version:'synthetic-not-shipping'};await writeFile(path,JSON.stringify(manifest),{mode:0o600});
+test('treer-launch session launch registers the same new native session',async t=>{
+  const f=await source(t),p=await f.target();
   const bin=join(f.root,'synthetic-bin'),registered=join(f.root,'registered');await mkdir(bin,{mode:0o700});const cli=join(bin,'treer');await writeFile(cli,`#!${process.execPath}\nimport {writeFileSync} from 'node:fs'; if(process.argv[2]!=='interface'||process.argv[3]!=='register')process.exit(81);writeFileSync(process.env.LAUNCH_REGISTER_LOG,JSON.stringify(process.argv.slice(2)));`,{mode:0o700});
-  const live=await f.running([entry,...p.args],{...p.env,PATH:bin+':'+p.env.PATH,LAUNCH_REGISTER_LOG:registered},process.execPath);assert.equal((await live.state()).thread.id,p.imported.sessionId);assert.equal((await live.state()).harness.capabilities.sessionTransfer,null);await until(()=>readFile(registered,'utf8'),v=>JSON.parse(v).includes('--instance-id'));await f.checkSource();
+  const live=await f.running(p.args,{...p.env,PATH:bin+':'+p.env.PATH,LAUNCH_REGISTER_LOG:registered});assert.equal((await live.state()).thread.id,p.imported.sessionId);assert.equal((await live.state()).harness.capabilities.sessionTransfer,null);await until(()=>readFile(registered,'utf8'),v=>JSON.parse(v).includes('--instance-id'));await f.checkSource();
 });
 
 test('persistent prepared startup reuses exact argv/checkpoint after native growth, with no duplicate launch/input',async t=>{
@@ -136,22 +129,16 @@ test('persistent startup refuses copied root, wrong session and deleted checkpoi
   const wrong=[...args];wrong[5]='00000000-0000-4000-8000-000000000001';await refuses(wrong,{...p.env,AGENT_UI_PORT_FILE:join(f.root,'wrong-port')});
   await rm(checkpoint);await refuses(args,{...p.env,AGENT_UI_PORT_FILE:join(f.root,'deleted-port')});await f.checkSource();
 });
-test('persistent installed dispatcher registers only initialized target and ignores inherited port observation',async t=>{
-  const f=await source(t),p=await f.target('persistent-entry'),bundle=join(f.root,'persistent-bundle'),scripts=join(bundle,'scripts'),publicDir=join(bundle,'public');
-  await mkdir(scripts,{recursive:true,mode:0o700});await mkdir(publicDir,{mode:0o700});
-  for(const name of ['treer-agent.mjs','native-runtime.mjs','process.mjs'])await copyFile(resolve('scripts',name),join(scripts,name));
-  const image=join(bundle,'native');await copyFile(binary,image);await chmod(image,0o700);
-  const bind=async path=>{const bytes=await readFile(path);return {path,bytes:bytes.length,sha256:sha(bytes)};};
-  const executable=await bind(image),assets=[];for(const name of ['index.html','boot.js','ui.js','ui.css']){const path=join(publicDir,name);await writeFile(path,'synthetic',{mode:0o600});assets.push(await bind(path));}
-  await writeFile(join(bundle,'native-runtime.json'),JSON.stringify({schema:'treer.native-launcher/v1',platform:process.platform,arch:process.arch,source_commit:'1'.repeat(40),executable,public_dir:publicDir,assets,tools:{treer:{...executable,version:'synthetic'},claude:{...executable,version:'synthetic'}}}),{mode:0o600});
+test('persistent treer-launch session run registers only initialized target and ignores inherited port observation',async t=>{
+  const f=await source(t),p=await f.target('persistent-entry');
   const bin=join(f.root,'persistent-bin'),registered=join(f.root,'persistent-registration');await mkdir(bin,{mode:0o700});
   await writeFile(join(bin,'treer'),`#!${process.execPath}\nimport {appendFileSync} from 'node:fs'; if(process.argv[2]!=='interface'||process.argv[3]!=='register')process.exit(81);appendFileSync(process.env.LAUNCH_REGISTER_LOG,JSON.stringify(process.argv.slice(2))+'\\n',{mode:0o600});`,{mode:0o700});
-  const entry=join(scripts,'treer-agent.mjs'),args=[entry,...p.args];args[2]='run';
+  const args=[...p.args];args[1]='run';
   const env={...p.env,PATH:bin+':'+p.env.PATH,LAUNCH_REGISTER_LOG:registered};await writeFile(env.AGENT_UI_PORT_FILE,'parent-owned-observation',{mode:0o600});
-  const q=await f.target('persistent-entry-refused'),refusedArgs=[entry,...q.args];refusedArgs[2]='run';const refusedRegistration=join(f.root,'refused-registration');
-  const refused=await f.start(refusedArgs,{...q.env,PATH:env.PATH,LAUNCH_REGISTER_LOG:refusedRegistration,LAUNCH_REFUSE_INIT:'1'},process.execPath);
+  const q=await f.target('persistent-entry-refused'),refusedArgs=[...q.args];refusedArgs[1]='run';const refusedRegistration=join(f.root,'refused-registration');
+  const refused=await f.start(refusedArgs,{...q.env,PATH:env.PATH,LAUNCH_REGISTER_LOG:refusedRegistration,LAUNCH_REFUSE_INIT:'1'});
   await once(refused.child,'exit');assert.notEqual(refused.child.exitCode,0,refused.log());await assert.rejects(stat(refusedRegistration));await assert.rejects(stat(join(q.stateRoot,'rust-spike.json')));
-  async function started(){const owned=await f.start(args,env,process.execPath);const events=await until(()=>readFile(registered,'utf8'),s=>s.trim().split('\n').length===count+1);count++;const argv=JSON.parse(events.trim().split('\n').at(-1)),port=argv[argv.indexOf('--port')+1];const state=await until(()=>fetch(`http://127.0.0.1:${port}/api/state`).then(r=>r.json()),s=>s.ready);assert.equal(state.thread.id,p.imported.sessionId);assert.equal(state.harness.capabilities.sessionTransfer,null);return owned;}
+  async function started(){const owned=await f.start(args,env);const events=await until(()=>readFile(registered,'utf8'),s=>s.trim().split('\n').length===count+1);count++;const argv=JSON.parse(events.trim().split('\n').at(-1)),port=argv[argv.indexOf('--port')+1];const state=await until(()=>fetch(`http://127.0.0.1:${port}/api/state`).then(r=>r.json()),s=>s.ready);assert.equal(state.thread.id,p.imported.sessionId);assert.equal(state.harness.capabilities.sessionTransfer,null);return owned;}
   let count=0;const first=await started();let done=once(first.child,'exit');first.child.kill('SIGTERM');await done;
   const second=await started();done=once(second.child,'exit');second.child.kill('SIGTERM');await done;
   assert.equal(await readFile(env.AGENT_UI_PORT_FILE,'utf8'),'parent-owned-observation');
