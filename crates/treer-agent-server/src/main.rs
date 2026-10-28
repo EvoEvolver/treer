@@ -8,6 +8,7 @@ mod interface_cache;
 mod launcher;
 mod local_api;
 mod machine_file_transfer;
+mod machine_metrics;
 mod machine_upload;
 mod network;
 mod private_state;
@@ -345,6 +346,7 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
     )
     .map_err(|error| anyhow::anyhow!(error.message))?;
     runtime.restore_cached_interfaces().await;
+    machine_metrics::start();
     let proxy_ws = agent_websocket_url(args.proxy)?;
     let mut server = proxy::server_info(
         server_id.clone(),

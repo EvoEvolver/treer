@@ -596,10 +596,38 @@ pub(super) enum MachineCommand {
     List,
     #[command(about = "Show one machine by unique name or id")]
     Show { target: String },
+    #[command(about = "Show CPU, RAM and GPU load history of a machine")]
+    Metrics {
+        target: String,
+        #[arg(
+            long,
+            default_value = "5m",
+            value_parser = parse_metrics_window,
+            help = "History window: seconds or a number with s, m or h (at most 24h)"
+        )]
+        window: u32,
+    },
     #[command(about = "Rename a machine")]
     Rename { target: String, name: String },
     #[command(about = "Remove a machine and revoke its credential")]
     Delete { target: String },
+}
+
+pub(super) fn parse_metrics_window(value: &str) -> Result<u32, String> {
+    let (number, unit) = match value.char_indices().last() {
+        Some((index, 's')) => (&value[..index], 1),
+        Some((index, 'm')) => (&value[..index], 60),
+        Some((index, 'h')) => (&value[..index], 3600),
+        _ => (value, 1),
+    };
+    number
+        .parse::<u32>()
+        .ok()
+        .and_then(|number| number.checked_mul(unit))
+        .filter(|seconds| {
+            (1..=treer_protocol::MACHINE_METRICS_MAX_WINDOW_SECONDS).contains(seconds)
+        })
+        .ok_or_else(|| "window must be 1s to 24h, e.g. 300, 15m or 1h".to_owned())
 }
 
 fn parse_file_mode(value: &str) -> Result<u32, String> {

@@ -126,6 +126,34 @@ pub(super) async fn exec_machine(
     ))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MachineMetricsQuery {
+    window_seconds: Option<u32>,
+}
+
+pub(super) async fn machine_metrics(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(target): Path<String>,
+    Query(query): Query<MachineMetricsQuery>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = validated_source_agent(&state, &headers)?;
+    let target = transfer_target(&state, &target, agent.as_ref()).await?;
+    let window = query
+        .window_seconds
+        .map(|seconds| format!("?window_seconds={seconds}"))
+        .unwrap_or_default();
+    Ok(Json(
+        state
+            .get_as(
+                &format!("machines/{target}/metrics{window}"),
+                agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
 pub(super) async fn upload_machine_file(
     State(state): State<LocalApiState>,
     headers: HeaderMap,

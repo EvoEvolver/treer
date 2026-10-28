@@ -333,6 +333,35 @@ fn machine_delete_command_parses() {
 }
 
 #[test]
+fn machine_metrics_command_parses_windows() {
+    let parse = |argv: &[&str]| match Args::try_parse_from(argv).map(|args| args.command) {
+        Ok(Some(Command::Machine {
+            command: MachineCommand::Metrics { target, window },
+        })) => Some((target, window)),
+        _ => None,
+    };
+    assert_eq!(
+        parse(&["treer", "machine", "metrics", "gpu-box"]),
+        Some(("gpu-box".into(), 300))
+    );
+    assert_eq!(
+        parse(&["treer", "machine", "metrics", "self", "--window", "1h"]),
+        Some(("self".into(), 3600))
+    );
+    assert_eq!(
+        parse(&["treer", "machine", "metrics", "m", "--window", "90"]),
+        Some(("m".into(), 90))
+    );
+    for invalid in ["0", "25h", "abc", "5d", ""] {
+        assert_eq!(
+            parse(&["treer", "machine", "metrics", "m", "--window", invalid]),
+            None,
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn machine_file_transfer_commands_parse_and_preserve_local_transport_paths() {
     let argv = [
         "machine",
