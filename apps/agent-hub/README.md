@@ -160,7 +160,5 @@ These are local App tests, including actual loopback HTTP and SQLite, synthetic
 identity verifier and CLI boundary checks. They cover recursive tree changes,
 missing identity, wrong audience/workspace, route escape, commit-before-ACK,
 crash/replay, send uncertainty, distinct leaf routing, poison and capacity.
-They do **not** establish actual Core/Policy or browser acceptance. The joint
-Core runner `scripts/app-tree-local-acceptance.py` owns those fresh native-stack
-results; Web owns its browser client on the same stack. No real channel send,
+They do **not** establish actual Core/Policy or browser acceptance. No real channel send,
 public exposure, release or installed lifecycle change is authorized here.

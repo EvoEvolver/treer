@@ -1,4 +1,4 @@
-"""Run via the machine-wide gate: local one-click source build -> real health."""
+"""Local one-click source build -> real health of the single-container image."""
 import http.client
 import json
 import os

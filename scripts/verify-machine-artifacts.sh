@@ -1,54 +1,16 @@
 #!/bin/sh
 set -eu
+# Fail unless <directory> holds complete, checksummed five-platform machine artifacts built from <commit>.
 commit=${1:?source commit is required}
 directory=${2:?artifact directory is required}
 version=
-built_commit=$commit
-# Artifacts built for an earlier commit are acceptable only with explicit
-# provenance, and only when git proves the candidate differs from that commit
-# exclusively in paths the native binaries are not built from.
-if [ -e "$directory/artifact-provenance.json" ]; then
-    root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-    jq -e --arg commit "$commit" \
-        '.schema_version == 1 and .candidate_commit == $commit
-         and (.source_commit | type == "string" and test("^[0-9a-f]{40}$"))' \
-        "$directory/artifact-provenance.json" >/dev/null || {
-        echo "invalid artifact provenance for $commit" >&2; exit 1;
-    }
-    built_commit=$(jq -r '.source_commit' "$directory/artifact-provenance.json")
-    # Recorded hashes pin the bytes that were verified when the artifacts were copied.
-    jq -e '.files | type == "object" and length == 25' "$directory/artifact-provenance.json" >/dev/null || {
-        echo "artifact provenance must record all 25 file hashes" >&2; exit 1;
-    }
-    # The hashing helper sits beside this script, in a checkout (scripts/) and in the hosted image (/).
-    helper=$(dirname -- "$0")/machine-artifact-hashes.sh
-    [ -f "$helper" ] || helper="$root/scripts/machine-artifact-hashes.sh"
-    actual=$(sh "$helper" "$directory") || {
-        echo "cannot hash the artifact files" >&2; exit 1;
-    }
-    [ "$(jq -S '.files' "$directory/artifact-provenance.json")" = "$(printf '%s' "$actual" | jq -S .)" ] || {
-        echo "artifact bytes differ from the recorded provenance hashes" >&2; exit 1;
-    }
-    # Ancestry and the path allowlist need the repository. The hosted image build has none:
-    # there TREER_ARTIFACT_VERIFY_NO_GIT=1 is set by Dockerfile.hosted, and stage-hosted-proxy.sh has
-    # already run this full check against the repository before the upload was created.
-    if [ "${TREER_ARTIFACT_VERIFY_NO_GIT:-0}" != 1 ]; then
-        git -C "$root" merge-base --is-ancestor "$built_commit" "$commit" || {
-            echo "artifact source $built_commit is not an ancestor of $commit" >&2; exit 1;
-        }
-        changed=$(git -C "$root" diff --no-renames --no-ext-diff --name-only "$built_commit" "$commit")
-        if [ -n "$changed" ] && printf '%s\n' "$changed" | grep -Evq '^((web|apps|docs)/|README\.md$)'; then
-            echo "native inputs changed since artifact source $built_commit" >&2; exit 1
-        fi
-    fi
-fi
 for platform in linux-x86_64 linux-aarch64 darwin-x86_64 darwin-aarch64 windows-x86_64; do
     source="$directory/$platform"
-    jq -e --arg commit "$built_commit" --arg platform "$platform" \
+    jq -e --arg commit "$commit" --arg platform "$platform" \
         '.schema_version == 1 and .git_commit == $commit and .platform == $platform
          and (.version | type == "string" and length > 0)' \
         "$source/build-metadata.json" >/dev/null || {
-        echo "missing or mismatched $platform artifacts for $built_commit" >&2; exit 1;
+        echo "missing or mismatched $platform artifacts for $commit" >&2; exit 1;
     }
     current_version=$(jq -r '.version' "$source/build-metadata.json")
     [ -z "$version" ] || [ "$current_version" = "$version" ] || {

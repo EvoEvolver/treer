@@ -43,8 +43,6 @@ jobs:
           toolchain: 1.90.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Release workflow security regressions (fake registry only)
-        run: node --test scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs scripts/install-checksums.test.mjs
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Build workspace binaries
@@ -55,9 +53,9 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   web:
-    name: Frontend types and build
+    name: Frontend types, build and browser journeys
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: web
@@ -76,6 +74,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm build
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
 
   agent-launcher:
     name: Agent launcher types, fake harnesses and browser
@@ -114,7 +114,7 @@ jobs:
           if-no-files-found: ignore
 
   release-tooling:
-    name: Release tooling and fake machine updates
+    name: Release, install-trust and deploy tooling
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -127,9 +127,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
-      - name: Closed release, checksum, detachment and rollback tests
-        run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-      - name: Documentation links and launcher test isolation
+      - name: Documentation links
+        run: node scripts/check-docs.mjs
+      - name: Script tests (fake registries, servers and machines only)
         run: |
-          node scripts/check-docs.mjs
-          node --test scripts/ais-e2e.test.mjs
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+          python3 -m unittest discover -s deploy/updater/tests -p 'test_*.py' -v
+          node --test scripts/*.test.mjs

@@ -264,8 +264,7 @@ access; the first build can take substantial time and disk space. No host
 Rust, Node or PostgreSQL installation is needed.
 
 Run `just single-image-smoke` to build through the script and check real HTTP
-health in a disposable container/volume with a random loopback port, under the
-machine-wide gate lock. This heavy test is deliberately not part of `just check`.
+health in a disposable container/volume with a random loopback port. This heavy test is deliberately not part of `just check`.
 
 The separate CI prebuilt-input path remains unchanged. With a clean exact-SHA
 checkout, stage the trusted

@@ -62,27 +62,22 @@ The operator needs authenticated GitHub, Railway and Wrangler CLIs plus `curl`, 
 `pnpm`, Python 3, PostgreSQL client tools, Docker, and `just`:
 
 ```bash
-just canary HEAD --dry-run
-just canary HEAD --push
-# Or, from an already prepared clean release checkout:
-just release-canary HEAD
+just deploy canary
+just test-canary
 ```
 
-The `canary` wrapper prepares an isolated worktree, supports `--resume`, and
-optionally notifies a verified Agent after success. See [Release process](releases.md#canary-release).
-
 Cookie-authenticated writes (`scripts/test-canary.sh` login, admin invitation and
-API calls; the Docker e2e uses `http://web.invalid`) send the exact configured
+API calls) send the exact configured
 Console origin as `Origin`, taken from `TREER_CANARY_APP_URL` (default
 `https://app.canary.treer.ai/`), never guessed from the Proxy URL. The Proxy
 rejects such writes without it.
 
-`release-canary` requires a clean committed revision, runs `just check`, deploys
-the current worktree to the Railway Proxy and the built App artifact to
-Cloudflare, and verifies their health endpoints. It also sets the Canary public
-URLs explicitly so this environment cannot accidentally emit Production
-installation or App links. The Proxy deployment explicitly enables
-`TREER_ENABLE_CORE_MESSAGES=true`; self-hosted launches default this gate off.
+`just deploy canary` requires a clean checkout, deploys the checked-out commit
+to the Railway Proxy and the freshly built App to Cloudflare, and verifies their
+health endpoints. It also sets the Canary public URLs explicitly so this
+environment cannot accidentally emit Production installation or App links. The
+Proxy deployment explicitly enables `TREER_ENABLE_CORE_MESSAGES=true`;
+self-hosted launches default this gate off.
 
 Before changing Canary resources, deployment collects CLI, Host, and Controller
 artifacts for Linux and macOS architectures and Windows x64 from the native GitHub
@@ -92,10 +87,8 @@ public downloads against those bytes and rejects redirects to older Releases.
 See [Machine artifacts](releases.md#machine-artifacts) for preparation and retry
 details. Installed Controllers still require a separate update/restart.
 
-The local gate inside `release-canary` includes the control-plane frontend and
-Core Message tests against local PostgreSQL. Workspace App and AIS adapter
-tests are opt-in focused checks rather than release gates. The Railway workflow
-remains network-focused and does not start channel Apps.
+Run `just check` (or rely on CI for the commit) before deploying; the deploy
+script itself only builds and verifies what it ships.
 The Railway black-box workflow below does not currently install a Mail bridge,
 contact Telegram, or automate a Mail browser. Do not cite it as external-channel
 canary evidence; those are separate future fixtures.
@@ -168,19 +161,17 @@ Override
 `TREER_CANARY_MACHINE_A_NAME`, and `TREER_CANARY_MACHINE_B_NAME` together when
 moving the test fleet. The test intentionally fails when wildcard DNS or
 certificate issuance is not ready. Set `TREER_CANARY_TEST_TIMEOUT` for slow
-Railway builds. Set `TREER_CANARY_DEPLOY_TIMEOUT` separately for control-plane
+Railway builds. Set `TREER_DEPLOY_TIMEOUT` separately for control-plane
 deployment waits.
 For failure investigation, `TREER_CANARY_KEEP_RESOURCES=1 just test-canary`
 leaves the run's logical Treer resources in place. The two Railway fixtures and
 their volumes are never removed by this test.
 `TREER_CANARY_SKIP_PUBLIC=1` is available only to isolate internal networking
 and accounting failures while DNS is unavailable. A skipped public-ingress test
-is never eligible for Production promotion.
+must not be taken as Canary evidence.
 
 ## Promotion rule
 
-Production promotion is a separate operator action. A successful Canary run
-writes an ignored release manifest and preserves the exact App artifact. Run
-`just promote-production <manifest>` from the same clean commit. The promotion
-script rejects other commits, modified artifacts, failed tests, and overlapping
-release processes. See [Release process](releases.md) for the complete contract.
+Production is a separate operator action: after Canary passes, run
+`just deploy production` from the same clean commit. It refuses commits that are
+not contained in `origin/main`. See [Release process](releases.md).

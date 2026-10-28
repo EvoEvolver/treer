@@ -123,33 +123,3 @@ rollout setting. A mixed old Controller does not expose `--from-endpoint`, and
 an old Proxy rejects unsupported new fields or fails target resolution; clients
 must not strip logical addresses and retry against a root mailbox. Existing Apps
 without the directory API are not shown as having discoverable children.
-
-## Local acceptance
-
-`scripts/app-tree-local-acceptance.py` composes a new private PostgreSQL, Proxy,
-foreground Host/Controller, Managed App and human session. It uses staged native
-images from this source and the production Console. The example tree includes
-`team` App → `tools` App → `agent1`/`agent2` leaves. The acceptance entry records
-actual CLI addressing/reply identity, durable retry/offline behavior and browser
-tree→select→message→reply on the same stack, plus cleanup receipts.
-
-This entry changes no enrolled installation and publishes no release. Its
-receipt distinguishes local acceptance from deployment and from any untested
-external business side effects.
-
-Build and run from a checkout containing the Core, App and Console changes:
-
-```sh
-cargo build --locked -p treer-proxy -p treer-agent-server -p treer-agent-host -p treer-cli
-(cd web && pnpm install --frozen-lockfile && pnpm build && pnpm exec playwright install)
-python3 -B scripts/app-tree-local-acceptance.py \
-  --source "$PWD" --native-dir "$PWD/target/debug" \
-  --web-root "$PWD/web" --pg-bin /absolute/path/to/postgresql/bin
-```
-
-Use an existing PostgreSQL installation with `initdb`, `pg_ctl` and `createdb`;
-the entry creates its own database and ports. The fixed browser origin is
-`http://127.0.0.1:54979` and must be free. It prints the new private run's safe
-`result.json` path. Keep `private.log`, database files and the browser session
-binding private; share only the safe result and browser receipts. Failed runs
-keep their own result and cleanup evidence and must not be replayed.
