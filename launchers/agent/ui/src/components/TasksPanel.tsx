@@ -52,12 +52,13 @@ function Card({ task, panelOpen }: { task: BackgroundTask; panelOpen: boolean })
         <Icon name={ICONS[task.kind] ?? ICONS.other} />
         <span className="td">{task.description || task.id}</span>
         <span className={`ts${running ? " run" : ""}`}>{t(`tasks.status.${status}` as MessageKey)}</span>
+        <Icon name="chev" className="chev" />
         <span className="tm">{task.kind || "other"} · {elapsed(task, now)}{task.exitCode == null ? "" : ` · ${t("tasks.exit", { code: task.exitCode })}`}</span>
         {task.summary && <span className="task-summary">{task.summary}</span>}
       </summary>
       <pre className="task-output" tabIndex={0}>{output === null && !error ? t("tasks.loadingOutput") : output || t("tasks.noOutput")}</pre>
       {error && <p className="field-error" role="status">{error}</p>}
-      <button type="button" className="btn" onClick={() => setNonce((value) => value + 1)}>{t("tasks.refresh")}</button>
+      <button type="button" className="btn small" onClick={() => setNonce((value) => value + 1)}><Icon name="retry" />{t("tasks.refresh")}</button>
     </details>
   );
 }
@@ -120,8 +121,8 @@ export function TasksPanel({ open, onClose }: { open: boolean; onClose: () => vo
   const closeButton = useRef<HTMLButtonElement>(null);
   const focusClose = useCallback(() => closeButton.current?.focus(), []);
   return (
-    <aside className="panel tasks" id="tasks" aria-label={t("tasks.title")} hidden={!open} onKeyDown={(event) => { if (event.key === "Escape" && !document.querySelector("dialog[open]")) { event.preventDefault(); close(); } }}>
-      <header className="ph"><h2>{t("tasks.title")}</h2><button type="button" className="xbtn" ref={closeButton} aria-label={t("tasks.close")} onClick={close}><Icon name="close" /></button></header>
+    <aside className="drawer tasks" id="drawer-tasks" aria-label={t("tasks.title")} hidden={!open} onKeyDown={(event) => { if (event.key === "Escape" && !document.querySelector("dialog[open]")) { event.preventDefault(); close(); } }}>
+      <header className="drawer-h"><h2>{t("tasks.title")}</h2><button type="button" className="ib" ref={closeButton} aria-label={t("tasks.close")} onClick={close}><Icon name="close" /></button></header>
       <div className="tlist">
         {tasks.length === 0 && <p className="tasks-empty">{t("tasks.empty")}</p>}
         {tasks.map((task) => <Card key={task.id} task={task} panelOpen={open} />)}

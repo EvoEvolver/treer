@@ -19,3 +19,10 @@ export function parseDiff(diff: string): DiffLine[] {
   return lines;
 }
 
+
+/** Added and removed line counts of a unified diff (hunk bodies only). */
+export function diffCounts(diff: string): { added: number; removed: number } {
+  let added = 0, removed = 0;
+  for (const line of parseDiff(diff)) { if (line.kind === "add") added++; else if (line.kind === "del") removed++; }
+  return { added, removed };
+}

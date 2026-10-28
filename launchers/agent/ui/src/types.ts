@@ -106,13 +106,24 @@ export interface HarnessInfo {
 
 export type RuntimeState = "starting" | "working" | "blocked" | "idle";
 
+/** Provider supervision as published by the runtime; absent on older launchers. */
+export interface Recovery {
+  state: "running" | "restarting" | "storage_failure" | string;
+  restarts?: number;
+  consecutiveFailures?: number;
+  nextRestartInMs?: number | null;
+  lastFailure?: string | null;
+  unresolved?: Array<{ submissionId: string; turnId: string | null; state: string }>;
+  automaticReplay?: boolean;
+}
+
 /** The body of GET api/state and of every WebSocket `state` frame (the frame adds `type`). */
 export interface Snapshot {
   attachmentsAvailable?: boolean;
   attachmentStorageStatus?: "available" | "agent_private_state_unavailable";
   type?: "state";
   ready: boolean;
-  runtime: { state: RuntimeState; error: string | null };
+  runtime: { state: RuntimeState; error: string | null; recovery?: Recovery };
   harness: HarnessInfo;
   thread: ThreadState | null;
   modelOptions: ModelOption[];

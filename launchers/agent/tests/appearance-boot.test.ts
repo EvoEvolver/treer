@@ -20,7 +20,7 @@ function boot(framed: boolean, search = "") {
 }
 test("standalone boot has defaults and never registers embed handlers", () => {
   const { root, listeners } = boot(false, "?embed_origin=https://console.test");
-  assert.equal(root.dataset.look, "b"); assert.equal(root.dataset.theme, "light");
+  assert.equal(root.dataset.theme, "light"); assert.equal(root.dataset.look, undefined);
   assert.equal(listeners.has("message"), false);
 });
 test("framed boot accepts only the immediate parent at the configured exact origin", () => {
@@ -32,7 +32,7 @@ test("framed boot accepts only the immediate parent at the configured exact orig
   message({ source: parent, origin: "null", data });
   assert.equal(root.dataset.theme, "light");
   message({ source: parent, origin: "https://console.test", data });
-  assert.equal(root.dataset.theme, "dark"); assert.equal(root.dataset.look, "c");
+  assert.equal(root.dataset.theme, "dark"); assert.equal(root.dataset.look, undefined, "a Console look hint is accepted but ignored");
 });
 test("invalid configured origins fail closed, omitted origin allows same-origin frames", () => {
   for (const origin of ["", "null", "https://user:pass@console.test", "javascript:alert(1)", "https://console.test/path", "https://*.test"]) {

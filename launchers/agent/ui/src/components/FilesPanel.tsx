@@ -7,6 +7,7 @@ import { useDialogs } from "./Dialogs";
 import { Icon } from "./Icon";
 import { FileContent } from "./FileContent";
 import { previewKind } from "./previews/kind";
+import { insertIntoDraft } from "../state/draft";
 
 // The server refuses larger files with 413 before sending a byte; the UI says so up front instead of starting a failed download.
 const DOWNLOAD_LIMIT_BYTES = 1024 ** 3;
@@ -155,12 +156,8 @@ export function FilesPanel({ open, requestedFile, onClose }: { open: boolean; re
   const file = preview.state === "ready" ? preview.file : null;
   const meta = preview.state === "loading" ? t("files.loading") : preview.state === "error" ? t("files.unavailable") : file ? `${t("files.bytes", { n: file.size.toLocaleString() })} · ${file.truncated ? t("files.truncated") : t("files.readOnly")}` : t("files.readOnly");
   return (
-    <aside className="panel files" id="files" aria-label={t("files.title")} hidden={!open} data-ftab={tab} onKeyDown={(event) => { if (event.key === "Escape" && !document.querySelector("dialog[open]")) { event.preventDefault(); onClose(); } }}>
-      <header className="ph"><h2>{t("files.title")}</h2><span className="ph-tools"><button type="button" className="btn" title={t("files.refreshTitle")} onClick={refresh}>{t("files.refresh")}</button><button type="button" className="xbtn" ref={closeButton} aria-label={t("files.close")} onClick={onClose}><Icon name="close" /></button></span></header>
-      <div className="ftabs" role="group" aria-label={t("files.title")}>
-        <button type="button" aria-pressed={tab === "browse"} onClick={() => setTab("browse")}>{t("files.browse")}</button>
-        <button type="button" aria-pressed={tab === "preview"} disabled={!selected} onClick={() => setTab("preview")}>{t("files.preview")}</button>
-      </div>
+    <aside className="drawer files" id="drawer-files" aria-label={t("files.title")} hidden={!open} data-ftab={tab} onKeyDown={(event) => { if (event.key === "Escape" && !document.querySelector("dialog[open]")) { event.preventDefault(); onClose(); } }}>
+      <header className="drawer-h"><h2>{t("files.title")}</h2><button type="button" className="ib" aria-label={t("files.refreshTitle")} title={t("files.refreshTitle")} onClick={refresh}><Icon name="retry" /></button><button type="button" className="ib" ref={closeButton} aria-label={t("files.close")} onClick={onClose}><Icon name="close" /></button></header>
       <label className="filter"><Icon name="search" /><span className="sr-only">{t("files.filter")}</span><input type="search" value={filter} placeholder={t("files.filter")} autoComplete="off" onChange={(event) => setFilter(event.target.value)} /></label>
       <ul className="tree" role="tree" aria-label={t("files.tree")} ref={list} onKeyDown={onKeyDown}>
         {rows.map((row) => row.kind === "notice" ? (
@@ -180,13 +177,19 @@ export function FilesPanel({ open, requestedFile, onClose }: { open: boolean; re
         ))}
       </ul>
       <section className={`preview${file && previewKind(file.path) !== "text" ? " rich-preview" : ""}`} aria-label={t("files.preview")}>
-        <div className="pmeta"><b>{selected ?? t("files.select")}</b><span className={file?.truncated ? "truncated" : undefined}>{meta}</span>
-          {file && ["text", "markdown"].includes(previewKind(file.path)) && <button type="button" className="btn" onClick={() => openText(file.path, file.content)}>{t("files.open")}</button>}
-          {selected && preview.state !== "idle" && (file && file.size > DOWNLOAD_LIMIT_BYTES
-            ? <><button type="button" className="btn dl" disabled title={t("files.downloadTooLarge")}><Icon name="download" /> {t("files.download")}</button><span className="dl-note" role="status">{t("files.downloadTooLarge")}</span></>
-            : <a className="btn dl" href={safeUrl(fileDownloadUrl(selected))} download={selected.split("/").pop()} title={t("files.downloadFile", { name: selected })}><Icon name="download" /> {t("files.download")}</a>)}</div>
+        <div className="pmeta">
+          <button type="button" className="btn small back" onClick={() => { setTab("browse"); requestAnimationFrame(() => list.current?.querySelector<HTMLElement>("[tabindex='0']")?.focus()); }}><Icon name="back" />{t("files.back")}</button>
+          <b title={selected ?? undefined}>{selected ?? t("files.select")}</b><span className={file?.truncated ? "truncated" : undefined}>{meta}</span>
+          {selected && preview.state !== "idle" && <span className="pactions">
+            <button type="button" className="btn small" title={t("files.mentionTitle")} onClick={() => { insertIntoDraft(selected); if (matchMedia("(max-width: 1099px)").matches) onClose(); }}><Icon name="at" />{t("files.mention")}</button>
+            {file && ["text", "markdown"].includes(previewKind(file.path)) && <button type="button" className="btn small" onClick={() => openText(file.path, file.content)}><Icon name="open" />{t("files.open")}</button>}
+            {file && file.size > DOWNLOAD_LIMIT_BYTES
+              ? <><button type="button" className="btn small" disabled title={t("files.downloadTooLarge")}><Icon name="download" />{t("files.download")}</button><span className="dl-note" role="status">{t("files.downloadTooLarge")}</span></>
+              : <a className="btn small" href={safeUrl(fileDownloadUrl(selected))} download={selected.split("/").pop()} title={t("files.downloadFile", { name: selected })}><Icon name="download" />{t("files.download")}</a>}
+          </span>}
+        </div>
         {preview.state === "error" && <p className="field-error" role="status">{preview.message}</p>}
-        {open && file ? <FileContent key={`${file.path}:${version.current}`} file={file} /> : <pre tabIndex={0}>{preview.state === "idle" ? t("files.hint") : ""}</pre>}
+        {open && file ? <FileContent key={`${file.path}:${version.current}`} file={file} /> : <p className="muted phint">{preview.state === "idle" ? t("files.hint") : ""}</p>}
       </section>
     </aside>
   );
