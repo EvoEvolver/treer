@@ -128,6 +128,9 @@ pub struct ProxyClient {
     controller_instance_id: String,
     command_cache: Arc<Mutex<HashMap<String, CommandResult>>>,
     advertised_agents: Arc<Mutex<Vec<String>>>,
+    /// Last logged failure per workload/step, so a persistent failure retried
+    /// on every heartbeat is logged once and again only when it changes.
+    reported_failures: Arc<Mutex<HashMap<String, String>>>,
     last_activity: Arc<Mutex<Instant>>,
     continue_signal: Arc<Notify>,
 }
@@ -167,6 +170,7 @@ impl ProxyClient {
             controller_instance_id: format!("ctl_{}", uuid::Uuid::new_v4().simple()),
             command_cache: Arc::new(Mutex::new(HashMap::new())),
             advertised_agents: Arc::new(Mutex::new(advertised_agents)),
+            reported_failures: Arc::new(Mutex::new(HashMap::new())),
             last_activity: Arc::new(Mutex::new(Instant::now())),
             continue_signal,
         }
@@ -258,32 +262,7 @@ impl ProxyClient {
             },
         )
         .await?;
-        let candidates = self.runtime.automatic_startup_candidate_ids();
-        let validation_ids = self.runtime.startup_validation_ids();
-        if !validation_ids.is_empty() {
-            match self.validate_startup_agents(validation_ids).await {
-                Ok(active) => {
-                    let active: Vec<_> = active
-                        .into_iter()
-                        .filter(|id| candidates.contains(id))
-                        .collect();
-                    for (agent_id, result) in self.runtime.restore_startup_agents(&active).await {
-                        match result {
-                            Ok(_) => info!(%agent_id, "restored Agent startup command"),
-                            Err(error) => warn!(
-                                %agent_id,
-                                code = %error.code,
-                                message = %error.message,
-                                "failed to restore Agent startup command"
-                            ),
-                        }
-                    }
-                }
-                Err(error) => {
-                    warn!(error = %format!("{error:#}"), retry_seconds = HEARTBEAT_INTERVAL.as_secs(), "Agent startup validation failed; deferring restore until heartbeat retry")
-                }
-            }
-        }
+        self.reconcile_startups(false).await;
         send(
             &mut outgoing,
             &AgentServerMessage::Snapshot {
@@ -322,22 +301,7 @@ impl ProxyClient {
                 }
                 _ = heartbeat.tick() => {
                     send(&mut outgoing, &AgentServerMessage::Heartbeat { sent_at: Utc::now() }).await?;
-                    let candidates = self.runtime.automatic_startup_candidate_ids();
-                    let validation_ids = self.runtime.startup_validation_ids();
-                    if !validation_ids.is_empty() {
-                        match self.validate_startup_agents(validation_ids).await {
-                            Ok(active) => {
-                                let active: Vec<_> = active.into_iter().filter(|id| candidates.contains(id)).collect();
-                                for (agent_id, result) in self.runtime.restore_startup_agents(&active).await {
-                                    match result {
-                                        Ok(_) => info!(%agent_id, "restored deferred Agent startup command"),
-                                        Err(error) => warn!(%agent_id, code = %error.code, "workload recovery failed"),
-                                    }
-                                }
-                            }
-                            Err(error) => warn!(error = %format!("{error:#}"), retry_seconds = HEARTBEAT_INTERVAL.as_secs(), "Agent startup validation failed; restore will retry"),
-                        }
-                    }
+                    self.reconcile_startups(true).await;
                     let kinds = self.runtime.available_agent_kinds();
                     let changed = self
                         .advertised_agents
@@ -681,6 +645,64 @@ impl ProxyClient {
         }
     }
 
+    /// Returns true when `failure` (None = recovered) differs from what was
+    /// last logged for `key`.
+    fn failure_changed(&self, key: &str, failure: Option<&str>) -> bool {
+        let Ok(mut reported) = self.reported_failures.lock() else {
+            return true;
+        };
+        match failure {
+            Some(failure) => reported.insert(key.to_owned(), failure.to_owned()).as_deref() != Some(failure),
+            None => reported.remove(key).is_some(),
+        }
+    }
+
+    /// Validates startup declarations with the Proxy and restores missing
+    /// instances. Runs on connect and every heartbeat; only actual restores
+    /// and changed failures are logged.
+    async fn reconcile_startups(&self, deferred: bool) {
+        let candidates = self.runtime.automatic_startup_candidate_ids();
+        let validation_ids = self.runtime.startup_validation_ids();
+        if validation_ids.is_empty() {
+            return;
+        }
+        let active = match self.validate_startup_agents(validation_ids).await {
+            Ok(active) => {
+                self.failure_changed("startup-validation", None);
+                active
+            }
+            Err(error) => {
+                let error = format!("{error:#}");
+                if self.failure_changed("startup-validation", Some(&error)) {
+                    warn!(%error, retry_seconds = HEARTBEAT_INTERVAL.as_secs(), "Agent startup validation failed; restore will retry");
+                }
+                return;
+            }
+        };
+        let active: Vec<_> = active
+            .into_iter()
+            .filter(|id| candidates.contains(id))
+            .collect();
+        for (agent_id, result) in self.runtime.restore_startup_agents(&active).await {
+            let key = format!("restore:{agent_id}");
+            match result {
+                Ok(_) => {
+                    self.failure_changed(&key, None);
+                    if deferred {
+                        info!(%agent_id, "restored deferred Agent startup command");
+                    } else {
+                        info!(%agent_id, "restored Agent startup command");
+                    }
+                }
+                Err(error) => {
+                    if self.failure_changed(&key, Some(&error.code)) {
+                        warn!(%agent_id, code = %error.code, message = %error.message, "failed to restore Agent startup command; will retry");
+                    }
+                }
+            }
+        }
+    }
+
     async fn validate_startup_agents(&self, agent_ids: Vec<String>) -> anyhow::Result<Vec<String>> {
         let mut url = self.proxy_ws.clone();
         url.set_scheme(match url.scheme() {
@@ -736,7 +758,11 @@ impl ProxyClient {
                 // One broken App must not defer every other workload forever.
                 // Do not fall back to its old command; retry on the next pass.
                 active_agent_ids.retain(|id| id != &startup.agent_id);
-                warn!(agent_id = %startup.agent_id, code = %error.code, "App startup reconciliation failed; will retry");
+                if self.failure_changed(&format!("app:{}", startup.agent_id), Some(&error.code)) {
+                    warn!(agent_id = %startup.agent_id, code = %error.code, "App startup reconciliation failed; will retry");
+                }
+            } else {
+                self.failure_changed(&format!("app:{}", startup.agent_id), None);
             }
         }
         Ok(active_agent_ids
