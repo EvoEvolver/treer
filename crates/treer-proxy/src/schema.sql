@@ -962,14 +962,7 @@ CREATE INDEX IF NOT EXISTS machine_uploads_workspace_state ON machine_uploads(wo
 CREATE INDEX IF NOT EXISTS machine_uploads_server_state ON machine_uploads(server_id, state);
 CREATE INDEX IF NOT EXISTS machine_uploads_subject_state ON machine_uploads(subject_kind, subject_id, state);
 
--- The former #222 Controller update tables; updates now keep no Proxy state.
-DROP TABLE IF EXISTS controller_update_previews, controller_update_attempts,
-    controller_update_operations, controller_update_catalog_floor,
-    controller_update_catalog_entries;
-
--- The former Managed App email route tables.
-DROP TABLE IF EXISTS app_email_sends, app_email_attempts;
-
--- The former Console provider CLI install tables.
-DROP TABLE IF EXISTS provider_cli_prepare_attempts, provider_cli_operations,
-    provider_cli_install_tokens;
+-- The former Controller update (controller_update_*), Managed App email
+-- (app_email_*) and Console provider CLI install (provider_cli_*) tables are
+-- no longer read or written. 0.2.0 deliberately leaves them in place; a later
+-- release drops them.

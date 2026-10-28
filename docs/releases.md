@@ -218,8 +218,9 @@ Breaking changes; read before upgrading a workspace or machine:
 - **ACP profiles removed.** Only the Codex and Claude harnesses of
   `treer-launch` are supported; recreate ACP Agents with one of them.
 - **Removed features:** Voice, Console provider CLI install, and Managed App
-  email. Their Proxy tables are dropped on upgrade: `controller_update_*`,
-  `provider_cli_*` and `app_email_*` (back them up first if you need history).
+  email. Their Proxy tables (`controller_update_*`, `provider_cli_*` and
+  `app_email_*`) are no longer used but are left in place by 0.2.0; a later
+  release drops them, so back them up before that upgrade if you need history.
 - **Launcher auto-recovery.** The launcher no longer stops and waits for a
   human: a failed provider is restarted and the same session resumed with
   capped backoff and no attempt cap; an in-flight prompt is settled from the
