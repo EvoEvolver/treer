@@ -499,12 +499,12 @@ Control-plane updates do not touch machines.
 
 ### Machines
 
-Update a machine from its Console page (enter a version such as `v0.1.16`), or
+Update a machine from its Console page (enter a version such as `v0.2.0`), or
 via the API with any principal allowed `machine.exec` on it:
 
 ```bash
 curl -X POST "$PROXY/api/workspaces/$WS/machines/$SERVER/controller-update" \
-  -H 'content-type: application/json' -d '{"version":"v0.1.16"}'
+  -H 'content-type: application/json' -d '{"version":"v0.2.0"}'
 curl "$PROXY/api/workspaces/$WS/machines/$SERVER/controller-update"   # idle|downloading|installing|restarting|failed|done
 ```
 
@@ -512,7 +512,7 @@ or on the machine itself:
 
 ```bash
 treer-agent-server update                       # stable channel
-treer-agent-server update --version v0.1.16
+treer-agent-server update --version v0.2.0
 treer-agent-server update --release-base-url https://releases.example/ --public-key /trusted/release.pub.pem
 ```
 
