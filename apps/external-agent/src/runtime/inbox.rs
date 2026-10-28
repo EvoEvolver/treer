@@ -131,7 +131,10 @@ impl App {
                 }
                 Request::Poll{after,limit}=> {
                     let endpoint=p.target().ok_or(Error::Denied)?;
-                    let (status,v)=self.controller.request(reqwest::Method::POST,"/api/messages/receive",Some(json!({"app_endpoint":endpoint,"after":after,"limit":limit,"wait_milliseconds":0})))?;
+                    let mut body=json!({"app_endpoint":endpoint,"limit":limit,"wait_milliseconds":0});
+                    // Core's opaque top-level `next_cursor` from the previous page, if any.
+                    if let Some(after)=after {body["after"]=json!(after);}
+                    let (status,v)=self.controller.request(reqwest::Method::POST,"/api/messages/receive",Some(body))?;
                     if status==200 {
                         // Core `message.endpoint-inbox.v1` deliveries; the App adds no kind of its own.
                         let deliveries=v["deliveries"].as_array().ok_or(Error::Invalid)?;
@@ -148,9 +151,11 @@ impl App {
                 value,
                 outcome: Outcome::Completed,
             },
-            Ok((status @ (400 | 403 | 404 | 409), _)) => ResultValue {
+            // Core's own codes (message_endpoint_invalid, message_delivery_not_found,
+            // message_ack_idempotency_conflict, ...) pass through; diagnostics do not.
+            Ok((status @ (400 | 403 | 404 | 409), v)) => ResultValue {
                 status,
-                value: json!({"error":{"code":"delivery_rejected"}}),
+                value: json!({"error":{"code":core_code(&v).unwrap_or("delivery_rejected")}}),
                 outcome: Outcome::Unavailable,
             },
             Err(Error::Denied) if registry => ResultValue {
@@ -175,4 +180,12 @@ impl App {
             },
         }
     }
+}
+
+fn core_code(v: &Value) -> Option<&str> {
+    let code = v["error"]["code"].as_str().or_else(|| v["code"].as_str())?;
+    (code.starts_with("message_")
+        && code.len() <= 64
+        && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+    .then_some(code)
 }

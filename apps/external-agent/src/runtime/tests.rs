@@ -139,6 +139,7 @@ fn backend_services(backend: &Arc<Backend>) -> (Listener, Listener) {
                 let v: Value = serde_json::from_slice(&r.body).unwrap();
                 assert_eq!(r.method, "POST");
                 assert_eq!(v["wait_milliseconds"], 0);
+                assert!(v["kind"].is_null());
                 let records: Vec<_> = b
                     .inbox
                     .lock()
@@ -147,10 +148,17 @@ fn backend_services(backend: &Arc<Backend>) -> (Listener, Listener) {
                     .filter(|d| d["recipient"]["app_endpoint"] == v["app_endpoint"])
                     .cloned()
                     .collect();
-                Response::json(
-                    200,
-                    json!({"deliveries":records,"remaining_unacknowledged":0}),
-                )
+                // Final Core contract: one opaque top-level cursor, absent on an empty page.
+                let page = if v["after"] == "cursor_end" {
+                    vec![]
+                } else {
+                    records
+                };
+                let mut body = json!({"deliveries":page,"remaining_unacknowledged":page.len()});
+                if !page.is_empty() {
+                    body["next_cursor"] = json!("cursor_end");
+                }
+                Response::json(200, body)
             } else if r.path == "/api/messages/ack" {
                 let v: Value = serde_json::from_slice(&r.body).unwrap();
                 let mut records = b.inbox.lock().unwrap();
@@ -159,10 +167,16 @@ fn backend_services(backend: &Arc<Backend>) -> (Listener, Listener) {
                     ids.contains(&d["delivery_id"])
                         && d["recipient"]["app_endpoint"] != v["app_endpoint"]
                 }) {
-                    Response::json(403, json!({"error":{"code":"endpoint_mismatch"}}))
+                    Response::json(
+                        404,
+                        json!({"error":{"code":"message_delivery_not_found","message":"PRIVATE-DIAGNOSTIC"}}),
+                    )
                 } else {
                     records.retain(|d| !ids.contains(&d["delivery_id"]));
-                    Response::json(200, json!({"acknowledged":ids}))
+                    Response::json(
+                        200,
+                        json!({"acknowledged_delivery_ids":ids,"already_acknowledged_delivery_ids":[]}),
+                    )
                 }
             } else {
                 panic!("unexpected Controller call {} {}", r.method, r.path)
@@ -1595,19 +1609,26 @@ fn external_inbox_tcp_registration_poll_is_nonconsuming_and_ack_is_scoped() {
                 v["result"]["deliveries"][0]["recipient"]["app_endpoint"],
                 *key
             );
+            // The top-level cursor pages forward; an empty page carries no cursor.
+            let cursor = v["result"]["next_cursor"].as_str().unwrap();
+            let (s, next) = f.external(token, "GET", &format!("/v1/inbox?cursor={cursor}"), None);
+            assert_eq!(s, 200, "{next}");
+            assert!(next["result"]["deliveries"].as_array().unwrap().is_empty());
+            assert!(next["result"].get("next_cursor").is_none());
         }
         assert_eq!(f.cli(token).0, 200);
         assert_eq!(f.external(token, "GET", "/v1/external-agents", None).0, 401);
     }
+    let (s, v) = f.external(
+        &keys[0],
+        "POST",
+        "/v1/inbox/ack",
+        Some(json!({"delivery_ids":["dlv_bob"],"operation_id":"op_foreign"})),
+    );
+    assert_eq!(s, 404);
     assert_eq!(
-        f.external(
-            &keys[0],
-            "POST",
-            "/v1/inbox/ack",
-            Some(json!({"delivery_ids":["dlv_bob"],"operation_id":"op_foreign"}))
-        )
-        .0,
-        403
+        v["result"],
+        json!({"error":{"code":"message_delivery_not_found"}})
     );
     for _ in 0..2 {
         assert_eq!(
