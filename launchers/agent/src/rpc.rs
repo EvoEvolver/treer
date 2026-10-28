@@ -1020,7 +1020,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_provider_job_terminates_owned_descendant() {
-        let node = std::env::var("TREER_WINDOWS_TEST_NODE")
+        let node = std::env::var("TREER_TEST_NODE")
             .expect("native Windows test requires pinned Node executable");
         let root = std::env::temp_dir().join(format!("treer-rust-job-{}", uuid::Uuid::new_v4()));
         treer_platform::secure_directory(&root).unwrap();
