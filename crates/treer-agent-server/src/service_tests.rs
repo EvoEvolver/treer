@@ -571,7 +571,7 @@ fn roots_equal_to_or_inside_the_state_directory_are_refused() {
 }
 
 #[test]
-fn root_relocation_preserves_identity_and_rejects_live_hosts_or_partial_state() {
+fn in_place_replacement_stops_only_a_live_host_and_roots_must_agree() {
     #[cfg(unix)]
     let base = PathBuf::from("/tmp");
     #[cfg(windows)]
@@ -618,33 +618,38 @@ fn root_relocation_preserves_identity_and_rejects_live_hosts_or_partial_state() 
         &paths.host_config,
     )
     .unwrap();
-    let original: serde_json::Value =
-        serde_json::from_slice(&fs::read(&paths.config).unwrap()).unwrap();
+    require_root_alignment(&paths, &config).unwrap();
+    let mut moved = config.clone();
+    moved.root = new.clone();
+    assert!(require_root_alignment(&paths, &moved).is_err());
+
+    // No Host listening: nothing is stopped.
+    let stops = std::cell::Cell::new(0);
+    stop_previous_host(&paths, &config, |_, _| {
+        stops.set(stops.get() + 1);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(stops.get(), 0);
     {
-        let _runtime = tokio::runtime::Runtime::new().unwrap();
-        let _entered = _runtime.enter();
-        let listener = treer_platform::LocalListener::bind(&socket).unwrap();
-        assert!(relocate_root_at(&paths, &config, &new).is_err());
-        drop(listener);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _entered = runtime.enter();
+        let listener =
+            std::cell::RefCell::new(Some(treer_platform::LocalListener::bind(&socket).unwrap()));
+        // A foreground Host belongs to another terminal and is never stopped.
+        assert!(stop_previous_host(&paths, &config, |_, _| unreachable!()).is_err());
+        let mut managed = config.clone();
+        managed.service_manager = ServiceManager::Nohup;
+        stop_previous_host(&paths, &managed, |_, _| {
+            stops.set(stops.get() + 1);
+            drop(listener.borrow_mut().take());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(stops.get(), 1);
     }
     #[cfg(unix)]
-    fs::remove_file(&socket).unwrap();
-    relocate_root_at(&paths, &config, &new).unwrap();
-    let migrated = ServiceConfig::load(&paths.config).unwrap();
-    require_root_alignment(&paths, &migrated).unwrap();
-    let mut after: serde_json::Value =
-        serde_json::from_slice(&fs::read(&paths.config).unwrap()).unwrap();
-    after["root"] = original["root"].clone();
-    assert_eq!(
-        after, original,
-        "only root may change, not identity or credentials"
-    );
-    let mut incomplete = migrated.clone();
-    incomplete.root = old;
-    incomplete.save(&paths.config).unwrap();
-    assert!(require_root_alignment(&paths, &incomplete).is_err());
-    relocate_root_at(&paths, &incomplete, &new).unwrap();
-    require_root_alignment(&paths, &ServiceConfig::load(&paths.config).unwrap()).unwrap();
+    let _ = fs::remove_file(&socket);
     fs::remove_dir_all(directory).unwrap();
 }
 

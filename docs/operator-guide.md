@@ -195,9 +195,16 @@ treer-agent-server connect --key 'enr_v1_...' --proxy 'https://PROXY_HOST/' \
 ```
 
 `connect` succeeds only when the Controller reports `proxy_connected`.
-Reconnecting the same hostname into the same workspace reuses its machine ID
-and rotates the credential, so a revoked or deleted machine can be enrolled
-again with a fresh key without uninstalling.
+Reconnecting the same hostname into the same workspace with the same root and
+Proxy reuses its machine ID and rotates the credential; running workloads are
+untouched. Running the Console's connect command again also replaces a stale
+local registration, so you never need `service uninstall` first: if the root
+(`--root`) or Proxy differs, or the Proxy no longer accepts the old machine
+identity (for example, the machine was deleted in the Console), the old Host
+and Controller for that workspace stop and the new configuration is registered
+and started, like a reinstall. Files under the old root are not moved or
+deleted. When the old Host still runs workloads, `connect` says how many will
+stop and asks once (`y/N`); non-interactive runs need `--replace`.
 
 **Service modes** (`--service-mode`): `auto`/`nohup` (default; detached, survives
 logout, not reboot), `systemd` (Linux user unit; enable linger for it to
@@ -226,9 +233,8 @@ The Host runs detached as your user; nothing is registered to start at login,
 so run `treer-agent-server restore --workspace WS` after a reboot. Use Windows
 executables in launch profiles (the interactive fallback is `cmd.exe`) and
 `curl.exe` rather than PowerShell's `curl` alias. To move an existing root,
-stop the service and run
-`treer-agent-server service --workspace WS relocate-root --root DIR --accept-workload-migration`;
-it does not move files or rewrite saved paths.
+rerun the connect command with the new `--root` and a fresh enrollment key; it
+does not move files or rewrite saved paths.
 
 ### Managing a machine
 
@@ -558,12 +564,12 @@ or directory is reported, not retried forever.
 (optionally `--service-mode systemd|launchd|nohup`). A running Host is never
 orphaned; if its current manager cannot stop it, repair tells you what to stop.
 
-**Re-adding a deleted machine.** Run the new `connect` command. The same
-installation is reactivated under its machine ID; a different installation gets
-a new ID, and the Controller replaces the stale local service registration
-(keeping `.bak-<timestamp>` copies of its config files, which still hold the
-revoked token; delete them once the new machine works). To start clean:
-`treer-agent-server service --workspace WS uninstall`, then connect again.
+**Re-adding a deleted machine.** Run the new `connect` command, with a new
+`--root` if you want one. The same installation is reactivated under its machine
+ID; when the Proxy no longer accepts the old identity it enrolls a new machine,
+and `connect` replaces the stale local service registration (keeping
+`.bak-<timestamp>` copies of its config files when the machine ID changes; they
+still hold the revoked token, delete them once the new machine works).
 
 **`command_not_found` on launch.** Bare commands resolve only through absolute
 `PATH` directories of the workload environment; relative commands such as

@@ -617,6 +617,50 @@ pub async fn refresh_registration_and_wait(mut config: ServiceConfig) -> Result<
     activate_registered_service(&paths, &installed).await
 }
 
+/// Replace an existing registration that keeps its machine ID but changes
+/// root or Proxy, like a reinstall: stop the old Host (its workloads end),
+/// then register and start the new configuration. Files under the old root
+/// are neither moved nor deleted.
+pub async fn replace_registration_in_place(
+    lock: &RegistrationLock,
+    previous: &ServiceConfig,
+    next: ServiceConfig,
+) -> Result<ServiceActivation> {
+    lock.check(&next.workspace)?;
+    if next.server_id != previous.server_id || next.workspace != previous.workspace {
+        bail!("an in-place replacement keeps the machine and workspace");
+    }
+    let paths = ServicePaths::new(&previous.server_id)?;
+    stop_previous_host(&paths, previous, platform::stop)?;
+    refresh_registration_and_wait(next).await
+}
+
+fn stop_previous_host(
+    paths: &ServicePaths,
+    previous: &ServiceConfig,
+    stop: impl Fn(&ServicePaths, &ServiceConfig) -> Result<()>,
+) -> Result<()> {
+    if !host_is_running(&previous.host_socket) {
+        return Ok(());
+    }
+    if previous.service_manager == ServiceManager::Foreground {
+        bail!("the old Host runs in foreground mode; stop it in its terminal, then rerun connect");
+    }
+    eprintln!(
+        "treer: stopping the old Host of machine {} (its workloads end now)",
+        previous.server_id
+    );
+    stop(paths, previous)?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while host_is_running(&previous.host_socket) {
+        if Instant::now() >= deadline {
+            bail!("the old Host did not stop within 15 seconds");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
+}
+
 async fn activate_registered_service(
     paths: &ServicePaths,
     config: &ServiceConfig,
@@ -976,65 +1020,11 @@ pub fn restart_controller(workspace: &str) -> Result<()> {
     restart_controller_at(&paths, &config.host_socket)
 }
 
-pub fn relocate_root(workspace: &str, root: &Path) -> Result<()> {
-    #[cfg(not(windows))]
-    {
-        let _ = (workspace, root);
-        bail!("service relocate-root currently supports Windows only");
-    }
-    #[cfg(windows)]
-    {
-        let (paths, config) = installed_service(workspace)?;
-        let _lock = treer_platform::LocalLock::acquire(&config.server_id)?;
-        relocate_root_at(&paths, &config, root)
-    }
-}
-
-#[cfg(any(windows, test))]
-fn relocate_root_at(paths: &ServicePaths, config: &ServiceConfig, root: &Path) -> Result<()> {
-    if host_is_running(&config.host_socket) {
-        bail!(
-            "stop the Host from a host terminal before relocating root; this terminates workloads"
-        );
-    }
-    #[cfg(windows)]
-    {
-        let input = if root.is_absolute() {
-            root.to_path_buf()
-        } else {
-            env::current_dir()?.join(root)
-        };
-        treer_platform::machine_file::Root::open(&input, &[])
-            .context("new root must not traverse reparse points")?;
-    }
-    let root = fs::canonicalize(root).context("new root must be an existing physical directory")?;
-    treer_platform::machine_file::Root::open(&root, &[])
-        .context("new root must not traverse symlinks/reparse points")?;
-    ensure_root_outside_state_dir(&root)?;
-    let old_host_bytes = fs::read(&paths.host_config)?;
-    let mut host: HostDaemonConfig = serde_json::from_slice(&old_host_bytes)?;
-    let mut next = config.clone();
-    next.root = root.clone();
-    host.root = root;
-    // Each file is atomic. Startup validates agreement so a crash between the
-    // writes fails closed until this command is rerun or the old root restored.
-    next.save(&paths.config)?;
-    if let Err(error) = save_json(&host, &paths.host_config) {
-        config
-            .save(&paths.config)
-            .context("root migration failed; restoring Controller configuration also failed")?;
-        return Err(error);
-    }
-    println!("treer: root updated; no files were moved and no service was started");
-    println!("treer: review saved absolute startup/profile paths; the old .treer directory was not moved or cleaned");
-    Ok(())
-}
-
 #[cfg(any(windows, test))]
 fn require_root_alignment(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
     let host: HostDaemonConfig = serde_json::from_slice(&fs::read(&paths.host_config)?)?;
     if fs::canonicalize(&host.root)? != fs::canonicalize(&config.root)? {
-        bail!("Host/Controller roots disagree; rerun service relocate-root while stopped before starting");
+        bail!("Host/Controller roots disagree; rerun `treer-agent-server connect --root DIR` with a new enrollment key to replace the registration");
     }
     Ok(())
 }
