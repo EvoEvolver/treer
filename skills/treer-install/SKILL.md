@@ -57,7 +57,7 @@ Only after they answer, run the checkout's installer for **that subset**:
 ```bash
 if [ -f "$DEST/scripts/apply.sh" ]; then
   # Repeat --agent for each chosen harness, for example:
-  # "$DEST/scripts/apply.sh" --dir "$DEST" --agent grok --agent cursor
+  # "$DEST/scripts/apply.sh" --dir "$DEST" --agent claude --agent codex
   "$DEST/scripts/apply.sh" --dir "$DEST" --agent <chosen> [--agent <chosen> ...]
 elif [ -f "$DEST/treer-agent.json" ]; then
   echo "apply.sh missing; follow treer-agent.json with treer agent admin create"
