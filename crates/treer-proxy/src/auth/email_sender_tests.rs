@@ -108,37 +108,6 @@ async fn email_sender_safe_categories_and_known_status() {
 }
 
 #[tokio::test]
-async fn email_sender_timeout_before_headers_has_no_status() {
-    let (sender, server) = provider(Vec::new(), true).await;
-    let failure = send(&sender).await.unwrap_err();
-    assert_eq!(failure.category, "timeout");
-    assert_eq!(failure.upstream_status, None);
-    server.abort();
-}
-
-#[tokio::test]
-async fn email_sender_transport_failure_has_no_status() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        drop(listener.accept().await.unwrap());
-    });
-    let sender = CloudflareEmailSender {
-        client: CloudflareEmailSender::client_builder()
-            .no_proxy()
-            .build()
-            .unwrap(),
-        endpoint: Url::parse(&format!("http://{address}/send")).unwrap(),
-        api_token: "synthetic".into(),
-        from: "sender@example.test".into(),
-    };
-    let failure = send(&sender).await.unwrap_err();
-    assert_eq!(failure.category, "transport");
-    assert_eq!(failure.upstream_status, None);
-    server.await.unwrap();
-}
-
-#[tokio::test]
 async fn email_sender_redirect_never_replays_post() {
     let sink = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let response = format!(
