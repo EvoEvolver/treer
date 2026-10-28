@@ -176,10 +176,7 @@ impl PrivateStateRoot {
         let directory = self.agent_directory(agent_id)?;
         match fs::metadata(&directory) {
             Ok(metadata) if metadata.is_dir() => Ok(directory),
-            Ok(_) => Err(unavailable(
-                &directory,
-                io::Error::other("not a directory"),
-            )),
+            Ok(_) => Err(unavailable(&directory, io::Error::other("not a directory"))),
             Err(error) => Err(unavailable(&directory, error)),
         }
     }

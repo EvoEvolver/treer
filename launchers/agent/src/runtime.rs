@@ -9,16 +9,21 @@ use crate::{
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::{HashSet, VecDeque}, path::PathBuf, process::Stdio, sync::Arc};
+use std::{
+    collections::{HashSet, VecDeque},
+    path::PathBuf,
+    process::Stdio,
+    sync::Arc,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
     sync::{mpsc, oneshot, watch},
     time::{timeout, Duration},
 };
+mod message_retry;
 mod messages;
 mod receipts;
-mod message_retry;
 mod recovery;
 mod session_snapshot;
 
@@ -42,22 +47,33 @@ impl Handle {
     pub async fn stopped_unrequested(&self) {
         let mut stopped = self.stopped.clone();
         while stopped.borrow_and_update().is_none() {
-            if stopped.changed().await.is_err() { break; }
+            if stopped.changed().await.is_err() {
+                break;
+            }
         }
-        if self.shutdown_requested.load(std::sync::atomic::Ordering::SeqCst) {
+        if self
+            .shutdown_requested
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
             std::future::pending::<()>().await;
         }
     }
     pub async fn shutdown(&self) -> Result<()> {
-        self.shutdown_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.shutdown_requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.shutdown.notify_one();
         let mut stopped = self.stopped.clone();
         timeout(Duration::from_secs(7), async {
             while stopped.borrow_and_update().is_none() {
-                stopped.changed().await.map_err(|_| anyhow!("runtime_shutdown_unverified"))?;
+                stopped
+                    .changed()
+                    .await
+                    .map_err(|_| anyhow!("runtime_shutdown_unverified"))?;
             }
             Ok::<_, anyhow::Error>(())
-        }).await.map_err(|_| anyhow!("runtime_shutdown_unverified"))??;
+        })
+        .await
+        .map_err(|_| anyhow!("runtime_shutdown_unverified"))??;
         if *stopped.borrow() == Some(false) {
             bail!("private_state_write_failed");
         }
@@ -106,7 +122,7 @@ struct Record {
     steer_refused: bool,
 }
 struct Runtime {
-    claude:bool,
+    claude: bool,
     native_bootstrap: Option<Value>,
     bootstrap_pending: bool,
     snapshot_source: Option<(PathBuf, PathBuf)>,
@@ -166,12 +182,14 @@ struct Notification {
 // during an in-flight provider RPC or startup handshake.
 struct AbortTask(tokio::task::JoinHandle<()>);
 impl Drop for AbortTask {
-    fn drop(&mut self) { self.0.abort(); }
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 #[derive(Clone)]
 pub struct Config {
-    pub claude:bool,
+    pub claude: bool,
     pub native_bootstrap: Option<Value>,
     pub claude_config_dir: Option<PathBuf>,
     pub cwd: PathBuf,
@@ -184,12 +202,25 @@ pub struct Config {
 }
 /// Start the provider process. Claude resumes its session when Treer already
 /// holds state for it; Codex sessions are resumed over JSON-RPC by start().
-fn spawn_provider(config: &Config, session: Option<&str>, resume: bool) -> Result<(Rpc, crate::rpc::ProviderChild, mpsc::Receiver<Value>)> {
+fn spawn_provider(
+    config: &Config,
+    session: Option<&str>,
+    resume: bool,
+) -> Result<(Rpc, crate::rpc::ProviderChild, mpsc::Receiver<Value>)> {
     let mut args = config.codex_args.clone();
     if config.claude {
         let session = session.ok_or_else(|| anyhow!("claude_session_required"))?;
-        args.extend([if resume {"--resume"} else {"--session-id"}.into(), session.into()]);
-        Rpc::spawn_claude(&config.codex, &args, &config.cwd, config.capture_stderr, session.into())
+        args.extend([
+            if resume { "--resume" } else { "--session-id" }.into(),
+            session.into(),
+        ]);
+        Rpc::spawn_claude(
+            &config.codex,
+            &args,
+            &config.cwd,
+            config.capture_stderr,
+            session.into(),
+        )
     } else {
         Rpc::spawn(&config.codex, &args, &config.cwd, config.capture_stderr)
     }
@@ -202,24 +233,49 @@ pub fn spawn(config: Config) -> Result<Handle> {
     let store = Store::open(&config.private_root, &config.cwd)?;
     let saved = store.load().map_err(|_| anyhow!("private_state_invalid"))?;
     if config.claude {
-        if let Some(saved)=&saved {
-            if saved["harness"]!="claude" {bail!("private_state_harness_mismatch");}
-        } else if config.session.is_some() && config.native_bootstrap.is_none() {bail!("claude_resume_requires_supported_history_checkpoint");}
-    } else if saved.as_ref().is_some_and(|s|s["harness"]=="claude") {bail!("private_state_harness_mismatch");}
+        if let Some(saved) = &saved {
+            if saved["harness"] != "claude" {
+                bail!("private_state_harness_mismatch");
+            }
+        } else if config.session.is_some() && config.native_bootstrap.is_none() {
+            bail!("claude_resume_requires_supported_history_checkpoint");
+        }
+    } else if saved.as_ref().is_some_and(|s| s["harness"] == "claude") {
+        bail!("private_state_harness_mismatch");
+    }
     // Refuse malformed durable dispatch state before starting a provider. Never
     // discard an invalid record: it may contain an uncertain dispatch intent.
     if let Some(saved) = &saved {
-        if config.native_bootstrap.is_some() {bail!("claude_bootstrap_requires_new_state");}
+        if config.native_bootstrap.is_some() {
+            bail!("claude_bootstrap_requires_new_state");
+        }
         decode_records(saved)?;
         Goals::load(&saved["goals"])?;
-        if config.session.as_ref().is_some_and(|session| saved["threadId"].as_str() != Some(session.as_str())) {
+        if config
+            .session
+            .as_ref()
+            .is_some_and(|session| saved["threadId"].as_str() != Some(session.as_str()))
+        {
             bail!("private_state_session_mismatch");
         }
     }
-    let session = config.claude.then(|| config.session.clone()
-        .or_else(||saved.as_ref().and_then(|s|s["threadId"].as_str()).map(str::to_owned))
-        .unwrap_or_else(||uuid::Uuid::new_v4().to_string()));
-    let (rpc, mut child, events) = spawn_provider(&config, session.as_deref(), saved.is_some() || config.native_bootstrap.is_some())?;
+    let session = config.claude.then(|| {
+        config
+            .session
+            .clone()
+            .or_else(|| {
+                saved
+                    .as_ref()
+                    .and_then(|s| s["threadId"].as_str())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+    });
+    let (rpc, mut child, events) = spawn_provider(
+        &config,
+        session.as_deref(),
+        saved.is_some() || config.native_bootstrap.is_some(),
+    )?;
     let (commands, mut requests) = mpsc::channel::<Request>(64);
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let shutdown_requested = shutdown.clone();
@@ -228,13 +284,19 @@ pub fn spawn(config: Config) -> Result<Handle> {
         json!({"ready":false,"runtime":{"state":"starting","error":null},"thread":null,"queue":[],"modelOptions":[],"backgroundTasks":[],"goal":null}),
     ));
     let mut rt = Runtime {
-        claude:config.claude,
+        claude: config.claude,
         native_bootstrap: config.native_bootstrap.clone(),
         bootstrap_pending: config.native_bootstrap.is_some(),
-        snapshot_source: config.claude_config_dir.clone().map(|root| (root,config.cwd.clone())),
-        snapshot_default_source: std::env::var_os("HOME").map(|home|PathBuf::from(home).join(".claude"))
-            .filter(|home| home.is_absolute() && config.claude_config_dir.as_ref().is_none_or(|p|p==home))
-            .map(|home|(home,config.cwd.clone())),
+        snapshot_source: config
+            .claude_config_dir
+            .clone()
+            .map(|root| (root, config.cwd.clone())),
+        snapshot_default_source: std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join(".claude"))
+            .filter(|home| {
+                home.is_absolute() && config.claude_config_dir.as_ref().is_none_or(|p| p == home)
+            })
+            .map(|home| (home, config.cwd.clone())),
         snapshot_read_slot: Arc::new(tokio::sync::Semaphore::new(1)),
         rpc,
         events,
@@ -436,49 +498,94 @@ pub fn spawn(config: Config) -> Result<Handle> {
         rt.publish();
         rt.record_provider_stop(timeout(Duration::from_secs(5), child.kill()).await);
         if config.capture_stderr {
-            rt.rpc.stderr_saved(rt.store.save_stderr(&child.stderr_tail()).is_ok());
+            rt.rpc
+                .stderr_saved(rt.store.save_stderr(&child.stderr_tail()).is_ok());
         }
         rt.publish();
         let diagnostic = rt.rpc.diagnostics();
         eprintln!("Treer launcher: shutdown provider_exit={}; process_group=termination_requested_unverified; detached_descendants=not_guaranteed; transport={}; before_cleanup={}", rt.provider_exit, diagnostic["transport"].as_str().unwrap_or("unverified"), diagnostic["beforeCleanup"]);
         stopped_tx.send_replace(Some(!rt.state_failed));
     });
-    Ok(Handle { commands, state, shutdown, shutdown_requested: Arc::default(), stopped })
+    Ok(Handle {
+        commands,
+        state,
+        shutdown,
+        shutdown_requested: Arc::default(),
+        stopped,
+    })
 }
 
 impl Runtime {
     async fn provider_request(&mut self, method: &str, params: Value) -> Result<Value> {
-        self.provider_selected(method,params,None).await
+        self.provider_selected(method, params, None).await
     }
-    async fn provider_selected(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>) -> Result<Value> {
-        self.provider_query(method, params, selection, None, false).await
+    async fn provider_selected(
+        &mut self,
+        method: &str,
+        params: Value,
+        selection: Option<(usize, usize)>,
+    ) -> Result<Value> {
+        self.provider_query(method, params, selection, None, false)
+            .await
     }
-    async fn provider_query(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>, target: Option<String>, optional: bool) -> Result<Value> {
+    async fn provider_query(
+        &mut self,
+        method: &str,
+        params: Value,
+        selection: Option<(usize, usize)>,
+        target: Option<String>,
+        optional: bool,
+    ) -> Result<Value> {
         // This outer deadline is polled even during an event's reply write.
-        let result = if self.claude && matches!(method,"model/set"|"effort/set"|"effort/probe") {
+        let result = if self.claude && matches!(method, "model/set" | "effort/set" | "effort/probe")
+        {
             // This control has its own response-only deadline after fatal
             // write/flush; keep pumping events without the required-RPC timer.
-            self.wait_provider_response(method,params,selection,target,optional).await
-        } else {match timeout(Duration::from_secs(60), self.wait_provider_response(method, params, selection, target, optional)).await {
-            Ok(result) => result,
-            Err(_) => { self.rpc.fail("rpc_timeout"); Err(anyhow!("provider_rpc_timeout")) },
-        }};
+            self.wait_provider_response(method, params, selection, target, optional)
+                .await
+        } else {
+            match timeout(
+                Duration::from_secs(60),
+                self.wait_provider_response(method, params, selection, target, optional),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    self.rpc.fail("rpc_timeout");
+                    Err(anyhow!("provider_rpc_timeout"))
+                }
+            }
+        };
         if self.rpc.failed() {
             self.stop_for_transport_error()?;
             bail!("provider_transport_closed");
         }
         result
     }
-    async fn wait_provider_response(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>, target: Option<String>, optional: bool) -> Result<Value> {
+    async fn wait_provider_response(
+        &mut self,
+        method: &str,
+        params: Value,
+        selection: Option<(usize, usize)>,
+        target: Option<String>,
+        optional: bool,
+    ) -> Result<Value> {
         self.rpc_completed_turns.clear();
         let rpc = self.rpc.clone();
-        let claude=self.claude;
+        let claude = self.claude;
         let response = async {
-            if method=="model/set" && claude {rpc.request_claude_model(params).await}
-            else if claude && matches!(method,"effort/set"|"effort/probe") {rpc.request_claude_effort(method,params).await}
-            else if optional { rpc.request_optional(method, params).await }
-            else if target.is_some() { rpc.request_target(method, params, target).await }
-            else { rpc.request_selected(method, params, selection).await }
+            if method == "model/set" && claude {
+                rpc.request_claude_model(params).await
+            } else if claude && matches!(method, "effort/set" | "effort/probe") {
+                rpc.request_claude_effort(method, params).await
+            } else if optional {
+                rpc.request_optional(method, params).await
+            } else if target.is_some() {
+                rpc.request_target(method, params, target).await
+            } else {
+                rpc.request_selected(method, params, selection).await
+            }
         };
         tokio::pin!(response);
         loop {
@@ -509,23 +616,48 @@ impl Runtime {
         }
         recovery::validate(observed, &self.thread["id"])?;
         self.recovery_reads += 1;
-        let before = (serde_json::to_value(&self.records)?, self.thread["activeTurnId"].clone());
-        let wires = observed["thread"]["turns"].as_array().cloned().unwrap_or_default();
+        let before = (
+            serde_json::to_value(&self.records)?,
+            self.thread["activeTurnId"].clone(),
+        );
+        let wires = observed["thread"]["turns"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         for wire in &wires {
-            if self.thread["activeTurnId"] != wire["id"] && !self.records.iter().any(|r| recovery::needs_recovery(r) && r.submission["turn_id"].is_string() && r.submission["turn_id"] == wire["id"]) { continue; }
-            // An idle summary can lag a turn that is still executing. Trust
-            // Treer's inferred interruption only once it has held for a minute.
-            if wire["treerStatusProjected"] == true && !self.stale_for(wire["id"].as_str().unwrap_or_default()) {
+            if self.thread["activeTurnId"] != wire["id"]
+                && !self.records.iter().any(|r| {
+                    recovery::needs_recovery(r)
+                        && r.submission["turn_id"].is_string()
+                        && r.submission["turn_id"] == wire["id"]
+                })
+            {
                 continue;
             }
-            let terminal = matches!(wire["status"].as_str(), Some("completed" | "failed" | "interrupted"));
-            let mapped = if terminal {model::final_turn(wire)?} else {model::turn(wire)};
+            // An idle summary can lag a turn that is still executing. Trust
+            // Treer's inferred interruption only once it has held for a minute.
+            if wire["treerStatusProjected"] == true
+                && !self.stale_for(wire["id"].as_str().unwrap_or_default())
+            {
+                continue;
+            }
+            let terminal = matches!(
+                wire["status"].as_str(),
+                Some("completed" | "failed" | "interrupted")
+            );
+            let mapped = if terminal {
+                model::final_turn(wire)?
+            } else {
+                model::turn(wire)
+            };
             let projected = self.projected(vec![mapped], false)?;
             let mut turn = projected.first().ok_or(HistoryLimit)?.clone();
-            if let Some(old) = self.turns.iter().find(|t|t["id"] == wire["id"]) {
+            if let Some(old) = self.turns.iter().find(|t| t["id"] == wire["id"]) {
                 if terminal {
                     let mut prior = old.clone();
-                    if prior["projectionOnly"] == true { prior["status"] = json!("inProgress"); }
+                    if prior["projectionOnly"] == true {
+                        prior["status"] = json!("inProgress");
+                    }
                     let fresh = turn.clone();
                     if self.retain_projected_items(&prior, &mut turn).is_err() {
                         eprintln!("Treer launcher: provider snapshot disagrees with streamed items; using the snapshot");
@@ -534,25 +666,35 @@ impl Runtime {
                 }
             }
             for record in &mut self.records {
-                if record.submission["turn_id"] == wire["id"] { recovery::reconcile_record(record, &turn); }
+                if record.submission["turn_id"] == wire["id"] {
+                    recovery::reconcile_record(record, &turn);
+                }
             }
             if terminal && self.thread["activeTurnId"] == wire["id"] {
                 self.thread["activeTurnId"] = Value::Null;
             }
-            if self.turns.iter().any(|t|t["id"] == wire["id"]) { self.upsert_turn(turn)?; }
+            if self.turns.iter().any(|t| t["id"] == wire["id"]) {
+                self.upsert_turn(turn)?;
+            }
         }
         // An idle provider whose history has no such turn is not running it:
         // settle instead of waiting forever.
         if observed["thread"]["status"]["type"] == "idle" {
-            if let Some(target) = target.filter(|id| !wires.iter().any(|t| t["id"] == *id) && self.stale_for(id)) {
+            if let Some(target) =
+                target.filter(|id| !wires.iter().any(|t| t["id"] == *id) && self.stale_for(id))
+            {
                 eprintln!("Treer launcher: provider history has no turn for an in-flight prompt; marking it failed");
                 for record in &mut self.records {
                     if record.submission["turn_id"] == target && recovery::needs_recovery(record) {
                         record.submission["state"] = json!("failed");
-                        record.submission["error"] = json!("The provider is idle and its history has no record of this turn");
+                        record.submission["error"] = json!(
+                            "The provider is idle and its history has no record of this turn"
+                        );
                     }
                 }
-                if self.thread["activeTurnId"] == target { self.thread["activeTurnId"] = Value::Null; }
+                if self.thread["activeTurnId"] == target {
+                    self.thread["activeTurnId"] = Value::Null;
+                }
             }
         }
         // The provider's newest in-progress turn is the live one.
@@ -564,8 +706,19 @@ impl Runtime {
                 }
             }
         }
-        self.thread["status"] = json!(if self.thread["activeTurnId"].is_string() {"running"} else {"idle"});
-        if before != (serde_json::to_value(&self.records)?, self.thread["activeTurnId"].clone()) { self.persist()?; }
+        self.thread["status"] = json!(if self.thread["activeTurnId"].is_string() {
+            "running"
+        } else {
+            "idle"
+        });
+        if before
+            != (
+                serde_json::to_value(&self.records)?,
+                self.thread["activeTurnId"].clone(),
+            )
+        {
+            self.persist()?;
+        }
         self.publish();
         Ok(())
     }
@@ -574,13 +727,18 @@ impl Runtime {
     fn stale_for(&mut self, id: &str) -> bool {
         match &self.stale_since {
             Some((seen, at)) if seen == id => at.elapsed() >= Duration::from_secs(60),
-            _ => { self.stale_since = Some((id.to_owned(), std::time::Instant::now())); false }
+            _ => {
+                self.stale_since = Some((id.to_owned(), std::time::Instant::now()));
+                false
+            }
         }
     }
     /// Mark the provider down and schedule its restart with capped backoff.
     fn schedule_restart(&mut self, reason: String) {
         // A provider that stayed up for a minute starts a fresh backoff.
-        if self.started_at.elapsed() >= Duration::from_secs(60) { self.restart_failures = 0; }
+        if self.started_at.elapsed() >= Duration::from_secs(60) {
+            self.restart_failures = 0;
+        }
         let delay = restart_delay(self.restart_failures);
         self.restart_failures = self.restart_failures.saturating_add(1);
         self.restart_due = std::time::Instant::now() + delay;
@@ -593,12 +751,17 @@ impl Runtime {
     async fn restart(&mut self, config: &Config) -> Result<crate::rpc::ProviderChild> {
         self.restarts = self.restarts.saturating_add(1);
         let saved = self.store.load()?;
-        let session = self.thread["id"].as_str().map(str::to_owned)
-            .or_else(|| saved.as_ref().and_then(|s| s["threadId"].as_str()).map(str::to_owned));
+        let session = self.thread["id"].as_str().map(str::to_owned).or_else(|| {
+            saved
+                .as_ref()
+                .and_then(|s| s["threadId"].as_str())
+                .map(str::to_owned)
+        });
         let mut config = config.clone();
         config.native_bootstrap = None;
         config.session = session.clone();
-        let (rpc, mut child, events) = spawn_provider(&config, session.as_deref(), saved.is_some())?;
+        let (rpc, mut child, events) =
+            spawn_provider(&config, session.as_deref(), saved.is_some())?;
         self.rpc = rpc;
         self.events = events;
         self.provider_down = false;
@@ -625,7 +788,9 @@ impl Runtime {
     async fn start(&mut self, config: &Config, saved: Option<Value>) -> Result<()> {
         if let Some(saved) = &saved {
             if self.claude {
-                self.terminal_tasks = crate::soul_terminal::validate(saved.get("claudeTerminalTasks").unwrap_or(&json!([])))?;
+                self.terminal_tasks = crate::soul_terminal::validate(
+                    saved.get("claudeTerminalTasks").unwrap_or(&json!([])),
+                )?;
             }
             self.records = decode_records(saved)?;
             self.goals = Goals::load(&saved["goals"])?;
@@ -636,12 +801,17 @@ impl Runtime {
         if self.claude {
             // Empty overlay probes the native setter, not model selection.
             // Unsupported/missing ACK hides effort; integrity/write faults stay fatal.
-            if let Err(error)=self.provider_request("effort/probe",json!({})).await {
-                if self.rpc.failed() || self.provider_down {return Err(error);}
+            if let Err(error) = self.provider_request("effort/probe", json!({})).await {
+                if self.rpc.failed() || self.provider_down {
+                    return Err(error);
+                }
                 eprintln!("Claude effort setter unavailable; effort controls hidden");
             }
         }
-        self.models = match self.provider_query("model/list", json!({}), None, None, true).await {
+        self.models = match self
+            .provider_query("model/list", json!({}), None, None, true)
+            .await
+        {
             Ok(result) => result["data"].clone(),
             Err(error) if self.rpc.failed() || self.provider_down => return Err(error),
             Err(_) => {
@@ -654,8 +824,8 @@ impl Runtime {
             .as_deref()
             .or_else(|| saved.as_ref().and_then(|s| s["threadId"].as_str()));
         let result = self.provider_request(if session.is_some() {"thread/resume"} else {"thread/start"}, json!({"threadId":session,"cwd":config.cwd,"approvalPolicy":"never","sandbox":"danger-full-access","experimentalRawEvents":false,"persistExtendedHistory":true})).await?;
-        self.history_start=result["treerHistory"]["start"].as_u64().unwrap_or(0) as usize;
-        self.history_total=result["treerHistory"]["total"].as_u64().unwrap_or(0) as usize;
+        self.history_start = result["treerHistory"]["start"].as_u64().unwrap_or(0) as usize;
+        self.history_total = result["treerHistory"]["total"].as_u64().unwrap_or(0) as usize;
         let id = result["thread"]["id"]
             .as_str()
             .ok_or_else(|| anyhow!("missing thread"))?;
@@ -663,24 +833,45 @@ impl Runtime {
             bail!("session identity mismatch");
         }
         self.thread = json!({"id":id,"title":result["thread"]["name"].as_str().filter(|name| *name != "Codex (Rust experiment)").unwrap_or(if self.claude {"Claude"} else {"Codex"}),"cwd":config.cwd,"model":result["model"],"reasoningEffort":result["reasoningEffort"],"status":"idle","activeTurnId":null,"lastError":null,"createdAt":now(),"updatedAt":now(),"turns":[],"hasOlderItems":false});
-        if self.claude {self.thread["effortSelectionStatus"]=result["effortSelectionStatus"].clone();}
         if self.claude {
-            self.models=result["modelOptions"].clone();
-            self.model_revision=result["modelRevision"].as_u64().unwrap_or(0);
-            self.effort_revision=result["effortRevision"].as_u64().unwrap_or(0);
+            self.thread["effortSelectionStatus"] = result["effortSelectionStatus"].clone();
+        }
+        if self.claude {
+            self.models = result["modelOptions"].clone();
+            self.model_revision = result["modelRevision"].as_u64().unwrap_or(0);
+            self.effort_revision = result["effortRevision"].as_u64().unwrap_or(0);
         }
         for turn in result["thread"]["turns"].as_array().into_iter().flatten() {
             self.turns.insert(model::turn(turn))?;
         }
         if self.claude {
-            if let Some(native)=&config.native_bootstrap {
-                if native["threadId"]!=self.thread["id"] || native["source"]!="native-jsonl" || native["providerConfirmed"]!=false {bail!("claude_native_bootstrap_invalid");}
-                for turn in native["turns"].as_array().ok_or_else(||anyhow!("claude_native_bootstrap_invalid"))? {self.turns.insert(turn.clone())?;}
-                self.history_start=native["start"].as_u64().ok_or_else(||anyhow!("claude_native_bootstrap_invalid"))? as usize;
-                self.history_total=native["total"].as_u64().ok_or_else(||anyhow!("claude_native_bootstrap_invalid"))? as usize;
+            if let Some(native) = &config.native_bootstrap {
+                if native["threadId"] != self.thread["id"]
+                    || native["source"] != "native-jsonl"
+                    || native["providerConfirmed"] != false
+                {
+                    bail!("claude_native_bootstrap_invalid");
+                }
+                for turn in native["turns"]
+                    .as_array()
+                    .ok_or_else(|| anyhow!("claude_native_bootstrap_invalid"))?
+                {
+                    self.turns.insert(turn.clone())?;
+                }
+                self.history_start = native["start"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("claude_native_bootstrap_invalid"))?
+                    as usize;
+                self.history_total = native["total"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("claude_native_bootstrap_invalid"))?
+                    as usize;
             }
-            if let Some(saved)=&saved {
-                let turns=saved["claudeTurns"].as_array().filter(|turns|turns.len()<=50).ok_or_else(||anyhow!("claude_history_checkpoint_invalid"))?;
+            if let Some(saved) = &saved {
+                let turns = saved["claudeTurns"]
+                    .as_array()
+                    .filter(|turns| turns.len() <= 50)
+                    .ok_or_else(|| anyhow!("claude_history_checkpoint_invalid"))?;
                 for turn in turns {
                     let mut turn = turn.clone();
                     // A fresh Claude process has no running turn: the one that
@@ -691,9 +882,17 @@ impl Runtime {
                     }
                     self.turns.insert(turn)?;
                 }
-                self.history_start=saved["claudeHistoryStart"].as_u64().ok_or_else(||anyhow!("claude_history_checkpoint_invalid"))? as usize;
-                self.history_total=saved["claudeHistoryTotal"].as_u64().ok_or_else(||anyhow!("claude_history_checkpoint_invalid"))? as usize;
-                if self.history_start>self.history_total || turns.len()>self.history_total {bail!("claude_history_checkpoint_invalid");}
+                self.history_start = saved["claudeHistoryStart"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("claude_history_checkpoint_invalid"))?
+                    as usize;
+                self.history_total = saved["claudeHistoryTotal"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("claude_history_checkpoint_invalid"))?
+                    as usize;
+                if self.history_start > self.history_total || turns.len() > self.history_total {
+                    bail!("claude_history_checkpoint_invalid");
+                }
             }
         }
         // Settle work whose outcome was unknown when the provider stopped, from
@@ -716,10 +915,10 @@ impl Runtime {
         recovery::reconcile(&mut self.records, &known, self.claude);
         // Project accepted user items once, then admit every subsequent update
         // through the same byte budget. Snapshot reads never replay the journal.
-        let dropped=self.turns.dropped;
-        let mut projected=self.history()?;
-        projected.dropped+=dropped;
-        self.turns=projected;
+        let dropped = self.turns.dropped;
+        let mut projected = self.history()?;
+        projected.dropped += dropped;
+        self.turns = projected;
         if let Some(active) = self
             .turns
             .iter()
@@ -730,19 +929,27 @@ impl Runtime {
             self.thread["activeTurnId"] = active["id"].clone();
         }
         self.dispatch_blocked = false;
-        if let Ok(result) = self.provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
+        if let Ok(result) = self
+            .provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
             .await
         {
-            self.goals_supported = if self.claude {result["supported"] == true} else {result.get("goal").is_some()};
+            self.goals_supported = if self.claude {
+                result["supported"] == true
+            } else {
+                result.get("goal").is_some()
+            };
             if self.claude {
                 // A saved local goal is not native resume authority. Never
                 // reapply a command whose outcome may already have effects.
                 if self.goals.goal.is_object() {
-                    self.goals.goal["syncStatus"]=json!("desynced");
-                    self.goals.goal["syncError"]=json!("Native goal state unconfirmed after restart; no command replayed");
+                    self.goals.goal["syncStatus"] = json!("desynced");
+                    self.goals.goal["syncError"] =
+                        json!("Native goal state unconfirmed after restart; no command replayed");
                 }
                 for edit in &mut self.goals.edits {
-                    if edit.applying && !edit.applied {edit.error=json!("claude_goal_ack_unknown_after_restart");}
+                    if edit.applying && !edit.applied {
+                        edit.error = json!("claude_goal_ack_unknown_after_restart");
+                    }
                 }
             } else if !result["goal"].is_null() {
                 self.goals.goal = goals::map(&result["goal"], &self.goals.goal);
@@ -761,19 +968,28 @@ impl Runtime {
     fn persist(&mut self) -> Result<()> {
         // Fresh launch has no dispatch intents. Initialization events may update
         // memory, but must not publish a partial bootstrap before startup ACKs.
-        if self.bootstrap_pending && !self.ready {return Ok(());}
+        if self.bootstrap_pending && !self.ready {
+            return Ok(());
+        }
         if self.state_failed {
             (self.records, self.goals) = self.checkpoint.clone();
             bail!("private_state_write_failed");
         }
-        receipts::prune(&mut self.records, self.dispatch_blocked, &self.thread["activeTurnId"]);
-        let mut state=json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records,"goals":self.goals});
+        receipts::prune(
+            &mut self.records,
+            self.dispatch_blocked,
+            &self.thread["activeTurnId"],
+        );
+        let mut state = json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records,"goals":self.goals});
         if self.claude {
-            if let Some(native)=&self.native_bootstrap {state["claudeNativeHistory"]=json!({"source":"native-jsonl","sha256":native["nativeSha256"],"providerConfirmed":false});}
-            state["harness"]=json!("claude");state["claudeTurns"]=json!(&*self.turns);
-            state["claudeHistoryStart"]=json!(self.history_start+self.turns.dropped);
-            state["claudeHistoryTotal"]=json!(self.history_total);
-            state["claudeTerminalTasks"]=crate::tasks::finished(&self.terminal_tasks);
+            if let Some(native) = &self.native_bootstrap {
+                state["claudeNativeHistory"] = json!({"source":"native-jsonl","sha256":native["nativeSha256"],"providerConfirmed":false});
+            }
+            state["harness"] = json!("claude");
+            state["claudeTurns"] = json!(&*self.turns);
+            state["claudeHistoryStart"] = json!(self.history_start + self.turns.dropped);
+            state["claudeHistoryTotal"] = json!(self.history_total);
+            state["claudeTerminalTasks"] = crate::tasks::finished(&self.terminal_tasks);
         }
         if let Err(error) = self.store.save(&state) {
             eprintln!("Rust spike: checkpoint_failure=1");
@@ -788,9 +1004,16 @@ impl Runtime {
         // Non-authoritative evidence is sampled only after the live checkpoint
         // commits, at most once per five minutes. Its failure cannot undo that
         // commit or fence dispatch. The copy is bounded to one 32 MiB snapshot.
-        if self.last_disk_snapshot.is_none_or(|at| at.elapsed() >= Duration::from_secs(300)) {
+        if self
+            .last_disk_snapshot
+            .is_none_or(|at| at.elapsed() >= Duration::from_secs(300))
+        {
             self.last_disk_snapshot = Some(std::time::Instant::now());
-            self.disk_history_status = if self.store.retain_history().is_ok() { "available" } else { "journal_history_unavailable" };
+            self.disk_history_status = if self.store.retain_history().is_ok() {
+                "available"
+            } else {
+                "journal_history_unavailable"
+            };
         }
         Ok(())
     }
@@ -802,7 +1025,8 @@ impl Runtime {
         self.ready = false;
         self.dispatch_blocked = true;
         self.thread["status"] = json!("error");
-        self.thread["lastError"] = json!("private_state_write_failed; launcher exiting for restart");
+        self.thread["lastError"] =
+            json!("private_state_write_failed; launcher exiting for restart");
     }
     fn publish(&self) {
         let mut thread = self.thread.clone();
@@ -811,24 +1035,28 @@ impl Runtime {
         let mut snapshot = json!({"ready":self.ready,"runtime":{"state":if self.state_failed {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" || self.dispatch_blocked {"working"} else {"idle"},"error":thread["lastError"],"cleanup":{"providerExit":self.provider_exit,"processGroup":if self.provider_exit == "not_requested" {"not_requested"} else {"termination_requested_unverified"},"detachedDescendants":"not_guaranteed"}},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":null,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}});
         snapshot["thread"] = thread;
         if self.claude {
-            snapshot["harness"]=json!({"id":"claude","name":"Claude","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":true,"goal":if self.goals_supported {json!({"pause":false,"budget":false})} else {Value::Null},"sessionTransfer":null}});
-            if let Some(edit)=self.goals.edits.last() {
-                snapshot["goalDelivery"]=json!({"id":edit.id,"status":if !edit.error.is_null() {"failed"} else if edit.applied {"sent"} else {"pending"},"error":edit.error,"promptId":edit.prompt_id});
+            snapshot["harness"] = json!({"id":"claude","name":"Claude","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":true,"goal":if self.goals_supported {json!({"pause":false,"budget":false})} else {Value::Null},"sessionTransfer":null}});
+            if let Some(edit) = self.goals.edits.last() {
+                snapshot["goalDelivery"] = json!({"id":edit.id,"status":if !edit.error.is_null() {"failed"} else if edit.applied {"sent"} else {"pending"},"error":edit.error,"promptId":edit.prompt_id});
             }
-            snapshot["backgroundTasks"]=self.terminal_tasks.clone();
+            snapshot["backgroundTasks"] = self.terminal_tasks.clone();
         }
-        let start=(self.history_start+self.turns.dropped).min(self.history_total);
-        snapshot["thread"]["hasOlderItems"]=json!(start>0);
-        snapshot["history"]=json!({"limit":50,"totalTurns":self.history_total,"cursor":if start>0 {Some(format!("{}:{start:x}",self.history_nonce))}else{None}});
-        if self.claude && start>0 {
-            snapshot["history"]["cursor"]=Value::Null;
-            snapshot["history"]["unavailable"]=json!(true);
-            snapshot["thread"]["historyUnavailable"]=json!(true);
+        let start = (self.history_start + self.turns.dropped).min(self.history_total);
+        snapshot["thread"]["hasOlderItems"] = json!(start > 0);
+        snapshot["history"] = json!({"limit":50,"totalTurns":self.history_total,"cursor":if start>0 {Some(format!("{}:{start:x}",self.history_nonce))}else{None}});
+        if self.claude && start > 0 {
+            snapshot["history"]["cursor"] = Value::Null;
+            snapshot["history"]["unavailable"] = json!(true);
+            snapshot["thread"]["historyUnavailable"] = json!(true);
         }
         snapshot["runtime"]["provider"] = self.rpc.diagnostics();
         let unresolved: Vec<_> = self.records.iter().filter(|r| recovery::needs_recovery(r))
             .map(|r|json!({"submissionId":r.submission["id"],"turnId":r.submission["turn_id"],"state":if r.submission["turn_id"].is_string(){"exact_turn_pending"}else{"unknown_dispatch"}})).collect();
-        let restart_in = self.provider_down.then(|| self.restart_due.saturating_duration_since(std::time::Instant::now()).as_millis() as u64);
+        let restart_in = self.provider_down.then(|| {
+            self.restart_due
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis() as u64
+        });
         snapshot["runtime"]["recovery"] = json!({"state":if self.state_failed {"storage_failure"} else if self.provider_down || self.restarts > 0 && !self.ready {"restarting"} else {"running"},"restarts":self.restarts,"consecutiveFailures":self.restart_failures,"nextRestartInMs":restart_in,"lastFailure":self.last_failure,"readCount":self.recovery_reads,"unresolved":unresolved,"automaticReplay":false});
         snapshot["runtime"]["messages"] = self.message_watch.clone();
         snapshot["runtime"]["provider"]["finalProjection"] = self.final_projection.clone();
@@ -836,9 +1064,16 @@ impl Runtime {
         self.changed.send_replace(Arc::new(snapshot));
     }
     fn history(&self) -> Result<Transcript> {
-        self.projected(self.turns.to_vec(),self.history_start==0 && self.turns.dropped==0)
+        self.projected(
+            self.turns.to_vec(),
+            self.history_start == 0 && self.turns.dropped == 0,
+        )
     }
-    fn retain_projected_items(&self, old: &Value, next: &mut Value) -> Result<(usize, usize), model::InvalidFinalSnapshot> {
+    fn retain_projected_items(
+        &self,
+        old: &Value,
+        next: &mut Value,
+    ) -> Result<(usize, usize), model::InvalidFinalSnapshot> {
         let mut prior = old.clone();
         // Legacy steering receipts have no persisted item-position evidence.
         // Their guessed display slot must not veto a later ordered native
@@ -846,17 +1081,28 @@ impl Runtime {
         // activity ordering, terminal/output guards and dispatch authority stay
         // with retain_final_items. An omitted echo supplies no new position.
         if let Some(items) = prior["items"].as_array_mut() {
-            items.retain(|item| !self.records.iter().any(|record|
-                record.receipt["disposition"] == "steered" && record.projection_after.is_none()
-                && record.submission["turn_id"] == old["id"]
-                && item["kind"] == "userMessage" && item["submissionId"] == record.submission["id"]
-                && item["sourceTurnId"] == old["id"] && item["text"] == record.text
-                && (item["providerAssignedId"] != true || item["positionProvisional"] == true)
-                && next["items"].as_array().is_some_and(|incoming| incoming.iter().any(|native|
-                    native["providerAssignedId"] == true && native["kind"] == "userMessage"
-                    && native["sourceTurnId"] == old["id"]
-                    && native["submissionId"] == record.submission["id"]
-                    && native["text"] == record.text))));
+            items.retain(|item| {
+                !self.records.iter().any(|record| {
+                    record.receipt["disposition"] == "steered"
+                        && record.projection_after.is_none()
+                        && record.submission["turn_id"] == old["id"]
+                        && item["kind"] == "userMessage"
+                        && item["submissionId"] == record.submission["id"]
+                        && item["sourceTurnId"] == old["id"]
+                        && item["text"] == record.text
+                        && (item["providerAssignedId"] != true
+                            || item["positionProvisional"] == true)
+                        && next["items"].as_array().is_some_and(|incoming| {
+                            incoming.iter().any(|native| {
+                                native["providerAssignedId"] == true
+                                    && native["kind"] == "userMessage"
+                                    && native["sourceTurnId"] == old["id"]
+                                    && native["submissionId"] == record.submission["id"]
+                                    && native["text"] == record.text
+                            })
+                        })
+                })
+            });
         }
         model::retain_final_items(&prior, next)
     }
@@ -865,18 +1111,25 @@ impl Runtime {
         // already owns their durable text and attested metadata; project it
         // without changing dispatch state or trusting provider-supplied senders.
         let mut matched = std::collections::HashSet::new();
-        for (number,record) in self.records.iter().enumerate() {
-            if record.node_fingerprint.is_some() && record.text.is_empty() { continue; }
+        for (number, record) in self.records.iter().enumerate() {
+            if record.node_fingerprint.is_some() && record.text.is_empty() {
+                continue;
+            }
             let Some(id) = record.submission["turn_id"].as_str() else {
                 continue;
             };
             if !turns.iter().any(|t| t["id"] == id) {
                 // Receipts remain durable, but evicted completed turns must not
                 // be synthesized back into every snapshot from that journal.
-                if !synthesize || number<self.records.len().saturating_sub(50) {continue;}
+                if !synthesize || number < self.records.len().saturating_sub(50) {
+                    continue;
+                }
                 // A local-only turn belongs before the next receipt-associated
                 // provider turn, not at the end of all provider history.
-                let next = self.records.iter().skip(number + 1)
+                let next = self
+                    .records
+                    .iter()
+                    .skip(number + 1)
                     .filter_map(|r| r.submission["turn_id"].as_str())
                     .find_map(|next| turns.iter().position(|t| t["id"] == next))
                     .unwrap_or(turns.len());
@@ -896,14 +1149,24 @@ impl Runtime {
             // Replace that projection with one native occurrence, rather than
             // keeping both. Consume at most one native occurrence per receipt;
             // identical accepted steer inputs remain distinct submissions.
-            let local = items.iter().position(|item| item["kind"] == "userMessage" && item["submissionId"] == record.submission["id"]);
-            let native = items.iter().position(|item| item["kind"] == "userMessage" && item["text"] == record.text && !item["submissionId"].is_string());
-            let unpositioned = record.receipt["disposition"] == "steered" && record.projection_after.is_none();
+            let local = items.iter().position(|item| {
+                item["kind"] == "userMessage" && item["submissionId"] == record.submission["id"]
+            });
+            let native = items.iter().position(|item| {
+                item["kind"] == "userMessage"
+                    && item["text"] == record.text
+                    && !item["submissionId"].is_string()
+            });
+            let unpositioned =
+                record.receipt["disposition"] == "steered" && record.projection_after.is_none();
             if let (Some(local), Some(native)) = (local, native) {
                 // Keep the receipt-owned first-observed position when a late
                 // native echo arrives after tool items. Removing the local
                 // slot would otherwise reorder shared completion anchors.
-                if unpositioned && (items[local]["providerAssignedId"] != true || items[local]["positionProvisional"] == true) {
+                if unpositioned
+                    && (items[local]["providerAssignedId"] != true
+                        || items[local]["positionProvisional"] == true)
+                {
                     // A legacy fallback is not evidence that this user spoke
                     // before all the tools. Keep the native occurrence in its
                     // own slot instead of moving it to the guessed prefix.
@@ -912,7 +1175,9 @@ impl Runtime {
                     let echoed = items.remove(native);
                     items[local - usize::from(native < local)] = echoed;
                 }
-            } else if let Some(local) = local.filter(|&at| unpositioned && items[at]["providerAssignedId"] != true) {
+            } else if let Some(local) =
+                local.filter(|&at| unpositioned && items[at]["providerAssignedId"] != true)
+            {
                 // No historical slot can be reconstructed without an anchor
                 // or a native occurrence. Keep the input visible separately at
                 // the turn's tail, explicitly marked as unpositioned, rather
@@ -924,7 +1189,8 @@ impl Runtime {
             let existing = items.iter().position(|item| {
                 item["kind"] == "userMessage"
                     && item["text"] == record.text
-                    && (!item["submissionId"].is_string() || item["submissionId"] == record.submission["id"])
+                    && (!item["submissionId"].is_string()
+                        || item["submissionId"] == record.submission["id"])
                     && !matched.contains(&(id.to_string(), item["id"].to_string()))
             });
             if let Some(index) = existing {
@@ -938,7 +1204,9 @@ impl Runtime {
                 // belongs after what was already observed at dispatch, even
                 // when the provider omits its user echo from final history.
                 // Never move a native occurrence: its ordered position wins.
-                let before = record.projection_after.as_ref()
+                let before = record
+                    .projection_after
+                    .as_ref()
                     .and_then(|after| items.iter().position(|item| item["id"] == *after))
                     .map(|at| at + 1)
                     .or_else(|| {
@@ -947,28 +1215,60 @@ impl Runtime {
                         // shared identities; retain_final_items will keep the
                         // omitted activity. Never sort by text or timestamps.
                         let after = record.projection_after.as_ref()?;
-                        let previous = self.turns.iter().find(|t| t["id"] == id)?["items"].as_array()?;
+                        let previous =
+                            self.turns.iter().find(|t| t["id"] == id)?["items"].as_array()?;
                         let boundary = previous.iter().position(|item| item["id"] == *after)? + 1;
-                        previous[boundary..].iter()
+                        previous[boundary..]
+                            .iter()
                             .find_map(|old| items.iter().position(|item| item["id"] == old["id"]))
-                            .or_else(|| previous[..boundary].iter().rev()
-                                .find_map(|old| items.iter().position(|item| item["id"] == old["id"]).map(|at| at + 1)))
+                            .or_else(|| {
+                                previous[..boundary].iter().rev().find_map(|old| {
+                                    items
+                                        .iter()
+                                        .position(|item| item["id"] == old["id"])
+                                        .map(|at| at + 1)
+                                })
+                            })
                     })
-                    .unwrap_or_else(|| if unpositioned {items.len()} else {items.iter().take_while(|i| i["kind"] == "userMessage").count()});
+                    .unwrap_or_else(|| {
+                        if unpositioned {
+                            items.len()
+                        } else {
+                            items
+                                .iter()
+                                .take_while(|i| i["kind"] == "userMessage")
+                                .count()
+                        }
+                    });
                 let mut item = json!({"id":item_id,"kind":"userMessage","text":record.text,"sender":record.submission["sender"],"submissionId":record.submission["id"],"detailText":null,"sourceTurnId":id,"attachments":record.images});
-                if unpositioned { item["positionUnavailable"] = json!(true); }
+                if unpositioned {
+                    item["positionUnavailable"] = json!(true);
+                }
                 items.insert(before, item);
                 matched.insert((id.to_string(), json!(item_id).to_string()));
             }
         }
-        let mut bounded=Transcript::default();
-        for turn in turns {bounded.insert(turn)?;}
+        let mut bounded = Transcript::default();
+        for turn in turns {
+            bounded.insert(turn)?;
+        }
         Ok(bounded)
     }
     async fn command(&mut self, method: &str, body: Value) -> Result<Value> {
         // Only operations that need a live provider wait for its restart;
         // prompts and messages are journaled and dispatched once it is back.
-        if self.provider_down && matches!(method, "abort" | "settings" | "goal" | "goal_reconcile" | "goal_retry" | "history_page" | "session/export") {
+        if self.provider_down
+            && matches!(
+                method,
+                "abort"
+                    | "settings"
+                    | "goal"
+                    | "goal_reconcile"
+                    | "goal_retry"
+                    | "history_page"
+                    | "session/export"
+            )
+        {
             anyhow::bail!("provider_restarting");
         }
         match method {
@@ -987,39 +1287,83 @@ impl Runtime {
             "recovery" => match body["action"].as_str() {
                 // Restart a stopped provider now instead of waiting for backoff.
                 Some("recheck") => {
-                    if self.provider_down { self.restart_due = std::time::Instant::now(); }
+                    if self.provider_down {
+                        self.restart_due = std::time::Instant::now();
+                    }
                     Ok(json!({"accepted":true,"automaticReplay":false}))
                 }
                 _ => bail!("recovery_action_invalid"),
             },
             "history_page" => {
-                if self.claude {bail!("claude_older_history_unavailable");}
-                let cursor=body["cursor"].as_str().ok_or_else(||anyhow!("history_cursor_invalid"))?;
-                if cursor.len()>48 {bail!("history_cursor_invalid");}
-                let suffix=cursor.strip_prefix(&format!("{}:",self.history_nonce)).ok_or_else(||anyhow!("history_cursor_invalid"))?;
-                let end=usize::from_str_radix(suffix,16).map_err(|_|anyhow!("history_cursor_invalid"))?;
-                if end==0 || end>self.history_total || suffix!=format!("{end:x}") {bail!("history_cursor_invalid");}
-                if self.last_history_page.is_some_and(|at|at.elapsed()<Duration::from_secs(2)) {bail!("history_page_busy");}
-                self.last_history_page=Some(std::time::Instant::now());
-                let result=self.provider_selected("thread/read",json!({"threadId":self.thread["id"],"includeTurns":true}),Some((end.saturating_sub(50),end))).await?;
-                if result["thread"]["id"]!=self.thread["id"] {bail!("history_page_unavailable");}
-                let turns=result["thread"]["turns"].as_array().ok_or_else(||anyhow!("history_page_unavailable"))?;
-                if turns.is_empty() {bail!("history_page_unavailable");}
-                let start=result["treerHistory"]["start"].as_u64().ok_or_else(||anyhow!("history_page_unavailable"))? as usize;
-                if start>=end || turns.len()>50 || result["treerHistory"]["total"].as_u64().unwrap_or(0)<end as u64 {bail!("history_page_unavailable");}
-                let mapped=self.projected(turns.iter().map(model::turn).collect(),false).map_err(|_|anyhow!("history_page_unavailable"))?;
+                if self.claude {
+                    bail!("claude_older_history_unavailable");
+                }
+                let cursor = body["cursor"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("history_cursor_invalid"))?;
+                if cursor.len() > 48 {
+                    bail!("history_cursor_invalid");
+                }
+                let suffix = cursor
+                    .strip_prefix(&format!("{}:", self.history_nonce))
+                    .ok_or_else(|| anyhow!("history_cursor_invalid"))?;
+                let end = usize::from_str_radix(suffix, 16)
+                    .map_err(|_| anyhow!("history_cursor_invalid"))?;
+                if end == 0 || end > self.history_total || suffix != format!("{end:x}") {
+                    bail!("history_cursor_invalid");
+                }
+                if self
+                    .last_history_page
+                    .is_some_and(|at| at.elapsed() < Duration::from_secs(2))
+                {
+                    bail!("history_page_busy");
+                }
+                self.last_history_page = Some(std::time::Instant::now());
+                let result = self
+                    .provider_selected(
+                        "thread/read",
+                        json!({"threadId":self.thread["id"],"includeTurns":true}),
+                        Some((end.saturating_sub(50), end)),
+                    )
+                    .await?;
+                if result["thread"]["id"] != self.thread["id"] {
+                    bail!("history_page_unavailable");
+                }
+                let turns = result["thread"]["turns"]
+                    .as_array()
+                    .ok_or_else(|| anyhow!("history_page_unavailable"))?;
+                if turns.is_empty() {
+                    bail!("history_page_unavailable");
+                }
+                let start = result["treerHistory"]["start"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow!("history_page_unavailable"))?
+                    as usize;
+                if start >= end
+                    || turns.len() > 50
+                    || result["treerHistory"]["total"].as_u64().unwrap_or(0) < end as u64
+                {
+                    bail!("history_page_unavailable");
+                }
+                let mapped = self
+                    .projected(turns.iter().map(model::turn).collect(), false)
+                    .map_err(|_| anyhow!("history_page_unavailable"))?;
                 // Mapping may expand a provider value. Never silently return a
                 // shortened page with the original cursor and lose the gap.
-                if mapped.dropped!=0 {bail!("history_page_unavailable");}
-                let mut snapshot=(**self.changed.borrow()).clone();
-                snapshot["thread"]["turns"]=json!(&*mapped);
-                snapshot["thread"]["hasOlderItems"]=json!(start>0);
-                snapshot["history"]=json!({"limit":50,"page":true,"totalTurns":self.history_total,"cursor":if start>0 {Some(format!("{}:{start:x}",self.history_nonce))}else{None}});
+                if mapped.dropped != 0 {
+                    bail!("history_page_unavailable");
+                }
+                let mut snapshot = (**self.changed.borrow()).clone();
+                snapshot["thread"]["turns"] = json!(&*mapped);
+                snapshot["thread"]["hasOlderItems"] = json!(start > 0);
+                snapshot["history"] = json!({"limit":50,"page":true,"totalTurns":self.history_total,"cursor":if start>0 {Some(format!("{}:{start:x}",self.history_nonce))}else{None}});
                 Ok(snapshot)
-            },
+            }
             "goal" => self.goal_edit(body).await,
             "goal_reconcile" | "goal_retry" => {
-                if self.claude {bail!("claude_goal_native_state_unavailable_no_automatic_retry");}
+                if self.claude {
+                    bail!("claude_goal_native_state_unavailable_no_automatic_retry");
+                }
                 if method == "goal_retry"
                     && !self
                         .goals
@@ -1029,7 +1373,8 @@ impl Runtime {
                 {
                     bail!("goal_edit_unknown");
                 }
-                let current = self.provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
+                let current = self
+                    .provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
                     .await?;
                 if !current["goal"].is_null() {
                     self.goals.goal = goals::map(&current["goal"], &self.goals.goal);
@@ -1044,17 +1389,28 @@ impl Runtime {
             "submit" => self.submit(body).await,
             "message_receive" => self.receive_messages(body),
             "queue" => Ok(json!({"submissions":self.submissions()})),
-            "message_seen" => Ok(json!(self.records.iter().any(|r| r.source_messages.iter().any(|m| m["messageId"] == body["id"])))),
-            "message_pending_acks" => Ok(json!(self.records.iter().flat_map(|r| &r.source_messages).filter(|m| m["ackPending"] == true).map(|m| m["deliveryId"].clone()).collect::<Vec<_>>())),
+            "message_seen" => Ok(json!(self.records.iter().any(|r| r
+                .source_messages
+                .iter()
+                .any(|m| m["messageId"] == body["id"])))),
+            "message_pending_acks" => Ok(json!(self
+                .records
+                .iter()
+                .flat_map(|r| &r.source_messages)
+                .filter(|m| m["ackPending"] == true)
+                .map(|m| m["deliveryId"].clone())
+                .collect::<Vec<_>>())),
             "message_ack" => {
                 for record in &mut self.records {
                     for message in &mut record.source_messages {
-                        if message["deliveryId"] == body["id"] { message["ackPending"] = json!(false); }
+                        if message["deliveryId"] == body["id"] {
+                            message["ackPending"] = json!(false);
+                        }
                     }
                 }
                 self.persist()?;
                 Ok(json!(true))
-            },
+            }
             "submission" => Ok(self
                 .submissions()
                 .iter()
@@ -1082,62 +1438,86 @@ impl Runtime {
             "abort" => {
                 if let Some(turn) = self.thread["activeTurnId"].as_str() {
                     self.provider_request(
-                            "turn/interrupt",
-                            json!({"threadId":self.thread["id"],"turnId":turn}),
-                        )
-                        .await?;
+                        "turn/interrupt",
+                        json!({"threadId":self.thread["id"],"turnId":turn}),
+                    )
+                    .await?;
                 }
                 Ok(json!({"accepted":true}))
             }
             "settings" => {
                 if self.claude {
-                    if !self.ready || self.provider_down || self.state_failed || self.dispatch_blocked {bail!("claude_settings_unavailable");}
-                    let mut validation=body.clone();
-                    if validation.get("model").is_none() {validation["model"]=self.thread["model"].clone();}
-                    self.provider_request("settings/validate",validation).await?;
+                    if !self.ready
+                        || self.provider_down
+                        || self.state_failed
+                        || self.dispatch_blocked
+                    {
+                        bail!("claude_settings_unavailable");
+                    }
+                    let mut validation = body.clone();
+                    if validation.get("model").is_none() {
+                        validation["model"] = self.thread["model"].clone();
+                    }
+                    self.provider_request("settings/validate", validation)
+                        .await?;
                     if body.get("model").is_some() {
-                        let result=match self.provider_request("model/set",json!({"model":body["model"]})).await {
-                            Ok(result)=>result,
-                            Err(error)=>{
-                                if error.to_string()=="claude_model_response_timeout" {
+                        let result = match self
+                            .provider_request("model/set", json!({"model":body["model"]}))
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => {
+                                if error.to_string() == "claude_model_response_timeout" {
                                     // Mutation outcome is unknown, not a claim
                                     // that the provider retained the old model.
-                                    self.model_revision=self.rpc.claude_model_revision();
-                                    self.effort_revision=self.rpc.claude_effort_revision();
-                                    self.thread["model"]=Value::Null;
-                                    self.thread["modelSelectionStatus"]=json!("unknown");
-                                    self.thread["reasoningEffort"]=Value::Null;
-                                    self.thread["effortSelectionStatus"]=json!("unknown");
+                                    self.model_revision = self.rpc.claude_model_revision();
+                                    self.effort_revision = self.rpc.claude_effort_revision();
+                                    self.thread["model"] = Value::Null;
+                                    self.thread["modelSelectionStatus"] = json!("unknown");
+                                    self.thread["reasoningEffort"] = Value::Null;
+                                    self.thread["effortSelectionStatus"] = json!("unknown");
                                     self.publish();
                                 }
                                 return Err(error);
                             }
                         };
-                        self.thread["model"]=result["model"].clone();
-                        self.model_revision=result["modelRevision"].as_u64().unwrap_or(0);
-                        self.thread["modelSelectionStatus"]=json!("confirmed");
-                        self.models=result["modelOptions"].clone();
-                        self.thread["reasoningEffort"]=result["reasoningEffort"].clone();
-                        self.thread["effortSelectionStatus"]=result["effortSelectionStatus"].clone();
-                        self.effort_revision=result["effortRevision"].as_u64().unwrap_or(self.effort_revision);
+                        self.thread["model"] = result["model"].clone();
+                        self.model_revision = result["modelRevision"].as_u64().unwrap_or(0);
+                        self.thread["modelSelectionStatus"] = json!("confirmed");
+                        self.models = result["modelOptions"].clone();
+                        self.thread["reasoningEffort"] = result["reasoningEffort"].clone();
+                        self.thread["effortSelectionStatus"] =
+                            result["effortSelectionStatus"].clone();
+                        self.effort_revision = result["effortRevision"]
+                            .as_u64()
+                            .unwrap_or(self.effort_revision);
                         self.publish();
                     }
                     if body.get("reasoningEffort").is_some() {
-                        let result=match self.provider_request("effort/set",json!({"reasoningEffort":body["reasoningEffort"]})).await {
-                            Ok(result)=>result,
-                            Err(error)=>{
-                                if error.to_string()=="claude_model_response_timeout" {
-                                    self.effort_revision=self.rpc.claude_effort_revision();
-                                    self.thread["reasoningEffort"]=Value::Null;
-                                    self.thread["effortSelectionStatus"]=json!("unknown");
+                        let result = match self
+                            .provider_request(
+                                "effort/set",
+                                json!({"reasoningEffort":body["reasoningEffort"]}),
+                            )
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => {
+                                if error.to_string() == "claude_model_response_timeout" {
+                                    self.effort_revision = self.rpc.claude_effort_revision();
+                                    self.thread["reasoningEffort"] = Value::Null;
+                                    self.thread["effortSelectionStatus"] = json!("unknown");
                                     self.publish();
                                 }
                                 return Err(error);
                             }
                         };
-                        self.thread["reasoningEffort"]=result["reasoningEffort"].clone();
-                        self.thread["effortSelectionStatus"]=result["effortSelectionStatus"].clone();
-                        self.effort_revision=result["effortRevision"].as_u64().unwrap_or(self.effort_revision);
+                        self.thread["reasoningEffort"] = result["reasoningEffort"].clone();
+                        self.thread["effortSelectionStatus"] =
+                            result["effortSelectionStatus"].clone();
+                        self.effort_revision = result["effortRevision"]
+                            .as_u64()
+                            .unwrap_or(self.effort_revision);
                         self.publish();
                     }
                     return Ok(json!({"accepted":true}));
@@ -1163,7 +1543,9 @@ impl Runtime {
         } else {
             goals::validate(&body)?
         };
-        if self.claude { return self.claude_goal_edit(body, input).await; }
+        if self.claude {
+            return self.claude_goal_edit(body, input).await;
+        }
         if input["roundBudget"].as_u64().is_some() {
             bail!("goal_round_budget_not_yet_supported");
         }
@@ -1209,13 +1591,16 @@ impl Runtime {
         Ok(())
     }
     async fn flush_goal(&mut self, i: usize) -> Result<()> {
-        if self.claude { return self.flush_claude_goal(i).await; }
+        if self.claude {
+            return self.flush_claude_goal(i).await;
+        }
         let edit = self.goals.edits[i].clone();
         let clear = edit.input["status"] == "cleared"
             || [json!("blocked"), json!("stale"), json!("done")].contains(&edit.input["status"]);
         if !edit.applied {
             let recovered = if edit.applying {
-                let current = self.provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
+                let current = self
+                    .provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
                     .await?;
                 if clear {
                     current["goal"].is_null()
@@ -1262,7 +1647,8 @@ impl Runtime {
                 }
                 params["threadId"] = self.thread["id"].clone();
                 params["origin"] = json!("user");
-                let result = self.provider_request(
+                let result = self
+                    .provider_request(
                         if clear {
                             "thread/goal/clear"
                         } else {
@@ -1278,7 +1664,8 @@ impl Runtime {
                     }
                 }
             } else if !clear {
-                let result = self.provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
+                let result = self
+                    .provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
                     .await?;
                 self.goals.goal = goals::map(&result["goal"], &self.goals.goal);
             }
@@ -1334,31 +1721,59 @@ impl Runtime {
         Ok(())
     }
     async fn claude_goal_edit(&mut self, body: Value, input: Value) -> Result<Value> {
-        if body.get("tokenBudget").is_some() || body.get("roundBudget").is_some()
-            || input.get("status").is_some_and(|s| s!="cleared")
-            || input.get("reason").is_some() || input.get("requiredAction").is_some() {
+        if body.get("tokenBudget").is_some()
+            || body.get("roundBudget").is_some()
+            || input.get("status").is_some_and(|s| s != "cleared")
+            || input.get("reason").is_some()
+            || input.get("requiredAction").is_some()
+        {
             bail!("claude_goal_budget_pause_exit_unsupported");
         }
-        if input["status"]!="cleared" && !input["objective"].as_str().is_some_and(|s| s!="clear" && s.len()<=65_000) {
+        if input["status"] != "cleared"
+            && !input["objective"]
+                .as_str()
+                .is_some_and(|s| s != "clear" && s.len() <= 65_000)
+        {
             bail!("claude_goal_objective_invalid");
         }
-        let id=body["operationId"].as_str().map(str::to_owned).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
-        if let Some(edit)=self.goals.edits.iter().find(|e|e.id==id) {
-            if edit.input!=input {bail!("goal_edit_id conflict");}
+        let id = body["operationId"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        if let Some(edit) = self.goals.edits.iter().find(|e| e.id == id) {
+            if edit.input != input {
+                bail!("goal_edit_id conflict");
+            }
             return Ok(json!({"accepted":true,"duplicate":true}));
         }
-        if self.dispatch_blocked || self.thread["activeTurnId"].is_string() || self.records.iter().any(|r|r.submission["state"]=="queued" || r.submission["state"]=="running") {
+        if self.dispatch_blocked
+            || self.thread["activeTurnId"].is_string()
+            || self
+                .records
+                .iter()
+                .any(|r| r.submission["state"] == "queued" || r.submission["state"] == "running")
+        {
             bail!("claude_goal_requires_idle_no_interrupt");
         }
-        if self.goals.edits.iter().any(|e|!e.applied) {bail!("claude_goal_ack_unconfirmed_no_retry");}
-        self.goals.add(&id,input)?;
-        if let Some(objective)=self.goals.edits.last().and_then(|edit|edit.input["objective"].as_str()) {
-            self.goals.goal=goals::map(&json!({"objective":objective,"status":"active"}),&self.goals.goal);
+        if self.goals.edits.iter().any(|e| !e.applied) {
+            bail!("claude_goal_ack_unconfirmed_no_retry");
+        }
+        self.goals.add(&id, input)?;
+        if let Some(objective) = self
+            .goals
+            .edits
+            .last()
+            .and_then(|edit| edit.input["objective"].as_str())
+        {
+            self.goals.goal = goals::map(
+                &json!({"objective":objective,"status":"active"}),
+                &self.goals.goal,
+            );
         }
         if self.goals.goal.is_object() {
-            self.goals.goal["syncStatus"]=json!("desynced");
-            self.goals.goal["nativeObjective"]=Value::Null;
-            self.goals.goal["syncError"]=json!("Waiting for native goal acknowledgement");
+            self.goals.goal["syncStatus"] = json!("desynced");
+            self.goals.goal["nativeObjective"] = Value::Null;
+            self.goals.goal["syncError"] = json!("Waiting for native goal acknowledgement");
         }
         self.persist()?;
         self.flush_goals().await?;
@@ -1366,63 +1781,118 @@ impl Runtime {
         Ok(json!({"accepted":true,"nativeAcknowledgement":"pending"}))
     }
     async fn flush_claude_goal(&mut self, i: usize) -> Result<()> {
-        let edit=self.goals.edits[i].clone();
-        if edit.applying {return Ok(());}
-        let args=if edit.input["status"]=="cleared" {"clear"} else {edit.input["objective"].as_str().ok_or_else(||anyhow!("claude_goal_objective_invalid"))?};
+        let edit = self.goals.edits[i].clone();
+        if edit.applying {
+            return Ok(());
+        }
+        let args = if edit.input["status"] == "cleared" {
+            "clear"
+        } else {
+            edit.input["objective"]
+                .as_str()
+                .ok_or_else(|| anyhow!("claude_goal_objective_invalid"))?
+        };
         // The normal input journal is the sole dispatch/turn authority. Fixed
         // operation identity also covers a crash between enqueue and edit save.
-        self.goals.edits[i].applying=true;
-        self.goals.edits[i].mode=Some("queue".into());
+        self.goals.edits[i].applying = true;
+        self.goals.edits[i].mode = Some("queue".into());
         self.persist()?;
         let result=self.submit(json!({"operation_id":format!("claude-goal/{}",edit.id),"text":format!("/goal {args}"),"delivery":"queue","notify":{"on":[]}})).await?;
-        self.goals.edits[i].prompt_id=result["submission"]["id"].clone();
+        self.goals.edits[i].prompt_id = result["submission"]["id"].clone();
         self.persist()?;
         self.check_claude_goal()?;
         Ok(())
     }
     fn check_claude_goal(&mut self) -> Result<()> {
-        let Some(i)=self.goals.edits.iter().position(|e|e.applying && !e.applied && e.error.is_null()) else {self.claude_goal_wait=None;self.claude_goal_ack=None;return Ok(());};
-        let id=self.goals.edits[i].id.clone();
-        let record=self.records.iter().find(|r|r.operation==format!("claude-goal/{id}"));
-        if record.is_some_and(|r|r.submission["state"]=="queued") {return Ok(());}
-        let (_,started)=self.claude_goal_wait.get_or_insert_with(||(id,std::time::Instant::now()));
-        let expired=started.elapsed()>=Duration::from_secs(30);
-        if !expired {self.accept_claude_goal_ack()?;}
-        if self.goals.edits[i].applied {return Ok(());}
-        let terminal=self.records.iter().find(|r|r.operation==format!("claude-goal/{}",self.goals.edits[i].id)).is_none_or(|r|r.submission["state"]!="running");
+        let Some(i) = self
+            .goals
+            .edits
+            .iter()
+            .position(|e| e.applying && !e.applied && e.error.is_null())
+        else {
+            self.claude_goal_wait = None;
+            self.claude_goal_ack = None;
+            return Ok(());
+        };
+        let id = self.goals.edits[i].id.clone();
+        let record = self
+            .records
+            .iter()
+            .find(|r| r.operation == format!("claude-goal/{id}"));
+        if record.is_some_and(|r| r.submission["state"] == "queued") {
+            return Ok(());
+        }
+        let (_, started) = self
+            .claude_goal_wait
+            .get_or_insert_with(|| (id, std::time::Instant::now()));
+        let expired = started.elapsed() >= Duration::from_secs(30);
+        if !expired {
+            self.accept_claude_goal_ack()?;
+        }
+        if self.goals.edits[i].applied {
+            return Ok(());
+        }
+        let terminal = self
+            .records
+            .iter()
+            .find(|r| r.operation == format!("claude-goal/{}", self.goals.edits[i].id))
+            .is_none_or(|r| r.submission["state"] != "running");
         if terminal || expired {
-            self.claude_goal_ack=None;
-            self.goals.edits[i].error=json!("claude_goal_ack_unknown_no_retry");
-            if self.goals.goal.is_object() {self.goals.goal["syncStatus"]=json!("desynced");self.goals.goal["syncError"]=json!("Native goal command outcome unknown; input not replayed");}
-            self.persist()?;self.publish();
+            self.claude_goal_ack = None;
+            self.goals.edits[i].error = json!("claude_goal_ack_unknown_no_retry");
+            if self.goals.goal.is_object() {
+                self.goals.goal["syncStatus"] = json!("desynced");
+                self.goals.goal["syncError"] =
+                    json!("Native goal command outcome unknown; input not replayed");
+            }
+            self.persist()?;
+            self.publish();
         }
         Ok(())
     }
     fn accept_claude_goal_ack(&mut self) -> Result<()> {
-        let Some(p)=self.claude_goal_ack.clone() else {return Ok(());};
-        if self.provider_down || self.state_failed || self.rpc.failed() {self.claude_goal_ack=None;return Ok(());}
-        let Some(i)=self.goals.edits.iter().position(|edit| {
-            !edit.applied && edit.error.is_null() && self.records.iter().any(|record|
-                record.operation==format!("claude-goal/{}",edit.id)
-                && record.text==format!("/goal {}",p["args"].as_str().unwrap_or(""))
-                && record.submission["turn_id"].is_string() && record.submission["turn_id"]==p["turnId"]
-                && record.submission["error"].is_null()
-                && matches!(record.submission["state"].as_str(),Some("running"|"done")))
-        }) else {return Ok(());};
+        let Some(p) = self.claude_goal_ack.clone() else {
+            return Ok(());
+        };
+        if self.provider_down || self.state_failed || self.rpc.failed() {
+            self.claude_goal_ack = None;
+            return Ok(());
+        }
+        let Some(i) = self.goals.edits.iter().position(|edit| {
+            !edit.applied
+                && edit.error.is_null()
+                && self.records.iter().any(|record| {
+                    record.operation == format!("claude-goal/{}", edit.id)
+                        && record.text == format!("/goal {}", p["args"].as_str().unwrap_or(""))
+                        && record.submission["turn_id"].is_string()
+                        && record.submission["turn_id"] == p["turnId"]
+                        && record.submission["error"].is_null()
+                        && matches!(
+                            record.submission["state"].as_str(),
+                            Some("running" | "done")
+                        )
+                })
+        }) else {
+            return Ok(());
+        };
         // A correlated local turn ID is published only AFTER successful input
         // write/flush. An ACK pumped during that await is merely a candidate.
-        if p["args"]=="clear" {self.goals.goal=Value::Null;}
-        else {
-            self.goals.goal=goals::map(&p["goal"],&self.goals.goal);
-            self.goals.goal["syncStatus"]=json!("synced");
-            self.goals.goal["nativeObjective"]=p["args"].clone();
-            if p["completion"]["condition"]==p["args"] && p["completion"]["status"].is_string() {
-                self.goals.goal["status"]=p["completion"]["status"].clone();
+        if p["args"] == "clear" {
+            self.goals.goal = Value::Null;
+        } else {
+            self.goals.goal = goals::map(&p["goal"], &self.goals.goal);
+            self.goals.goal["syncStatus"] = json!("synced");
+            self.goals.goal["nativeObjective"] = p["args"].clone();
+            if p["completion"]["condition"] == p["args"] && p["completion"]["status"].is_string() {
+                self.goals.goal["status"] = p["completion"]["status"].clone();
             }
         }
-        let edit=&mut self.goals.edits[i];
-        edit.applied=true;edit.sent=true;edit.goal=self.goals.goal.clone();
-        self.claude_goal_wait=None;self.claude_goal_ack=None;
+        let edit = &mut self.goals.edits[i];
+        edit.applied = true;
+        edit.sent = true;
+        edit.goal = self.goals.goal.clone();
+        self.claude_goal_wait = None;
+        self.claude_goal_ack = None;
         self.persist()?;
         Ok(())
     }
@@ -1485,10 +1955,26 @@ impl Runtime {
             fingerprint(text, delivery, &body["sender"], &body["notify"], &images).to_string();
         if let Some(prior) = self.records.iter().find(|r| r.operation == operation) {
             let matches = match &prior.node_fingerprint {
-                Some(hash) => images.is_empty() && *hash == node_fingerprint(text, delivery, &body["sender"], &body["notify"]),
-                None => prior.message_batch.as_ref().map_or_else(|| prior.fingerprint.clone(), |b| {
-                    fingerprint(&b.initial_text(), &prior.delivery, &prior.submission["sender"], &prior.notify, &prior.images).to_string()
-                }) == submission_fingerprint,
+                Some(hash) => {
+                    images.is_empty()
+                        && *hash
+                            == node_fingerprint(text, delivery, &body["sender"], &body["notify"])
+                }
+                None => {
+                    prior.message_batch.as_ref().map_or_else(
+                        || prior.fingerprint.clone(),
+                        |b| {
+                            fingerprint(
+                                &b.initial_text(),
+                                &prior.delivery,
+                                &prior.submission["sender"],
+                                &prior.notify,
+                                &prior.images,
+                            )
+                            .to_string()
+                        },
+                    ) == submission_fingerprint
+                }
             };
             if !matches {
                 bail!("operation_id conflict");
@@ -1499,7 +1985,9 @@ impl Runtime {
         }
         // Old journals/retained operation retries keep their original <=100000
         // byte compatibility; only NEW submissions adopt Node's raw UTF-8 cap.
-        if supplied_text.len() > 65_536 { bail!("prompt exceeds 64 KiB"); }
+        if supplied_text.len() > 65_536 {
+            bail!("prompt exceeds 64 KiB");
+        }
         self.prepare_admission()?;
         if receipts::pressure(self.records.iter()) >= receipts::PENDING_LIMIT
             || self.records.len() >= 4096
@@ -1569,14 +2057,19 @@ impl Runtime {
                 .attachments
                 .as_ref()
                 .ok_or_else(|| anyhow!("attachments_unavailable"))?;
-            let store=store.lock().await;
-            let session=self.thread["id"].as_str().unwrap_or("");
+            let store = store.lock().await;
+            let session = self.thread["id"].as_str().unwrap_or("");
             for (metadata, path) in store.resolve(&ids, session)? {
                 if self.claude {
                     use base64::Engine;
                     // The private store revalidates no-follow ownership, MIME,
                     // length and digest before these bytes reach the provider.
-                    let (_,bytes)=store.read(metadata["id"].as_str().ok_or_else(||anyhow!("attachment_invalid_ids"))?,session)?;
+                    let (_, bytes) = store.read(
+                        metadata["id"]
+                            .as_str()
+                            .ok_or_else(|| anyhow!("attachment_invalid_ids"))?,
+                        session,
+                    )?;
                     input.push(json!({"type":"image","source":{"type":"base64","media_type":metadata["mime"],"data":base64::engine::general_purpose::STANDARD.encode(bytes)}}));
                 } else {
                     input.push(json!({"type":"localImage","path":path}));
@@ -1590,14 +2083,18 @@ impl Runtime {
             return Ok(());
         }
         let busy = self.thread["activeTurnId"].is_string();
-        if !busy && self.records.iter().any(|r| r.submission["state"] == "running")
+        if !busy
+            && self
+                .records
+                .iter()
+                .any(|r| r.submission["state"] == "running")
         {
             return Ok(());
         }
-        let next = self
-            .records
-            .iter()
-            .position(|r| r.submission["state"] == "queued" && (!busy || r.delivery == "steer" && !r.steer_refused));
+        let next = self.records.iter().position(|r| {
+            r.submission["state"] == "queued"
+                && (!busy || r.delivery == "steer" && !r.steer_refused)
+        });
         let Some(index) = next else { return Ok(()) };
         let input = match self.dispatch_input(index).await {
             Ok(input) => input,
@@ -1605,7 +2102,8 @@ impl Runtime {
                 // An input that can no longer be built (for example an expired
                 // attachment) fails alone; the rest of the queue continues.
                 self.records[index].submission["state"] = json!("failed");
-                self.records[index].submission["error"] = json!(format!("Prompt could not be sent: {error}"));
+                self.records[index].submission["error"] =
+                    json!(format!("Prompt could not be sent: {error}"));
                 self.persist()?;
                 self.publish();
                 return Ok(());
@@ -1614,10 +2112,14 @@ impl Runtime {
         // Capture display order before the cooperative RPC can consume newer
         // provider activity. Persist it with intent, never as provider authority.
         if busy {
-            self.records[index].projection_after = self.turns.iter()
+            self.records[index].projection_after = self
+                .turns
+                .iter()
                 .find(|t| t["id"] == self.thread["activeTurnId"])
-                .and_then(|t| t["items"].as_array()).and_then(|items| items.last())
-                .and_then(|item| item["id"].as_str()).map(str::to_owned);
+                .and_then(|t| t["items"].as_array())
+                .and_then(|items| items.last())
+                .and_then(|item| item["id"].as_str())
+                .map(str::to_owned);
         }
         // Persist intent BEFORE contacting the provider. No ambiguous replay.
         self.recovery_generation += 1;
@@ -1636,17 +2138,26 @@ impl Runtime {
             }
         }
         let steering_turn = self.thread["activeTurnId"].clone();
-        let response = self.provider_request(if busy { "turn/steer" } else { "turn/start" }, params)
+        let response = self
+            .provider_request(if busy { "turn/steer" } else { "turn/start" }, params)
             .await;
         // Timeout, EOF or write error: the provider is restarted and the
         // resumed session's history settles this record (start/reconcile).
         // The prompt is journaled, so its submission still succeeds.
-        if self.provider_down { return Ok(()); }
+        if self.provider_down {
+            return Ok(());
+        }
         self.dispatch_blocked = false;
         match response {
             Ok(response) => {
                 // A steer that raced the end of its turn can become a new turn.
-                let turn = if response["turn"]["id"].is_string() { response["turn"]["id"].clone() } else if busy { steering_turn } else { Value::Null };
+                let turn = if response["turn"]["id"].is_string() {
+                    response["turn"]["id"].clone()
+                } else if busy {
+                    steering_turn
+                } else {
+                    Value::Null
+                };
                 if !turn.is_string() {
                     // Accepted, but which turn is unknown: resume the session
                     // and let its history decide (restart reconciliation).
@@ -1664,8 +2175,9 @@ impl Runtime {
                         self.stop_for_history_limit()?;
                         return Err(error);
                     }
-                } else if let Some(existing)=self.turns.iter().find(|t|t["id"]==turn).cloned() {
-                    if let Err(error)=self.upsert_turn(existing) {
+                } else if let Some(existing) = self.turns.iter().find(|t| t["id"] == turn).cloned()
+                {
+                    if let Err(error) = self.upsert_turn(existing) {
                         self.stop_for_history_limit()?;
                         return Err(error);
                     }
@@ -1674,18 +2186,36 @@ impl Runtime {
                 // BEFORE the response identifies this accepted submission.
                 // Keep those items and now settle only an explicit terminal
                 // event for the returned identity, never an idle inference.
-                let terminal = self.turns.iter().find(|t| t["id"] == turn
-                    && turn.as_str().is_some_and(|id| self.rpc_completed_turns.contains(id))
-                    && matches!(t["status"].as_str(), Some("completed" | "failed" | "interrupted"))).cloned();
+                let terminal = self
+                    .turns
+                    .iter()
+                    .find(|t| {
+                        t["id"] == turn
+                            && turn
+                                .as_str()
+                                .is_some_and(|id| self.rpc_completed_turns.contains(id))
+                            && matches!(
+                                t["status"].as_str(),
+                                Some("completed" | "failed" | "interrupted")
+                            )
+                    })
+                    .cloned();
                 if let Some(terminal) = terminal {
                     // Stored turns are browser models, not provider wire items.
                     // Settle receipts directly without mapping those items twice.
                     let status = match terminal["status"].as_str() {
-                        Some("failed") => "failed", Some("interrupted") => "interrupted", _ => "done",
+                        Some("failed") => "failed",
+                        Some("interrupted") => "interrupted",
+                        _ => "done",
                     };
-                    let assistant = terminal["items"].as_array().into_iter().flatten().rev()
+                    let assistant = terminal["items"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .rev()
                         .find(|item| item["kind"] == "agentMessage")
-                        .and_then(|item| item["text"].as_str()).map(|text| preview(text, 2048));
+                        .and_then(|item| item["text"].as_str())
+                        .map(|text| preview(text, 2048));
                     self.records[index].submission["state"] = json!(status);
                     self.records[index].submission["error"] = terminal["error"].clone();
                     self.records[index].submission["assistant_preview"] = json!(assistant);
@@ -1706,7 +2236,8 @@ impl Runtime {
                     record.projection_after = None;
                 } else {
                     record.submission["state"] = json!("failed");
-                    record.submission["error"] = json!(format!("Provider refused the prompt: {error}"));
+                    record.submission["error"] =
+                        json!(format!("Provider refused the prompt: {error}"));
                 }
             }
         }
@@ -1718,11 +2249,13 @@ impl Runtime {
         Ok(())
     }
     fn upsert_turn(&mut self, turn: Value) -> Result<()> {
-        let fresh=!self.turns.iter().any(|t|t["id"]==turn["id"]);
-        let projected=self.projected(vec![turn],false)?;
-        let turn=projected.first().ok_or(HistoryLimit)?.clone();
+        let fresh = !self.turns.iter().any(|t| t["id"] == turn["id"]);
+        let projected = self.projected(vec![turn], false)?;
+        let turn = projected.first().ok_or(HistoryLimit)?.clone();
         self.turns.insert(turn)?;
-        if fresh {self.history_total+=1;}
+        if fresh {
+            self.history_total += 1;
+        }
         Ok(())
     }
     fn record_provider_stop(
@@ -1737,7 +2270,9 @@ impl Runtime {
         let reason = self.thread["lastError"]
             .as_str()
             .unwrap_or("Provider stopped")
-            .split("; provider exit ").next().unwrap_or("Provider stopped");
+            .split("; provider exit ")
+            .next()
+            .unwrap_or("Provider stopped");
         self.thread["lastError"] = json!(format!("{reason}; provider exit {}; process-group termination requested but unverified; detached-descendant cleanup not guaranteed", self.provider_exit));
         self.publish();
     }
@@ -1745,8 +2280,13 @@ impl Runtime {
         self.stop_for_history_error(HistoryLimit.to_string())
     }
     fn stop_for_transport_error(&mut self) -> Result<()> {
-        let transport = self.rpc.diagnostics()["transport"].as_str().unwrap_or("closed").to_owned();
-        self.stop_for_history_error(format!("Provider stopped ({transport}); restarting and resuming the session"))
+        let transport = self.rpc.diagnostics()["transport"]
+            .as_str()
+            .unwrap_or("closed")
+            .to_owned();
+        self.stop_for_history_error(format!(
+            "Provider stopped ({transport}); restarting and resuming the session"
+        ))
     }
     /// Stop the provider; the actor restarts it and resumes the session. The
     /// durable journal is the authority, so in-memory state returns to the
@@ -1769,7 +2309,11 @@ impl Runtime {
         let result = self.apply_event(event).await;
         if completing && result.is_err() {
             self.final_projection["refusals"] = json!(1);
-            self.final_projection["conflicts"] = json!(usize::from(result.as_ref().is_err_and(|e| e.is::<model::InvalidFinalSnapshot>())));
+            self.final_projection["conflicts"] = json!(usize::from(
+                result
+                    .as_ref()
+                    .is_err_and(|e| e.is::<model::InvalidFinalSnapshot>())
+            ));
         }
         if self.rpc.failed() {
             self.stop_for_transport_error()?;
@@ -1820,30 +2364,35 @@ impl Runtime {
         }
         match method {
             "thread/claude-goal/ack" if self.claude => {
-                self.claude_goal_ack=Some(p.clone());
+                self.claude_goal_ack = Some(p.clone());
                 self.check_claude_goal()?;
             }
             "thread/claude-goal/completion" if self.claude => {
-                if self.goals.goal["status"]=="active" && self.goals.goal["syncStatus"]=="synced" && p["condition"]==self.goals.goal["nativeObjective"] {
-                    self.goals.goal["status"]=p["status"].clone();
+                if self.goals.goal["status"] == "active"
+                    && self.goals.goal["syncStatus"] == "synced"
+                    && p["condition"] == self.goals.goal["nativeObjective"]
+                {
+                    self.goals.goal["status"] = p["status"].clone();
                     self.persist()?;
-                } else if let Some(ack)=&mut self.claude_goal_ack {
+                } else if let Some(ack) = &mut self.claude_goal_ack {
                     // Preserve wire order if both ACK and its completion arrive
                     // while the actor is still waiting for input write/flush.
-                    if p["condition"]==ack["args"] {ack["completion"]=p.clone();}
+                    if p["condition"] == ack["args"] {
+                        ack["completion"] = p.clone();
+                    }
                 }
             }
             "thread/claude-task-output" | "thread/claude-scheduled-output" if self.claude => {
                 // Independent native task output is display-only. Never run
                 // user-receipt settlement or change the active input/fence.
-                let mut turn=model::final_turn(&p["turn"])?;
-                turn["projectionOnly"]=json!(true);
-                if method=="thread/claude-scheduled-output" {
-                    turn["historySource"]=json!("native-scheduled-command");
-                    turn["nativeCommandId"]=p["turn"]["nativeCommandId"].clone();
+                let mut turn = model::final_turn(&p["turn"])?;
+                turn["projectionOnly"] = json!(true);
+                if method == "thread/claude-scheduled-output" {
+                    turn["historySource"] = json!("native-scheduled-command");
+                    turn["nativeCommandId"] = p["turn"]["nativeCommandId"].clone();
                 } else {
-                    turn["historySource"]=json!("native-task-notification");
-                    turn["taskRunId"]=p["turn"]["taskRunId"].clone();
+                    turn["historySource"] = json!("native-task-notification");
+                    turn["taskRunId"] = p["turn"]["taskRunId"].clone();
                 }
                 self.upsert_turn(turn)?;
                 self.persist()?;
@@ -1852,19 +2401,27 @@ impl Runtime {
                 // Auxiliary metadata cannot complete a turn or poison its transport.
                 if crate::tasks::update(&mut self.terminal_tasks, &p["event"]).is_ok() {
                     self.persist()?;
-                } else { eprintln!("Rust launcher: claude_task_metadata_refused"); }
+                } else {
+                    eprintln!("Rust launcher: claude_task_metadata_refused");
+                }
             }
             "thread/model/updated" if self.claude => {
-                if p["modelRevision"].as_u64().is_some_and(|r|r>self.model_revision) {
-                    self.model_revision=p["modelRevision"].as_u64().unwrap();
-                    self.thread["model"]=p["model"].clone();
-                    self.thread["modelSelectionStatus"]=json!("confirmed");
-                    self.models=p["modelOptions"].clone();
+                if p["modelRevision"]
+                    .as_u64()
+                    .is_some_and(|r| r > self.model_revision)
+                {
+                    self.model_revision = p["modelRevision"].as_u64().unwrap();
+                    self.thread["model"] = p["model"].clone();
+                    self.thread["modelSelectionStatus"] = json!("confirmed");
+                    self.models = p["modelOptions"].clone();
                 }
-                if p["effortRevision"].as_u64().is_some_and(|r|r>self.effort_revision) {
-                    self.effort_revision=p["effortRevision"].as_u64().unwrap();
-                    self.thread["reasoningEffort"]=p["reasoningEffort"].clone();
-                    self.thread["effortSelectionStatus"]=p["effortSelectionStatus"].clone();
+                if p["effortRevision"]
+                    .as_u64()
+                    .is_some_and(|r| r > self.effort_revision)
+                {
+                    self.effort_revision = p["effortRevision"].as_u64().unwrap();
+                    self.thread["reasoningEffort"] = p["reasoningEffort"].clone();
+                    self.thread["effortSelectionStatus"] = p["effortSelectionStatus"].clone();
                 }
             }
             "thread/goal/updated" => {
@@ -1884,7 +2441,9 @@ impl Runtime {
                 if self.thread["activeTurnId"].is_string()
                     && self.thread["activeTurnId"] != p["turn"]["id"]
                 {
-                    eprintln!("Treer launcher: provider started another turn; following the newest");
+                    eprintln!(
+                        "Treer launcher: provider started another turn; following the newest"
+                    );
                 }
                 self.upsert_turn(model::turn(&p["turn"]))?;
                 self.thread["status"] = json!("running");
@@ -1892,14 +2451,19 @@ impl Runtime {
             }
             "turn/completed" => {
                 self.recovery_generation += 1;
-                self.final_projection = json!({"retainedOnly":0,"sameIdUpdates":0,"conflicts":0,"refusals":0});
+                self.final_projection =
+                    json!({"retainedOnly":0,"sameIdUpdates":0,"conflicts":0,"refusals":0});
                 let turn_id = p["turn"]["id"].clone();
-                if !turn_id.is_string() { return Err(InvalidTurnIdentity.into()); }
+                if !turn_id.is_string() {
+                    return Err(InvalidTurnIdentity.into());
+                }
                 let projected = self.projected(vec![model::final_turn(&p["turn"])?], false)?;
                 let mut turn = projected.first().ok_or(HistoryLimit)?.clone();
                 let counts = if let Some(old) = self.turns.iter().find(|t| t["id"] == turn_id) {
                     let mut prior = old.clone();
-                    if prior["projectionOnly"] == true { prior["status"] = json!("inProgress"); }
+                    if prior["projectionOnly"] == true {
+                        prior["status"] = json!("inProgress");
+                    }
                     let fresh = turn.clone();
                     match self.retain_projected_items(&prior, &mut turn) {
                         Ok(counts) => counts,
@@ -1911,7 +2475,9 @@ impl Runtime {
                             (0, 0)
                         }
                     }
-                } else { (0, 0) };
+                } else {
+                    (0, 0)
+                };
                 let status = if turn["status"] == "failed" {
                     "failed"
                 } else if turn["status"] == "interrupted" {
@@ -1932,9 +2498,7 @@ impl Runtime {
                 self.final_projection["retainedOnly"] = json!(counts.0);
                 self.final_projection["sameIdUpdates"] = json!(counts.1);
                 for record in &mut self.records {
-                    if record.submission["turn_id"] == turn_id
-                        && recovery::needs_recovery(record)
-                    {
+                    if record.submission["turn_id"] == turn_id && recovery::needs_recovery(record) {
                         record.submission["state"] = json!(status);
                         record.submission["assistant_preview"] = json!(assistant);
                         record.submission["error"] = error.clone();
@@ -1956,11 +2520,19 @@ impl Runtime {
                     // A late user lifecycle event tells us the item identity,
                     // but not its place among earlier items in a resumed turn.
                     // Only the ordered turn snapshot establishes that position.
-                    if mapped["kind"] == "userMessage" && self.records.iter().any(|record|
-                        record.receipt["disposition"] == "steered" && record.projection_after.is_none()
-                        && record.submission["turn_id"] == turn_id && record.text == mapped["text"]
-                        && items.iter().any(|old| old["submissionId"] == record.submission["id"]
-                            && (old["providerAssignedId"] != true || old["positionProvisional"] == true))) {
+                    if mapped["kind"] == "userMessage"
+                        && self.records.iter().any(|record| {
+                            record.receipt["disposition"] == "steered"
+                                && record.projection_after.is_none()
+                                && record.submission["turn_id"] == turn_id
+                                && record.text == mapped["text"]
+                                && items.iter().any(|old| {
+                                    old["submissionId"] == record.submission["id"]
+                                        && (old["providerAssignedId"] != true
+                                            || old["positionProvisional"] == true)
+                                })
+                        })
+                    {
                         mapped["positionProvisional"] = json!(true);
                         mapped["positionUnavailable"] = json!(true);
                     }
@@ -1970,7 +2542,9 @@ impl Runtime {
                         items.push(mapped);
                     }
                     self.upsert_turn(turn)?;
-                    if self.claude {self.persist()?;}
+                    if self.claude {
+                        self.persist()?;
+                    }
                 }
             }
             "turn/plan/updated" => {
@@ -2039,7 +2613,9 @@ impl Runtime {
                 .or(r.submission["sender"]["agent_id"].as_str());
             let Some(recipient) = recipient else { continue };
             let mut payload = json!({"type":"treer.prompt.completed","status":state,"submission_id":r.submission["id"],"submission_ids":[r.submission["id"]],"turn_id":r.submission["turn_id"],"assistant_preview":r.submission["assistant_preview"],"error":r.submission["error"]});
-            if r.submission["recovery_disposition"].is_object() { payload["recovery_disposition"] = r.submission["recovery_disposition"].clone(); }
+            if r.submission["recovery_disposition"].is_object() {
+                payload["recovery_disposition"] = r.submission["recovery_disposition"].clone();
+            }
             let payload = payload.to_string();
             let args = vec![
                 "send".into(),
@@ -2082,14 +2658,24 @@ fn decode_records(saved: &Value) -> Result<VecDeque<Record>> {
         for r in &records {
             let s = &r.submission;
             let id = s["id"].as_str().ok_or_else(|| anyhow!("invalid journal"))?;
-            if uuid::Uuid::parse_str(if r.node_fingerprint.is_some() { id.strip_prefix("sub_").unwrap_or("") } else { id }).is_err()
+            if uuid::Uuid::parse_str(if r.node_fingerprint.is_some() {
+                id.strip_prefix("sub_").unwrap_or("")
+            } else {
+                id
+            })
+            .is_err()
                 || !ids.insert(id.to_owned())
                 || r.operation.is_empty()
                 || r.operation.len() > 1024
                 || !operations.insert(r.operation.clone())
-                || r.text.is_empty() && r.images.is_empty() && (r.node_fingerprint.is_none() || matches!(s["state"].as_str(), Some("queued" | "running")))
+                || r.text.is_empty()
+                    && r.images.is_empty()
+                    && (r.node_fingerprint.is_none()
+                        || matches!(s["state"].as_str(), Some("queued" | "running")))
                 || r.text.len() > 100_000
-                || r.projection_after.as_ref().is_some_and(|id| id.is_empty() || id.len() > 1024)
+                || r.projection_after
+                    .as_ref()
+                    .is_some_and(|id| id.is_empty() || id.len() > 1024)
                 || !["queue", "steer"].contains(&r.delivery.as_str())
                 || !s["state"].as_str().is_some_and(|s| {
                     ["queued", "running", "done", "failed", "interrupted"].contains(&s)
@@ -2100,21 +2686,40 @@ fn decode_records(saved: &Value) -> Result<VecDeque<Record>> {
                         .as_str()
                         .is_some_and(|s| !s.is_empty() && s.len() <= 1024))
                 || r.receipt["id"] != s["id"]
-                || r.node_fingerprint.as_ref().is_some_and(|f| f.len() != 64 || !f.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-                || r.node_fingerprint.is_none() && serde_json::from_str::<Value>(&r.fingerprint).ok()
-                    != Some(fingerprint(
-                        &r.text,
-                        &r.delivery,
-                        &s["sender"],
-                        &r.notify,
-                        &r.images,
-                    ))
+                || r.node_fingerprint.as_ref().is_some_and(|f| {
+                    f.len() != 64
+                        || !f
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                })
+                || r.node_fingerprint.is_none()
+                    && serde_json::from_str::<Value>(&r.fingerprint).ok()
+                        != Some(fingerprint(
+                            &r.text,
+                            &r.delivery,
+                            &s["sender"],
+                            &r.notify,
+                            &r.images,
+                        ))
             {
                 bail!("invalid journal");
             }
             validate_metadata(&json!({"sender":s["sender"],"notify":r.notify}))?;
             messages::validate_record(r)?;
-            if r.source_messages.len() > 256 || r.source_messages.iter().any(|m| !m["ackPending"].is_boolean() || ["messageId", "deliveryId"].into_iter().any(|key| !m[key].as_str().is_some_and(|s| !s.is_empty() && s.len() <= 256 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')))) {
+            if r.source_messages.len() > 256
+                || r.source_messages.iter().any(|m| {
+                    !m["ackPending"].is_boolean()
+                        || ["messageId", "deliveryId"].into_iter().any(|key| {
+                            !m[key].as_str().is_some_and(|s| {
+                                !s.is_empty()
+                                    && s.len() <= 256
+                                    && s.bytes().all(|b| {
+                                        b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+                                    })
+                            })
+                        })
+                })
+            {
                 bail!("invalid journal");
             }
             if r.images.len() > crate::image_format::COUNT_LIMIT
@@ -2140,7 +2745,10 @@ fn decode_records(saved: &Value) -> Result<VecDeque<Record>> {
 /// Convert the text queue used by Node v1. Unsupported in-flight sidecars or
 /// attachments are refused as a whole; source bytes and their backup survive.
 pub(crate) fn node_fields(value: &Value, allowed: &[&str]) -> Result<()> {
-    if value.as_object().is_none_or(|o| o.keys().any(|key| !allowed.contains(&key.as_str()))) {
+    if value
+        .as_object()
+        .is_none_or(|o| o.keys().any(|key| !allowed.contains(&key.as_str())))
+    {
         bail!("node_import_unknown_field");
     }
     Ok(())
@@ -2151,38 +2759,103 @@ fn node_nullable_string(value: Option<&Value>, limit: usize) -> bool {
 }
 #[cfg(any(unix, test))]
 fn validate_node_record(r: &Value) -> Result<()> {
-    node_fields(r, &["operationId", "fingerprint", "text", "delivery", "notify", "receipt", "submission", "notification", "turnScope", "priorTurnId", "sourceMessage", "sourceMessages", "attachmentIds", "attachmentSession"])?;
+    node_fields(
+        r,
+        &[
+            "operationId",
+            "fingerprint",
+            "text",
+            "delivery",
+            "notify",
+            "receipt",
+            "submission",
+            "notification",
+            "turnScope",
+            "priorTurnId",
+            "sourceMessage",
+            "sourceMessages",
+            "attachmentIds",
+            "attachmentSession",
+        ],
+    )?;
     let s = &r["submission"];
-    node_fields(s, &["id", "sender", "created_at", "position", "text_preview", "state", "turn_id", "assistant_preview", "error"])?;
+    node_fields(
+        s,
+        &[
+            "id",
+            "sender",
+            "created_at",
+            "position",
+            "text_preview",
+            "state",
+            "turn_id",
+            "assistant_preview",
+            "error",
+        ],
+    )?;
     node_fields(&r["receipt"], &["id", "disposition", "position"])?;
-    if !s["sender"].is_null() { node_fields(&s["sender"], &["agent_id", "path", "name"])?; }
-    if !r["notify"].is_null() { node_fields(&r["notify"], &["on", "to"])?; }
-    if !s["created_at"].as_str().is_some_and(|s| s.len() <= 128 && chrono::DateTime::parse_from_rfc3339(s).is_ok())
+    if !s["sender"].is_null() {
+        node_fields(&s["sender"], &["agent_id", "path", "name"])?;
+    }
+    if !r["notify"].is_null() {
+        node_fields(&r["notify"], &["on", "to"])?;
+    }
+    if !s["created_at"]
+        .as_str()
+        .is_some_and(|s| s.len() <= 128 && chrono::DateTime::parse_from_rfc3339(s).is_ok())
         || s["text_preview"].as_str().is_none_or(|s| s.len() > 1024)
         || !node_nullable_string(s.get("assistant_preview"), 4096)
         || !node_nullable_string(s.get("error"), 100_000)
         || !node_nullable_string(s.get("turn_id"), 1024)
         || !s.get("position").is_some_and(Value::is_null)
-        || !r["receipt"].get("position").is_some_and(|v| v.is_null() || v.as_u64().is_some_and(|n| n > 0))
-        || s.get("sender").is_none() || r.get("notify").is_none()
-        || r.get("priorTurnId").is_some_and(|v| !node_nullable_string(Some(v), 1024))
-        || r.get("turnScope").is_some_and(|v| !v.as_str().is_some_and(|s| s.len() == 36 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || b == b'-')))
+        || !r["receipt"]
+            .get("position")
+            .is_some_and(|v| v.is_null() || v.as_u64().is_some_and(|n| n > 0))
+        || s.get("sender").is_none()
+        || r.get("notify").is_none()
+        || r.get("priorTurnId")
+            .is_some_and(|v| !node_nullable_string(Some(v), 1024))
+        || r.get("turnScope").is_some_and(|v| {
+            !v.as_str().is_some_and(|s| {
+                s.len() == 36
+                    && s.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || b == b'-')
+            })
+        })
         || r.get("attachmentSession").is_some()
-    { bail!("node_import_invalid_queue"); }
-    if let Some(to) = r["notify"].get("to") {
-        if !to.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 1024 && !s.contains(['\r', '\n', '\0'])) { bail!("node_import_invalid_queue"); }
+    {
+        bail!("node_import_invalid_queue");
     }
-    let notification = r.get("notification").ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
+    if let Some(to) = r["notify"].get("to") {
+        if !to
+            .as_str()
+            .is_some_and(|s| !s.is_empty() && s.len() <= 1024 && !s.contains(['\r', '\n', '\0']))
+        {
+            bail!("node_import_invalid_queue");
+        }
+    }
+    let notification = r
+        .get("notification")
+        .ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
     if !notification.is_null() {
-        node_fields(notification, &["attempts", "nextAttempt", "error", "delivered", "batch"])?;
+        node_fields(
+            notification,
+            &["attempts", "nextAttempt", "error", "delivered", "batch"],
+        )?;
         // Settled notification batches may be omitted from the destination;
         // refuse them here until their full semantic validator is implemented.
-        if notification.get("batch").is_some() || notification["delivered"] != true
+        if notification.get("batch").is_some()
+            || notification["delivered"] != true
             || notification["attempts"].as_u64().is_none()
             || notification["nextAttempt"].as_f64().is_none()
             || !node_nullable_string(notification.get("error"), 100_000)
-        { bail!("node_import_invalid_queue"); }
-    } else if r["notify"]["on"].as_array().is_some_and(|on| on.contains(&s["state"])) {
+        {
+            bail!("node_import_invalid_queue");
+        }
+    } else if r["notify"]["on"]
+        .as_array()
+        .is_some_and(|on| on.contains(&s["state"]))
+    {
         bail!("node_import_missing_notification");
     }
     Ok(())
@@ -2191,41 +2864,90 @@ fn validate_node_record(r: &Value) -> Result<()> {
 pub(crate) fn import_node_queue(thread: &Value, queue: &Value) -> Result<Value> {
     node_fields(thread, &["threadId"])?;
     node_fields(queue, &["version", "records"])?;
-    let thread_id = thread["threadId"].as_str().filter(|s| !s.trim().is_empty() && s.len() <= 1024)
+    let thread_id = thread["threadId"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty() && s.len() <= 1024)
         .ok_or_else(|| anyhow!("node_import_invalid_thread"))?;
-    if queue["version"] != 1 { bail!("node_import_invalid_queue"); }
-    let source = queue["records"].as_array().filter(|r| r.len() <= 4096)
+    if queue["version"] != 1 {
+        bail!("node_import_invalid_queue");
+    }
+    let source = queue["records"]
+        .as_array()
+        .filter(|r| r.len() <= 4096)
         .ok_or_else(|| anyhow!("node_import_queue_limit"))?;
     let mut records = Vec::new();
     for value in source {
         validate_node_record(value)?;
-        let text = value["text"].as_str().filter(|s| s.len() <= 65_536)
+        let text = value["text"]
+            .as_str()
+            .filter(|s| s.len() <= 65_536)
             .ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
-        let operation = value["operationId"].as_str().ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
-        let hash = value["fingerprint"].as_str().ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
-        if value.get("attachmentIds").is_some() || !value["notification"].is_null() && value["notification"]["delivered"] != true {
+        let operation = value["operationId"]
+            .as_str()
+            .ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
+        let hash = value["fingerprint"]
+            .as_str()
+            .ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
+        if value.get("attachmentIds").is_some()
+            || !value["notification"].is_null() && value["notification"]["delivered"] != true
+        {
             bail!("node_import_pending_outbox_or_images_unsupported");
         }
-        if !["queued", "sent", "steered"].contains(&value["receipt"]["disposition"].as_str().unwrap_or("")) { bail!("node_import_invalid_queue"); }
-        let mut messages = Vec::new();
-        if !value["sourceMessage"].is_null() { messages.push(value["sourceMessage"].clone()); }
-        if let Some(batch) = value.get("sourceMessages") {
-            let batch = batch.as_array().filter(|batch| batch.len() <= 255).ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
-            messages.extend(batch.iter().cloned());
-        }
-        if messages.len() > 256 || messages.iter().any(|m| !m["ackPending"].is_boolean() || ["messageId", "deliveryId"].into_iter().any(|k| !m[k].as_str().is_some_and(|s| !s.is_empty() && s.len() <= 256 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')))) {
+        if !["queued", "sent", "steered"]
+            .contains(&value["receipt"]["disposition"].as_str().unwrap_or(""))
+        {
             bail!("node_import_invalid_queue");
         }
-        for message in &messages { node_fields(message, &["messageId", "deliveryId", "ackPending"])?; }
+        let mut messages = Vec::new();
+        if !value["sourceMessage"].is_null() {
+            messages.push(value["sourceMessage"].clone());
+        }
+        if let Some(batch) = value.get("sourceMessages") {
+            let batch = batch
+                .as_array()
+                .filter(|batch| batch.len() <= 255)
+                .ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
+            messages.extend(batch.iter().cloned());
+        }
+        if messages.len() > 256
+            || messages.iter().any(|m| {
+                !m["ackPending"].is_boolean()
+                    || ["messageId", "deliveryId"].into_iter().any(|k| {
+                        !m[k].as_str().is_some_and(|s| {
+                            !s.is_empty()
+                                && s.len() <= 256
+                                && s.bytes()
+                                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                        })
+                    })
+            })
+        {
+            bail!("node_import_invalid_queue");
+        }
+        for message in &messages {
+            node_fields(message, &["messageId", "deliveryId", "ackPending"])?;
+        }
         let submission = value["submission"].clone();
-        if matches!(submission["state"].as_str(), Some("queued" | "running")) || messages.iter().any(|m| m["ackPending"] == true) {
+        if matches!(submission["state"].as_str(), Some("queued" | "running"))
+            || messages.iter().any(|m| m["ackPending"] == true)
+        {
             bail!("node_import_requires_idle_empty_queue");
         }
         let record = Record {
-            operation: operation.into(), fingerprint: String::new(), node_fingerprint: Some(hash.into()),
-            text: text.into(), delivery: value["delivery"].as_str().unwrap_or("").into(),
-            submission, receipt: value["receipt"].clone(), notify: value["notify"].clone(),
-            notified: value["notification"]["delivered"] == true, images: vec![], source_messages: messages, message_batch: None, projection_after: None, steer_refused: false,
+            operation: operation.into(),
+            fingerprint: String::new(),
+            node_fingerprint: Some(hash.into()),
+            text: text.into(),
+            delivery: value["delivery"].as_str().unwrap_or("").into(),
+            submission,
+            receipt: value["receipt"].clone(),
+            notify: value["notify"].clone(),
+            notified: value["notification"]["delivered"] == true,
+            images: vec![],
+            source_messages: messages,
+            message_batch: None,
+            projection_after: None,
+            steer_refused: false,
         };
         records.push(record);
     }
@@ -2237,16 +2959,37 @@ pub(crate) fn import_node_queue(thread: &Value, queue: &Value) -> Result<Value> 
 fn node_fingerprint(text: &str, delivery: &str, sender: &Value, notify: &Value) -> String {
     use sha2::{Digest, Sha256};
     // Match Node's insertion-order JSON, including its sender/notify normalization.
-    let sender_json = if sender.is_null() { "null".into() } else {
-        format!("{{\"agent_id\":{},\"path\":{},\"name\":{}}}", sender["agent_id"], sender["path"], sender["name"])
+    let sender_json = if sender.is_null() {
+        "null".into()
+    } else {
+        format!(
+            "{{\"agent_id\":{},\"path\":{},\"name\":{}}}",
+            sender["agent_id"], sender["path"], sender["name"]
+        )
     };
-    let notify_json = if notify.is_null() { "null".into() } else {
+    let notify_json = if notify.is_null() {
+        "null".into()
+    } else {
         let mut on = notify["on"].as_array().cloned().unwrap_or_default();
-        on.sort_by_key(Value::to_string); on.dedup();
-        let to = notify.get("to").filter(|v| v.is_string()).or_else(|| sender.get("agent_id"));
-        format!("{{\"on\":{}{}}}", json!(on), to.map(|v| format!(",\"to\":{v}")).unwrap_or_default())
+        on.sort_by_key(Value::to_string);
+        on.dedup();
+        let to = notify
+            .get("to")
+            .filter(|v| v.is_string())
+            .or_else(|| sender.get("agent_id"));
+        format!(
+            "{{\"on\":{}{}}}",
+            json!(on),
+            to.map(|v| format!(",\"to\":{v}")).unwrap_or_default()
+        )
     };
-    let input = format!("{{\"text\":{},\"delivery\":{},\"sender\":{},\"notify\":{}}}", json!(text), json!(delivery), sender_json, notify_json);
+    let input = format!(
+        "{{\"text\":{},\"delivery\":{},\"sender\":{},\"notify\":{}}}",
+        json!(text),
+        json!(delivery),
+        sender_json,
+        notify_json
+    );
     format!("{:x}", Sha256::digest(input.as_bytes()))
 }
 fn fingerprint(
@@ -2314,7 +3057,17 @@ pub async fn message_command(args: &[String], input: Option<&str>) -> Result<Val
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .spawn().map_err(|e| if matches!(e.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::TimedOut) {message_retry::Failure::Network} else {message_retry::Failure::Other})?;
+        .spawn()
+        .map_err(|e| {
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::TimedOut
+            ) {
+                message_retry::Failure::Network
+            } else {
+                message_retry::Failure::Other
+            }
+        })?;
     if let Some(input) = input {
         child
             .stdin
@@ -2350,11 +3103,14 @@ pub async fn message_command(args: &[String], input: Option<&str>) -> Result<Val
     })
     .await;
     match result {
-        Ok(Ok(())) => {},
+        Ok(Ok(())) => {}
         Ok(Err(error)) => {
             let _ = child.kill().await;
-            return Err(error.downcast::<message_retry::Failure>().unwrap_or(message_retry::Failure::Other).into());
-        },
+            return Err(error
+                .downcast::<message_retry::Failure>()
+                .unwrap_or(message_retry::Failure::Other)
+                .into());
+        }
         Err(_) => {
             let _ = child.kill().await;
             return Err(message_retry::Failure::Network.into());
@@ -2374,38 +3130,57 @@ pub async fn watch_messages(handle: Handle, agent: String) {
             let pending = handle.call("message_pending_acks", Value::Null).await?;
             acknowledge_messages(&handle, &pending).await?;
             let result = message_command(
-            &[
-                "receive".into(),
-                "--wait".into(),
-                "30000".into(),
-                "--limit".into(),
-                "10".into(),
-            ],
-            None,
-        )
-        .await?;
+                &[
+                    "receive".into(),
+                    "--wait".into(),
+                    "30000".into(),
+                    "--limit".into(),
+                    "10".into(),
+                ],
+                None,
+            )
+            .await?;
             // One actor admission for the WHOLE poll, before any idle drain.
             // Only the persisted result grants permission to ack its IDs.
-            let ids = handle.call("message_receive",json!({"agent":agent,"deliveries":result["deliveries"]})).await?;
+            let ids = handle
+                .call(
+                    "message_receive",
+                    json!({"agent":agent,"deliveries":result["deliveries"]}),
+                )
+                .await?;
             acknowledge_messages(&handle, &ids).await?;
             Ok::<_, anyhow::Error>(result["deliveries"].as_array().is_some_and(Vec::is_empty))
-        }.await;
+        }
+        .await;
         match received {
             Ok(empty) => {
                 if failures > 0 || !reported {
-                    reported = handle.call("message_watch", json!({"state":"receiving","failures":0,"lastFailure":null})).await.is_ok();
+                    reported = handle
+                        .call(
+                            "message_watch",
+                            json!({"state":"receiving","failures":0,"lastFailure":null}),
+                        )
+                        .await
+                        .is_ok();
                 }
                 failures = 0;
-                if empty { tokio::time::sleep(Duration::from_millis(250)).await; }
-            },
+                if empty {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
             Err(error) => {
                 // Never give up: credentials, the Controller and the Proxy can
                 // all come back (for example after a restart or rotation).
-                let failure = error.downcast_ref::<message_retry::Failure>().unwrap_or(&message_retry::Failure::Other);
+                let failure = error
+                    .downcast_ref::<message_retry::Failure>()
+                    .unwrap_or(&message_retry::Failure::Other);
                 let id = uuid::Uuid::new_v4();
                 let jitter = u16::from_le_bytes([id.as_bytes()[0], id.as_bytes()[1]]);
                 let delay = message_retry::retry_delay(failures, jitter);
-                eprintln!("Treer message watcher retry: {failure}; failures={failures}; delay_ms={}", delay.as_millis());
+                eprintln!(
+                    "Treer message watcher retry: {failure}; failures={failures}; delay_ms={}",
+                    delay.as_millis()
+                );
                 failures = failures.saturating_add(1);
                 reported = handle.call("message_watch", json!({"state":"retrying","failures":failures,"lastFailure":failure.to_string(),"retryInMs":delay.as_millis() as u64})).await.is_ok();
                 tokio::time::sleep(delay).await;
@@ -2414,9 +3189,23 @@ pub async fn watch_messages(handle: Handle, agent: String) {
     }
 }
 async fn acknowledge_messages(handle: &Handle, ids: &Value) -> Result<()> {
-    for id in ids.as_array().ok_or_else(|| anyhow!("invalid pending ack list"))? {
-        let id = id.as_str().ok_or_else(|| anyhow!("invalid pending ack id"))?;
-        message_command(&["ack".into(), id.into(), "--operation-id".into(), format!("launcher-message-ack/{id}")], None).await?;
+    for id in ids
+        .as_array()
+        .ok_or_else(|| anyhow!("invalid pending ack list"))?
+    {
+        let id = id
+            .as_str()
+            .ok_or_else(|| anyhow!("invalid pending ack id"))?;
+        message_command(
+            &[
+                "ack".into(),
+                id.into(),
+                "--operation-id".into(),
+                format!("launcher-message-ack/{id}"),
+            ],
+            None,
+        )
+        .await?;
         handle.call("message_ack", json!({"id":id})).await?;
     }
     Ok(())
@@ -2431,7 +3220,14 @@ mod journal_tests {
         let hash = node_fingerprint(text, "queue", &Value::Null, &Value::Null);
         let id = format!("sub_{}", uuid::Uuid::new_v4());
         let record = json!({"operationId":"old-op","fingerprint":hash,"text":"","delivery":"queue","notify":null,"notification":null,"receipt":{"id":id,"disposition":"sent","position":null},"submission":{"id":id,"state":"done","sender":null,"created_at":"2026-10-18T00:00:00Z","position":null,"turn_id":"turn-1","text_preview":text,"assistant_preview":"answer","error":null},"sourceMessage":{"messageId":"msg_old","deliveryId":"dlv_old","ackPending":true}});
-        assert!(import_node_queue(&json!({"threadId":"thread"}), &json!({"version":1,"records":[record.clone()]})).is_err(), "pending Core ack must refuse import");
+        assert!(
+            import_node_queue(
+                &json!({"threadId":"thread"}),
+                &json!({"version":1,"records":[record.clone()]})
+            )
+            .is_err(),
+            "pending Core ack must refuse import"
+        );
         let mut record = record;
         record["sourceMessage"]["ackPending"] = json!(false);
         let source = json!({"version":1,"records":[record.clone()]});
@@ -2441,14 +3237,33 @@ mod journal_tests {
         assert_eq!(restored[0].node_fingerprint.as_ref(), Some(&hash));
         assert_eq!(restored[0].source_messages[0], record["sourceMessage"]);
         assert!(restored[0].text.is_empty());
-        let mut queued = record.clone(); queued["submission"]["state"] = json!("queued");
-        assert!(import_node_queue(&json!({"threadId":"thread"}), &json!({"version":1,"records":[queued]})).is_err());
+        let mut queued = record.clone();
+        queued["submission"]["state"] = json!("queued");
+        assert!(import_node_queue(
+            &json!({"threadId":"thread"}),
+            &json!({"version":1,"records":[queued]})
+        )
+        .is_err());
         for state in ["queued", "running"] {
-            let mut busy = record.clone(); busy["text"] = json!(text); busy["submission"]["state"] = json!(state);
-            assert!(import_node_queue(&json!({"threadId":"thread"}), &json!({"version":1,"records":[busy]})).is_err(), "busy state must refuse even with valid prompt text");
+            let mut busy = record.clone();
+            busy["text"] = json!(text);
+            busy["submission"]["state"] = json!(state);
+            assert!(
+                import_node_queue(
+                    &json!({"threadId":"thread"}),
+                    &json!({"version":1,"records":[busy]})
+                )
+                .is_err(),
+                "busy state must refuse even with valid prompt text"
+            );
         }
-        let mut pending = record; pending["notification"] = json!({"delivered":false});
-        assert!(import_node_queue(&json!({"threadId":"thread"}), &json!({"version":1,"records":[pending]})).is_err());
+        let mut pending = record;
+        pending["notification"] = json!({"delivered":false});
+        assert!(import_node_queue(
+            &json!({"threadId":"thread"}),
+            &json!({"version":1,"records":[pending]})
+        )
+        .is_err());
     }
 
     #[test]

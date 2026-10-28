@@ -91,7 +91,9 @@ pub fn item(raw: &Value, turn: &str, order: usize) -> Value {
 pub fn turn(raw: &Value) -> Value {
     let id = raw["id"].as_str().unwrap_or("turn");
     let mut mapped = json!({"id":raw["id"],"status":raw["status"].as_str().unwrap_or("completed"),"startedAt":null,"error":raw["error"]["message"],"items":raw["items"].as_array().unwrap_or(&vec![]).iter().enumerate().map(|(n,i)|item(i,id,n)).collect::<Vec<_>>()});
-    if raw["treerStatusProjected"] == true { mapped["projectionOnly"] = json!(true); }
+    if raw["treerStatusProjected"] == true {
+        mapped["projectionOnly"] = json!(true);
+    }
     mapped
 }
 
@@ -109,11 +111,18 @@ impl std::error::Error for InvalidFinalSnapshot {}
 // shrink. Both inputs already passed the provider depth/node/byte caps and the
 // resulting turn must still pass Transcript admission before publication.
 fn retained_tool_detail(old: Value, next: Value) -> Result<Value, InvalidFinalSnapshot> {
-    let empty = |v: &Value| v.is_null() || v.as_str() == Some("")
-        || v.as_array().is_some_and(Vec::is_empty)
-        || v.as_object().is_some_and(serde_json::Map::is_empty);
-    if empty(&next) { return Ok(old); }
-    if empty(&old) { return Ok(next); }
+    let empty = |v: &Value| {
+        v.is_null()
+            || v.as_str() == Some("")
+            || v.as_array().is_some_and(Vec::is_empty)
+            || v.as_object().is_some_and(serde_json::Map::is_empty)
+    };
+    if empty(&next) {
+        return Ok(old);
+    }
+    if empty(&old) {
+        return Ok(next);
+    }
     match (old, next) {
         (Value::Object(mut old), Value::Object(next)) => {
             for (key, value) in next {
@@ -127,10 +136,13 @@ fn retained_tool_detail(old: Value, next: Value) -> Result<Value, InvalidFinalSn
         }
         (Value::Array(old), Value::Array(next)) if next.len() >= old.len() => {
             let mut previous = old.into_iter();
-            let merged = next.into_iter().map(|value| match previous.next() {
-                Some(prior) => retained_tool_detail(prior, value),
-                None => Ok(value),
-            }).collect::<Result<Vec<_>, _>>()?;
+            let merged = next
+                .into_iter()
+                .map(|value| match previous.next() {
+                    Some(prior) => retained_tool_detail(prior, value),
+                    None => Ok(value),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::Array(merged))
         }
         (Value::String(old), Value::String(next)) if next.starts_with(&old) => Ok(json!(next)),
@@ -148,9 +160,12 @@ fn retained_tool_envelope(old: Value, next: Value) -> Result<Value, InvalidFinal
         Some("mcpToolCall") => "result",
         _ => "",
     };
-    let (Value::Object(mut old), Value::Object(next)) = (old, next) else { return Err(InvalidFinalSnapshot); };
+    let (Value::Object(mut old), Value::Object(next)) = (old, next) else {
+        return Err(InvalidFinalSnapshot);
+    };
     for (key, value) in next {
-        let empty = value.is_null() || value.as_str() == Some("")
+        let empty = value.is_null()
+            || value.as_str() == Some("")
             || value.as_array().is_some_and(Vec::is_empty)
             || value.as_object().is_some_and(serde_json::Map::is_empty);
         if let Some(prior) = old.remove(&key) {
@@ -160,7 +175,9 @@ fn retained_tool_envelope(old: Value, next: Value) -> Result<Value, InvalidFinal
                 prior
             } else if prior.is_null() {
                 value
-            } else { return Err(InvalidFinalSnapshot); };
+            } else {
+                return Err(InvalidFinalSnapshot);
+            };
             old.insert(key, merged);
         } else {
             old.insert(key, value);
@@ -169,21 +186,33 @@ fn retained_tool_envelope(old: Value, next: Value) -> Result<Value, InvalidFinal
     Ok(Value::Object(old))
 }
 
-fn item_positions(items: &[Value]) -> Result<std::collections::HashMap<String, usize>, InvalidFinalSnapshot> {
+fn item_positions(
+    items: &[Value],
+) -> Result<std::collections::HashMap<String, usize>, InvalidFinalSnapshot> {
     let mut ids = std::collections::HashMap::new();
     for (n, item) in items.iter().enumerate() {
-        let id = item["id"].as_str().filter(|s| !s.is_empty() && s.len() <= 256).ok_or(InvalidFinalSnapshot)?;
-        if ids.insert(id.to_owned(), n).is_some() { return Err(InvalidFinalSnapshot); }
+        let id = item["id"]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 256)
+            .ok_or(InvalidFinalSnapshot)?;
+        if ids.insert(id.to_owned(), n).is_some() {
+            return Err(InvalidFinalSnapshot);
+        }
     }
     Ok(ids)
 }
 
 pub fn final_turn(raw: &Value) -> Result<Value, InvalidFinalSnapshot> {
-    if !matches!(raw["status"].as_str(), Some("completed" | "failed" | "interrupted")) {
+    if !matches!(
+        raw["status"].as_str(),
+        Some("completed" | "failed" | "interrupted")
+    ) {
         return Err(InvalidFinalSnapshot);
     }
     match raw.get("items") {
-        Some(Value::Array(items)) => { item_positions(items)?; }
+        Some(Value::Array(items)) => {
+            item_positions(items)?;
+        }
         None | Some(Value::Null) => {}
         _ => return Err(InvalidFinalSnapshot),
     }
@@ -194,10 +223,19 @@ pub fn final_turn(raw: &Value) -> Result<Value, InvalidFinalSnapshot> {
 // already observed live. This is a bounded projection union, not evidence that
 // either snapshot contains the complete provider history. Call only after the
 // receipt-owned user projection has canonicalized native echoes.
-pub fn retain_final_items(old: &Value, next: &mut Value) -> Result<(usize, usize), InvalidFinalSnapshot> {
-    let terminal = |status: &Value| matches!(status.as_str(), Some("completed" | "failed" | "interrupted" | "declined"));
+pub fn retain_final_items(
+    old: &Value,
+    next: &mut Value,
+) -> Result<(usize, usize), InvalidFinalSnapshot> {
+    let terminal = |status: &Value| {
+        matches!(
+            status.as_str(),
+            Some("completed" | "failed" | "interrupted" | "declined")
+        )
+    };
     if old["id"] != next["id"]
-        || (terminal(&old["status"]) && (old["status"] != next["status"] || old["error"] != next["error"]))
+        || (terminal(&old["status"])
+            && (old["status"] != next["status"] || old["error"] != next["error"]))
     {
         return Err(InvalidFinalSnapshot);
     }
@@ -205,12 +243,20 @@ pub fn retain_final_items(old: &Value, next: &mut Value) -> Result<(usize, usize
     let incoming = next["items"].as_array().ok_or(InvalidFinalSnapshot)?;
     let positions = item_positions(previous)?;
     item_positions(incoming)?;
-    let previous_messages: std::collections::HashSet<_> = previous.iter()
+    let previous_messages: std::collections::HashSet<_> = previous
+        .iter()
         .filter(|item| matches!(item["kind"].as_str(), Some("userMessage" | "agentMessage")))
-        .filter_map(|item| Some((item["kind"].as_str()?, item["text"].as_str().filter(|s| !s.is_empty())?)))
+        .filter_map(|item| {
+            Some((
+                item["kind"].as_str()?,
+                item["text"].as_str().filter(|s| !s.is_empty())?,
+            ))
+        })
         .collect();
-    if previous.iter().chain(incoming).any(|item| item["sourceTurnId"] != next["id"]
-        || (item["providerAssignedId"] != true && !item["submissionId"].is_string())) {
+    if previous.iter().chain(incoming).any(|item| {
+        item["sourceTurnId"] != next["id"]
+            || (item["providerAssignedId"] != true && !item["submissionId"].is_string())
+    }) {
         return Err(InvalidFinalSnapshot);
     }
     let mut merged = Vec::with_capacity(previous.len() + incoming.len());
@@ -220,7 +266,8 @@ pub fn retain_final_items(old: &Value, next: &mut Value) -> Result<(usize, usize
     for item in incoming {
         if let Some(&at) = positions.get(item["id"].as_str().ok_or(InvalidFinalSnapshot)?) {
             let prior = &previous[at];
-            if at < old_at || prior["kind"] != item["kind"]
+            if at < old_at
+                || prior["kind"] != item["kind"]
                 || (terminal(&prior["status"]) && prior["status"] != item["status"])
             {
                 return Err(InvalidFinalSnapshot);
@@ -232,7 +279,7 @@ pub fn retain_final_items(old: &Value, next: &mut Value) -> Result<(usize, usize
                 if let Some(output) = prior["detailText"].as_str().filter(|s| !s.is_empty()) {
                     match updated["detailText"].as_str().filter(|s| !s.is_empty()) {
                         None => updated["detailText"] = prior["detailText"].clone(),
-                        Some(next_output) if next_output.starts_with(output) => {},
+                        Some(next_output) if next_output.starts_with(output) => {}
                         _ => return Err(InvalidFinalSnapshot),
                     }
                 }
@@ -240,12 +287,20 @@ pub fn retain_final_items(old: &Value, next: &mut Value) -> Result<(usize, usize
             if terminal(&prior["status"]) && prior["kind"] == "fileChange" {
                 let old = prior["changes"].as_array().ok_or(InvalidFinalSnapshot)?;
                 let new = updated["changes"].as_array().ok_or(InvalidFinalSnapshot)?;
-                if new.is_empty() { updated["changes"] = prior["changes"].clone(); }
-                else if !new.starts_with(old) { return Err(InvalidFinalSnapshot); }
+                if new.is_empty() {
+                    updated["changes"] = prior["changes"].clone();
+                } else if !new.starts_with(old) {
+                    return Err(InvalidFinalSnapshot);
+                }
             }
             if terminal(&prior["status"]) && prior["kind"] == "toolCall" {
-                let old: Value = serde_json::from_str(prior["detailText"].as_str().ok_or(InvalidFinalSnapshot)?).map_err(|_| InvalidFinalSnapshot)?;
-                let new: Value = serde_json::from_str(updated["detailText"].as_str().ok_or(InvalidFinalSnapshot)?).map_err(|_| InvalidFinalSnapshot)?;
+                let old: Value =
+                    serde_json::from_str(prior["detailText"].as_str().ok_or(InvalidFinalSnapshot)?)
+                        .map_err(|_| InvalidFinalSnapshot)?;
+                let new: Value = serde_json::from_str(
+                    updated["detailText"].as_str().ok_or(InvalidFinalSnapshot)?,
+                )
+                .map_err(|_| InvalidFinalSnapshot)?;
                 let detail = retained_tool_envelope(old, new)?;
                 updated["text"] = prior["text"].clone();
                 updated["detailText"] = json!(detail.to_string());
@@ -257,8 +312,13 @@ pub fn retain_final_items(old: &Value, next: &mut Value) -> Result<(usize, usize
             // Never deduplicate differing provider message identities by text.
             // Refuse an apparent duplicate rather than displaying it twice.
             if matches!(item["kind"].as_str(), Some("userMessage" | "agentMessage"))
-                && previous_messages.contains(&(item["kind"].as_str().unwrap(), item["text"].as_str().unwrap_or("")))
-            { return Err(InvalidFinalSnapshot); }
+                && previous_messages.contains(&(
+                    item["kind"].as_str().unwrap(),
+                    item["text"].as_str().unwrap_or(""),
+                ))
+            {
+                return Err(InvalidFinalSnapshot);
+            }
             pending.push(item.clone());
         }
     }
@@ -285,22 +345,33 @@ mod tests {
             {"id":"u","type":"userMessage","text":"input"},
             {"id":"new","type":"reasoning","text":"new between shared anchors"},
             {"id":"a","type":"agentMessage","text":"final"}
-        ]})).unwrap();
-        assert_eq!(retain_final_items(&old, &mut next).unwrap(), (1,2));
-        assert_eq!(next["items"].as_array().unwrap().iter().map(|i|i["id"].as_str().unwrap()).collect::<Vec<_>>(),vec!["u","tool","new","a"]);
-        assert_eq!(next["items"][1]["detailText"],"output");
-        assert_eq!(next["items"][3]["text"],"final");
-        let before=next.clone();
-        let mut repeated=next.clone();
-        retain_final_items(&before,&mut repeated).unwrap();
-        assert_eq!(before,repeated);
+        ]}))
+        .unwrap();
+        assert_eq!(retain_final_items(&old, &mut next).unwrap(), (1, 2));
+        assert_eq!(
+            next["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["u", "tool", "new", "a"]
+        );
+        assert_eq!(next["items"][1]["detailText"], "output");
+        assert_eq!(next["items"][3]["text"], "final");
+        let before = next.clone();
+        let mut repeated = next.clone();
+        retain_final_items(&before, &mut repeated).unwrap();
+        assert_eq!(before, repeated);
         let mut sparse_tool=final_turn(&json!({"id":"t","status":"completed","items":[{"id":"tool","type":"commandExecution","status":"completed"}]})).unwrap();
-        retain_final_items(&before,&mut sparse_tool).unwrap();
-        assert_eq!(sparse_tool["items"][1]["detailText"],"output");
+        retain_final_items(&before, &mut sparse_tool).unwrap();
+        assert_eq!(sparse_tool["items"][1]["detailText"], "output");
     }
     #[test]
     fn final_identity_and_outcome_conflicts_do_not_modify_candidate() {
-        let old=turn(&json!({"id":"t","status":"completed","items":[{"id":"tool","type":"commandExecution","status":"completed","aggregatedOutput":"output"}]}));
+        let old = turn(
+            &json!({"id":"t","status":"completed","items":[{"id":"tool","type":"commandExecution","status":"completed","aggregatedOutput":"output"}]}),
+        );
         for raw in [
             json!({"id":"other","status":"completed","items":[]}),
             json!({"id":"t","status":"failed","items":[]}),
@@ -308,27 +379,44 @@ mod tests {
             json!({"id":"t","status":"completed","items":[{"id":"tool","type":"commandExecution","status":"completed","aggregatedOutput":"changed"}]}),
             json!({"id":"t","status":"completed","items":[{"id":"tool","type":"commandExecution","status":"inProgress"}]}),
         ] {
-            let mut candidate=final_turn(&raw).unwrap();let before=candidate.clone();
-            assert!(retain_final_items(&old,&mut candidate).is_err());assert_eq!(candidate,before);
+            let mut candidate = final_turn(&raw).unwrap();
+            let before = candidate.clone();
+            assert!(retain_final_items(&old, &mut candidate).is_err());
+            assert_eq!(candidate, before);
         }
-        for id in [Value::Null,json!(3),json!(""),json!("x".repeat(257))] {
-            assert!(final_turn(&json!({"id":"t","status":"completed","items":[{"id":id,"type":"agentMessage"}]})).is_err());
+        for id in [Value::Null, json!(3), json!(""), json!("x".repeat(257))] {
+            assert!(final_turn(
+                &json!({"id":"t","status":"completed","items":[{"id":id,"type":"agentMessage"}]})
+            )
+            .is_err());
         }
-        assert!(final_turn(&json!({"id":"t","status":"completed","items":[{"type":"agentMessage"}]})).is_err());
+        assert!(final_turn(
+            &json!({"id":"t","status":"completed","items":[{"type":"agentMessage"}]})
+        )
+        .is_err());
     }
     #[test]
     fn terminal_invocation_metadata_is_immutable_but_named_results_extend() {
-        let old=json!({"id":"tool","type":"mcpToolCall","tool":"fixed","server":"fixture","status":"completed","arguments":{"input":"sealed"},"result":{"content":[{"type":"text","text":"one"}]}});
-        let mut next=old.clone();next["result"]["content"].as_array_mut().unwrap().push(json!({"type":"text","text":"two"}));
-        let merged=retained_tool_envelope(old.clone(),next).unwrap();
-        assert_eq!(merged["result"]["content"].as_array().unwrap().len(),2);
-        for field in ["type","tool","server","arguments"] {
-            let mut changed=old.clone();
-            changed[field]=if field=="arguments"{json!({"input":"sealed-extra"})}else{json!(format!("{}-extra",old[field].as_str().unwrap()))};
-            assert!(retained_tool_envelope(old.clone(),changed).is_err());
+        let old = json!({"id":"tool","type":"mcpToolCall","tool":"fixed","server":"fixture","status":"completed","arguments":{"input":"sealed"},"result":{"content":[{"type":"text","text":"one"}]}});
+        let mut next = old.clone();
+        next["result"]["content"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type":"text","text":"two"}));
+        let merged = retained_tool_envelope(old.clone(), next).unwrap();
+        assert_eq!(merged["result"]["content"].as_array().unwrap().len(), 2);
+        for field in ["type", "tool", "server", "arguments"] {
+            let mut changed = old.clone();
+            changed[field] = if field == "arguments" {
+                json!({"input":"sealed-extra"})
+            } else {
+                json!(format!("{}-extra", old[field].as_str().unwrap()))
+            };
+            assert!(retained_tool_envelope(old.clone(), changed).is_err());
         }
-        let sparse=json!({"id":"tool","type":"mcpToolCall","tool":"","status":"completed","result":null});
-        assert_eq!(retained_tool_envelope(old.clone(),sparse).unwrap(),old);
+        let sparse =
+            json!({"id":"tool","type":"mcpToolCall","tool":"","status":"completed","result":null});
+        assert_eq!(retained_tool_envelope(old.clone(), sparse).unwrap(), old);
     }
     #[test]
     fn invalid_turn_identity_is_preserved_for_admission_rejection() {

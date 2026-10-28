@@ -40,18 +40,30 @@ fn uncertain(record: &Record) -> bool {
 /// - anything else (an unknown turn id, Claude input whose process died)
 ///   fails with an explanation and the queue continues.
 pub(super) fn reconcile(records: &mut VecDeque<Record>, turns: &[Value], claude: bool) {
-    let mut claimed: HashSet<String> = records.iter()
-        .filter_map(|r| r.submission["turn_id"].as_str().map(str::to_owned)).collect();
+    let mut claimed: HashSet<String> = records
+        .iter()
+        .filter_map(|r| r.submission["turn_id"].as_str().map(str::to_owned))
+        .collect();
     for record in records.iter_mut() {
         if !needs_recovery(record) {
             continue;
         }
-        let mut turn = record.submission["turn_id"].as_str()
+        let mut turn = record.submission["turn_id"]
+            .as_str()
             .and_then(|id| turns.iter().find(|turn| turn["id"].as_str() == Some(id)));
-        if turn.is_none() && record.submission["turn_id"].is_null() && !claude && !record.text.is_empty() {
-            turn = turns.iter().find(|turn| turn["id"].as_str().is_some_and(|id| !claimed.contains(id))
-                && turn["items"].as_array().is_some_and(|items| items.iter()
-                    .any(|item| item["kind"] == "userMessage" && item["text"] == record.text.as_str())));
+        if turn.is_none()
+            && record.submission["turn_id"].is_null()
+            && !claude
+            && !record.text.is_empty()
+        {
+            turn = turns.iter().find(|turn| {
+                turn["id"].as_str().is_some_and(|id| !claimed.contains(id))
+                    && turn["items"].as_array().is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item["kind"] == "userMessage" && item["text"] == record.text.as_str()
+                        })
+                    })
+            });
             if let Some(id) = turn.and_then(|turn| turn["id"].as_str()) {
                 claimed.insert(id.to_owned());
                 record.submission["turn_id"] = json!(id);
@@ -60,13 +72,15 @@ pub(super) fn reconcile(records: &mut VecDeque<Record>, turns: &[Value], claude:
         match turn {
             // Codex turns here all come from the provider; a Claude display
             // projection (task output) is never a receipt's turn.
-            Some(turn) if !claude || turn["projectionOnly"] != true => reconcile_record(record, turn),
+            Some(turn) if !claude || turn["projectionOnly"] != true => {
+                reconcile_record(record, turn)
+            }
             _ if record.submission["turn_id"].is_null() && !claude && !uncertain(record) => {
                 record.submission["state"] = json!("queued");
                 record.submission["error"] = Value::Null;
             }
             _ => {
-                record.submission["state"] = json!(if claude {"interrupted"} else {"failed"});
+                record.submission["state"] = json!(if claude { "interrupted" } else { "failed" });
                 record.submission["error"] = json!(if claude {
                     "The provider restarted while this prompt was running; it was not replayed"
                 } else {
@@ -77,7 +91,8 @@ pub(super) fn reconcile(records: &mut VecDeque<Record>, turns: &[Value], claude:
         // A Claude turn that was still running ended with its process.
         if claude && record.submission["state"] == "running" {
             record.submission["state"] = json!("interrupted");
-            record.submission["error"] = json!("The provider restarted while this prompt was running; it was not replayed");
+            record.submission["error"] =
+                json!("The provider restarted while this prompt was running; it was not replayed");
         }
     }
 }
@@ -139,11 +154,18 @@ mod tests {
         }
     }
     fn history(status: &str) -> Vec<Value> {
-        vec![json!({"id":"accepted","status":status,"error":null,"items":[{"id":"u","kind":"userMessage","text":"input"},{"id":"answer","kind":"agentMessage","text":"answer"}]})]
+        vec![
+            json!({"id":"accepted","status":status,"error":null,"items":[{"id":"u","kind":"userMessage","text":"input"},{"id":"answer","kind":"agentMessage","text":"answer"}]}),
+        ]
     }
     #[test]
     fn acknowledged_terminal_turns_settle_without_touching_identity_or_ack() {
-        for (status, expected) in [("completed", "done"), ("failed", "failed"), ("interrupted", "interrupted"), ("inProgress", "running")] {
+        for (status, expected) in [
+            ("completed", "done"),
+            ("failed", "failed"),
+            ("interrupted", "interrupted"),
+            ("inProgress", "running"),
+        ] {
             let mut records = VecDeque::from([record("running", json!("accepted"), Value::Null)]);
             reconcile(&mut records, &history(status), false);
             assert_eq!(records[0].submission["state"], expected);
@@ -160,15 +182,24 @@ mod tests {
         assert_eq!(records[0].submission["state"], "done");
         let mut records = VecDeque::from([record("running", Value::Null, Value::Null)]);
         reconcile(&mut records, &[], false);
-        assert_eq!(records[0].submission["state"], "queued", "not in history: not delivered");
+        assert_eq!(
+            records[0].submission["state"], "queued",
+            "not in history: not delivered"
+        );
         // A turn already owned by another receipt is never claimed twice.
-        let mut records = VecDeque::from([record("done", json!("accepted"), Value::Null), record("running", Value::Null, Value::Null)]);
+        let mut records = VecDeque::from([
+            record("done", json!("accepted"), Value::Null),
+            record("running", Value::Null, Value::Null),
+        ]);
         reconcile(&mut records, &history("completed"), false);
         assert_eq!(records[1].submission["state"], "queued");
     }
     #[test]
     fn unknown_turn_ids_and_claude_running_input_fail_without_pausing() {
-        let mut records = VecDeque::from([record("running", json!("another-turn"), Value::Null), record("queued", Value::Null, Value::Null)]);
+        let mut records = VecDeque::from([
+            record("running", json!("another-turn"), Value::Null),
+            record("queued", Value::Null, Value::Null),
+        ]);
         let queued = serde_json::to_value(&records[1]).unwrap();
         reconcile(&mut records, &history("completed"), false);
         assert_eq!(records[0].submission["state"], "failed");

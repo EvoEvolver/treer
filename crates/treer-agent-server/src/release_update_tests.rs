@@ -272,7 +272,12 @@ async fn signed_release_download_verifies_all_binaries() {
     change_manifest(&mut older, |m| {
         m["artifacts"].as_array_mut().unwrap().pop();
     });
-    assert!(fetch_release(older, VERSION).await.0.unwrap().host.is_none());
+    assert!(fetch_release(older, VERSION)
+        .await
+        .0
+        .unwrap()
+        .host
+        .is_none());
 }
 
 #[tokio::test]
@@ -285,11 +290,15 @@ async fn launcher_only_download_fetches_just_the_launcher() {
     assert_eq!(bytes, BINARY);
     let fetched = requests.lock().unwrap().clone();
     assert!(fetched.contains(&LAUNCHER.to_owned()));
-    assert!(!fetched.iter().any(|path| path == CONTROLLER || path == CLI || path == HOST));
+    assert!(!fetched
+        .iter()
+        .any(|path| path == CONTROLLER || path == CLI || path == HOST));
     let untrusted = SigningKey::from_bytes(&[9; 32]).verifying_key();
-    assert!(download_launcher(&client(), base, VERSION, &untrusted, PLATFORM)
-        .await
-        .is_err());
+    assert!(
+        download_launcher(&client(), base, VERSION, &untrusted, PLATFORM)
+            .await
+            .is_err()
+    );
     task.abort();
 }
 
