@@ -397,6 +397,7 @@
       "--body-file": "value",
       "--context": "value",
       "--external-source-file": "value",
+      "--from-endpoint": "value",
       "--idempotency-key": "value",
       "--to": "value"
     },
@@ -411,6 +412,7 @@
       "--correlation-id": "value",
       "--expires-at": "value",
       "--external-source-file": "value",
+      "--from-endpoint": "value",
       "--idempotency-key": "value",
       "--stdin-envelope": "none",
       "--to": "value",
