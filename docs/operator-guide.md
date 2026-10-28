@@ -305,10 +305,10 @@ successful run, collect the exact commit locally with the authenticated GitHub
 CLI:
 
 ```bash
-just collect-artifacts HEAD
+just fetch-artifacts HEAD
 ```
 
-The collector rejects missing platforms, mismatched commit metadata, and
+The fetcher rejects missing platforms, mismatched commit metadata, and
 invalid checksums before placing the files under `dist/<platform>`. Set
 `TREER_ARTIFACT_RUN_ID` to select a particular successful workflow run.
 
@@ -1280,13 +1280,14 @@ Changes intended for the managed Railway deployment go to Canary before
 Production. From an authenticated operator checkout, run:
 
 ```bash
-just release-canary HEAD
+just deploy canary
+just test-canary
+just deploy production
 ```
 
-The command verifies a clean commit, runs the complete local gate, deploys the
-Canary Proxy and Cloudflare App, then verifies cross-machine virtual networking,
-public wildcard ingress, and traffic accounting. It writes a release manifest;
-Production accepts only that manifest through `just promote-production`. See
+`just deploy` verifies a clean commit, deploys the Proxy and Cloudflare App and
+checks the served artifacts; `just test-canary` verifies cross-machine virtual
+networking, public wildcard ingress, and traffic accounting on Canary. See
 [the release process](releases.md) and [Canary runbook](canary.md).
 
 Open the App URL to create Agents and manage Agents and Apps together in the

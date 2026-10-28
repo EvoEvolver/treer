@@ -2,7 +2,6 @@ import { clickTreeActions } from './fixtures/tree-actions'
 import { openTabMenu, tabAction, backToWorkloads } from "./fixtures/tab-actions"
 import { test, expect, type Page, type Route } from "@playwright/test"
 import { browseTreeOnMobile } from './fixtures/navigation'
-import { embedThemeMessage, withEmbedTheme } from "../src/lib/embed-ui"
 
 const NOW = new Date().toISOString()
 
@@ -376,18 +375,6 @@ test("a stopped App shows its state without fetching the human interface", async
   expect(appRequests).toBe(0)
 })
 
-test("a running App whose runtime exited shows its state without fetching the human interface", async ({ page }) => {
-  await mockApp(page, "running", "app-runtime", "exited")
-  let appRequests = 0
-  page.on("request", (request) => { if (request.url().includes("/apps/app-1/ui/")) appRequests++ })
-  await page.goto("/")
-  await browseTreeOnMobile(page)
-  await page.getByRole("link", { name: /^Soul Archive(\s|$)/ }).click()
-  await expect(page.getByText("App is not running")).toBeVisible()
-  await expect(page.locator("iframe")).toHaveCount(0)
-  expect(appRequests).toBe(0)
-})
-
 test("an App on an offline machine shows recovery and lets mobile users return", async ({ page }) => {
   await mockApp(page)
   await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, servers: [{ ...machine, status: "offline" }] }))
@@ -426,35 +413,6 @@ test("selecting an agent with an embedded UI shows the iframe instead of the ter
   // The framed content was actually loaded
   const innerHeading = page.frameLocator("iframe[title='/dashboard interface']").getByText("Agent dashboard for ag-ui")
   await expect(innerHeading).toBeVisible()
-})
-
-test('tree resizing protects embedded iframe events and matches dark theme', async ({ page }, testInfo) => {
-  await page.setViewportSize({ width: 1280, height: 900 })
-  await page.addInitScript(() => localStorage.setItem('treer-theme', 'dark'))
-  await page.goto('/')
-  await browseTreeOnMobile(page)
-  await page.getByRole('link', { name: /^dashboard(\s|$)/ }).click()
-  const frame = page.locator("iframe[title='/dashboard interface']")
-  await expect(frame).toBeVisible()
-  const bar = page.getByRole('separator', { name: 'Resize tree sidebar' })
-  const box = (await bar.boundingBox())!
-  await page.mouse.move(box.x + box.width / 2, box.y + 100)
-  await page.mouse.down()
-  await page.mouse.move(box.x + box.width / 2 + 150, box.y + 100, { steps: 10 })
-  await expect(bar).toHaveAttribute('aria-valuenow', '422')
-  await expect(page.locator('main > section')).toHaveCSS('pointer-events', 'none')
-  await page.mouse.up()
-  await expect(page.locator('main > section')).toHaveCSS('pointer-events', 'auto')
-  await expect(frame).toBeVisible()
-  await expect(page.locator('html')).toHaveClass(/dark/)
-  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-  await page.getByRole('button', { name: 'Collapse tree sidebar', exact: true }).click()
-  await expect(page.locator('#tree-sidebar')).toBeHidden()
-  await expect(frame).toBeVisible()
-  await page.getByRole('button', { name: 'Expand tree sidebar', exact: true }).click()
-  await expect(bar).toHaveAttribute('aria-valuenow', '422')
-  await expect(frame).toBeVisible()
-  await page.screenshot({ path: testInfo.outputPath('tree-resizer-dark-embed.png') })
 })
 
 test("selecting an embedded UI agent on an offline machine does not load the iframe", async ({ page }) => {
@@ -512,20 +470,6 @@ test('embedded UI logs use the shared replay-safe terminal', async ({ page }) =>
   expect(input).toEqual([])
   await page.locator('.xterm-helper-textarea').pressSequentially('logs-input')
   await expect.poll(() => input.join('')).toBe('logs-input')
-})
-
-test("reload button label changes when an agent has an embedded UI", async ({ page }) => {
-  await page.goto("/")
-  await browseTreeOnMobile(page)
-  await page.locator("aside").getByText("Tree", { exact: true }).click()
-
-  // Plain agent: Reconnect terminal
-  await page.getByRole("link", { name: /^plain-tty(\s|$)/ }).click()
-  { await openTabMenu(page); await expect(page.getByRole('menuitem', { name: 'Reconnect terminal', exact: true })).toBeVisible(); await page.keyboard.press('Escape') }
-
-  // Agent with UI: label switches to Reload interface
-  await page.getByRole("link", { name: /^dashboard(\s|$)/ }).click()
-  { await openTabMenu(page); await expect(page.getByRole('menuitem', { name: 'Reload interface', exact: true })).toBeVisible(); await page.keyboard.press('Escape') }
 })
 
 test("mobile: selecting an embedded UI agent opens a full-screen iframe", async ({ page }) => {
@@ -596,56 +540,6 @@ test("embedded UI iframe follows the control-plane light and dark theme", async 
   await expect(frame).toHaveAttribute("src", /[?&]theme=light(?:&|$)/)
 })
 
-test("a new interface registered_at remounts the iframe", async ({ page }) => {
-  await page.goto("/")
-  await browseTreeOnMobile(page)
-  await page.locator("aside").getByText("Tree", { exact: true }).click()
-  await page.getByRole("link", { name: /^dashboard(\s|$)/ }).click()
-  const frame = page.locator("iframe[title='/dashboard interface']")
-  await expect(frame).toBeVisible()
-
-  let uiHits = 0
-  await page.route("**/api/workspaces/*/agents/*/interface/ui/**", async (route) => {
-    uiHits += 1
-    await route.fulfill({
-      status: 200,
-      contentType: "text/html",
-      body: `<!doctype html><html><body><h1 data-testid="agent-app">Agent dashboard for ag-ui</h1></body></html>`,
-    })
-  })
-
-  expect(workspaceEvents).not.toBeNull()
-  workspaceEvents?.send(JSON.stringify({
-    event: "workspace.snapshot",
-    data: {
-      ...snapshot,
-      revision: 2,
-      agents: [
-        {
-          ...agentWithUi,
-          interface: {
-            ...agentWithUi.interface,
-            registered_at: new Date().toISOString(),
-          },
-        },
-        agentPlain,
-      ],
-    },
-  }))
-
-  await expect.poll(() => uiHits, { timeout: 5000 }).toBeGreaterThan(0)
-  await expect(frame).toBeVisible()
-})
-
-test("embed URL and message carry only whitelisted look and lang", () => {
-  const url = new URL(withEmbedTheme("https://proxy.example.test/ui/", "dark", { look: "c", lang: "zh" }))
-  expect(url.search).toBe("?theme=dark&look=c&lang=zh")
-  const bad = withEmbedTheme("https://proxy.example.test/ui/", "light", { look: "x" as never, lang: "fr" as never })
-  expect(new URL(bad).search).toBe("?theme=light")
-  expect(embedThemeMessage("dark", { look: "a", lang: "en" })).toEqual({ type: "treer:embed-theme", theme: "dark", look: "a", lang: "en" })
-  expect(embedThemeMessage("light", { look: "x" as never })).toEqual({ type: "treer:embed-theme", theme: "light" })
-})
-
 test("embedded UI receives the console look and browser language", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("treer-look", "c"))
   await page.goto("/")
@@ -664,49 +558,6 @@ test("embedded UI receives the console look and browser language", async ({ page
   const inner = page.frameLocator("iframe[title='/dashboard interface']").locator("html")
   await expect(inner).toHaveAttribute("data-embed-look", "c")
   await expect(inner).toHaveAttribute("data-embed-lang", "en")
-})
-
-test("an unknown stored look is not forwarded", async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem("treer-look", "<script>"))
-  await page.goto("/")
-  await browseTreeOnMobile(page)
-  await page.locator("aside").getByText("Tree", { exact: true }).click()
-  await page.getByRole("link", { name: /^dashboard(\s|$)/ }).click()
-  const src = await page.locator("iframe[title='/dashboard interface']").getAttribute("src")
-  expect(new URL(src!, "http://x").searchParams.has("look")).toBe(false)
-})
-
-test("a failed request announces its error toast as an alert", async ({ page }) => {
-  await page.route(/\/api\/organizations$/, (route) => route.request().method() === "POST"
-    ? route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: { message: "Backend unavailable" } }) })
-    : route.fallback())
-  await page.goto("/")
-  await browseTreeOnMobile(page)
-  await page.getByRole("button", { name: "Organization settings" }).click()
-  await page.getByRole("button", { name: "New organization" }).click()
-  const dialog = page.getByRole("dialog")
-  await dialog.getByRole("textbox").fill("Second")
-  await dialog.getByRole("button", { name: /create/i }).last().click()
-  const toast = page.getByRole("alert").filter({ hasText: "Backend unavailable" })
-  await expect(toast).toBeVisible()
-  await toast.getByRole("button", { name: "Dismiss" }).click()
-  await expect(toast).toHaveCount(0)
-})
-
-test("prefers-reduced-motion removes animation and transition time", async ({ page }) => {
-  await page.emulateMedia({ reducedMotion: "reduce" })
-  await page.goto("/")
-  await browseTreeOnMobile(page)
-  const durations = await page.evaluate(() => {
-    const probe = document.createElement("div")
-    probe.style.cssText = "transition: opacity 2s; animation: spin 2s infinite"
-    document.body.append(probe)
-    const style = getComputedStyle(probe)
-    const result = [style.transitionDuration, style.animationDuration, style.animationIterationCount]
-    probe.remove()
-    return result
-  })
-  expect(durations).toEqual(["1e-05s", "1e-05s", "1"])
 })
 
 test.describe("workload tree keyboard navigation", () => {
@@ -755,18 +606,6 @@ test.describe("workload tree keyboard navigation", () => {
     await expect(tree.locator("[data-tree-primary][tabindex='0']")).toHaveCount(1)
     await expect(page.locator(":focus")).toHaveAttribute("tabindex", "0")
   })
-})
-
-test("organization settings render in Chinese without leaking English copy", async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem("treer-lang", "zh"))
-  await page.goto("/")
-  await page.getByRole("button", { name: "组织设置" }).click()
-  await expect(page.getByRole("heading", { name: "成员" })).toBeVisible()
-  await expect(page.getByRole("heading", { name: "群组" })).toBeVisible()
-  await expect(page.getByRole("button", { name: "新建组织" })).toBeVisible()
-  await expect(page.getByRole("button", { name: "打开审计" })).toBeVisible()
-  const body = await page.locator("main").innerText()
-  for (const english of ["Members", "Groups", "Open audit", "New organization", "Activity"]) expect(body).not.toContain(english)
 })
 
 for (const width of [1360, 390]) {

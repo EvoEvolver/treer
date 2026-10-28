@@ -1,692 +1,149 @@
 # Release process
 
 - Status: maintained
-- Last reviewed: 2026-10-11
+- Last reviewed: 2026-10-27
 
-Treer promotes an explicit Git commit through Canary before Production. A
-release is not a branch name, a mutable `latest` label, or the contents of an
-operator's current directory. The ignored `.treer/releases/` directory stores
-the local release manifest and the exact frontend artifact that passed Canary.
+A release is an exact Git commit on `main`. The same commit is built once per
+platform by CI, deployed to the hosted Canary, then to Production, tagged for
+self-host images, and optionally signed into the R2 update channels.
 
-## Security release upgrade notes — 2026-10-12
+```bash
+just check                    # everything CI runs, locally (needs `just test-db-up`)
+just deploy canary            # hosted Canary: Railway Proxy + Cloudflare App
+just test-canary              # two-machine black-box test against Canary
+just deploy production        # same clean commit, must be in origin/main
+git tag vX.Y.Z && git push origin vX.Y.Z   # GHCR self-host images + tag artifacts
+just artifacts-prepare vX.Y.Z && just artifacts-canary vX.Y.Z   # signed R2 channel
+just artifacts-stable vX.Y.Z
+```
 
-- Policy Provider editing is now denied until an operator configures its
-  `POLICY_ADMIN_TOKEN`; existing editing clients must supply the corresponding
-  Bearer token. This token is a separate operator capability, not a Treer OAuth
-  administrator role. Keep it out of source, shared browser bundles and persisted
-  client storage. The Policy UI accepts it in a password field for page memory
-  only; same-account workloads still are not isolated from its server environment.
-- Upgrade Core before switching Agents to the strict launcher. An old Controller
-  cannot provide the required forwarding provenance and the new launcher returns
-  HTTP 403. Machine rollout order is **Proxy → Controller → CLI → coordinated
-  Agent restart onto the new launcher**. A Canary deployment does not update
-  enrolled machines or restart their Agents automatically.
-- Unix bootstrap now verifies every binary against same-origin `SHA256SUMS`
-  before installing any of them. Missing, invalid or mismatched checksums abort;
-  this is not independent publisher authentication or rollback protection.
-- Workspace Policy still defaults to allow without an enforcing Policy. The
-  shared machine account is not a sandbox; token revocation windows, legacy
-  identity limitations and other [unsupported security claims](security.md#unsupported-claims)
-  remain. Do not present this release as a security certification.
+## Hosted platform
 
-## Platform boundary
-
-Railway runs the Proxy replicas, PostgreSQL, NATS, and the two-machine Canary
-test services. Cloudflare Workers Static Assets runs the independent React App:
+Railway runs the Proxy replicas, PostgreSQL, NATS and the two Canary test
+machines. Cloudflare Workers Static Assets serves the React App; only `/health`
+and `/config.json` run Worker code, so one bundle works for any Proxy origin.
 
 | Environment | App | Proxy |
 | --- | --- | --- |
 | Canary | `https://app.canary.treer.ai/` | `https://proxy.canary.treer.ai/` |
 | Production | `https://app.treer.ai/` | `https://proxy.treer.ai/` |
 
-The App Worker serves Vite output directly from Cloudflare. Only `/health` and
-`/config.json` invoke Worker code. Runtime configuration keeps one frontend
-bundle independent of the Proxy origin.
+`scripts/deploy-hosted.sh canary|production` (`just deploy`) requires a clean
+worktree and authenticated `railway`, `wrangler` (through `pnpm`), `gh`, `jq`
+and `curl`. It:
 
-The optional Cloudflare Workers Builds integration validates `web/` on pushes
-to the configured branch and uploads an inactive Canary version. It does not
-deploy that version to traffic. Canary and Production remain explicit operator
-promotions, so an ordinary source push cannot bypass the release gate.
+1. puts verified native machine artifacts for `HEAD` into `dist/`
+   (`scripts/fetch-machine-artifacts.sh`, see below);
+2. uploads `git archive HEAD` plus `dist/` to Railway with
+   `railway.json` rewritten to `Dockerfile.hosted`, which bundles all fifteen
+   machine binaries without recompiling them and re-verifies them in the image;
+3. builds `web/` and runs `wrangler deploy --env <target>`;
+4. waits for the Railway deployment, then checks Proxy health, every served
+   `/artifacts/<platform>/<binary>` byte for byte without redirects
+   (`verify-served-artifacts.sh`), App `/health` and `/config.json`, and the
+   served App HTML against the local build (`verify-served-frontend.py`);
+5. on Canary checks the wildcard ingress certificate; on Production the wildcard
+   404 probe. Production also refuses a commit not contained in `origin/main`.
 
-Workers Builds requires a one-time Cloudflare GitHub App authorization. Connect
-`EvoEvolver/treer` to `treer-app-canary` and use these settings:
+Railway IDs and URLs default to the Treer project; override with
+`TREER_RAILWAY_PROJECT_ID`, `TREER_PROXY_SERVICE`, `TREER_RAILWAY_ENVIRONMENT`,
+`TREER_PROXY_URL`, `TREER_APP_URL`, `TREER_INGRESS_URL`,
+`TREER_WORKER_ENVIRONMENT` and `TREER_DEPLOY_TIMEOUT`. `just test-canary` and its
+fixtures are described in [Canary environment](canary.md).
 
-| Setting | Value |
-| --- | --- |
-| Production branch | `main` |
-| Root directory | `/` |
-| Build command | Empty |
-| Deploy command | `pnpm --dir web install --frozen-lockfile && pnpm --dir web build && pnpm --dir web worker:upload:canary` |
-| Non-production/version command | Same as the deploy command |
-| Build watch include path | `web/**` |
-| Build cache | Enabled |
+Optional Cloudflare Workers Builds may upload inactive Canary App versions from
+`main` (`worker:upload:canary`); uploads never receive traffic.
 
-The self-contained command is intentional: Workers Builds may invoke a version
-or deploy command without a separate dependency-install/build phase. Its final
-step uses `wrangler versions upload`, not `wrangler deploy`, so a successful
-source build uploads an inactive Canary version without changing active Canary
-or Production traffic. Production is only selected explicitly with
-`--env production` during operator promotion.
-
-Canary version and branch-alias Preview URLs are public internet endpoints.
-They make an uploaded frontend candidate inspectable while the base
-`treer-app-canary.<account>.workers.dev` route remains disabled. Preview URLs
-use Canary runtime configuration and are build evidence only: they do not
-deploy the Railway Proxy, Core Message code, or Mail/Telegram App processes.
+Roll back the App with `wrangler rollback --env production <version-id>` and the
+Proxy by redeploying its previous Railway deployment. Database contraction is
+never part of a code rollback: use expand-first PostgreSQL changes so old and
+new Proxy replicas can overlap, and add Proxy API fields before the App uses them.
+A Controller whose startup store is v2 (reservation fences) cannot roll back to a
+Controller without `agent.reservation-fence.v1`; never delete fences to force it.
+Back up App state (Mail, Telegram) before replacing an App; stop App processes,
+not Core Message routes, to stop channel traffic.
 
 ## Machine artifacts
 
-Official native builds use Node 22 and lockfile-pinned `npm ci --ignore-scripts` in the trusted
-CI checkout to prepare the launcher's portable runtime and UI. Dependency
-lifecycle scripts are disabled; target installation stays offline and
-does not require npm or Git. The bundle manifest records the exact source commit
-and every file's size/SHA256. Preparation requires all six launcher entry assets,
-rejects trailing dots/spaces and case-insensitive path collisions, verifies bytes, and
-sets `TREER_LAUNCHER_PAYLOAD_DIR` plus `TREER_REQUIRE_LAUNCHER_BUNDLE=1` before
-Cargo. Missing or invalid portable runtime payloads fail official builds; Core
-also validates the actual embedded bytes. Controller signatures cover the
-payload, not the externally selected Node executable. Native Node, PowerShell
-and installer checks are only claimed after their platform jobs actually pass.
-Local artifact staging and self-host image builds use the same preparation.
-
-
-The `Build release artifacts` GitHub workflow runs only by manual dispatch or
-for a pushed `v*` tag. Its matrix uses native runners for `linux-x86_64`,
-`linux-aarch64`, `darwin-x86_64`, `darwin-aarch64`, and `windows-x86_64`. Windows
-uses a native MSVC runner and gates artifacts on IPC/ConPTY, Host lifecycle,
-Controller/CLI, installer checksum, and PATH tests. Each platform artifact
-contains the CLI, Host, Controller, source commit metadata, and checksums. The
-workflow has read-only repository permission and never publishes a GitHub
-Release or writes to R2.
-
-The native Windows artifact gate explicitly runs Controller
-`machine_file_transfer::tests` and CLI `machine_file::tests`, in addition to the
-platform filesystem tests. Each command checks its exit status before staging
-artifacts. These checks require the file-transfer implementation in the fixed
-candidate; changing the workflow alone is not native Windows acceptance evidence.
-
-Windows binaries are PE `.exe` files in the build output. Staged artifacts and
-public download keys retain the three logical binary names without a suffix;
-the PowerShell installer saves them with `.exe`. Each platform directory also
-contains `SHA256SUMS`, available through `/artifacts/<platform>/SHA256SUMS` on a
-Proxy that carries the candidate artifact tree. Existing fallback release
-servers must supply `SHA256SUMS-<platform>` as well as the three binaries;
-Windows installation fails closed if that checksum asset is absent.
-
-Installed Controller hot updates consume the separately signed R2 channel and
-version manifest rather than these unsigned flat Proxy endpoints. Provision
-the publisher's SPKI Ed25519 public key locally before updating. Both signatures,
-the channel's manifest SHA256, and both binaries' signed sizes/SHA256 must pass
-before any downloaded code runs. See [signed artifact distribution](operator-guide.md#publish-signed-r2-releases)
-for publishing and [machine updates](operator-guide.md#controller-hot-updates)
-for invocation. Local/unsigned candidate artifacts remain available to initial
-installers and Canary tests; they cannot bypass the updater's signature checks.
-
-After the workflow succeeds, collect the exact commit into the ignored local
-artifact tree:
-
-```bash
-just collect-artifacts HEAD
-```
-
-This command requires authenticated `gh` and `jq`. It selects a successful run
-whose `headSha` is the requested commit, validates all five metadata files and
-checksums, restores executable permissions, and writes `dist/<platform>/`.
-Set `TREER_ARTIFACT_RUN_ID` when a manually dispatched run must be selected
-explicitly. The existing `artifacts-prepare`, `artifacts-canary`, and
-`artifacts-stable` commands then sign and distribute those bytes without
-recompiling them.
-
-Hosted deployment automatically runs `scripts/ensure-machine-artifacts.sh`.
-It reuses verified `dist/` bytes or dispatches the native workflow with the exact
-source commit and waits for all five platforms. Manual dispatch can build a
-specific commit with its `revision` input; its workflow `headSha` may differ from
-the built revision, so the source metadata is authoritative. Stale or incomplete
-local `dist/` trees fail validation rather than being overwritten. To prepare
-the artifacts independently, run `just ensure-artifacts HEAD`.
-
-`Dockerfile.hosted` bundles all twelve native binaries without recompiling them.
-The upload directory contains only `git archive` source from the clean candidate
-commit and verified artifacts. Its generated Railway configuration selects this
-Dockerfile; self-hosted/GHCR builds continue using `Dockerfile`. Validation runs
-both before changing deployment variables and inside the hosted image build.
-After deployment, all twelve public downloads must return HTTP 200 without a
-redirect and match the collected bytes. This prevents macOS installs from
-silently falling back to an older GitHub `latest` Release.
-
-### Reusing native artifacts for web, apps and docs changes
-
-The CLI, Host and Controller are built from `crates/`, the Cargo and toolchain
-files, `skills/` and `launchers/agent`. When a candidate changes only paths under
-`web/`, `apps/`, `docs/` or the root `README.md` since an earlier `canary_passed` commit, waiting for a
-new five-platform build adds nothing. `scripts/ensure-machine-artifacts.sh` then
-calls `scripts/reuse-machine-artifacts.sh` before dispatching a native run, but
-only when no native run exists for the exact commit. It reuses the `dist/` of the
-newest `canary_passed` commit in `.treer/canary-checkouts/` that is an ancestor of
-the candidate, and only if all of the following hold:
-
-- `git diff --no-renames --name-only` between the two commits lists only
-  `web/`, `apps/` and `docs/` paths or the exact root `README.md` (a rename out of a native path is a change;
-  any other or unknown path forces the normal build);
-- that commit's manifest is `canary_passed`, records the SHA-256 of all 25
-  artifact files, and its `dist/` still matches those recorded hashes byte for
-  byte (a manifest without hashes, or a `dist/` whose binaries and checksum file
-  were both rewritten, is never reused);
-- its `dist/` also passes the same metadata, checksum, executable-bit and version
-  verification as a fresh build;
-- the copy is verified again for the candidate before use.
-
-The reused `dist/` carries `artifact-provenance.json` (`source_commit` = the
-commit the binaries were really built from, `passed_release_commit`,
-`candidate_commit`, and the SHA-256 of all 25 files: three binaries,
-`SHA256SUMS` and `build-metadata.json` for each platform). When the passed
-release itself reused earlier binaries, the original build commit stays the
-source and the ancestry and path checks run against it. `verify-machine-artifacts.sh` accepts artifacts built for
-another commit only with that file and re-derives ancestry and the path
-allowlist from git itself, so a forged provenance file cannot launder a native
-change (the hosted image's artifacts stage has no repository, so there it re-checks
-the bytes, hashes and metadata only, with `TREER_ARTIFACT_VERIFY_NO_GIT=1`; the
-ancestry and allowlist check ran on the host in `stage-hosted-proxy.sh`), and bytes altered after the copy fail the recorded hashes even if the
-checksum files were rewritten. The Canary manifest records
-`machine_artifacts: {source_commit, reused, files}` for every release (the same
-25 hashes), the Proxy serves the reused bytes, and installed binaries and the
-embedded launcher keep reporting the commit they were actually built from. The
-trust base is the operator's local `.treer/canary-checkouts/` state, as for any
-collected `dist/`: the recorded hashes pin what was verified at copy time, but
-they are not a signature or an independent pin of the previous release's bytes. Retired native-client paths are not on the allowlist; unknown paths still require
-a native build. The
-Proxy serves only the three binaries and `SHA256SUMS` per platform, so the
-provenance file is never downloaded by clients, and the installed binaries'
-reported commit (the build commit) is not treated as a downgrade of the
-candidate. The log names the chosen source and the number of changed paths, and
-the manifest records whether reuse was enabled. Set `TREER_REUSE_NATIVE_ARTIFACTS=0` to
-force a native build. The hosted Proxy and the Cloudflare Worker are always built
-or deployed from the candidate, so changes to `apps/policy` (embedded in the
-Proxy) and to the frontend still ship.
-
-## Workspace Apps
-
-Both Proxy Docker build contexts include the Policy client and all other embedded
-Policy assets. The release tooling gate checks these files against the source
-`include_bytes!` references before an image build.
-
-Mail and Telegram are source Apps, not additional Rust machine binaries and not
-part of the Cloudflare control-plane artifact. Deploy them from the same clean
-source commit, build Mail's `web/dist`, and record the revision. Configuration,
-Python bytecode, channel secrets, and App state are never release artifacts.
-App supervision, rollback, state migration, and isolation use the deployment's
-normal service tooling; Treer has no App package installer.
-
-## Graded gates and staging batches
-
-`python3 scripts/release-grade.py <base> <head>` classifies a candidate by the
-paths it changes and prints the gates it must pass (`--json` for tooling,
-`--urgent` for a release that must never be batched). It only plans; it runs no
-gate, pushes nothing and deploys nothing. Any path that is not listed below,
-including a new top-level directory, classifies as core, so a new area can only
-make a release stricter.
-
-| Changed paths | Local gate | Native build, Canary and Policy check |
-| --- | --- | --- |
-| `docs/`, root `*.md` only | `node scripts/check-docs.mjs` | not required |
-| `apps/` only | docs check plus each changed App's own tests and `npm run check` | not required; the App owner deploys the App after CI |
-| `web/` | web typecheck, build and Playwright | Canary and the Policy check required; for `web/` changes the native build is reused from a previous `canary_passed` commit when [allowed](#reusing-native-artifacts-for-web-apps-and-docs-changes) |
-| `launchers/` | `just agent-launcher-test` | required: the Controller embeds the launcher payload |
-| `scripts/`, `.github/`, `justfile` that are not part of the release pipeline | `just check` | not required |
-| release pipeline: canary, deploy, promote, artifact staging/verification, machine-update scripts and `build-release-artifacts.yml`/`publish-ghcr.yml` | `just check` | required; ships alone |
-| `crates/`, `deploy/`, `canary/`, `native/`, `skills/` (embedded in the CLI), build files, unknown paths | `just check` | required; ships alone |
-
-A mixed change takes the union of its components' gates, and any core path
-makes it a core release. `.gitattributes` and `.gitignore` alone do not raise the
-grade. Graded gating changes only which local gate and which shipping steps
-apply. `just check` itself is unchanged, CI still runs every job on the exact
-SHA, a skipped gate is never replaced by a rerun, and nothing here lets a
-candidate reach Canary without the exact-commit native artifacts that
-`just canary` already requires.
-
-Frozen branches that their owners and the required reviewers have approved can
-be released together instead of one Canary per branch:
-
-1. Merge approved web, launcher and apps branches into a staging integration
-   branch based on `origin/main`, one merge per branch, recording each source
-   commit and proving by `git diff` that the staged tree is the union of the
-   sources.
-2. Cut one candidate from staging, run the graded local gate for the union of
-   its paths, push the exact SHA to `main`, then run CI, the native workflow and
-   `just canary` once for the whole batch. Record each step on the batch's
-   release ticket.
-3. Machine upgrades take the whole batch at once. Launcher changes always travel
-   inside the Controller build, so a batch that contains one is upgraded through
-   the normal Controller update, not a separate launcher path.
-
-A batch is cut when the leader asks for it, when approved work has waited a day,
-or when a release candidate has accumulated enough approved branches that
-testing them separately would cost more than testing them together. These rules
-do not batch:
-
-- Security fixes and blocking bugs release alone and immediately.
-- Core changes (`crates/`, authentication, Policy, migrations) and changes to the
-  release pipeline scripts release alone so that a failure points at one change.
-  Plain tooling changes may share a release with other tooling or docs.
-- A branch whose review is incomplete or whose tests are red waits for the next
-  batch; it is never carried in with a note.
-
-When a gate fails and passes on its single permitted rerun, the release does not
-continue until a ticket labelled `flaky` exists, assigned to the component
-owner, containing the failing job, the test name, the exact SHA, the CI run and
-the saved log path. A rerun that passes is evidence of flakiness, not of
-correctness.
-
-## Release tickets
-
-Every release candidate, review and acceptance is its own Issues ticket, and the
-order between them is `blocked_by`, not a chat instruction. One `[Release]`
-ticket (label `type:release`, assigned to the release owner) carries one comment
-per step in the form `[release] <step> <SHA> <result>` for integrate, check,
-push, CI, native, canary and Policy check, quoting the exact full commit and the
-log or receipt path. Each required reviewer gets a `[Review]` ticket that blocks
-the release, and each real-target acceptance (for example an official Windows
-Controller) gets an `[Acceptance]` ticket blocked by the release. A gate that
-fails once and passes on its permitted rerun additionally gets a `flaky` ticket
-(see [Graded gates](#graded-gates-and-staging-batches)).
-
-When a Canary candidate reused native artifacts, the machines run binaries that
-report their real build commit, not the candidate's. The Policy check therefore
-takes that commit explicitly (`--controller-commit`, the manifest's
-`machine_artifacts.source_commit`), and the receipt records it; for a fresh native
-build it stays the candidate commit.
-
-### Policy check audit scope
-
-The default-install check scans the Proxy responses, deployment logs and the
-workspace audit feed for the Policy admin token. The audit feed of the Canary
-workspace grows with every release (about 90,000 events at v0.1.14 plus a few
-trains), and scanning all of it took about 5 minutes per machine, growing each
-time, while the real work of the check takes about 10 seconds. Per release the
-check therefore runs with `--audit-scope run`: the same endpoint and the same
-assertions, limited to the events written after the run started, plus a sanity
-assertion that the run produced audit events (an empty window cannot pass).
-Two rules keep the history covered:
-
-- a `--audit-scope full` sweep (the whole history, the old behaviour) runs at
-  least daily and before any Production promotion or stable tag; a run-scoped
-  check refuses to start unless the last full sweep passed within 24 hours, and a
-  failed sweep blocks the next train and is reported on the pinned release queue;
-- every receipt records `audit_scope` (the starting sequence for a run scope),
-  `audit_new_actions`, `timings_seconds` and, for run-scoped receipts,
-  `last_full_sweep` (time and result).
-
-`python3 scripts/release-tickets.py --name <release> --parent <epic>
---release-owner <id> --review ROLE=<id> --acceptance ROLE=<id>` prints the
-`issues create` commands in dependency order; add `--create` to create them. The
-script uses the Issues CLI's own identity and never reads or stores credentials.
-
-## Canary release
-
-For routine releases, use the wrapper from the development checkout:
-
-```bash
-just canary HEAD --dry-run
-just canary HEAD --push
-# Retry the exact commit after fixing a failed build/deployment:
-just canary <full-commit> --resume
-# Optional completion message; requires the actual managed caller to match:
-just canary HEAD --push --notify leader --agent /treer-dev-team/release-eng
-```
-
-The wrapper resolves the revision once and creates a detached worktree under
-`.treer/canary-checkouts/<commit>/`, leaving concurrent development untouched.
-`--push` only fast-forwards `origin/main`; divergent history requires a reviewed
-merge. It installs frontend dependencies and runs the maintained release pipeline
-below, including all five native artifact builds. It preserves the worktree and
-release manifest for inspection and retry. `--dry-run` only prints the local
-plan; it performs no writes or network calls. The wrapper never updates local
-CLI binaries, restarts a local Host/Controller, or promotes Production.
-
-Before it starts any release step the wrapper refuses to publish unless the exact
-commit has a completed successful `CI` run (push or manual dispatch; a pull-request
-run or a run for another commit does not count, the latest run decides, and it waits
-up to `TREER_RELEASE_CI_TIMEOUT` seconds, 2700 by default) and its native artifacts are
-green: a successful `Machine artifacts <commit>` run for that exact revision (the run
-title decides, so a dispatch on this ref that built another revision does not
-count; the run receipt must belong to the candidate and, when the candidate's
-workflow defines it, exactly one "Native Windows embedded launcher and ACP UI" job must be
-completed and successful; an existing `dist/` is still verified against it), or a verified reuse
-anchor (`scripts/reuse-machine-artifacts.sh --check-only`, or `--verify-dist` for a
-`dist/` that already carries reuse provenance). A local `dist/` alone is never
-evidence of a green native build. All `gh` calls are time-bounded. Dispatch
-the native workflow and let CI finish before running `just canary`;
-`python3 scripts/canary-release.py <commit> --check-ci` waits for CI alone.
-
-`--resume` reuses the completed local gate only when its receipt matches the
-exact commit and unchanged frontend SHA-256. Missing or mismatched receipts
-rerun the full gate; deployment, artifact verification, and two-machine tests
-always run again. These receipts are local operator state, not signed build
-attestations. Native workflow failures remain failures: inspect the failed job
-and explicitly rerun it with `gh run rerun <run-id> --failed` before resuming.
-No failing test is skipped or automatically retried by the wrapper.
-The deployed frontend must match the candidate HTML byte for byte except for the
-Worker's per-response `nonce` attribute inserted into real script start tags.
-The gate reconstructs that exact transformation from the candidate and requires
-each script nonce to match the response's nonce-only CSP; arbitrary normalization,
-changed script content and other HTML changes are rejected.
-
-`--notify` sends only after the release passes, with an idempotency key derived
-from the full commit. `--agent` checks the caller before any release changes and
-again before sending. A mismatched caller fails instead of borrowing another
-Agent's credentials. Canary login cookies stay in shell memory; the test script
-does not create credential files. `just canary-scripts-test` checks the wrapper,
-checkpoint invalidation, and in-memory cookie handling without a deployment.
-
-The operator needs authenticated GitHub, Railway and Wrangler CLIs, Docker, `just`,
-`pnpm`, Python 3, PostgreSQL client tools, `jq`, and `curl`. Start from a clean
-checkout of the candidate commit:
-
-```bash
-just release-canary HEAD
-```
-
-The command refuses a dirty worktree, a revision other than `HEAD`, or a commit
-not contained in `origin/main`. It runs the complete local gate, stores the
-built `index.html` by SHA-256, deploys the Canary Proxy and App, and runs the
-black-box two-machine test. Success produces:
-
-```text
-.treer/releases/<full-commit>/manifest.json
-```
-
-The manifest records the commit, frontend checksum, Railway deployment ID,
-Cloudflare Worker version ID, endpoints, and test timestamp. Failure never
-creates an eligible manifest.
-
-The manifest also carries `timings_seconds`, the wall time of each sequential
-pipeline stage (`prepare_worktree`, `ci_wait`, `native_ready`, `pnpm_install`,
-`local_gate`, `deploy_railway_variables`, `deploy_railway_upload`,
-`deploy_worker`, `deploy_proxy_build_wait`, `deploy_served_checks`,
-`deploy_total`, `canary_login`, `canary_machine_restart_connect`,
-`canary_forward_and_traffic`, `canary_public_ingress`, `canary_e2e_total`).
-`scripts/release-timing.sh` (`lap <stage>`) and `canary-release.py` append them
-to `.treer/releases/<full-commit>/timings.tsv`; timing only observes and never
-changes a result. The Policy default-install check runs after the manifest and
-is timed separately by the operator.
-
-The deployment scripts also set `TREER_BUILD_COMMIT` on the Railway Proxy
-service before each build. The hosted builder embeds the candidate commit in
-the Proxy; the native workflow embeds the same commit in the bundled Host,
-Controller, and CLI artifacts. It is release metadata, not a mutable runtime
-version override. Deployment updates the downloadable binaries; already
-installed machines require an explicit Controller update/restart.
-
-Canary and Production Proxy deployment scripts explicitly set
-`TREER_ENABLE_CORE_MESSAGES=true`. It defaults off outside those scripts. App
-process supervisors are configured separately after code, config, secrets,
-state backup, and Policy are ready.
-
-## Production promotion
-
-Check out the same clean commit and retain its `.treer/releases` directory,
-then run:
-
-```bash
-just promote-production .treer/releases/<full-commit>/manifest.json
-```
-
-Promotion requires `status: canary_passed`, verifies the commit and artifact
-checksum, verifies all five machine artifact sets, deploys the Production Proxy
-and the exact Canary frontend artifact,
-then checks Proxy health, App health/configuration, and wildcard TLS routing.
-It updates the manifest to `status: production_deployed` with Production IDs.
-
-Only one release may run in a checkout at a time. The scripts use
-`.treer/release.lock` to reject overlapping operators.
-Self-hosted forks can set `TREER_RELEASE_REMOTE_REF` to their protected release
-branch.
-
-## Compatibility and rollback
-
-- Reservation cleanup introduces Controller startup-store v2 only after a
-  durable denied-Agent fence is written. Machines without fences keep v1.
-  A v2 machine cannot roll back to a Controller lacking
-  `agent.reservation-fence.v1`: older readers reject the store at startup with
-  `startup_store_error`. Do not delete fences, restore a pre-cleanup backup, or
-  rewrite the version to force rollback; a delayed Create could resurrect the
-  revoked identity. The release receipt must pin the first published source SHA
-  supporting this capability as the rollback floor. Until that receipt exists,
-  no older published Controller is a safe rollback target for a v2 store.
-  Inspect only `{version, denied_count}` of the local startup store (its
-  entries contain credentials) before choosing a rollback binary.
-- Add Proxy API fields before the App begins using them. Stop App use before a
-  later release removes an API.
-- Use expand-first PostgreSQL changes so old and new Proxy replicas can overlap.
-- Before a legacy Mail cutover, back up its SQLite/PostgreSQL database, stop the
-  Rust Mail writer, dry-run and execute `apps/mail/migrate.py` with a required
-  `--actor` identity, compare and retain the checksum/checkpoint report, start
-  the Mail App, and require users to log in again.
-  Rollback to the old writer is safe only before any new Core Message write;
-  after that point, repair forward and keep Core authoritative.
-- Back up each App's state before replacing or moving it. Telegram
-  needs its offset and ID-mapping SQLite state to avoid avoidable external
-  duplicates. Keep Bot tokens and Mail configuration out of source and release
-  artifacts, and provide them through the deployment secret mechanism.
-- Telegram's Bot API does not accept a client idempotency key. A lost successful
-  send response can produce a visible duplicate on retry; rollback and release
-  notes must not claim external exactly-once delivery.
-- To stop channel traffic, stop the App processes. Do not turn off Core Message
-  routes while a bridge still has an unacknowledged external delivery. Feature
-  flags do not delete Message rows or App state.
-- Keep the legacy Controller protocol field on a version understood by the
-  previous Proxy while advertising additive `supported_protocols` and
-  capabilities. Roll out Proxy support before selecting a new protocol version.
-  Capability-gated commands must fail as `unsupported_command` on older
-  Controllers instead of disconnecting the machine. A deliberate incompatible
-  protocol reset still requires a coordinated Canary rollout and an explicit
-  release note.
-- Roll back the App with `wrangler rollback --env production <version-id>`.
-- Roll back the Proxy to its prior Railway deployment. Database contraction is
-  a separate release and is never part of an automatic code rollback.
-
-## GitHub Release assets and artifact hashes
-
-A version tag `vX.Y.Z` runs `Build release artifacts` again for the tagged
-commit and the GitHub Release attaches those artifacts. Compare them with the
-Canary manifest (`machine_artifacts.files`) before uploading. For v0.1.14 the
-four Unix platforms were byte-identical to the Canary-tested build, while the
-`windows-x86_64` files had the same sizes and build metadata but different bytes:
-The Windows build links with `/Brepro` (the only link argument, set through
-`RUSTFLAGS` in `build-release-artifacts.yml`), which replaces the linker timestamp
-with a content hash. Before upload the Windows job removes `target/release`,
-rebuilds the same three packages with the same flags and path, and fails closed
-unless all three rebuilt binaries match the staged ones byte for byte, so the
-hashes compared are the hashes published. `build-metadata.json` records
-`rustc -vV`, the `RUSTFLAGS` and the runner image version; a changed image or
-toolchain is a new baseline, not a failure of the claim.
-
-Reproducibility here means two hosted builds of the same source on the same
-pinned image produce the same bytes. It is not a signature or an attestation, it
-does not prove the source was the reviewed one, and it does not cover macOS,
-Linux or binaries shipped before this change. The Windows hashes of a GitHub
-Release are those of the tag run, which may differ from a Canary manifest built
-on another image; record that in the release notes and do not edit artifacts or
-re-sign them to force equality. Consumers still verify the exact published
-digest.
-
-## Single-container image input and smoke
-
-The native workflow (`Build release artifacts`) also produces the inputs of the
-single-container image (`Dockerfile.single`) and proves them on the same run:
-
-- The two Linux `build` jobs additionally build `treer-proxy` and upload it as
-  `treer-proxy-linux-x86_64` / `treer-proxy-linux-aarch64`
-  (`scripts/stage-proxy-artifact.sh`: binary, `SHA256SUMS`, `build-metadata.json`
-  schema 1). The machine artifacts, their checksums and the reuse rules are
-  unchanged.
-- `single-container-input` checks out the exact revision, downloads only that
-  run's Linux artifacts, arranges `.single-container-input/` with
-  `scripts/assemble-single-container-input.py` and publishes its digest, the
-  40-hex commit and the version as job outputs. That job is the trust anchor.
-- `single-container-image` (one native runner per architecture) rebuilds nothing
-  in Rust: it passes the job-output digest to the image build as
-  `TREER_NATIVE_INPUT_SHA256` (the image recomputes the input digest and refuses
-  a mismatch), checks the image `org.opencontainers.image.revision` label against
-  the checkout, and runs `node deploy/single-container/smoke.mjs` on the
-  runner's own Docker daemon. No registry push happens in this workflow.
-
-Publishing the single-container image (a `v*` tag job beside `Publish GHCR
-images`, with the same tag policy: `vX.Y.Z` and `sha-<commit>`, never `latest`)
-is a separate change. Until it exists the image is built and smoke-tested but
-not distributed.
-
-## GHCR images for self-host
-
-After Canary passes, tag the same commit `vX.Y.Z` matching `Cargo.toml` and
-push the tag. The `Publish GHCR images` workflow builds native `linux/amd64`
-and `linux/arm64` images for Proxy, App, and the updater sidecar, then writes
-immutable `vX.Y.Z` and `sha-<commit>` tags plus a moving `canary` pointer.
-
-Do not publish `latest`. After Production promotion, dispatch the same
-workflow with `channel=stable` and the version tag. That retags existing
-digests; it does not rebuild.
-
-Self-hosted Compose pulls those images (`image:`, not `build: .`) and applies
-later versions from `/admin`. See [Self-hosted Compose](../deploy/README.md).
-Hosted Railway continues to rebuild the Proxy from the promoted commit in each
-environment. The frontend artifact is already byte-identical across promotion.
-
-The independent `windows-launcher-smoke` job is a required promotion gate.
-It downloads the already uploaded immutable Windows artifact, checks the
-Controller copy against that artifact's SHA256SUMS and runs browser/ACP tests
-without a write-back path to release bytes. Artifact collection requires the
-whole workflow and this job to succeed, including when an explicit run ID is
-supplied. Record its job/run link, `windows-smoke.json`, screenshots and the
-Playwright lockfile's Chromium revision in the release receipt.
-
-Next-version Windows acceptance must actually run Node 22, PowerShell crypto
-and tasklist through exec and through App/Agent workload launch paths; verifying
-environment maps alone is insufficient. Launcher installation plus a fake ACP Agent with its registered UI must also
-pass in a closed native Windows fixture. Pending native tests are not evidence
-of success; a failing job blocks release rather than being retried into green.
-The operator then updates win_native explicitly and checks its App/UI Agent;
-release automation must not update that machine or restart existing Agents.
-
-## Independent launcher latest channel
-
-`treer-agent update --latest` uses a launcher-only GitHub prerelease pointer at
-`https://github.com/EvoEvolver/treer/releases/download/launcher-stable/launcher-latest.json`.
-This does not move the Core release `latest` tag or activate any Controller,
-Host, provider, or existing Agent. The pointer is mutable; version objects are
-published under `launcher-<full-source-SHA>` and never intentionally overwritten.
-Trust is the repository publisher over HTTPS plus pinned SHA256, not an asserted
-signature or GitHub immutable-release setting.
-
-Release prepares an exact ordinary native and a matching `prepare-bundle.mjs`
-payload without `native-runtime.json`. The native may be reused only with its
-original source and build evidence; matching platform alone does not prove tool
-compatibility. Its compiled tool paths and existing installed provider bindings
-must match. Unsupported bindings refuse; providers are not downloaded. The
-consumer derives the local runtime manifest and installer content hash after
-verification, keeping upstream package and locally generated bundle identities
-separate.
-
-Stage with `node scripts/launcher-release.mjs stage --payload ABS --native ABS
---binding ABS --build ABS --source FULL_SHA --platform PLATFORM --output ABS`.
-The binding is the accepted native-runtime metadata. The build evidence uses
-`treer.launcher-native-build/v1` with `source_commit`, `platform`, `ordinary:true`,
-`fixture_harness:false`, `sha256`, `bytes`, and `tool_paths`; those fields must
-match retained actual ordinary-build receipts, never synthetic fixtures.
-
-The platform asset is a bounded `treer.launcher-package/v1` JSON filemap. It
-contains the exact payload manifest and its declared files plus one native
-image, with per-file lengths and SHA256. It carries no credentials or provider
-binaries. The `treer.launcher-latest/v1` channel pins each platform's
-`package_url`, `package_sha256`, and `package_size`. Payload and native source
-commits are recorded separately. Channel metadata is at most 64 KiB, the package
-256 MiB, each file 32 MiB, and decoded contents 192 MiB with at most 1024 files.
-
-After the exact source is delivered and publication is authorized, run
-`node scripts/launcher-release.mjs publish ABS_OUTPUT ABS_STAGE_JSON...` once.
-The publisher records exclusive intents, verifies version objects through the
-public HTTPS download path, then writes the launcher-only pointer and verifies
-it. A failed or lost result requires inspecting the retained operation and
-actual GitHub objects; do not retry blindly or overwrite version assets. A
-pointer replacement can briefly return unavailable; the client must fail
-without silently choosing an older Controller payload. GitHub HTTPS redirects
-are bounded and host-restricted; temporary signed redirect URLs are not logged.
+`Build release artifacts` (`.github/workflows/build-release-artifacts.yml`) runs
+for `v*` tags or by manual dispatch with a `revision`. Native runners build the
+CLI, Host and Controller for `linux-x86_64`, `linux-aarch64`, `darwin-x86_64`,
+`darwin-aarch64` and `windows-x86_64`, after preparing the launcher payload with
+`scripts/prepare-launcher-release.mjs` (lockfile-pinned `npm ci --ignore-scripts`;
+the build fails without a valid payload). `scripts/stage-release-artifacts.sh`
+(`.ps1` on Windows) stages each platform with `SHA256SUMS` and
+`build-metadata.json`. Windows also runs ConPTY/Controller/CLI tests, the
+standard-user and installer checks, a byte-identical clean rebuild (`/Brepro`)
+and the native embedded-launcher smoke. The workflow never publishes anything.
+
+`scripts/fetch-machine-artifacts.sh [revision]` (`just fetch-artifacts`) verifies
+an existing `dist/`, or downloads the newest successful run for the exact commit
+(`TREER_ARTIFACT_RUN_ID` selects one), dispatching the workflow if no run exists.
+It requires the Windows launcher job to have passed and rejects missing
+platforms, mismatched commit metadata, partial checksum files and missing
+executable bits (`scripts/verify-machine-artifacts.sh`). A stale `dist/` fails;
+delete it to fetch another commit. `just stage-artifacts` builds only the local
+platform for testing.
+
+Windows artifacts keep the logical names without `.exe`; `scripts/install.ps1`
+saves them with the suffix and fails closed without `SHA256SUMS`.
+
+## Self-host images
+
+Pushing a `vX.Y.Z` tag that matches `Cargo.toml` runs `Publish GHCR images`:
+native `linux/amd64` and `linux/arm64` images for `treer-proxy` (`Dockerfile`),
+`treer-app` (`web/Dockerfile`) and `treer-updater` (`deploy/updater/Dockerfile`)
+with immutable `vX.Y.Z` and `sha-<commit>` tags and a moving `canary` pointer.
+After Production, dispatch the workflow with `channel=stable` and the version;
+`scripts/retag-ghcr.sh` retags existing digests without rebuilding. `latest` is
+never published. Compose pulls these images; see [Self-hosted Treer](../deploy/README.md).
+
+The same artifact workflow also stages `treer-proxy` for both Linux platforms
+(`stage-release-artifacts.sh --proxy`), assembles `.single-container-input/`
+with `scripts/assemble-single-container-input.py`, builds `Dockerfile.single`
+from that exact input digest on each architecture and runs
+`deploy/single-container/smoke.mjs`. That image is not pushed; operators build
+it locally with `scripts/build-single-image.sh`.
+
+## Signed R2 releases
+
+Installed Controllers update only from the signed R2 channel. `scripts/release-r2.mjs`
+prepares a version manifest from `dist/`, signs it, publishes it to the `canary`
+channel and promotes it to `stable` (`just artifacts-*`). Both signatures, the
+channel's manifest SHA256 and every binary's signed size and SHA256 must verify
+before downloaded code runs. See
+[Publish signed R2 releases](operator-guide.md#publish-signed-r2-releases).
 
 ## Official release signing authority
 
-The public SPKI in `keys/official-release-ed25519.pub.pem` is the newly
-owner-designated authority for the exact `https://releases.treer.ai/` distributor.
-Its full DER SHA256 is
-`634761ff47a6a113b4b8925f0db0e030d8bfce07f2fa228fdc0a4904874dc41f`.
-`keys/official-release-authority.json` records its designation; the separate
-establishment proof verifies custody can sign, and is not an artifact manifest
-or evidence that a release/channel has been published. Earlier signed channels
-must not be assumed to use this key. Do not overwrite an unknown channel.
+The public SPKI in `keys/official-release-ed25519.pub.pem` is the authority for
+`https://releases.treer.ai/`; its DER SHA256 is
+`634761ff47a6a113b4b8925f0db0e030d8bfce07f2fa228fdc0a4904874dc41f` and
+`keys/official-release-authority.json` records its designation. New Controllers
+embed the same key.
 
-Official publisher custody uses the macOS login Keychain, an explicit trusted
-signer executable ACL, and a non-synchronizing item. Private bytes are handled
-only in the native signer process and encrypted Keychain storage, never ordinary
-PEM files, argv, Git, or stdout. This is OS-account/Keychain custody, not Secure
-Enclave, hardware non-extractability, per-Agent isolation, or a CI secret. A
-machine owner able to change that account or its Keychain remains trusted.
-Separate recovery/backup custody has not been established; retain the original
-Keychain and authorized stable executable. The implementation uses macOS classic
-Keychain ACL APIs (deprecated but available on the established host).
+The private key lives in the publisher's macOS login Keychain as a
+non-synchronizing item with an explicit signer-executable ACL; it never exists as
+a PEM file, argv, Git object or stdout. Build `scripts/release-keychain.swift`
+with `xcrun swiftc -O` into a stable owner-only directory (mode 700) and record
+its SHA256. `status`, `public`, `sign` (≤ 1 MiB stdin, detached signature) and
+`selftest` are routine; `create` establishes the authority once and refuses an
+existing item. There is no export. Pass `--keychain-signer ABS --signer-sha256
+HASH` to `release-r2.mjs prepare|publish|promote`; it pins the executable, checks
+its key against the repository SPKI and verifies every returned signature
+(`scripts/release-keychain.mjs`). Self-hosted publishers may use an explicit key
+file instead, never together with Keychain custody.
 
-Build `scripts/release-keychain.swift` with `xcrun swiftc -O` into a stable
-owner-only physical directory, chmod the executable to 700, and record its
-SHA256. `status` is metadata-only, `public` returns public metadata, and `sign`
-accepts at most 1 MiB on stdin and returns only a detached signature. `selftest`
-uses an in-memory control key and does not touch custody. `create` is a separate,
-authorized once-only authority-establishment operation: it refuses an existing
-or unreadable item and never rotates/replaces it. A lost create result requires
-status/public readback, not repeating create. There is no export operation.
-Do not rebuild/replace an already-authorized executable or change its ACL as a
-routine publish step.
+For an existing installation without the key,
+`node scripts/install-release-trust.mjs [--config-dir ABS]` installs only the
+shipped public key (exclusive create; refuses a different or unsafe existing key).
 
-For official `prepare`, `publish`, or `promote`, supply
-`--keychain-signer ABS --signer-sha256 HASH`. The publisher pins the executable,
-checks its public key against the reviewed repository SPKI, and independently
-verifies every returned signature. Errors never fall back to a private-key
-file. Explicit file-key publishing remains available for self-hosted publishers;
-it cannot be selected together with Keychain custody. The existing publish and
-promote commands still change channels, so prepare the exact version/object
-inventory and get the named publication scope approved first.
+## Launcher channel
 
-New official Controllers embed this same reviewed key through the Core trust
-resolver. For an existing installation whose configured key is absent, the
-reviewed source bundle also supplies
-`node scripts/install-release-trust.mjs --config-dir ABS_CONFIG_DIR`.
-With no directory argument it follows `XDG_CONFIG_HOME/treer` (otherwise
-`HOME/.config/treer`) on Unix, or `LOCALAPPDATA/Treer` on Windows, matching the
-Controller's configuration parent. This local, network-free migration installs only the shipped public key with
-exclusive creation, preserves a matching key unchanged, and refuses different,
-corrupt, symlinked, or unsafe existing configuration. It does not run update,
-start a provider, or restart anything. Obtain that script and key through the
-trusted reviewed installer/source delivery; never fetch a key from the manifest
-being verified. Explicit/local self-hosted keys retain their Core precedence.
-The initializer has not been executed on any enrolled machine by this change.
-
-## Version 0.1.15 signed-update candidate
-
-Issue #250 prepares `v0.1.15` from the reviewed official-trust source. The
-initial candidate provides only ordinary `linux-x86_64` Controller, CLI and
-Host artifacts. Their version and build commit must be obtained from the new
-ordinary build; the earlier `v0.1.14-56ba2580-trust` binaries retain their
-original identity. Other platforms are not claimed for this candidate.
-
-Candidate preparation does not publish a tag or move a release channel. A
-remote `v*` tag currently triggers both the full release-artifact matrix and
-the GHCR image publishing workflow. Do not push `v0.1.15` as a shortcut for
-this single-platform build: use the isolated dispatch-only Linux wrapper.
-Before any later remote tag publication, coordinate the exact workflow
-side effects separately. Stable promotion still requires the exact local
-non-prerelease tag to match the signed manifest source; never weaken that
-guard or move the existing `v0.1.14` tag.
-
-The same repository-pinned official authority signs candidate metadata.
-Versioned objects, any canary pointer change, and the two stable pointer
-objects each require a named publication scope and fresh authenticated R2
-existence checks. Do not probe unwritten canonical URLs and populate negative
-CDN cache entries. Existing signed channel state must be retained before any
-authorized pointer change; no installed machine update is implied.
+`treer-agent update --latest` reads the launcher-only pointer
+`launcher-stable/launcher-latest.json` on GitHub Releases; version objects live
+under `launcher-<full-source-SHA>` and are never overwritten. Stage with
+`node scripts/launcher-release.mjs stage --payload ABS --native ABS --binding ABS
+--build ABS --source FULL_SHA --platform PLATFORM --output ABS` and publish once
+with `node scripts/launcher-release.mjs publish ABS_OUTPUT ABS_STAGE_JSON...`.
+Trust is the repository publisher over HTTPS plus pinned SHA256.

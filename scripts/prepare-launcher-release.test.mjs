@@ -46,7 +46,7 @@ test('payload links cannot substitute bytes', { skip: process.platform === 'win3
 });
 
 test('launcher build dependency installs disable lifecycle scripts in every build path', () => {
-  for (const path of ['../Dockerfile', '../.github/workflows/ci.yml', '../.github/workflows/build-release-artifacts.yml', './stage-local-artifacts.sh']) {
+  for (const path of ['../Dockerfile', '../.github/workflows/ci.yml', '../.github/workflows/build-release-artifacts.yml', '../justfile']) {
     const source = readFileSync(new URL(path, import.meta.url), 'utf8');
     const installs = source.split('\n').filter(line => /npm --prefix launchers\/agent ci(?: |$)/.test(line));
     assert.ok(installs.length > 0, path);

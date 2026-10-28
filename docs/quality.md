@@ -245,9 +245,10 @@ The Linux Rust job builds the workspace, checks formatting, runs
 runs Clippy for all targets with warnings denied. Each database test uses its
 own schema; connection failures fail the job rather than skipping coverage.
 An independent Node 22 / pnpm job installs the frozen frontend lockfile and runs
-`pnpm typecheck` and `pnpm build`. CI requires no deployment credentials and
-does not publish artifacts or deploy. Native macOS/Windows PR gates and browser
-end-to-end CI remain separate gaps.
+`pnpm typecheck`, `pnpm build` and the Playwright user-journey suite
+(`pnpm test:e2e`, Chromium). A release-tooling job runs `just scripts-test`'s
+checks and the updater tests. CI requires no deployment credentials and does
+not publish artifacts or deploy. Native macOS/Windows PR gates remain a gap.
 
 Use Slurm for CPU- or memory-heavy builds, Clippy runs, frontend builds, and
 non-database workspace tests when the checkout and toolchain are available on
@@ -366,25 +367,6 @@ cargo build -p treer-agent-host -p treer-agent-server -p treer-cli
 cargo test -p treer-agent-server recovery_real_host_cold_restart -- --ignored
 cargo test -p treer-cli --test controller -- --ignored
 ```
-
-The local Linux Docker regression uses real authentication, PostgreSQL, NATS,
-two Proxies, and non-root machines. It checks installation dependency preflight,
-installed CLI discovery, Agent messages, explicit service forwarding/publication,
-App access, per-workload HTTP identities, verified local HTTPS/CONNECT,
-WebSocket upgrades, listener cleanup, and hot/cold restoration:
-
-```sh
-docker build -t treer-local-e2e:fixed .
-node scripts/docker-core-e2e.mjs
-```
-
-Requires Node 20+ and Docker; `TREER_E2E_IMAGE` can select another freshly built
-image. The runner downloads Debian dependencies, binds host listeners only to
-loopback, and stops its own containers in a finalizer. It retains stopped test
-containers, the network, and logs/results in the printed temporary directory for
-inspection; `resources.json` lists their exact names. It does not deploy Canary
-or touch existing containers. Fixtures use Python services, without vendor Agent
-CLIs. Browser, public DNS/TLS, and OS boot-manager checks remain separate.
 
 Proxy persistence tests require an isolated `TREER_TEST_DATABASE_URL`. Set
 `TREER_TEST_NATS_URL` to an isolated broker for cross-Proxy tests; without it,

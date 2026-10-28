@@ -293,7 +293,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked --release -p treer-proxy
-          sh scripts/stage-proxy-artifact.sh \
+          sh scripts/stage-release-artifacts.sh --proxy \
             "${{ matrix.platform }}" \
             "release-artifacts-proxy/${{ matrix.platform }}"
 

@@ -125,7 +125,7 @@ No such file or directory (os error 2)
 
 最终使用 `9b77581` 基础上的本次工作树修复重新构建 Linux ARM64 release 镜像 `treer-local-e2e:fixed`，镜像 ID 为 `sha256:4086983cca5ab27ace4c84188bd45e92f3adbb10bb66a5e05d05e3a0396245aa`。这是未提交工作树测试镜像，不是正式发布。
 
-[可重复执行的 Docker 入口](../../scripts/docker-core-e2e.mjs)最终 **19 项检查全部通过，执行期间没有人工补救**。覆盖真实认证、两台非 root 机器安装、缺少 ps 后复用同一个 key、直接使用安装配置的宿主机 CLI、Agent 身份、跨 Proxy exec/消息、机器名 Profile、HTTP/TCP 私有转发（含 1 MiB 和 half-close）、HTTP CLI 发布/访问/撤销、实际 Canary shell 转发命令、public/private App 部署及鉴权、App stop/start/restart/崩溃恢复、Controller 热恢复、机器冷恢复、停止/完成/无效启动指令语义、稳定 App ID/service/URL、单实例和删除清理。
+可重复执行的 Docker 入口 `scripts/docker-core-e2e.mjs`（已于 2026-10 删除）最终 **19 项检查全部通过，执行期间没有人工补救**。覆盖真实认证、两台非 root 机器安装、缺少 ps 后复用同一个 key、直接使用安装配置的宿主机 CLI、Agent 身份、跨 Proxy exec/消息、机器名 Profile、HTTP/TCP 私有转发（含 1 MiB 和 half-close）、HTTP CLI 发布/访问/撤销、实际 Canary shell 转发命令、public/private App 部署及鉴权、App stop/start/restart/崩溃恢复、Controller 热恢复、机器冷恢复、停止/完成/无效启动指令语义、稳定 App ID/service/URL、单实例和删除清理。
 
 ```sh
 docker build -t treer-local-e2e:fixed .

@@ -1,10 +1,18 @@
 #!/bin/sh
 set -eu
 
+# Stage native release binaries with SHA256SUMS and build-metadata.json.
+#   stage-release-artifacts.sh <platform> <destination>          CLI, Host and Controller
+#   stage-release-artifacts.sh --proxy <linux-platform> <dest>   Proxy (single-container image input)
+binaries="treer treer-agent-host treer-agent-server"
+if [ "${1:-}" = --proxy ]; then
+    binaries=treer-proxy
+    shift
+fi
 platform=${1:-}
 destination=${2:-}
 [ -n "$platform" ] && [ -n "$destination" ] || {
-    echo "usage: scripts/stage-release-artifacts.sh <platform> <destination>" >&2
+    echo "usage: scripts/stage-release-artifacts.sh [--proxy] <platform> <destination>" >&2
     exit 2
 }
 
@@ -15,6 +23,9 @@ case "$platform" in
   darwin-aarch64) expected_system=Darwin; expected_architecture=arm64; file_pattern='Mach-O 64-bit executable arm64' ;;
   *) echo "unsupported release platform $platform" >&2; exit 2 ;;
 esac
+[ "$binaries" != treer-proxy ] || [ "$expected_system" = Linux ] || {
+    echo "the Proxy image supports linux-x86_64 and linux-aarch64, not $platform" >&2; exit 2;
+}
 
 actual_system=$(uname -s)
 actual_architecture=$(uname -m)
@@ -45,7 +56,7 @@ hash_file() {
 
 version=
 rustc_identity=$(rustc --version)
-for binary in treer treer-agent-host treer-agent-server; do
+for binary in $binaries; do
     source="$source_dir/$binary"
     artifact="$destination/$binary"
     [ -x "$source" ] || { echo "missing release binary $source" >&2; exit 1; }
@@ -62,6 +73,11 @@ for binary in treer treer-agent-host treer-agent-server; do
         exit 1
     }
 
+    if [ "$binary" = treer-proxy ]; then
+        version=$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f && /^version *=/{gsub(/[" ]/,"",$0); sub(/^version=/,"",$0); print; exit}' Cargo.toml)
+        case "$version" in [0-9]*.[0-9]*.[0-9]*) ;; *) echo "cannot read workspace version" >&2; exit 1 ;; esac
+        continue
+    fi
     identity=$("$artifact" --version)
     printf '%s\n' "$identity" | grep -F "($commit)" >/dev/null || {
         echo "$artifact does not report build commit $commit: $identity" >&2
@@ -78,7 +94,7 @@ done
 
 (
     cd "$destination"
-    for binary in treer treer-agent-host treer-agent-server; do
+    for binary in $binaries; do
         printf '%s  %s\n' "$(hash_file "$binary")" "$binary"
     done > SHA256SUMS
 )

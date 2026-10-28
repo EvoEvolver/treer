@@ -4,7 +4,6 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$script_dir/canary-auth.sh"
-. "$script_dir/release-timing.sh"
 
 project_id=${TREER_RAILWAY_PROJECT_ID:-09d4eeeb-cc5a-49e5-bcfe-f43c1c1b112b}
 environment=${TREER_CANARY_ENVIRONMENT:-canary}
@@ -204,7 +203,6 @@ if ! user_cookies=$(printf '%s' "$login_payload" \
         | canary_login_cookies "$proxy_url/api/auth/register")
 fi
 unset admin_password login_payload register_payload invite invitation admin_cookies
-lap canary_login
 
 organization_id=$(api GET /api/organizations | jq -er '.organizations[0].organization_id')
 workspaces=$(api GET "/api/workspaces?organization_id=$organization_id")
@@ -240,7 +238,6 @@ server_a=$(wait_for_machine "$machine_a")
 echo "Waiting for $machine_b to connect"
 server_b=$(wait_for_machine "$machine_b")
 echo "Both Canary machines are online"
-lap canary_machine_restart_connect
 
 service_payload=$(jq -n --arg name "http-$run_id" --arg server_id "$server_b" \
     '{name: $name, server_id: $server_id, target_host: "127.0.0.1", target_port: 8081, protocol: "http"}')
@@ -297,7 +294,6 @@ traffic=$(api GET "/api/workspaces/$workspace_id/traffic?hours=1")
 printf '%s' "$traffic" | jq -e --arg source "$server_a" --arg destination "$server_b" \
     '.traffic[]? | select(.source_server_id == $source and .destination_server_id == $destination and .payload_bytes > 0)' >/dev/null
 echo "Directional traffic accounting: passed"
-lap canary_forward_and_traffic
 
 if [ "$skip_public" = 1 ]; then
     echo "Public ingress: skipped by TREER_CANARY_SKIP_PUBLIC=1"
@@ -314,5 +310,4 @@ public_output=$(curl -fsS --retry 20 --retry-delay 3 --retry-all-errors "$ingres
 printf '%s' "$public_output" | jq -e --arg machine "$machine_b" \
     'select(.machine == $machine and .service == "treer-canary")' >/dev/null
 echo "Public ingress: passed ($ingress_url)"
-lap canary_public_ingress
 echo "Canary E2E passed"

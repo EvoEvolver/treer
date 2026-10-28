@@ -5,6 +5,20 @@ sidecar from published GHCR images. This is the operator path for a machine you
 control. The hosted Railway plus Cloudflare path is unchanged and does not
 start this sidecar.
 
+## Deployment files
+
+| File | Used by |
+| --- | --- |
+| `Dockerfile` | GHCR `treer-proxy` image (Compose) and Railway's default build |
+| `Dockerfile.hosted` | Hosted SaaS: `scripts/deploy-hosted.sh` bundles CI-built machine artifacts |
+| `railway.json` | Railway service config (rewritten to `Dockerfile.hosted` for hosted deploys) |
+| `web/Dockerfile` | GHCR `treer-app` image (Compose) |
+| `compose.yaml`, `deploy/updater/` | Self-hosted Compose stack and its update sidecar |
+| `compose.dev.yaml` | Compose overlay that builds the three images from source |
+| `Dockerfile.single`, `deploy/single-container/` | Self-hosted single-container central server |
+| `canary/machine/` | The two Railway Canary test machines (`just test-canary-provision`) |
+| `deploy/apple-container-machine/` | macOS container machine Host (`skills/treer-macos-container`) |
+
 ## Single container
 
 Build the single-container **central server** locally from the checkout.
@@ -264,8 +278,7 @@ access; the first build can take substantial time and disk space. No host
 Rust, Node or PostgreSQL installation is needed.
 
 Run `just single-image-smoke` to build through the script and check real HTTP
-health in a disposable container/volume with a random loopback port, under the
-machine-wide gate lock. This heavy test is deliberately not part of `just check`.
+health in a disposable container/volume with a random loopback port. This heavy test is deliberately not part of `just check`.
 
 The separate CI prebuilt-input path remains unchanged. With a clean exact-SHA
 checkout, stage the trusted

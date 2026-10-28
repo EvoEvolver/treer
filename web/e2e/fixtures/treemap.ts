@@ -53,38 +53,3 @@ export async function mockTreeMapApi(page: Page) {
     return route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) })
   })
 }
-
-
-export async function mockDeepTreeMapApi(page: Page, large: boolean | "medium", depth = 4) {
-  await mockTreeMapApi(page)
-  const nestedFolders = Array.from({ length: depth }, (_, index) => ({
-    folder_id: `level-${index}`, name: ['Team', 'Research', 'Experiments', 'Lab'][index] ?? `Level-${index}`, parent_id: index ? `level-${index - 1}` : null,
-  }))
-  const nestedAgents = Array.from({ length: large === "medium" ? 39 : large ? 299 : 4 }, (_, index) => ({
-    agent_id: `deep-${index}`, name: `agent-${String(index + 1).padStart(2, '0')}`, kind: index % 2 ? 'codex' : 'command',
-    status: index % 3 ? 'idle' : 'working', server_id: index % 11 === 10 ? 'remote' : 'local',
-  }))
-  await page.route('**/snapshot', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({
-    ...mapSnapshot, agents: [{ agent_id: 'app-runtime', name: 'dashboard', kind: 'app', status: 'running', server_id: 'local' }, ...nestedAgents],
-  }) }))
-  await page.route('**/workload-tree', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({
-    folders: large === "medium" ? [...nestedFolders, { folder_id: "operations", name: "Operations", parent_id: null }, { folder_id: "product", name: "Product", parent_id: null }] : nestedFolders,
-    placements: nestedAgents.map((agent, position) => ({ agent_id: agent.agent_id, folder_id: large === "medium" && position >= 6 ? position < 13 ? "operations" : "product" : `level-${depth - 1}`, position })),
-  }) }))
-}
-
-// Snapshot inventory and persisted placements load independently. In between,
-// every workload can briefly appear at the root; wait for the committed Tree,
-// not an icon assertion racing those two responses (especially in large maps).
-export async function waitForDeepTreeMap(page: Page) {
-  // Use the test's normal readiness budget, not the short assertion budget.
-  // Poll the DOM directly rather than repeatedly walking 300 accessible rows
-  // while the two independent reads are still committing.
-  await page.waitForFunction(() => {
-    const tree = document.querySelector('[role="tree"][aria-label="Workspace workloads"]')
-    return tree?.getAttribute('aria-busy') === 'false'
-      && tree.querySelector('[role="treeitem"][aria-label="Team"]')?.getAttribute('aria-expanded') === 'false'
-      && tree.querySelector('[data-agent-id="app-runtime"]')?.getAttribute('aria-label') === 'dashboard'
-      && !tree.querySelector('[data-agent-id="deep-0"]')
-  })
-}

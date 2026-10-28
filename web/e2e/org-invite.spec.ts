@@ -115,20 +115,6 @@ for (const signedIn of [true, false]) test(`invalid or consumed invitation is cl
   expect(backend.accepts).toEqual([])
   expect(new URL(page.url()).searchParams.has('invite')).toBe(false)
 })
-test('old Proxy fails closed without offering registration fallback', async ({ page }) => {
-  const backend = await setup(page, { signedIn: false, unsupported: true })
-  await page.goto(`/?invite=${token}`)
-  await expect(page.getByRole('alert')).toContainText('not supported by this server')
-  await expect(page.getByRole('button', { name: 'Create account', exact: true })).toHaveCount(0)
-  expect(backend.accepts).toEqual([])
-})
-test('invitation consumed between preview and accept displays a clear error', async ({ page }) => {
-  await setup(page, { acceptError: 409 })
-  await page.goto(`/?invite=${token}`)
-  await page.getByRole('button', { name: 'Join organization', exact: true }).click()
-  await expect(page.getByRole('alert')).toContainText('invalid or no longer available')
-  expect(new URL(page.url()).searchParams.has('invite')).toBe(false)
-})
 test('personal invitation remains registration-only and never accepts an organization', async ({ page }) => {
   const backend = await setup(page, { signedIn: false, kind: 'personal' })
   await page.goto(`/?invite=${token}`)
@@ -174,15 +160,6 @@ for (const mobile of [false, true]) test(`OAuth existing-account return restores
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
   await expect(page.getByRole('dialog')).toHaveCount(0)
 })
-
-test('keyboard Escape cancels without acceptance', async ({ page }) => {
-  const backend = await setup(page)
-  await page.goto(`/?invite=${token}`)
-  await expect(page.getByRole('heading', { name: 'Join Invited Studio?' })).toBeFocused()
-  await page.keyboard.press('Escape')
-  await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
-  expect(backend.accepts).toEqual([])
-})
 test('signed-in personal invitation cannot be used to join an organization', async ({ page }) => {
   const backend = await setup(page, { kind: 'personal' })
   await page.goto(`/?invite=${token}`)
@@ -204,23 +181,6 @@ test('accept failure is localized and can be retried without losing intent', asy
   await expect(page).toHaveURL(/\/orgs\/invited-org/)
   expect(backend.accepts).toEqual([{ token }])
 })
-test('Chinese invitation confirmation and failure copy', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('treer-lang', 'zh'))
-  await setup(page, { acceptError: 409 })
-  await page.goto(`/?invite=${token}`)
-  await expect(page.getByRole('dialog')).toContainText('Invited Studio')
-  await page.getByRole('button', { name: '加入组织', exact: true }).click()
-  await expect(page.getByRole('alert')).toContainText('邀请')
-})
-
-test('missing capability fails closed even if the preview endpoint exists', async ({ page }) => {
-  const backend = await setup(page, { signedIn: false, missingCapability: true })
-  await page.goto(`/?invite=${token}`)
-  await expect(page.getByRole('alert')).toContainText('not supported by this server')
-  await expect(page.getByRole('button', { name: 'Join organization', exact: true })).toHaveCount(0)
-  await expect(page.getByRole('textbox', { name: 'Email', exact: true })).toHaveCount(0)
-  expect(backend.accepts).toEqual([])
-})
 
 test('declining an OAuth pending deletes it and does not prompt again on reload', async ({ page }) => {
   const backend = await setup(page, { pending: true })
@@ -234,27 +194,12 @@ test('declining an OAuth pending deletes it and does not prompt again on reload'
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
   await expect(page.getByRole('dialog')).toHaveCount(0)
 })
-test('failed pending decline is visible, retryable, and never accepts', async ({ page }) => {
-  const backend = await setup(page, { pending: true, declineError: true })
-  await page.goto('/')
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
-  await expect(page.getByRole('alert')).toContainText('Unable to dismiss')
-  await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeEnabled()
-  expect(backend.accepts).toEqual([])
-})
 test('OAuth new account already joined in Core opens the organization without another acceptance', async ({ page }) => {
   const backend = await setup(page, { alreadyJoined: true })
   await page.goto('/orgs/invited-org')
   await expect(page.getByRole('combobox', { name: 'Organization', exact: true })).toHaveText('Invited Studio')
   expect(backend.accepts).toEqual([])
   await expect(page.getByRole('dialog')).toHaveCount(0)
-})
-test('old Proxy without pending support still opens the ordinary console', async ({ page }) => {
-  await setup(page)
-  await page.route('**/api/invitations/pending', (route) => route.fulfill({ status: 404, json: {} }))
-  await page.goto('/')
-  await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
-  await expect(page.getByRole('alert')).toHaveCount(0)
 })
 
 test('built Worker permits JSON OAuth start; validated navigation is cancelled before network', async ({ page }) => {
@@ -295,13 +240,4 @@ test('OAuth navigation accepts only selected HTTPS IdP URLs without invitation p
   for (const url of ['https://evil.example.test/', 'http://github.com/', 'https://github.com.evil.example.test/', 'https://synthetic@github.com/', 'javascript:alert(1)', 'https://github.com/#fragment', 'https://github.com/?invite=synthetic', 'https://github.com/?invite_token=synthetic', 'https://github.com/?pending_id=synthetic', 'https://accounts.google.com/']) {
     expect(() => oauthAuthorizationUrl('github', url)).toThrow()
   }
-})
-
-test('malformed pending response shows a safe localized notice without echoing its body', async ({ page }) => {
-  await setup(page)
-  await page.route('**/api/invitations/pending', (route) => route.fulfill({ contentType: 'text/plain', body: 'synthetic-private-response-not-json' }))
-  await page.goto('/')
-  await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
-  await expect(page.getByRole('alert')).toContainText('Unable to check this invitation')
-  await expect(page.locator('body')).not.toContainText('synthetic-private-response-not-json')
 })

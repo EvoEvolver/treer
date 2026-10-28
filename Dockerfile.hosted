@@ -17,11 +17,9 @@ FROM debian:bookworm-slim AS artifacts
 ARG TREER_BUILD_COMMIT
 RUN apt-get update && apt-get install -y --no-install-recommends jq ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY scripts/verify-machine-artifacts.sh scripts/machine-artifact-hashes.sh /
+COPY scripts/verify-machine-artifacts.sh /
 COPY dist /dist
-# No repository in this stage: reuse provenance is re-checked here for bytes and hashes only;
-# its ancestry and path allowlist were verified against the repository by stage-hosted-proxy.sh.
-RUN TREER_ARTIFACT_VERIFY_NO_GIT=1 sh /verify-machine-artifacts.sh "$TREER_BUILD_COMMIT" /dist
+RUN sh /verify-machine-artifacts.sh "$TREER_BUILD_COMMIT" /dist
 
 FROM debian:bookworm-slim
 ARG TREER_BUILD_COMMIT

@@ -10,7 +10,7 @@ fmt:
     cargo fmt --all
 
 test:
-    python3 scripts/gate-lock.py -- cargo test --workspace
+    cargo test --workspace
 
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
@@ -18,24 +18,24 @@ lint:
 service-canary:
     cargo test -p treer-agent-server service_canary_ -- --nocapture
 
-# Full gate: takes the machine-wide gate slot (see scripts/gate-lock.py); focused recipes do not.
+# Everything CI runs, locally.
 check:
-    python3 scripts/gate-lock.py -- just check-unlocked
-
-check-unlocked:
-    node scripts/check-docs.mjs
-    python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-    node --test scripts/release-r2.test.mjs scripts/release-authority.test.mjs scripts/machine-artifacts.test.mjs scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs
-    node --test scripts/install-path.test.mjs scripts/install-checksums.test.mjs scripts/ais-e2e.test.mjs
+    just scripts-test
     cd web && pnpm typecheck
     cd web && pnpm build
     cd web && pnpm test:e2e
-    python3 -m unittest discover -s deploy/updater/tests -p 'test_*.py' -v
+    just updater-test
     just agent-launcher-test
     cargo build --workspace
     cargo fmt --all -- --check
     cargo test --workspace
     cargo clippy --workspace --all-targets -- -D warnings
+
+# Release, install-trust, deploy and docs tooling (fake registries and servers only).
+scripts-test:
+    node scripts/check-docs.mjs
+    python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
+    node --test scripts/*.test.mjs
 
 proxy:
     cargo run -p treer-proxy
@@ -47,7 +47,7 @@ web-build:
     cd web && pnpm build
 
 web-test:
-    python3 scripts/gate-lock.py -- sh -c 'cd web && pnpm test:e2e'
+    cd web && pnpm test:e2e
 
 mail config state=".treer/apps/mail":
     TREER_APP_CONFIG={{config}} TREER_APP_STATE_DIR={{state}} python3 apps/mail/mail.py
@@ -79,17 +79,10 @@ app-test:
     just agent-launcher-test
 
 agent-launcher-test:
-    python3 scripts/gate-lock.py -- just agent-launcher-test-unlocked
-
-agent-launcher-test-unlocked:
-    npm --prefix launchers/agent ci
+    npm --prefix launchers/agent ci --ignore-scripts
     npm --prefix launchers/agent run check
     npm --prefix launchers/agent test
     npm --prefix launchers/agent run test:browser
-
-# Compatibility recipe name; the duplicate ACP runtime is retired.
-acp-launcher-test:
-    just agent-launcher-test
 
 ais-e2e:
     node scripts/ais-e2e.mjs
@@ -98,25 +91,38 @@ messaging-e2e:
     cargo test -p treer-proxy message_
     just app-test
 
-release-tooling-test:
-    python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
-    node --test scripts/ais-e2e.test.mjs
-
 agent-server *args:
     cargo run -p treer-agent-server -- {{args}}
 
+# Build and stage this machine's native artifacts into dist/<platform>/ (local testing only).
 stage-artifacts:
-    sh scripts/stage-local-artifacts.sh
+    #!/bin/sh
+    set -eu
+    case "$(uname -s)-$(uname -m)" in
+      Linux-x86_64|Linux-amd64) platform=linux-x86_64 ;;
+      Linux-aarch64|Linux-arm64) platform=linux-aarch64 ;;
+      Darwin-x86_64) platform=darwin-x86_64 ;;
+      Darwin-arm64|Darwin-aarch64) platform=darwin-aarch64 ;;
+      *) echo "unsupported platform $(uname -s)/$(uname -m)" >&2; exit 1 ;;
+    esac
+    payload=$(mktemp -d "${TMPDIR:-/tmp}/treer-launcher-payload.XXXXXX")
+    trap 'rm -rf "$payload"' EXIT
+    commit=$(git rev-parse HEAD)
+    npm --prefix launchers/agent ci --ignore-scripts
+    node scripts/prepare-launcher-release.mjs --output "$payload" --source-commit "$commit"
+    TREER_LAUNCHER_PAYLOAD_DIR="$payload" TREER_REQUIRE_LAUNCHER_BUNDLE=1 \
+        cargo build --locked --release -p treer-agent-host -p treer-agent-server -p treer-cli
+    TREER_BUILD_COMMIT="$commit" sh scripts/stage-release-artifacts.sh "$platform" "dist/$platform"
 
-collect-artifacts revision="HEAD":
-    sh scripts/collect-build-artifacts.sh {{revision}}
+# Verify dist/, or download (dispatching if needed) the native workflow artifacts for a commit.
+fetch-artifacts revision="HEAD":
+    sh scripts/fetch-machine-artifacts.sh {{revision}}
 
-ensure-artifacts revision="HEAD":
-    sh scripts/ensure-machine-artifacts.sh {{revision}}
+# Deploy the checked-out commit to the hosted service: canary first, then production.
+deploy target:
+    sh scripts/deploy-hosted.sh {{target}}
 
-machine-artifacts-test:
-    node --test scripts/machine-artifacts.test.mjs
-
+# Two-machine end-to-end test against the deployed Canary.
 test-canary:
     sh scripts/test-canary.sh
 
@@ -125,26 +131,6 @@ test-canary-provision:
 
 test-canary-enroll:
     TREER_CANARY_PROVISION_MACHINES=1 TREER_CANARY_ENROLL_MACHINES=1 sh scripts/test-canary.sh
-
-release-canary revision="HEAD":
-    sh scripts/release-canary.sh {{revision}}
-
-canary *args:
-    python3 scripts/canary-release.py {{args}}
-
-# Plan the gates for a candidate from its changed paths; runs nothing.
-release-grade *args:
-    python3 scripts/release-grade.py {{args}}
-
-# Print (or with --create, create) the Issues ticket chain for a release.
-release-tickets *args:
-    python3 scripts/release-tickets.py {{args}}
-
-canary-scripts-test:
-    python3 -m unittest discover -s scripts/tests -p 'test_canary_release.py' -v
-
-promote-production manifest:
-    sh scripts/promote-production.sh {{manifest}}
 
 web-worker-dev:
     cd web && pnpm worker:dev
@@ -164,10 +150,6 @@ artifacts-stable version:
 artifacts-verify version:
     node scripts/release-r2.mjs verify --version "{{version}}"
 
-artifacts-test:
-    node --test scripts/release-r2.test.mjs
-
-# Local source compilation plus disposable-container health, serialized with
-# release/author gates. Never publishes or replaces a real Treer service.
+# Self-hosted single-container image: local source build plus disposable-container health.
 single-image-smoke:
-    python3 scripts/gate-lock.py --name "single-image build smoke" -- python3 -I deploy/single-container/tests/build-smoke.py
+    python3 -I deploy/single-container/tests/build-smoke.py
