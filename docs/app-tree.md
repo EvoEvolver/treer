@@ -8,8 +8,13 @@ mailbox visibility, Policy, and the parent App's existing lifecycle.
 
 ## Recursive directory
 
-The Console expands a Managed App by reading its own `GET /api/tree?path=` API
-through the authenticated App UI tunnel:
+Core records no "has a tree" flag, so the Console asks each running Managed App
+once per page session for its root page (`Accept: application/json`, 4 s timeout). Only a `schema_version: 1`
+JSON answer, or a 401/403, makes the App row expandable; 404/405/501, an HTML
+SPA fallback or any other non-tree reply leaves it a plain leaf with no
+disclosure, and 5xx/timeouts are asked again after 30 s instead of guessed.
+An expandable App reads its own `GET /api/tree?path=` API through the
+authenticated App UI tunnel:
 
 ```text
 GET /api/workspaces/WORKSPACE/apps/APP/ui/api/tree?path=team%2Ftools

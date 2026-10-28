@@ -42,3 +42,43 @@ export async function readAppTree(workspaceId: string, appId: string, path: stri
 }
 
 export type AppNodeSelection = { appId: string; ownerId: string; path: string[]; node: AppTreeNode }
+
+// Core has no per-App "implements a tree" declaration yet, so the Console asks
+// each running App once whether `GET api/tree?path=` is part of its UI API.
+// A schema_version 1 JSON root page (even an invalid or empty one) or an auth
+// refusal means the App owns a directory; 404/405/501, an HTML SPA fallback or
+// any other non-tree answer means it does not. Definitive answers are kept for
+// the page session; network errors, timeouts and 5xx are retried later.
+export type AppTreeSupport = "yes" | "no" | "unknown"
+const support = new Map<string, { value: AppTreeSupport | Promise<AppTreeSupport>; at: number }>()
+const RETRY_UNKNOWN_MS = 30000
+const PROBE_TIMEOUT_MS = 4000
+const supportKey = (workspaceId: string, appId: string) => `${workspaceId}\n${appId}`
+
+export function knownAppTreeSupport(workspaceId: string, appId: string): AppTreeSupport {
+  const entry = support.get(supportKey(workspaceId, appId))
+  return entry && typeof entry.value === "string" ? entry.value : "unknown"
+}
+
+async function requestAppTreeSupport(workspaceId: string, appId: string): Promise<AppTreeSupport> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS)
+  try {
+    const page = await appJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/apps/${encodeURIComponent(appId)}/ui/api/tree?path=`, controller.signal, { headers: { Accept: "application/json" } }) as { schema_version?: unknown } | null
+    return page && typeof page === "object" && page.schema_version === 1 ? "yes" : "no"
+  } catch (reason) {
+    if (reason instanceof ApiError) return reason.status === 401 || reason.status === 403 ? "yes" : reason.status >= 500 && reason.status !== 501 ? "unknown" : "no"
+    // A body that is not JSON (or not UTF-8) is some other route, e.g. an SPA fallback page.
+    if (reason instanceof SyntaxError || reason instanceof TypeError && /encod/i.test(reason.message)) return "no"
+    return reason instanceof Error && reason.message === "app_response_too_large" ? "no" : "unknown"
+  } finally { clearTimeout(timer) }
+}
+
+export function probeAppTreeSupport(workspaceId: string, appId: string): Promise<AppTreeSupport> {
+  const key = supportKey(workspaceId, appId)
+  const entry = support.get(key)
+  if (entry && (entry.value !== "unknown" || Date.now() - entry.at < RETRY_UNKNOWN_MS)) return Promise.resolve(entry.value)
+  const pending = requestAppTreeSupport(workspaceId, appId).then(value => { support.set(key, { value, at: Date.now() }); return value })
+  support.set(key, { value: pending, at: Date.now() })
+  return pending
+}

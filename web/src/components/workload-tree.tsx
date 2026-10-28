@@ -1,4 +1,4 @@
-import { AppOwnedTree, type AppTreeNavigation } from "@/components/app-owned-tree"
+import { AppOwnedTree, useAppTreeSupport, type AppTreeNavigation } from "@/components/app-owned-tree"
 import { WorkspacePinAction, WorkspacePinsNotice } from "@/components/workspace-pin-action"
 import type { PinsController } from "@/components/use-workspace-pins"
 import { workloadPin } from "@/lib/workspace-pins"
@@ -338,6 +338,8 @@ export function WorkloadTree({ pins, workspaceId, agents, apps, machines, select
     return total
   }
   const [appOpen, setAppOpen] = useState<Record<string, boolean>>({})
+  // An App row discloses contents only when that App declared a directory by answering the tree contract.
+  const treeApps = useAppTreeSupport(appTree && !preview ? workspaceId : null, apps)
   const [dropFolder, setDropFolder] = useState<string | null>(null)
   function dragProps(item: Item) {
     return {
@@ -385,7 +387,7 @@ export function WorkloadTree({ pins, workspaceId, agents, apps, machines, select
     })}{orderedRows(parent).filter((agent) => showAll || agentMatches(agent)).map((agent) => {
       const item: Item = { kind: "agent", id: agent.agent_id, name: agent.name }
       const status = statusOf(agent)
-      const ownedApps = appTree && workspaceId && !preview ? apps.filter((app) => (app.runtime_agent_id ?? app.app_id) === agent.agent_id) : []
+      const ownedApps = appTree && workspaceId && !preview ? apps.filter((app) => (app.runtime_agent_id ?? app.app_id) === agent.agent_id && treeApps.has(app.app_id)) : []
       const expandable = ownedApps.length > 0
       const appExpanded = expandable ? appOpen[agent.agent_id] === true : undefined
       const selected = selectedId === agent.agent_id

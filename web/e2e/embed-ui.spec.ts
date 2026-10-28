@@ -100,6 +100,8 @@ async function mockApp(page: Page, status = "running", runtimeAgentId = "app-run
     if (new URL(route.request().url()).pathname.endsWith("/app.js")) {
       return route.fulfill({ contentType: "text/javascript", body: 'document.querySelector("h1").textContent = "Soul human interface"' })
     }
+    // The sidebar asks once whether this App owns a tree; Soul does not.
+    if (new URL(route.request().url()).pathname.endsWith("/api/tree")) return route.fulfill({ status: 404, json: { error: "not_found" } })
     expect(route.request().headers().accept).toContain("text/html")
     return route.fulfill({ contentType: "text/html", body: '<!doctype html><html><body><h1>Loading</h1><script src="./app.js"></script></body></html>' })
   })
