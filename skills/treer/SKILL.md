@@ -452,7 +452,8 @@ means the deployment has not enabled Messages; report it.
 
 A Message does not wake another Agent. When attention is needed, send the
 Message, then `treer agent prompt TARGET "<message-id>"` with only the ID;
-`agent.prompt` is a separate, stronger Policy action.
+`agent.prompt` is a separate, stronger Policy action; an App that wakes Agents
+(for example Issues on assignment or @mention) needs it granted to its runtime ID.
 
 ## Machines and bounded commands
 

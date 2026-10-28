@@ -67,7 +67,9 @@ interface, while data pages remain JSON. Agent Interfaces belong to the unified 
 They continue to expose their registered `ui_path`.
 
 - [`issues`](issues/README.md) is a shared human/Agent issue tracker with SQLite,
-  hierarchy, dependencies, comments and expiring claims.
+  hierarchy, dependencies and comments. Assigning or @mentioning an Agent wakes
+  it with `treer agent prompt`, so grant the App's runtime identity
+  `agent.prompt` in the workspace Policy (otherwise only a Message is sent).
 - [`mail`](mail/README.md) is a browser App over App OAuth and Core Message.
 - [`telegram`](telegram/README.md) is a Telegram bridge run by a managed Agent.
 - [`soul`](soul/README.md) is an experimental Managed App file server that
