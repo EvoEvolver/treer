@@ -266,7 +266,8 @@ RUST_SPIKE_RELEASE_BIN=$CARGO_TARGET_DIR/release/treer-launch node --test tests/
 
 The other `tests/*-entry.mjs` suites (session launch, snapshot, transfer, owner
 default, HOME cwd) take the same `RUST_SPIKE_BIN`;
-`tests/windows-native-entry.mjs` needs a Windows fixture-feature PE.
+`tests/windows-native-entry.mjs` needs a Windows fixture-feature PE; the
+Windows release job runs it with the launcher unit tests.
 UI sources live in `ui/`; after editing them run `npm run build:ui` and commit
 `public/`. `check:ui` fails on any byte difference, budget overrun or forbidden
 code pattern. `tests/acceptance/` holds the live Console embed/tasks acceptance
