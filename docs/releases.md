@@ -208,7 +208,15 @@ manifest without `treer-launch` as predating it.
   Proxy's Cloudflare sender with `treer email send` or
   `POST /api/apps/{service_id}/email`, governed by `email.send`, and look up an
   earlier send with `treer email status KEY`. It reuses the
-  `app_email_*` tables 0.2.0 left in place.
+  `app_email_*` tables 0.2.0 left in place. The recipient is `to` (any address)
+  or `to_member` (`--to-member USER_ID`: Core resolves the member's verified
+  account email; `email_member_not_found` 404, `email_member_unverified` 409).
+- **Mail App: Agents email people** (`POST /api/email` with `to_member` or
+  `to`, `subject`, `text`, `message_id`): Mail emails the person the Agent's
+  text plus a reply link that opens the Core thread in its web inbox after
+  sign-in; `GET /api/email/KEY` wraps Core's status. The unread-Message email
+  notifications (settings, digests, Notifications view, `email_preview_chars`,
+  `notify_poll_seconds`) are removed; Mail drops their SQLite tables on start.
 - **Per-endpoint App inbox** (`message.endpoint-inbox.v1`): `app_endpoint` and
   `after` on Message receive/ack (`treer message receive|ack --endpoint KEY`).
   Additive; needs a Proxy and Controller that both advertise it.

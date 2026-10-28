@@ -471,10 +471,28 @@ printf '%s\n' 'Your report is ready.' | \
   treer email send --to person@example.com --subject 'Report ready' --idempotency-key report-42
 ```
 
-Reusing a key with the same content returns the original `email_id`; different
-content is `email_idempotency_conflict`. Policy action: `email.send`. After a
-timeout or other uncertain result, `treer email status KEY` reports `sent`,
-`failed` or `pending` instead of resending.
+`--to-member USER_ID` instead of `--to` sends to a workspace member's verified
+account email. Reusing a key with the same content returns the original
+`email_id`; different content is `email_idempotency_conflict`. Policy action:
+`email.send`. After a timeout or other uncertain result, `treer email status KEY`
+reports `sent`, `failed` or `pending` instead of resending.
+
+An ordinary Agent emails a person through the Mail App, if the workspace runs
+one (`http://MAIL_NAME.treer/`; examples use an App named `mail`): send the
+person a Core Message first, then ask Mail to email them a link to it, where
+they sign in and reply in the thread:
+
+```bash
+treer message send --to USER_ID --body 'Please review the draft.'   # note message_id
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"to_member":"USER_ID","subject":"Review needed","text":"Please review the draft.","message_id":"MESSAGE_ID"}' \
+  http://mail.treer/api/email
+```
+
+Use `"to":"ADDRESS"` for any other address; replying through the link needs a
+Treer account in the workspace. The response is `{email_id, status,
+idempotency_key}`; on `uncertain` ask `GET http://mail.treer/api/email/KEY`
+instead of sending again.
 
 A Message does not wake another Agent. When attention is needed, send the
 Message, then `treer agent prompt TARGET "<message-id>"` with only the ID;
