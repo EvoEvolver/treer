@@ -8,25 +8,6 @@ if ([Environment]::OSVersion.Platform -ne 'Win32NT' -or
     [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') {
     throw 'This installer requires native Windows x64.'
 }
-# Product rule: Treer on Windows assumes an account in the Administrators group
-# (membership, not elevation). Decided from the process token through .NET
-# only: an elevated token lists S-1-5-32-544 among its enabled groups; the
-# UAC-limited token of an administrator carries it as a deny-only SID claim.
-# No subprocess, PATH lookup, environment variable or user name is consulted,
-# and any query failure counts as "not an administrator".
-$administrators = 'S-1-5-32-544'
-$isAdministrator = $false
-$token = $null
-try {
-    $token = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $isAdministrator = [bool]($token.Groups | Where-Object { $_.Value -eq $administrators }) -or
-        [bool]($token.Claims | Where-Object {
-            $_.Value -eq $administrators -and $_.Type -like '*denyonlysid*' })
-} catch { $isAdministrator = $false }
-finally { if ($token) { $token.Dispose() } }
-if (-not $isAdministrator) {
-    throw 'windows_requires_administrator: Treer on Windows requires an account in the Administrators group. Sign in as an administrator (elevation is not required) and run the installer again. Nothing was installed.'
-}
 $artifactUri = $null
 if ($ArtifactBase -eq '__TREER_ARTIFACT_BASE__' -or
     ![Uri]::TryCreate($ArtifactBase, [UriKind]::Absolute, [ref]$artifactUri) -or

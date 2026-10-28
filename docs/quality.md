@@ -73,7 +73,8 @@ Cross-compiling or running Clippy for Windows on macOS establishes only that it
 compiles. The Windows job in `build-release-artifacts.yml` is the evidence for
 local IPC and owner checks, private file replacement, ConPTY argv/input/resize/
 stop, detached Host idempotency and survival across Controller replacement,
-the administrator-account requirement, and the installer. Real enrollment,
+the installer, and install plus the native, registration-lock and real Host
+tests as a standard (non-administrator) user. Real enrollment,
 service routing, App deployment, reboot recovery and in-place update on Windows
 still need a native acceptance run before claiming them verified.
 

@@ -16,9 +16,7 @@ pub use environment::{
 #[allow(unsafe_code)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{
-    current_user_sid, process_created_at, terminate_process, LocalLock, ProcessTreeGuard,
-};
+pub use windows::{current_user_sid, process_created_at, terminate_process, ProcessTreeGuard};
 
 pub trait LocalIo: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> LocalIo for T {}
@@ -119,31 +117,6 @@ pub fn config_directory() -> Option<PathBuf> {
     }
 }
 
-/// Windows account classification for the administrator requirement (#130).
-/// Defined on every platform so decision logic can be unit-tested anywhere.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WindowsAccountClass {
-    /// Full-elevation token, or an unsplit token in BUILTIN\Administrators.
-    Elevated,
-    /// UAC-limited token of an Administrators member.
-    AdminCapable,
-    /// Not a member of Administrators.
-    Standard,
-}
-
-/// Windows only: classify the current process token.
-#[cfg(windows)]
-pub fn account_class() -> io::Result<WindowsAccountClass> {
-    windows::account_class()
-}
-
-/// Windows only, diagnostics/tests: run the Administrators membership path
-/// (DuplicateToken + CheckTokenMembership) on the current process token.
-#[cfg(windows)]
-pub fn process_token_administrators_member() -> io::Result<bool> {
-    windows::process_token_administrators_member()
-}
-
 pub fn secure_directory(path: &Path) -> io::Result<()> {
     std::fs::create_dir_all(path)?;
     #[cfg(unix)]
@@ -186,18 +159,6 @@ pub fn available_disk_bytes(path: &Path) -> io::Result<u64> {
     #[cfg(windows)]
     {
         windows::transfer_available_bytes(path)
-    }
-}
-
-/// Try to take an exclusive advisory lock on an open file without blocking.
-/// Returns `Ok(false)` when another holder has it; the lock lives with the
-/// file descriptor and the OS releases it when the process ends.
-#[cfg(unix)]
-pub fn try_lock_file_exclusive(file: &std::fs::File) -> io::Result<bool> {
-    match rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => Ok(true),
-        Err(rustix::io::Errno::WOULDBLOCK) => Ok(false),
-        Err(error) => Err(error.into()),
     }
 }
 

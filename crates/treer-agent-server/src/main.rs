@@ -233,20 +233,6 @@ async fn async_main() -> Result<()> {
             .unwrap_or_else(|| "default".to_string());
         return tui::run(&workspace).await;
     }
-    // Windows product rule (#130): installing, enrolling and starting require
-    // an Administrators-group account; refuse early with one fixed code.
-    if matches!(
-        args.command,
-        None | Some(Command::Connect(_) | Command::Restore { .. } | Command::Run { .. })
-    ) {
-        if let Err(error) = service::require_windows_administrator() {
-            tracing::error!(
-                code = service::WINDOWS_REQUIRES_ADMINISTRATOR,
-                "refusing to start"
-            );
-            return Err(error);
-        }
-    }
     match args.command {
         Some(Command::Launcher(args)) => launcher::run(args).await,
         None => run_server(args.server).await,
@@ -451,23 +437,6 @@ async fn run_service_command(args: ServiceArgs) -> Result<()> {
             }
             Err(error) => return Err(error),
         };
-    if matches!(
-        args.command,
-        ServiceCommand::Start
-            | ServiceCommand::Restart
-            | ServiceCommand::RestartController
-            | ServiceCommand::RelocateRoot { .. }
-            | ServiceCommand::Repair { .. }
-    ) {
-        service::require_windows_administrator()?;
-    }
-    // Status stays available to every account, but says why an installed
-    // Controller will not start under this one.
-    if matches!(args.command, ServiceCommand::Status) {
-        if let Err(error) = service::require_windows_administrator() {
-            eprintln!("treer: {error}");
-        }
-    }
     match (args.command, target) {
         (ServiceCommand::Status, service::ServiceCommandTarget::Inventory(services)) => {
             service::print_installed_services(&services).await

@@ -255,37 +255,6 @@ fn validate_machine_identity(identity: &MachineIdentity) -> Result<()> {
     validate_machine_name(&identity.name)
 }
 
-/// Fixed code for the Windows product rule: Treer assumes an account in the
-/// Administrators group; other accounts are refused before anything is
-/// written or started, never half-supported.
-pub const WINDOWS_REQUIRES_ADMINISTRATOR: &str = "windows_requires_administrator";
-
-// Only Windows classifies a live token; other platforms exercise this through
-// the unit test alone.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn administrator_requirement(class: treer_platform::WindowsAccountClass) -> Result<()> {
-    use treer_platform::WindowsAccountClass::*;
-    match class {
-        Elevated | AdminCapable => Ok(()),
-        Standard => bail!(
-            "{WINDOWS_REQUIRES_ADMINISTRATOR}: Treer on Windows requires an account in the Administrators group. Sign in as an administrator (elevation is not required) and retry. Nothing was changed."
-        ),
-    }
-}
-
-/// Windows: refuse to install, enroll or start under a non-administrator
-/// account. No-op elsewhere.
-pub fn require_windows_administrator() -> Result<()> {
-    #[cfg(windows)]
-    {
-        let class = treer_platform::account_class()
-            .context("failed to classify the Windows account token")?;
-        administrator_requirement(class)
-    }
-    #[cfg(not(windows))]
-    Ok(())
-}
-
 pub fn validate_machine_name(name: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
@@ -985,7 +954,7 @@ pub fn relocate_root(workspace: &str, root: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         let (paths, config) = installed_service(workspace)?;
-        let _lock = treer_platform::LocalLock::acquire(&config.server_id)?;
+        let _lock = platform::host_lock(&paths, &config)?;
         relocate_root_at(&paths, &config, root)
     }
 }
@@ -1729,15 +1698,12 @@ fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
 /// selection, the claim and the configuration replacement. Held by `connect`
 /// and `service repair` until the switch and registration are complete, so a
 /// concurrent run can never mistake an active replacement for crash residue.
-/// Unix: an advisory lock on a stable, never-unlinked 0600 file in the config
-/// directory (CLOEXEC, released by the OS when the process ends). Windows:
-/// the named per-user mutex `LocalLock`.
+/// An OS file lock on a stable, never-unlinked private file in the config
+/// directory (not inherited by children, released by the OS when the process
+/// ends).
 pub struct RegistrationLock {
     workspace: String,
-    #[cfg(unix)]
     _file: fs::File,
-    #[cfg(windows)]
-    _lock: treer_platform::LocalLock,
 }
 
 impl RegistrationLock {
@@ -1760,55 +1726,53 @@ pub fn lock_machine_registration(workspace: &str) -> Result<RegistrationLock> {
     lock_machine_registration_in(&config_dir()?, workspace)
 }
 
-fn lock_machine_registration_in(config_dir: &Path, workspace: &str) -> Result<RegistrationLock> {
+/// Open (creating if needed) a private lock file and take its exclusive OS
+/// lock, retrying until `wait` has elapsed. `Ok(None)` means another process
+/// still holds it. The file is never unlinked: removing it could let another
+/// process lock a different file.
+pub(crate) fn lock_file(path: &Path, wait: Duration) -> Result<Option<fs::File>> {
+    let directory = path.parent().context("lock file has no parent")?;
+    fs::create_dir_all(directory)
+        .with_context(|| format!("failed to create {}", directory.display()))?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        fs::create_dir_all(config_dir)
-            .with_context(|| format!("failed to create {}", config_dir.display()))?;
-        let path = config_dir.join(format!(
-            "{}-machine-registration.lock",
-            component_key(workspace)
-        ));
-        // std opens with O_CLOEXEC: spawned Hosts/Controllers never inherit it.
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)
-            .with_context(|| format!("failed to open {}", path.display()))?;
-        let locked = treer_platform::try_lock_file_exclusive(&file)
-            .with_context(|| format!("failed to lock {}", path.display()))?;
-        if !locked {
-            return Err(registration_busy(workspace));
-        }
-        Ok(RegistrationLock {
-            workspace: workspace.to_string(),
-            _file: file,
-        })
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
+    // std opens without handle inheritance (O_CLOEXEC on Unix): spawned
+    // Hosts/Controllers never inherit the lock.
+    let file = options
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
     #[cfg(windows)]
-    {
-        let _ = config_dir;
-        let lock = treer_platform::LocalLock::acquire(&format!(
-            "machine-registration-{}",
-            component_key(workspace)
-        ))
-        .map_err(|error| {
-            if error.kind() == ErrorKind::TimedOut {
-                registration_busy(workspace)
-            } else {
-                anyhow::Error::new(error)
+    treer_platform::secure_file(path)?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50))
             }
-        })?;
-        Ok(RegistrationLock {
-            workspace: workspace.to_string(),
-            _lock: lock,
-        })
+            Err(fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(fs::TryLockError::Error(error)) => {
+                return Err(error).with_context(|| format!("failed to lock {}", path.display()))
+            }
+        }
     }
+}
+
+fn lock_machine_registration_in(config_dir: &Path, workspace: &str) -> Result<RegistrationLock> {
+    let path = config_dir.join(format!(
+        "{}-machine-registration.lock",
+        component_key(workspace)
+    ));
+    let file = lock_file(&path, Duration::ZERO)?.ok_or_else(|| registration_busy(workspace))?;
+    Ok(RegistrationLock {
+        workspace: workspace.to_string(),
+        _file: file,
+    })
 }
 
 /// Switch this installation's registration from `previous` to `next` (a new
