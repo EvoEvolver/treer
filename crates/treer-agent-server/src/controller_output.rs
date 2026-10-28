@@ -36,6 +36,37 @@ pub(super) fn decode_replay(replay: &HostOutputReplay) -> Result<Vec<u8>, Protoc
     Ok(result)
 }
 
+/// Terminal bytes for a replay from `cursor`. When the Host ring has evicted
+/// output right before the first retained chunk, that chunk can start inside
+/// an escape sequence or UTF-8 character, which a fresh terminal would print
+/// as garbage (or misparse what follows), so it starts at the first sequence
+/// or line boundary instead.
+pub(super) fn terminal_replay(
+    replay: &HostOutputReplay,
+    cursor: Option<&TerminalCursor>,
+) -> Result<Vec<u8>, ProtocolError> {
+    let resumed = cursor
+        .filter(|cursor| cursor.stream_epoch == replay.stream_epoch)
+        .map_or(0, |cursor| cursor.revision);
+    let mut data = decode_replay(replay)?;
+    if replay
+        .chunks
+        .first()
+        .is_some_and(|chunk| chunk.revision > resumed.saturating_add(1))
+    {
+        let scan = &data[..data.len().min(REPLAY_BOUNDARY_SCAN_BYTES)];
+        if let Some(start) = scan.iter().position(|byte| matches!(byte, 0x1b | b'\n')) {
+            let start = if data[start] == b'\n' {
+                start + 1
+            } else {
+                start
+            };
+            data.drain(..start);
+        }
+    }
+    Ok(data)
+}
+
 pub(super) fn plain_text(replay: &HostOutputReplay) -> Result<String, ProtocolError> {
     let raw = decode_replay(replay)?;
     Ok(String::from_utf8_lossy(&strip_ansi_escapes::strip(raw)).into_owned())

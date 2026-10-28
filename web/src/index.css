@@ -106,8 +106,8 @@
 .xterm-viewport {
   overscroll-behavior: none;
 }
-.xterm-screen,
-.xterm-rows {
+/* Touch drags are turned into wheel input (lib/terminal-touch.ts). */
+.xterm {
   touch-action: none;
 }
 .xterm .xterm-viewport { scrollbar-color: #41484d #0f1215; }

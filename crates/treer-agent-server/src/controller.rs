@@ -41,6 +41,7 @@ use output::*;
 const OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 const OUTPUT_TRIM_SLACK_BYTES: usize = 64 * 1024;
 const STATUS_SCAN_LIMIT_BYTES: usize = 16 * 1024;
+const REPLAY_BOUNDARY_SCAN_BYTES: usize = 4 * 1024;
 const QUIET_IDLE_AFTER: Duration = Duration::from_millis(900);
 const OUTPUT_METADATA_INTERVAL: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
@@ -3059,7 +3060,7 @@ impl ControllerRuntime {
             stream_epoch: replay.stream_epoch.clone(),
             revision: replay.next_revision.saturating_sub(1),
             gap: replay.gap,
-            data: decode_replay(&replay)?,
+            data: terminal_replay(&replay, cursor)?,
         })
     }
 

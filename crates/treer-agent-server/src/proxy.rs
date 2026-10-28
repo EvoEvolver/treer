@@ -36,6 +36,28 @@ struct TerminalRelay {
     last_revision: u64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum RelayStep {
+    Skip,
+    Forward,
+    Resync,
+}
+
+impl TerminalRelay {
+    /// Revisions are contiguous per stream. A jump means chunks were dropped
+    /// upstream (a lagged Controller relay): forwarding would lose bytes.
+    fn step(&mut self, process_id: &str, revision: u64) -> RelayStep {
+        if self.process_id != process_id || revision <= self.last_revision {
+            RelayStep::Skip
+        } else if revision != self.last_revision + 1 {
+            RelayStep::Resync
+        } else {
+            self.last_revision = revision;
+            RelayStep::Forward
+        }
+    }
+}
+
 struct PendingClose {
     deadline: Instant,
     final_revision: u64,
@@ -337,60 +359,32 @@ impl ProxyClient {
                 },
                 event = terminal_events.recv() => match event {
                     Ok(event) => {
-                        let frames = terminal_sessions
-                            .iter_mut()
-                            .filter_map(|(session_id, relay)| {
-                                if relay.process_id != event.process_id || event.revision <= relay.last_revision {
-                                    return None;
-                                }
-                                relay.last_revision = event.revision;
-                                Some(TerminalBinaryFrame {
+                        let mut frames = Vec::new();
+                        let mut gaps = Vec::new();
+                        for (session_id, relay) in &mut terminal_sessions {
+                            match relay.step(&event.process_id, event.revision) {
+                                RelayStep::Skip => {}
+                                RelayStep::Resync => gaps.push(session_id.clone()),
+                                RelayStep::Forward => frames.push(TerminalBinaryFrame {
                                     kind: TerminalBinaryKind::Output,
                                     session_id: session_id.clone(),
                                     revision: event.revision,
                                     payload: event.data.clone(),
-                                })
-                            })
-                            .collect::<Vec<_>>();
+                                }),
+                            }
+                        }
                         for frame in frames {
                             send_binary(&mut outgoing, frame).await?;
+                        }
+                        if !gaps.is_empty() {
+                            warn!(sessions = gaps.len(), "terminal output skipped revisions; resyncing from host");
+                            self.resync_terminals(&mut outgoing, &mut terminal_sessions, gaps).await?;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
                         warn!(count, "terminal output relay lagged; resyncing from host");
-                        let sessions = terminal_sessions
-                            .iter()
-                            .map(|(session_id, relay)| (session_id.clone(), relay.clone()))
-                            .collect::<Vec<_>>();
-                        for (session_id, relay) in sessions {
-                            let cursor = TerminalCursor {
-                                stream_epoch: relay.stream_epoch,
-                                revision: relay.last_revision,
-                            };
-                            match self
-                                .runtime
-                                .terminal_snapshot(&relay.process_id, Some(&cursor))
-                                .await
-                            {
-                                Ok(snapshot) => {
-                                    if snapshot.data.is_empty() && !snapshot.gap {
-                                        continue;
-                                    }
-                                    if let Some(relay) = terminal_sessions.get_mut(&session_id) {
-                                        relay.stream_epoch = snapshot.stream_epoch.clone();
-                                        relay.last_revision = snapshot.revision;
-                                    }
-                                    publish_terminal_replay(&mut outgoing, session_id, snapshot)
-                                        .await?;
-                                }
-                                Err(error) => warn!(
-                                    code = %error.code,
-                                    message = %error.message,
-                                    %session_id,
-                                    "failed to resync lagged terminal"
-                                ),
-                            }
-                        }
+                        let sessions = terminal_sessions.keys().cloned().collect();
+                        self.resync_terminals(&mut outgoing, &mut terminal_sessions, sessions).await?;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         return Err(anyhow!("terminal event channel closed"));
@@ -643,6 +637,50 @@ impl ProxyClient {
                 }
             }
         }
+    }
+
+    /// Replays what each session missed since its relay cursor (a gap Ready
+    /// when the Host ring no longer holds it).
+    async fn resync_terminals<S>(
+        &self,
+        outgoing: &mut S,
+        terminal_sessions: &mut HashMap<String, TerminalRelay>,
+        session_ids: Vec<String>,
+    ) -> anyhow::Result<()>
+    where
+        S: futures_util::Sink<Message> + Unpin,
+        S::Error: std::error::Error + Send + Sync + 'static,
+    {
+        for session_id in session_ids {
+            let Some(relay) = terminal_sessions.get_mut(&session_id) else {
+                continue;
+            };
+            let cursor = TerminalCursor {
+                stream_epoch: relay.stream_epoch.clone(),
+                revision: relay.last_revision,
+            };
+            match self
+                .runtime
+                .terminal_snapshot(&relay.process_id, Some(&cursor))
+                .await
+            {
+                Ok(snapshot) => {
+                    if snapshot.data.is_empty() && !snapshot.gap {
+                        continue;
+                    }
+                    relay.stream_epoch = snapshot.stream_epoch.clone();
+                    relay.last_revision = snapshot.revision;
+                    publish_terminal_replay(outgoing, session_id, snapshot).await?;
+                }
+                Err(error) => warn!(
+                    code = %error.code,
+                    message = %error.message,
+                    %session_id,
+                    "failed to resync terminal"
+                ),
+            }
+        }
+        Ok(())
     }
 
     /// Returns true when `failure` (None = recovered) differs from what was
@@ -1426,6 +1464,22 @@ pub(crate) fn command_permitted(advertised: &[String], command: &AgentCommand) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_relay_forwards_contiguous_output_and_resyncs_skipped_revisions() {
+        use super::{RelayStep, TerminalRelay};
+        let mut relay = TerminalRelay {
+            process_id: "p1".into(),
+            stream_epoch: "stream_a".into(),
+            last_revision: 4,
+        };
+        assert_eq!(relay.step("p2", 5), RelayStep::Skip);
+        assert_eq!(relay.step("p1", 4), RelayStep::Skip);
+        assert_eq!(relay.step("p1", 5), RelayStep::Forward);
+        assert_eq!(relay.step("p1", 7), RelayStep::Resync);
+        assert_eq!(relay.last_revision, 5, "a gap must not advance the cursor");
+        assert_eq!(relay.step("p1", 6), RelayStep::Forward);
+    }
+
     use super::*;
     use axum::{routing::get, Json, Router};
     use std::net::Ipv4Addr;
