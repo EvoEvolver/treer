@@ -1671,12 +1671,8 @@ PostgreSQL `app_email_sends` stores fingerprint/idempotency/state, and
 `app_email_attempts` is body-free delivery audit and rate history. Email is not
 Core Message and does not create or wake an Agent.
 
-The [email-endpoint App](../apps/email-endpoint/README.md) owns its SQLite
-thread-to-message/email mapping, retry queue, local outbox, membership/email
-bindings, HTML page, and optional wake. Core owns canonical message bodies and
-per-recipient delivery. Agent requests and human replies use their own verified
-service tokens through App Message routes. App-owned channel data does not add
-email fields to Core Message or use an App credential to impersonate a caller.
+An App that uses this route owns its own email/thread mapping and outbox; Core
+Message gains no email fields.
 
 ### Workspace tree target identity
 

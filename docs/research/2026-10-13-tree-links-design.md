@@ -22,7 +22,7 @@
 - [树持久化](../../crates/treer-proxy/src/auth/workload_tree.rs)锁workspace行，但folder/workload名称检查分离，需统一三类reservation。
 - [树授权](../../crates/treer-proxy/src/api/workload_tree.rs)当前agent.tree.read/manage为workspace级，尚无路径选择器。
 - [CLI ls](../../crates/treer-agent-server/src/cli_workload_tree.rs)输出JSON folders/agents，links不能伪装成第二份Agent。
-- [email-endpoint](../../apps/email-endpoint/email_endpoint.py)当前自行查真实ID/folder并硬编码同目录，需配套App动作检查替代。
+- email-endpoint（已删除）当前自行查真实ID/folder并硬编码同目录，需配套App动作检查替代。
 
 ## Core/Postgres/NATS模型
 
