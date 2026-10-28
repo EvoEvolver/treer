@@ -67,6 +67,13 @@ telegram-test:
 soul-test:
     python3 -m unittest discover -s apps/soul/tests -p 'test_*.py' -v
 
+external-agent-test:
+    cargo fmt --check --manifest-path apps/external-agent/Cargo.toml
+    cargo clippy --locked --manifest-path apps/external-agent/Cargo.toml --all-targets -- -D warnings
+    cargo test --locked --manifest-path apps/external-agent/Cargo.toml
+    cargo build --locked --manifest-path apps/external-agent/Cargo.toml
+    python3 apps/external-agent/tests/smoke.py --binary apps/external-agent/target/debug/treer-external-agent
+
 updater-test:
     python3 -m unittest discover -s deploy/updater/tests -p 'test_*.py' -v
 

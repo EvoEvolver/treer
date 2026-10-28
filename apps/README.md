@@ -79,6 +79,9 @@ They continue to expose their registered `ui_path`.
   repositories shared by Agents and humans.
 - [`policy`](policy/README.md) is a versioned workspace Policy Provider with a
   browser editor, publication status, cache invalidation, and decision simulator.
+- [`external-agent`](external-agent/README.md) lets programs outside Treer
+  (Claude Code, Codex, scripts, CI) act as the App's Agent with App-issued
+  tokens: device-code onboarding, a native CLI gateway and per-key inboxes.
 
 Each bundled App is source code, configuration schema, documentation, and
 tests. Managed Apps currently accept one command and one HTTP UI port; there is
