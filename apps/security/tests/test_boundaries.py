@@ -28,6 +28,7 @@ issues_auth=load('audit_issues_auth',APPS/'issues/auth.py')
 secrets=load('audit_soul_secrets',APPS/'soul/soul_secrets.py')
 archive_bounds=load('audit_soul_archive',APPS/'soul/soul_archive.py')
 sys.modules['auth']=issues_auth
+sys.path.insert(0,str(APPS/'issues'))  # store.py imports its sibling modules
 issues_store=load('audit_issues_store',APPS/'issues/store.py')
 sys.path.insert(0,str(APPS/'telegram'))
 from telegram_app.state import StateStore as TelegramStore
