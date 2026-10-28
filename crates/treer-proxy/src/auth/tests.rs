@@ -2230,6 +2230,233 @@ fn machine_route_is_limited_to_credential_workspace() {
 }
 
 #[tokio::test]
+async fn app_email_any_recipient_delivery_idempotency_rates_and_body_free_audit() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let captured = Arc::new(tokio::sync::Mutex::new(Vec::<Value>::new()));
+    let capture = captured.clone();
+    let fake = Router::new().route(
+        "/send",
+        post(move |Json(body): Json<Value>| {
+            let capture = capture.clone();
+            async move {
+                capture.lock().await.push(body);
+                Json(json!({"success":true}))
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, fake).await });
+    let mut store = AuthStore::for_test("password").await;
+    store.seed_test_workspace("email").await;
+    sqlx::query("INSERT INTO users(id,email,preferred_name,password_hash,email_verified,created_at) VALUES('u','member@example.test','M','unused',TRUE,'now'),('unverified','unverified@example.test','U','unused',FALSE,'now')")
+        .execute(&store.pool).await.unwrap();
+    sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES('org_email','u','member','now'),('org_email','unverified','member','now')").execute(&store.pool).await.unwrap();
+    let mut request = treer_protocol::SendAppEmailRequest {
+        to: "outside@external.test".into(),
+        subject: "Test".into(),
+        text: "PRIVATE BODY <script>bad()</script>".into(),
+        idempotency_key: "first".into(),
+    };
+    let error = store
+        .send_app_email("email", "app-a", &request)
+        .await
+        .unwrap_err();
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error.error.code, "email_not_configured");
+    store.email_sender = Some(CloudflareEmailSender {
+        client: reqwest::Client::new(),
+        endpoint: Url::parse(&format!("http://{address}/send")).unwrap(),
+        api_token: "fake-token".into(),
+        from: "fixed@example.test".into(),
+    });
+    let first = store
+        .send_app_email("email", "app-a", &request)
+        .await
+        .unwrap();
+    assert_eq!(first.status, "sent");
+    let status = store
+        .app_email_status("email", "app-a", "first")
+        .await
+        .unwrap();
+    assert_eq!(
+        (status.email_id.as_str(), status.status.as_str()),
+        (first.email_id.as_str(), "sent")
+    );
+    for (app, key) in [("app-a", "unknown"), ("app-b", "first")] {
+        let missing = store.app_email_status("email", app, key).await.unwrap_err();
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
+        assert_eq!(missing.error.code, "email_not_found");
+    }
+    sqlx::query("UPDATE app_email_sends SET status='sending' WHERE idempotency_key='first'")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .app_email_status("email", "app-a", "first")
+            .await
+            .unwrap()
+            .status,
+        "pending"
+    );
+    sqlx::query("UPDATE app_email_sends SET status='sent' WHERE idempotency_key='first'")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .send_app_email("email", "app-a", &request)
+            .await
+            .unwrap()
+            .email_id,
+        first.email_id
+    );
+    assert_eq!(captured.lock().await.len(), 1);
+    let mut conflict = request.clone();
+    conflict.text = "different content".into();
+    assert_eq!(
+        store
+            .send_app_email("email", "app-a", &conflict)
+            .await
+            .unwrap_err()
+            .error
+            .code,
+        "email_idempotency_conflict"
+    );
+    assert_eq!(captured.lock().await.len(), 1);
+    let body = captured.lock().await[0].clone();
+    assert_eq!(body["to"], "outside@external.test");
+    assert_eq!(body["from"], "fixed@example.test");
+    assert!(body.get("reply_to").is_none());
+    assert!(body["html"].as_str().unwrap().contains("&lt;script&gt;"));
+    let audit: Value = sqlx::query_scalar("SELECT to_jsonb(a) FROM app_email_attempts a LIMIT 1")
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+    let audit = serde_json::to_string(&audit).unwrap();
+    assert!(!audit.contains("PRIVATE"));
+    assert!(!audit.contains("outside@external.test"));
+    assert!(!audit.contains("fake-token"));
+    for i in 0..4 {
+        request.idempotency_key = format!("next-{i}");
+        store
+            .send_app_email("email", "app-a", &request)
+            .await
+            .unwrap();
+    }
+    request.idempotency_key = "limited".into();
+    assert_eq!(
+        store
+            .send_app_email("email", "app-b", &request)
+            .await
+            .unwrap_err()
+            .status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // An unverified member is also a legal recipient; membership/verification
+    // must not decide outbound admission.
+    request.to = "unverified@example.test".into();
+    request.idempotency_key = "unverified".into();
+    assert!(store
+        .send_app_email("email", "app-a", &request)
+        .await
+        .is_ok());
+    assert_eq!(
+        captured.lock().await.last().unwrap()["to"],
+        "unverified@example.test"
+    );
+    request.to = "malformed@@external.test".into();
+    request.idempotency_key = "malformed".into();
+    let attempts_before = captured.lock().await.len();
+    assert_eq!(
+        store
+            .send_app_email("email", "app-a", &request)
+            .await
+            .unwrap_err()
+            .error
+            .code,
+        "email_invalid"
+    );
+    assert_eq!(captured.lock().await.len(), attempts_before);
+    for i in 0..14 {
+        request.to = format!("p{i}@allowed.test");
+        request.idempotency_key = format!("app-limit-{i}");
+        store
+            .send_app_email("email", "app-a", &request)
+            .await
+            .unwrap();
+    }
+    request.to = "last@allowed.test".into();
+    request.idempotency_key = "app-limited".into();
+    assert_eq!(
+        store
+            .send_app_email("email", "app-a", &request)
+            .await
+            .unwrap_err()
+            .status,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    request.subject = "injected\r\nBcc: other".into();
+    assert_eq!(
+        store
+            .send_app_email("email", "app-a", &request)
+            .await
+            .unwrap_err()
+            .error
+            .code,
+        "email_invalid"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn app_email_provider_failure_is_sanitized_and_retryable() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fake = Router::new().route(
+        "/send",
+        post(|| async {
+            Json(json!({"success":false,"errors":[{"message":"SECRET provider response"}]}))
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, fake).await });
+    let mut store = AuthStore::for_test("password").await;
+    store.seed_test_workspace("email").await;
+    store.email_sender = Some(CloudflareEmailSender {
+        client: reqwest::Client::new(),
+        endpoint: Url::parse(&format!("http://{address}/send")).unwrap(),
+        api_token: "fake".into(),
+        from: "fixed@example.test".into(),
+    });
+    let r = treer_protocol::SendAppEmailRequest {
+        to: "allowed@example.test".into(),
+        subject: "test".into(),
+        text: "private".into(),
+        idempotency_key: "k".into(),
+    };
+    for _ in 0..2 {
+        let error = store.send_app_email("email", "app", &r).await.unwrap_err();
+        assert_eq!(error.error.code, "email_delivery_failed");
+        assert!(!error.error.message.contains("SECRET"));
+    }
+    assert_eq!(
+        store
+            .app_email_status("email", "app", "k")
+            .await
+            .unwrap()
+            .status,
+        "failed"
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM app_email_attempts WHERE status='failed'")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 2);
+    server.abort();
+}
+
+#[tokio::test]
 async fn sign_in_attempts_are_limited_per_account_and_administrator() {
     let store = AuthStore::for_test("owner-password").await;
     let limit = accounts::LOGIN_ATTEMPT_LIMIT;

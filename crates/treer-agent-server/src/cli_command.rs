@@ -559,6 +559,40 @@ async fn run_cli() -> anyhow::Result<()> {
             return Ok(());
         }
         Command::Message { command } => run_message_command(&client, command).await?,
+        Command::Email {
+            command:
+                EmailCommand::Send {
+                    to,
+                    subject,
+                    body,
+                    idempotency_key,
+                },
+        } => {
+            let request = treer_protocol::SendAppEmailRequest {
+                to,
+                subject,
+                text: read_message_body(body, None)?,
+                idempotency_key,
+            };
+            client
+                .value(
+                    Method::POST,
+                    "api/email",
+                    Some(serde_json::to_value(request)?),
+                )
+                .await?
+        }
+        Command::Email {
+            command: EmailCommand::Status { idempotency_key },
+        } => {
+            client
+                .value(
+                    Method::GET,
+                    &format!("api/email/{}", path_segment(&idempotency_key)),
+                    None,
+                )
+                .await?
+        }
         Command::Whoami => whoami(&client).await?,
         Command::Status => status(&client).await?,
     };

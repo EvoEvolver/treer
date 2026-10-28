@@ -52,8 +52,11 @@ here are not made.
 - Policy evaluates authenticated subjects against workspace resources:
   `machine.exec`, `machine.file.read`/`machine.file.write`, `agent.create`,
   `agent.stop`, `agent.prompt`, `agent.startup.read`/`manage`, `agent.tree.*`,
-  `agent.discover`, `workspace.audit.read` and the service actions. Monitor mode
-  computes denials without enforcing them.
+  `agent.discover`, `workspace.audit.read`, `email.send` and the service
+  actions. Monitor mode computes denials without enforcing them.
+- App email is admitted only for a Managed App runtime on its own machine; the
+  Cloudflare token, sender address and HTML stay in the Proxy, and audit rows
+  hold a recipient hash, never the address or body.
 - Agent-authenticated mutations are bound to the Agent's own machine and ID;
   cross-owner requests fail before Policy can grant them.
 - Only a current owner selects a Policy Provider (trusted code) or its

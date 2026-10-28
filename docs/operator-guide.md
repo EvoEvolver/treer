@@ -56,7 +56,7 @@ Every flag has an environment variable; `treer-proxy --help` lists them all.
 | `ADMIN_PASSWORD` | Platform administrator password for `/admin` |
 | `TREER_INVITATION_REQUIRED` | Default `true`; `false` allows open registration |
 | `GITHUB_OAUTH_CLIENT_ID`/`_SECRET`, `GOOGLE_OAUTH_CLIENT_ID`/`_SECRET` | Optional OAuth login (set both of a pair) |
-| `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `TREER_EMAIL_FROM` | Account email (welcome, password reset) via Cloudflare Email Sending |
+| `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `TREER_EMAIL_FROM` | Account email (welcome, password reset) and App email via Cloudflare Email Sending |
 | `TREER_ENABLE_CORE_MESSAGES` | Enable Core Message routes (default `false`; Compose and single-container set `true`) |
 | `TREER_NATS_URL` (+ `TREER_NATS_STREAM`, `..._SUBJECT_PREFIX`, `..._CLUSTER_SUBJECT_PREFIX`) | Required for more than one Proxy replica |
 | `TREER_PROXY_INSTANCE_ID` | Unique replica ID (falls back to `RAILWAY_REPLICA_ID`, then generated) |
@@ -394,6 +394,34 @@ hash-checked release directories with an SQLite backup and automatic rollback
 when health checks fail (`init`, `stage`, `bootstrap`, `deploy`, `recover`;
 see `python3 scripts/app-deploy --help`). It suits Apps whose single SQLite
 database is their whole state.
+
+### App email
+
+Apps send email through the Proxy's Cloudflare sender (the variables above),
+so the token never reaches an App. A Managed App runtime calls
+`treer email send --to ADDRESS --subject TEXT --idempotency-key KEY` (body on
+stdin or `--body`) or `POST /api/apps/{service_id}/email` with its service token;
+ordinary Agents and humans get `email_app_required`. Policy action `email.send`
+is evaluated for the App runtime on its `machine.service`. Any valid recipient
+is accepted; the sender, Reply-To and HTML are fixed by the Proxy. Each
+workspace allows 20 attempts per App and 5 per recipient per hour, failures
+included. Errors: `email_invalid` (400), `email_idempotency_conflict` (400),
+`email_rate_limited` (429), `email_delivery_failed` (502),
+`email_not_configured` (503), `email_in_progress` (503, retry after 60 s).
+To resolve an uncertain send without resending, use `treer email status KEY`
+or `GET /api/apps/{service_id}/email/{idempotency_key}`: `sent`, `failed` or
+`pending` (reserved, outcome not recorded), or `email_not_found` (404) when this
+App never used the key.
+The token needs `Email Sending: Edit` and the sender domain must be onboarded
+in that account.
+
+Body-free history is in PostgreSQL `app_email_attempts` (`app_id`,
+`recipient_hash`, `status`, `created_at`); it is not pruned automatically. Sender
+failures log only a fixed `category` (`transport`, `timeout`, `http_status`,
+`response_read`, `response_too_large`, `response_invalid`,
+`provider_rejected`) and the upstream HTTP status, never addresses, bodies or
+credentials. Reservation and provider dispatch are not one transaction: a
+crash or ambiguous provider response can duplicate a later retry.
 
 The in-repo Apps (Mail, Telegram, Issues, Gits, Policy and others) and the App
 contract are documented in [apps/README.md](../apps/README.md).

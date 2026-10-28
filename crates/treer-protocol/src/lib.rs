@@ -259,5 +259,7 @@ pub use enrollment::*;
 #[path = "lib/tests.rs"]
 mod tests;
 
+mod email;
+pub use email::*;
 mod audit_category;
 pub use audit_category::*;

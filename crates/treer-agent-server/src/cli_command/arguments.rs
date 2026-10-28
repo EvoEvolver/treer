@@ -83,6 +83,11 @@ pub(super) enum Command {
         #[command(subcommand)]
         command: MessageCommand,
     },
+    #[command(about = "Send email as the calling Managed App (Proxy-held sender)")]
+    Email {
+        #[command(subcommand)]
+        command: EmailCommand,
+    },
     #[command(about = "Show the current managed agent identity")]
     Whoami,
     #[command(about = "Show this workspace, its machines, and its agents")]
@@ -607,6 +612,31 @@ fn parse_file_mode(value: &str) -> Result<u32, String> {
         .ok()
         .filter(|mode| *mode <= 0o777)
         .ok_or_else(|| "mode must contain ordinary octal permission bits (000-777)".to_owned())
+}
+
+#[derive(Debug, Subcommand)]
+pub(super) enum EmailCommand {
+    #[command(about = "Send one plain-text email; only a Managed App runtime may send")]
+    Send {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        subject: String,
+        #[arg(long, help = "Plain-text body; omit to read it from piped stdin")]
+        body: Option<String>,
+        #[arg(
+            long,
+            help = "App-scoped key; a retry with the same content returns the original result"
+        )]
+        idempotency_key: String,
+    },
+    #[command(
+        about = "Show an earlier send's outcome (sent, failed or pending) without resending"
+    )]
+    Status {
+        #[arg(value_name = "IDEMPOTENCY_KEY")]
+        idempotency_key: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

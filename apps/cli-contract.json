@@ -277,6 +277,21 @@
     "positionals": 2,
     "variadic": true
   },
+  "email send": {
+    "flags": {
+      "--body": "value",
+      "--idempotency-key": "value",
+      "--subject": "value",
+      "--to": "value"
+    },
+    "positionals": 0,
+    "variadic": false
+  },
+  "email status": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
   "exec": {
     "flags": {
       "--cwd": "value",

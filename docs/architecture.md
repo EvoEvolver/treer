@@ -296,13 +296,24 @@ App identity:
 Apps own their data permissions and Origin defenses; see the
 [App guidelines](../apps/GUIDELINES.md).
 
+**App email** (`app.email.v1`). The Cloudflare sender credentials stay in the
+Proxy, so Apps send through Core: `POST /api/apps/{service_id}/email` with the
+App's service token, or `treer email send` (Controller `POST /api/email`,
+Proxy `/agent/workspaces/{ws}/email`). Both admit only a Managed App runtime on
+its own machine, evaluate `email.send` on its `machine.service` (status lookup
+`GET .../email/{idempotency_key}` and `treer email status` check ownership
+only), and share one
+store: `app_email_sends` holds per-App idempotency keys, request fingerprints
+and state; `app_email_attempts` is the body-free audit and hourly rate history.
+Email is not Core Message and wakes no Agent; the App owns any thread mapping.
+
 ## Policy
 
 Every governed request is evaluated as subject/action/resource after
 authentication and workspace scoping. Actions cover Agent control
 (`agent.create|stop|prompt|input|output.read|startup.*|tree.*|...`), launch
 profiles, `machine.exec|file.read|file.write|service|update|delete`, services
-and ingress, `identity.token.issue`, `network.*`, `message.*` and
+and ingress, `identity.token.issue`, `network.*`, `message.*`, `email.send` and
 `workspace.audit.read`.
 
 The effective Policy, in order:
@@ -416,7 +427,7 @@ restart (`service restart`), which stops workloads. See [Releases](releases.md).
 
 | Store | Holds |
 | --- | --- |
-| PostgreSQL (`crates/treer-proxy/src/schema.sql`, migrated at Proxy startup) | Accounts, sessions, organizations, workspaces and grants, machine and workload credentials, launch profiles, Tree, services, ingresses, Apps, App OAuth codes, signing keys, Policy and Provider bindings, Core Message, audit, traffic usage, upload state |
+| PostgreSQL (`crates/treer-proxy/src/schema.sql`, migrated at Proxy startup) | Accounts, sessions, organizations, workspaces and grants, machine and workload credentials, launch profiles, Tree, services, ingresses, Apps, App OAuth codes, signing keys, Policy and Provider bindings, Core Message, App email audit, audit, traffic usage, upload state |
 | NATS JetStream (optional) | Machine leases and snapshots, workspace projections, domain events; never authoritative for Messages or billing |
 | Controller config (`~/.config/treer/agent-servers/`, `%LOCALAPPDATA%\Treer\agent-servers`) | `<server_id>-controller.json` / `-host.json`: Proxy URL, machine credential, root, listen address, service mode (0600) |
 | Controller state (`~/.local/state/treer`, `$XDG_STATE_HOME/treer`, `TREER_STATE_DIR`, `%LOCALAPPDATA%\Treer\state`) | Installation identity per hostname, launch snapshots, deletion fences, transfer journals, interface cache, Agent private state, logs |
