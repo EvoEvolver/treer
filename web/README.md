@@ -139,22 +139,59 @@ and joins only after explicit confirmation (`/api/invitations/accept`). After
 OAuth, a pending invitation is read from `/api/invitations/pending`. Invitation
 tokens stay in memory and JSON bodies, never URLs or storage.
 
+### Sidebar
+
+The sidebar is the navigator, ordered by how often each part is used:
+organization and workspace switchers, **Overview**, **Search**, **Needs
+attention**, the **Tree**, then **Machines**, in one scroll region with sticky
+section headings (`sidebar-sections.tsx`).
+
+- **Search** (Cmd/Ctrl+K outside terminals and editors) filters the Tree by
+  name or path, showing matches with their folders expanded, and also filters
+  the attention list and machines. Escape clears; ArrowDown enters the rows.
+- **Needs attention** is the triage inbox: blocked and failed Agents (flat,
+  with their folder), then one row per offline machine ("build-node offline ·
+  N Agents down", opens the machine page), then Agents that **finished**: this
+  browser saw them go from working to idle/exited while they were not open
+  (kept per workspace in localStorage, cleared on open; the API has no
+  per-user read state, so this only covers what the open Console observed).
+  First five rows, then "Show N more". On phones the **Browse tree** button
+  carries the row count.
+- **Machines** lists each machine with its workload count and online/offline
+  state; a row opens the machine page, **+** opens Add machine. With no
+  machines the Tree shows a guide; it, the Overview card and "Add agent" all
+  open the same Add machine dialog.
+- Attention and Machines collapse from their heading (remembered per browser).
+
 ### Workspace Tree
 
 The sidebar Tree shows folders, Agents and Apps in persisted sibling order,
 addressed by stable IDs; display names are unique only within a folder.
 
-- Rows are one line (icon + name) with a status dot for non-idle states; the
-  dot has a text name so colour is never the only cue.
-- The row "⋯" menu, right-click and Shift+F10 share one action list
-  (`menuItems` in `workload-tree.tsx`): open in new tab, copy path, rename,
-  move up/down/to folder, pin, edit startup command, logs, App settings,
-  Start/Restart, and Stop/Delete last with confirmation. Folder menus add new
-  folder/Agent. Tab menus deliberately have no Stop/Delete.
+- Every level (folders, Agents, Apps, App-owned nodes) uses one row component
+  (`tree-row.tsx`): indent, a reserved chevron slot, icon, name, then status or
+  actions. Rows are 28px on fine pointers and 44px on touch / below 768px;
+  guide lines sit under each parent's chevron. Long names truncate; the row
+  title shows the full Tree path and machine.
+- Status is shape plus colour and has a text name: a dot for working/starting,
+  a hollow ring (and muted name) for stopped/exited, an icon for blocked,
+  failed and machine offline. Idle and running Apps show nothing. A collapsed
+  folder shows how many hidden Agents need attention (else how many work).
+- The row "⋯" button appears on hover/focus (always on touch) and the
+  right-click menu and Shift+F10 share one action list (`menuItems` in
+  `workload-tree.tsx`), grouped as open (new tab, logs, App settings), run
+  (start, restart, startup command), organise (rename, copy path, move, pin)
+  and finally Stop/Delete after the last separator, each confirmed. Folder
+  menus add new folder/Agent. Tab menus deliberately have no Stop/Delete.
+- An App with an App-owned subtree has a disclosure chevron ("App contents")
+  on its own row; nested App nodes expand the same way.
+- Dragging highlights the target folder or the insertion line, and shows a
+  workspace-root drop zone at the bottom.
 - The header **+** menu has Add folder, Add agent and Add machine (opens the
   enrollment dialog). With no machines the Tree shows a setup button.
 - Keyboard: one Tab stop with roving tabindex; Up/Down/Home/End move, Right
-  expands or reaches the actions button, Left collapses or goes to the parent.
+  expands (folders, Apps, App nodes) or reaches the actions button, Left
+  collapses or goes to the parent.
 - The sidebar resizes (240–480px, double-click resets to 272px) and collapses
   with the footer button or Cmd+B / Ctrl+B (not captured inside terminals or
   rich-text editors). Below 768px the layout is mobile: **Browse tree** opens
@@ -164,13 +201,20 @@ addressed by stable IDs; display names are unique only within a folder.
 
 ### Overview, pins and map
 
-Workspaces open at **Overview** without attaching a PTY. It keeps the Tree
-hierarchy and overlays status badges and subtree counts; filter chips
-(attention, working, idle) keep matches and their ancestors. Attention means
-blocked/failed Agents or live Agents on offline machines (`lib/attention.ts`).
+Workspaces open at **Overview** without attaching a PTY. It is a status
+board, not a second Tree: filter chips (attention, working, idle) with
+counts, then flat sections **Needs attention**, **Working**, **Idle**,
+**Stopped** and **Apps** (each row shows folder, machine and status text; long
+sections show a few rows and "Show N more"), then machine health cards that
+open the machine page. Attention means blocked/failed Agents or live Agents on
+offline machines (`lib/attention.ts`). Without an organization or workspace it
+shows one primary action (Create organization / Create workspace). Pages other
+than the terminal have no separate header bar on desktop; phones keep a bar
+with Back.
 
 On Proxies advertising `workspace.pins.v1`, **Pin to Overview** manages a
-shared, Core-stored list of up to 50 pins shown above the filters. Writes are
+shared, Core-stored list of up to 50 pins shown above the filters (pinned
+folders still expand in place there). Writes are
 not optimistic; older Proxies hide the feature.
 
 **Workspace map** opens a read-only squarified treemap
@@ -180,9 +224,12 @@ blocks too small to target.
 
 ### Tabs, deep links and focus mode
 
+Tabs are the working set of open pages: switching keeps a page's terminal
+connection or interface draft alive, which search and the inbox cannot.
 Opening a workload opens or selects its tab. Overview is pinned. Hidden tabs
-stay mounted (terminal connections, iframe drafts) up to 6 live pages on
-desktop / 4 on phones; older ones unmount and reconnect when reselected.
+stay mounted up to 6 live pages on desktop / 4 on phones; older ones unmount
+and reconnect when reselected (a reconnect icon marks them; the all-tabs menu
+explains this in one line).
 Closing a tab never stops the workload. Desktop shortcuts: Left/Right,
 Home/End, Delete, Ctrl/Cmd+1–9, Ctrl/Cmd+W (only while focus is in Console
 chrome).
@@ -208,7 +255,9 @@ link is used.
 Selecting an Agent opens its Agent Interface UI when it has one, otherwise its
 terminal; **Logs** always reaches the terminal.
 
-**Terminal** (`terminal-pane.tsx`): xterm.js over the Proxy PTY WebSocket, with
+**Terminal** (`terminal-pane.tsx`): full-bleed under one compact header
+(`workload-surface.tsx`: path, machine, Agent status, connection state only
+when not live, and Upload / Open in new tab / Reconnect). xterm.js over the Proxy PTY WebSocket, with
 reconnect from a stream cursor, fit-on-resize (never resizing the PTY to a
 hidden zero-size container) and mobile key rows (`mobile-terminal-keys.tsx`).
 Historical output replay swallows terminal queries (DA, CPR/DSR, DECRQM, OSC
