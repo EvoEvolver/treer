@@ -332,12 +332,16 @@ impl Fixture {
             body,
         )
     }
-    /// A workspace Agent calling the management API through its runtime proxy: no browser headers.
+    /// A workspace Agent calling the management API through its runtime proxy: no browser
+    /// headers; the proxy sends the identity both as the identity header and as Bearer.
     fn agent(&self, path: &str, body: Option<Value>) -> (u16, Value) {
         self.call(
             if body.is_some() { "POST" } else { "GET" },
             path,
-            &[("x-treer-identity-token", "agent")],
+            &[
+                ("x-treer-identity-token", "agent"),
+                ("authorization", "Bearer agent"),
+            ],
             body,
         )
     }
@@ -534,6 +538,20 @@ fn agent_identity_operates_the_owner_api_except_device_decision() {
             401
         );
     }
+    // Authorization must be exactly the identity token, never another credential.
+    assert_eq!(
+        f.call(
+            "GET",
+            "/owner/state",
+            &[
+                ("x-treer-identity-token", "agent"),
+                ("authorization", "Bearer other")
+            ],
+            None
+        )
+        .0,
+        401
+    );
     // Agents still cannot send foreign browser origins.
     assert_eq!(
         f.call(

@@ -385,8 +385,15 @@ impl App {
     /// gets it from its runtime proxy for `http://NAME.treer/` (Core Policy
     /// `identity.token.issue` on this service). Only the device-code decision stays human.
     fn owner_request(&self, r: &Request) -> Result<Response, Error> {
-        if r.header("authorization").is_some() {
-            return Err(Error::Denied);
+        // An Agent's runtime proxy sends its identity both as X-Treer-Identity-Token and
+        // as `Authorization: Bearer <same token>`. Any other Authorization (an App
+        // bearer token, a different credential) never reaches management.
+        if let Some(auth) = r.header("authorization") {
+            if r.header("x-treer-identity-token")
+                .is_none_or(|t| auth.strip_prefix("Bearer ") != Some(t))
+            {
+                return Err(Error::Denied);
+            }
         }
         // Browser requests are judged by their own headers; non-browser Agents send none.
         if r.header("origin")
