@@ -650,7 +650,7 @@ treer agent admin create --machine <server-id> --kind command --name reviewer --
 ```
 
 ```bash
-treer agent admin create --machine <server-id> --kind command --name codex-ui --cwd . -- /path/to/codex-agent-ui/scripts/treer-agent.sh
+treer agent admin create --machine <server-id> --kind command --name codex-ui --cwd . -- treer-agent --harness codex
 ```
 
 To install a public git recipe, select and launch an explicit installer command
