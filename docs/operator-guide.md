@@ -581,7 +581,7 @@ uninstaller, then
 **Private state unavailable.** `TREER_AGENT_PRIVATE_STATE_DIR` is withheld when
 the Agent's cwd contains the state directory (for example a root at `$HOME`) or
 when the directory fails its ownership check; the Controller log names the
-reason (`agent_private_state_*`, `insecure_dacl` on Windows). Use a different
+reason (`agent_private_state_*`). Use a different
 root, or fix ownership of `agent-private/<server_id>` while the Controller is
 stopped.
 
