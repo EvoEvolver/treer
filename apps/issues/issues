@@ -12,20 +12,23 @@ p = argparse.ArgumentParser(description='Workspace Issues JSON client')
 p.add_argument('--url', default=os.environ.get('ISSUES_URL', 'http://issues.treer/'))
 s = p.add_subparsers(dest='command', required=True)
 a = s.add_parser('list')
-for key in ('status', 'assignee', 'label', 'parent-id', 'limit', 'offset'):
+for key in ('status', 'assignee', 'creator', 'label', 'parent-id', 'limit', 'offset'):
     a.add_argument('--'+key)
 a.add_argument('--unresolved', action='store_const', const='1', help='only issues that are not done/closed/note')
+a.add_argument('--hidden', choices=('0', '1', 'only'), help='include hidden issues (1) or list only them (only)')
 for command in ('show', 'children'):
     a = s.add_parser(command); a.add_argument('id', type=int); a.add_argument('--limit', type=int); a.add_argument('--offset', type=int)
     if command == 'show':
         a.add_argument('--titles', action='store_const', const='titles', dest='comments',
                        help='comments without their text (title and body_bytes only); read one with `activity`')
+        a.add_argument('--comments-only', action='store_const', const='comments', dest='events', help='comments only, no system entries')
+        a.add_argument('--hidden', action='store_const', const='1', help='show hidden comments in full')
 a = s.add_parser('activity', help='one activity entry in full, e.g. a comment read from its id in `show`')
 a.add_argument('id', type=int); a.add_argument('event', type=int)
 a = s.add_parser('create'); a.add_argument('title'); a.add_argument('--description', default='')
 a.add_argument('--parent-id', type=int); a.add_argument('--assignee')
 a.add_argument('--priority', choices=('low','normal','high','urgent'), default='normal')
-a.add_argument('--status', choices=('open','in_progress','blocked','done','closed','note'), help='initial status; `note` makes a knowledge entry (no reminders, not counted as work)')
+a.add_argument('--status', choices=('open','in_progress','blocked','done','closed','note'), help='initial status; `note` makes a knowledge entry (not counted as work)')
 a.add_argument('--label', action='append', default=[]); a.add_argument('--blocked-by', type=int, action='append', default=[])
 for command, field in (('comment', 'body'), ('assign', 'assignee'), ('status', 'status')):
     a = s.add_parser(command); a.add_argument('id', type=int); a.add_argument(field)
@@ -43,20 +46,14 @@ a.add_argument('--blocked-by', type=int, action='append'); a.add_argument('--cle
 a.add_argument('--parent', type=int, action='append', help='parent issue ID (repeat for several); replaces ALL parents, so it can detach parents someone else set (use `link`/`unlink` to add or remove just one)')
 a.add_argument('--clear-parents', action='store_true')
 a.add_argument('--version', type=int, help='fail with 409 if the issue changed since this version (optimistic concurrency)')
-a = s.add_parser('link', help='attach EXISTING issues as children of PARENT (you must be able to edit PARENT); an issue can have several parents')
+a = s.add_parser('link', help='attach EXISTING issues as children of PARENT; an issue can have several parents')
 a.add_argument('parent', type=int); a.add_argument('children', type=int, nargs='+')
-a = s.add_parser('unlink', help='detach children from PARENT (allowed to whoever can edit the parent or the child)')
+a = s.add_parser('unlink', help='detach children from PARENT')
 a.add_argument('parent', type=int); a.add_argument('children', type=int, nargs='+')
-a = s.add_parser('wait', help='mark an issue blocked on someone: reminders go to them (an Agent ID, leader, user, or none)')
-a.add_argument('id', type=int); a.add_argument('who')
-a = s.add_parser('stale', help='unresolved issues without progress for more than N hours (default 4), oldest first, with who is responsible and what they wait on')
-a.add_argument('--hours', type=int); a.add_argument('--limit', type=int); a.add_argument('--offset', type=int)
-a = s.add_parser('policy', help='who gets which Issues notifications at once: `policy` lists, `policy set asks|all [--agent ID]`')
-a.add_argument('action', nargs='?', choices=('set',)); a.add_argument('mode', nargs='?', choices=('all', 'asks')); a.add_argument('--agent')
-a.add_argument('--audit', action='store_const', const='1', help='include the change audit')
-a = s.add_parser('claim'); a.add_argument('id', type=int)
-a.add_argument('--action', choices=('acquire', 'renew', 'release'), default='acquire')
-a.add_argument('--seconds', type=int, default=900)
+for command in ('hide', 'restore'):
+    a = s.add_parser(command, help=('hide (soft-delete) an issue, or one comment with --comment; restorable' if command == 'hide'
+                                    else 'restore a hidden issue, or one comment with --comment'))
+    a.add_argument('id', type=int); a.add_argument('--comment', type=int, metavar='EVENT', help='the comment\'s activity ID')
 args = vars(p.parse_args()); base, command = args.pop('url'), args.pop('command')
 path, method, body = 'v1/issues', 'GET', None
 if command == 'list':
@@ -86,27 +83,20 @@ elif command in ('link', 'unlink'):
     method, body = 'POST', {('add' if command == 'link' else 'remove'): args['children']}
 elif command == 'search':
     path = 'v1/search?' + urllib.parse.urlencode({('from' if k == 'from_' else k): v for k, v in args.items() if v is not None})
-elif command == 'stale':
-    path = 'v1/stale?' + urllib.parse.urlencode({k: v for k, v in args.items() if v is not None})
-elif command == 'policy':
-    path = 'v1/notify-policy'
-    if args['action'] == 'set':
-        if not args['mode']:
-            p.error('policy set needs asks or all')
-        method, body = 'PUT', {k: v for k, v in (('mode', args['mode']), ('agent', args['agent'])) if v}
-    elif args['audit']:
-        path += '?audit=1'
+elif command in ('hide', 'restore'):
+    path += f"/{args['id']}" + (f"/activity/{args['comment']}" if args['comment'] else '')
+    method = 'DELETE' if command == 'hide' else 'POST'
+    if command == 'restore':
+        path += '/restore'
 elif command == 'activity':
     path += f"/{args['id']}/activity/{args['event']}"
 else:
     path += '/' + str(args.pop('id'))
-    if command in ('children', 'comment', 'claim'):
+    if command in ('children', 'comment'):
         path += '/' + command
     if command in ('show', 'children'):
         path += '?' + urllib.parse.urlencode({k: v for k, v in args.items() if v is not None})
-    if command == 'wait':
-        method, body = 'PATCH', {'status': 'blocked', 'waiting_on': None if args['who'] == 'none' else args['who']}
-    elif command in ('comment', 'claim'):
+    if command == 'comment':
         method, body = 'POST', {k: v for k, v in args.items() if v is not None}
     elif command in ('assign', 'status'):
         method, body = 'PATCH', args

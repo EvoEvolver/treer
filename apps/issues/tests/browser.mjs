@@ -35,7 +35,7 @@ for (const width of [1280, 390]) test(`OAuth fallback with a contract double, is
     await page.getByRole('button',{name:'New issue',exact:true}).click();
     const title='Build <img src=x onerror=alert(1)> collaboration';
     await page.getByLabel('Title',{exact:true}).fill(title);
-    await page.getByLabel('Description (Markdown source, rendered as text)',{exact:true}).fill('# Plan\n<script>window.xss=1</script>\nInvestigate shared development workflow.');
+    await page.getByLabel('Description (Markdown)',{exact:true}).fill('# Plan\n<script>window.xss=1</script>\nInvestigate shared development workflow.');
     await page.locator('#detail').getByRole('button',{name:'Assignee',exact:true}).click();
     const picker=page.getByRole('dialog',{name:'Choose assignee'});
     assert.equal(await picker.getByText('PEOPLE',{exact:true}).count(),1);
@@ -86,9 +86,16 @@ for (const width of [1280, 390]) test(`OAuth fallback with a contract double, is
     await page.waitForFunction(()=>document.querySelector('#detail > p.meta')?.textContent.startsWith('done ·'));
     await page.locator('#detail').getByRole('link',{name:'#1',exact:true}).click();
     await page.getByRole('heading',{name:/Children · 1\/1/}).waitFor();
-    await page.getByLabel('Comment (text / Markdown source)',{exact:true}).fill('<svg onload=alert(1)> Ready for review.');
+    assert.equal(await page.locator('#detail .markdown.description h3').innerText(),'Plan','the description is rendered as Markdown');
+    await page.getByLabel('Comment (Markdown)',{exact:true}).fill('<svg onload=alert(1)> Ready for review.\n\n**bold** [bad](javascript:alert(1)) [good](https://example.test/x) `code`');
     await page.getByRole('button',{name:'Post comment',exact:true}).click();
-    await page.locator('.comment-body').getByText('<svg onload=alert(1)> Ready for review.',{exact:true}).waitFor();
+    const comment=page.locator('#detail .comment').first();
+    await comment.locator('.comment-headline').getByText('<svg onload=alert(1)> Ready for review.',{exact:true}).waitFor();
+    assert.equal(await comment.locator('.markdown').count(),0,'comments start collapsed to their first line');
+    await comment.locator('.comment-head').click();
+    await comment.locator('.markdown strong').getByText('bold',{exact:true}).waitFor();
+    assert.equal(await comment.locator('a[href^="javascript"]').count(),0,'unsafe links stay text');
+    assert.equal(await comment.locator('a[href="https://example.test/x"][rel~="noopener"]').count(),1);
     assert.match(await page.locator('#detail').innerText(),/Notification disabled/);
     assert.equal(await page.locator('#detail script, #detail img, #detail svg').count(),0);
     assert.equal(await page.evaluate(()=>globalThis.xss),undefined);
@@ -144,7 +151,7 @@ for (const mode of ['embedded', 'ingress']) for (const width of [1280, 390]) {
       await surface.getByRole('button',{name:'New issue',exact:true}).click();
       const title='Ship automatically authenticated <img src=x onerror=alert(1)> issues';
       await surface.getByLabel('Title',{exact:true}).fill(title);
-      await surface.getByLabel('Description (Markdown source, rendered as text)',{exact:true}).fill('## Plan\n<script>window.xss=1</script>\nUse the existing Treer session; no second sign-in.');
+      await surface.getByLabel('Description (Markdown)',{exact:true}).fill('## Plan\n<script>window.xss=1</script>\nUse the existing Treer session; no second sign-in.');
       await assign(surface,'ag_b');
       await surface.getByLabel('Labels (comma separated)',{exact:true}).fill('team, auth');
       await surface.getByRole('button',{name:'Create issue',exact:true}).click();
@@ -158,17 +165,26 @@ for (const mode of ['embedded', 'ingress']) for (const width of [1280, 390]) {
       await surface.locator('#detail').getByRole('link',{name:'#1',exact:true}).click();
       await surface.getByRole('heading',{name:/Children · 1\/1/}).waitFor();
       await assign(surface,'usr_a');
+      await surface.waitForFunction(()=>{const t=document.querySelector('#detail .assignee-trigger');return t && !t.disabled && t.textContent.includes('Alice');});
       await surface.locator('#detail').getByLabel('Status',{exact:true}).selectOption('in_progress');
       await surface.waitForFunction(()=>document.querySelector('#detail > p.meta')?.textContent.startsWith('in progress ·'));
-      await surface.getByRole('button',{name:'Claim for 15 min',exact:true}).click();
-      await surface.getByRole('button',{name:'Renew lease',exact:true}).waitFor();
-      await surface.getByRole('button',{name:'Renew lease',exact:true}).click();
-      await surface.getByText(/Notifications: not_requested/).waitFor();
-      await surface.getByRole('button',{name:'Release lease',exact:true}).click();
-      await surface.getByRole('button',{name:'Claim for 15 min',exact:true}).waitFor();
-      await surface.getByLabel('Comment (text / Markdown source)',{exact:true}).fill('<svg onload=alert(1)> Existing Treer session works.');
+      assert.equal(await surface.getByRole('button',{name:/lease|Claim/}).count(),0,'no lease controls');
+      await surface.getByLabel('Comment (Markdown)',{exact:true}).fill('<svg onload=alert(1)> Existing Treer session works.');
       await surface.getByRole('button',{name:'Post comment',exact:true}).click();
-      await surface.locator('.comment-body').getByText('<svg onload=alert(1)> Existing Treer session works.',{exact:true}).waitFor();
+      const comment=surface.locator('#detail .comment').first();
+      await comment.locator('.comment-headline').getByText('<svg onload=alert(1)> Existing Treer session works.',{exact:true}).waitFor();
+      // system events stay behind a toggle; hiding a comment leaves a restorable stub
+      assert.equal(await surface.locator('#detail .system-event').count(),0);
+      await surface.getByLabel('System events').check();
+      await surface.locator('#detail .system-event').first().waitFor();
+      await surface.getByLabel('System events').uncheck();
+      await comment.getByRole('button',{name:/^Hide comment/}).click();
+      await surface.locator('#detail .comment.is-hidden .comment-headline').getByText('Hidden comment',{exact:true}).waitFor();
+      await surface.locator('#detail .comment.is-hidden').getByRole('button',{name:/^Restore comment/}).click();
+      await surface.locator('#detail .comment:not(.is-hidden) .comment-headline').getByText('<svg onload=alert(1)> Existing Treer session works.',{exact:true}).waitFor();
+      await surface.getByRole('button',{name:'Hide issue',exact:true}).click();
+      await surface.getByRole('button',{name:'Restore issue',exact:true}).click();
+      await surface.getByRole('button',{name:'Hide issue',exact:true}).waitFor();
       await surface.getByLabel('View',{exact:true}).selectOption('tree');assert.equal(await surface.locator('.tree-group').count(),1);
       assert.equal(await surface.locator('#detail script, #detail img, #detail svg').count(),0);
       assert.equal(await surface.evaluate(()=>globalThis.xss),undefined);
@@ -200,7 +216,7 @@ async function seed(config) {
   return {agent};
 }
 
-for (const width of [1280, 390]) test(`close buttons, keyboard, permissions and screenshots at ${width}px`, async () => {
+for (const width of [1280, 390]) test(`close buttons, keyboard, navigation and screenshots at ${width}px`, async () => {
   const fixture = spawn(process.env.PYTHON || 'python3', [fileURLToPath(new URL('./fixture.py', import.meta.url))], {env:hermeticEnv(), stdio:['ignore','pipe','pipe']});
   let stderr = ''; fixture.stderr.on('data',chunk => stderr += chunk);
   const lines = createInterface({ input: fixture.stdout });
@@ -217,7 +233,7 @@ for (const width of [1280, 390]) test(`close buttons, keyboard, permissions and 
     const create = body => page.evaluate(async body => (await (await fetch(new URL('v1/issues',document.baseURI),{method:'POST',headers:{'Content-Type':'application/json','X-Issues-Request':'1'},body:JSON.stringify(body)})).json()).issue.id, body);
     const status = id => fetch(`${config.url}v1/issues/${id}`,{headers:{'X-Treer-Identity-Token':'agent-a'}}).then(r=>r.json()).then(r=>r.issue.status);
     await create({title:'Linear-style Issues UI',priority:'high',labels:['ui'],assignee:'ag_a',status:'in_progress'});
-    await create({title:'Hourly assignee reminders',priority:'urgent',labels:['backend'],assignee:'ag_b'});
+    await create({title:'Wake assignees',priority:'urgent',labels:['backend'],assignee:'ag_b'});
     await create({title:'One-click Close button',labels:['ui'],parent_id:1,assignee:'usr_a'});
     await create({title:'Dark theme polish',priority:'low',parent_id:1,status:'done'});
     await create({title:'Mobile layout',parent_id:1,status:'blocked'});
@@ -236,16 +252,16 @@ for (const width of [1280, 390]) test(`close buttons, keyboard, permissions and 
     await page.screenshot({path:`${screenshotDir}/issues-list-${width}-dark.png`,fullPage:true});
     await page.getByRole('button',{name:'Theme',exact:true}).click();
 
-    // "Needs me": assigned to me and unresolved, combinable with the label filter.
-    await page.locator('#nav-needs').click();
+    // "Mine": assigned to me and unresolved, combinable with the label filter.
+    await page.locator('#nav-mine').click();
     await page.waitForFunction(()=>document.querySelectorAll('#list .issue-row').length===1);
     assert.match(await page.locator('#list .issue-row').first().getAttribute('aria-label'),/^ISS-3 /);
-    assert.equal(await page.locator('#list-title').innerText(),'Needs me');
+    assert.equal(await page.locator('#list-title').innerText(),'Mine');
     await page.getByLabel('Label',{exact:true}).fill('docs');await page.getByLabel('Label',{exact:true}).press('Enter');
     await page.getByText('No issues match. Create an issue to begin.',{exact:true}).waitFor();
     await page.getByLabel('Label',{exact:true}).fill('ui');await page.getByLabel('Label',{exact:true}).press('Enter');
     await page.waitForFunction(()=>document.querySelectorAll('#list .issue-row').length===1);
-    await page.screenshot({path:`${screenshotDir}/issues-needs-me-${width}.png`,fullPage:true});
+    await page.screenshot({path:`${screenshotDir}/issues-mine-${width}.png`,fullPage:true});
     await page.locator('#nav-all').click();
     await page.waitForFunction(()=>document.querySelectorAll('#list .issue-row').length===6);
 
@@ -257,8 +273,8 @@ for (const width of [1280, 390]) test(`close buttons, keyboard, permissions and 
     await page.waitForFunction(()=>document.querySelector('#list [data-issue-id="6"]'));
     assert.equal(await status(6),'open');
 
-    // Permissions mirror the backend: Alice may not edit an Agent-owned issue, so Close is disabled.
-    assert.equal(await page.getByRole('button',{name:`Close ISS-${owned}`,exact:true}).isDisabled(),true);
+    // Anyone may change any issue: Close is enabled on an Agent-owned issue too.
+    assert.equal(await page.getByRole('button',{name:`Close ISS-${owned}`,exact:true}).isDisabled(),false);
 
     // Keyboard: j/k move the focus ring, x closes the focused issue, Enter opens, ? shows help.
     await page.locator('body').press('j');
@@ -271,10 +287,8 @@ for (const width of [1280, 390]) test(`close buttons, keyboard, permissions and 
     await page.locator('body').press('Enter');
     await page.waitForFunction(id=>document.querySelector('#detail h2')&&document.querySelector('.issue-line.selected')?.dataset.issueId===id,first);
     assert.equal(await page.locator('.issue-line.selected').getAttribute('data-issue-id'),first);
-    // The detail view explains why a read-only issue cannot be closed instead of silently disabling the button.
     assert.equal(first,String(owned));
-    assert.equal(await page.getByRole('button',{name:'Close issue',exact:true}).isDisabled(),true);
-    await page.locator('#detail').getByText(/You can comment, but only the creator/).waitFor();
+    assert.equal(await page.getByRole('button',{name:'Close issue',exact:true}).isDisabled(),false);
     await page.locator('body').press('?');
     await page.getByRole('dialog',{name:'Keyboard shortcuts'}).waitFor();
     await page.locator('body').press('Escape');

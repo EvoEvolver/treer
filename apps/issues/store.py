@@ -1,8 +1,16 @@
-"""Transactional issue state. All ownership checks run under BEGIN IMMEDIATE."""
+"""Transactional issue state. Every write runs under BEGIN IMMEDIATE.
+
+Any verified workspace principal (human or Agent) may change any issue; every change is an activity entry (who,
+when, what), so history is the safeguard rather than ownership. Issues and comments are never deleted: hiding is a
+restorable flag and is itself recorded in the activity.
+
+Older databases may carry tables and issue fields of retired features (reminders, waiting_on, leases, notification
+policies and digests, shipped signals, stall_* tables). They are left exactly as they are: nothing here reads,
+rewrites or drops them, and the stored issue JSON keeps those fields untouched (they are only left out of API output).
+"""
 import json
 import os
 import sys
-import re
 import sqlite3
 import time
 import unicodedata
@@ -13,14 +21,15 @@ from auth import Error
 import hierarchy
 import refs
 import search as fulltext
-from notify import (ASK_PER_AUTHOR, HOURLY, HOURLY_ISSUES, HOURLY_WINDOW, POLICY_MODES, WINDOW, notice_for, parse_intent,
-                    recipients_for, resolve_mentions, unresolved_mentions)
+from notify import notice_for, recipients_for, resolve_mentions, unresolved_mentions
 
 STATUSES = ('open', 'in_progress', 'blocked', 'done', 'closed', 'note')
-RESOLVED = ('done', 'closed', 'note')      # nothing left to do: no reminders, not stale, not unresolved, not a pending dependency
-SHIPPED = re.compile(r'\[(?:release|deployed)\].*\bcanary_passed\b')
-HEX = re.compile(r'(?<![0-9A-Za-z])([0-9a-f]{8,40})(?![0-9A-Za-z])')
+RESOLVED = ('done', 'closed', 'note')      # nothing left to do: not unresolved, not a pending dependency
 PRIORITIES = ('low', 'normal', 'high', 'urgent')
+# Fields of retired features that older rows still carry. Kept in storage, never shown or acted on.
+LEGACY_FIELDS = ('claim', 'waiting_on', 'waiting_by', 'waiting_at', 'rv', 'progress_at', 'progress_reason', 'progress_resets', 'resp_seen')
+COMMENT_TITLE_BYTES = 200
+EXCERPT_CHARS = 160
 
 
 def stamp(now=None):
@@ -36,19 +45,6 @@ def fields(body, allowed):
         fail('invalid_fields', 'Unknown fields or non-object JSON')
 
 
-COMMENT_TITLE_BYTES = 200
-
-
-def shipped_sha(title):
-    """First 8 hex digits of the commit named in a `[release] … canary_passed … <8-40 hex>` comment title, else None.
-    Only the matched hex is used afterwards: no other author text reaches the reminder."""
-    if not isinstance(title, str) or not SHIPPED.match(title):
-        return None
-    found = HEX.search(title)
-    return found.group(1)[:8] if found else None
-EXCERPT_CHARS = 160
-
-
 def text(value, name, maximum, empty=False):
     if not isinstance(value, str) or len(value.encode()) > maximum or (not empty and not value.strip()):
         fail('invalid_field', f'{name} must be text, at most {maximum} bytes')
@@ -61,12 +57,18 @@ def ident(value):
     return value
 
 
+def flag(value, name):
+    if value in (None, '', '0', 'false'):
+        return False
+    if value in ('1', 'true'):
+        return True
+    fail('invalid_field', f'{name} must be 1 or 0')
+
+
 class Store:
-    def __init__(self, path, clock=time.time, leader_agent=None, release_agent=None):
+    def __init__(self, path, clock=time.time):
         self.path, self.clock = str(path), clock
         self.link_hits = {}
-        self.release_agent = release_agent     # only THIS Agent's comments can raise a 'looks shipped' signal; unset: the feature is off
-        self.leader_agent = leader_agent       # stable ID that `leader` and `user` in waiting_on resolve to (unset: those values are refused)
         os.umask(0o077)
         Path(path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         Path(path).parent.chmod(0o700)
@@ -78,29 +80,9 @@ class Store:
                     issue_id INTEGER NOT NULL REFERENCES issues(id), data TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS activity_issue ON activity(issue_id,id);
                 CREATE TABLE IF NOT EXISTS oauth(state TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires REAL NOT NULL, browser TEXT);
-                CREATE TABLE IF NOT EXISTS reminders(slot INTEGER NOT NULL, assignee TEXT NOT NULL, issue_ids TEXT NOT NULL,
-                    sent_at REAL NOT NULL, PRIMARY KEY(slot, assignee));
-                CREATE TABLE IF NOT EXISTS notify_windows(recipient TEXT NOT NULL, issue_id INTEGER NOT NULL, actor TEXT NOT NULL,
-                    window_start REAL NOT NULL, pending TEXT NOT NULL DEFAULT '[]', attempts INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY(recipient, issue_id, actor));
-                CREATE TABLE IF NOT EXISTS notify_proven(recipient TEXT NOT NULL, actor TEXT NOT NULL, hour INTEGER NOT NULL,
-                    PRIMARY KEY(recipient, actor, hour));
-                CREATE TABLE IF NOT EXISTS notify_budget(recipient TEXT NOT NULL, hour INTEGER NOT NULL, immediate INTEGER NOT NULL,
-                    PRIMARY KEY(recipient, hour));
-                CREATE TABLE IF NOT EXISTS notify_policy(recipient TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('all','asks')),
-                    updated_by TEXT NOT NULL, updated_at REAL NOT NULL);
-                CREATE TABLE IF NOT EXISTS notify_policy_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, actor TEXT NOT NULL,
-                    subject TEXT NOT NULL, old TEXT NOT NULL, new TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS notify_ask_budget(recipient TEXT NOT NULL, author TEXT NOT NULL, hour INTEGER NOT NULL,
-                    pushes INTEGER NOT NULL, PRIMARY KEY(recipient, author, hour));
-                CREATE TABLE IF NOT EXISTS shipped_signals(issue_id INTEGER NOT NULL, sha8 TEXT NOT NULL, created_at REAL NOT NULL,
-                    sent_at REAL, PRIMARY KEY(issue_id, sha8));
-                CREATE TABLE IF NOT EXISTS reminder_budget(recipient TEXT NOT NULL, hour INTEGER NOT NULL, messages INTEGER NOT NULL,
-                    PRIMARY KEY(recipient, hour));
-                CREATE TABLE IF NOT EXISTS reminder_backoff(issue_id INTEGER PRIMARY KEY, assignee TEXT NOT NULL, version INTEGER NOT NULL,
-                    interval REAL NOT NULL, next_due REAL NOT NULL, count INTEGER NOT NULL DEFAULT 0);
-                CREATE INDEX IF NOT EXISTS reminder_backoff_due ON reminder_backoff(next_due);
                 CREATE TABLE IF NOT EXISTS sessions(secret TEXT PRIMARY KEY, token TEXT NOT NULL, expires REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS wakes(target TEXT NOT NULL, issue_id INTEGER NOT NULL, at REAL NOT NULL,
+                    PRIMARY KEY(target, issue_id));
             ''')
         with self.connect() as db:
             columns = {row[1] for row in db.execute('PRAGMA table_info(oauth)')}
@@ -117,7 +99,7 @@ class Store:
                 refs.ensure(db)
                 refs.rebuild_if_needed(db, fulltext.stamp_epoch, fulltext.writers)
                 self.search_ready = fulltext.rebuild_if_needed(db)
-        except Error as exc:
+        except Error:
             print('Issues search index could not be built in time; search answers 503 until a later start finishes it', file=sys.stderr, flush=True)
 
     @contextmanager
@@ -132,45 +114,20 @@ class Store:
             db.close()
 
     def all(self, db):
-        items = hierarchy.Items((row['id'], self.normal(dict(json.loads(row['data']), id=row['id'])))
+        items = hierarchy.Items((row['id'], dict(json.loads(row['data']), id=row['id']))
                                 for row in db.execute('SELECT id,data FROM issues'))
         return hierarchy.attach(db, items)
-
-    @staticmethod
-    def normal(issue):
-        """Issues written before #185 get its fields: no waiting_on, the reminder version is the issue version and the
-        last progress is the last update (so a deployment starts every clock from what already happened)."""
-        issue.setdefault('waiting_on', None)
-        issue.setdefault('rv', issue.get('version', 0))
-        issue.setdefault('progress_at', issue.get('updated_at'))
-        return issue
-
-    def responsible(self, issue):
-        """(Agent who can move the issue, kind): the Agent it waits on (`leader`/`user` resolve to the configured leader
-        Agent), else its Agent assignee; (None, None) when nobody clear. kind is 'waiting' or 'own'."""
-        waiting = issue.get('waiting_on')
-        if waiting:
-            target = self.leader_agent if waiting in ('leader', 'user') else waiting
-            return (target, 'waiting') if target else (None, None)
-        assignee = issue.get('assignee')
-        return (assignee, 'own') if assignee and assignee.startswith('ag_') else (None, None)
 
     def get(self, items, issue_id):
         if issue_id not in items:
             fail('issue_not_found', 'Issue not found', 404)
         return items[issue_id]
 
-    def active_claim(self, issue):
-        claim = issue.get('claim')
-        if claim and datetime.fromisoformat(claim['expires_at'].replace('Z', '+00:00')).timestamp() > self.clock():
-            return claim
-        return None
-
     def view(self, issue, items):
-        result = dict(issue, claim=self.active_claim(issue))
+        result = {k: v for k, v in issue.items() if k not in LEGACY_FIELDS}
+        result.setdefault('hidden', None)
         below, truncated = hierarchy.descendants(items, issue['id'])      # each descendant once, however many paths lead to it
-        descendants = [items[n] for n in below]
-        counted = [i for i in descendants if i['status'] != 'note']      # notes are memory, not work: they do not count in rollups
+        counted = [items[n] for n in below if items[n]['status'] != 'note' and not items[n].get('hidden')]   # notes are memory, not work
         result['progress'] = {'total': len(counted), 'truncated': truncated,
             'completed': sum(i['status'] in ('done', 'closed') for i in counted),
             'by_status': {s: sum(i['status'] == s for i in counted) for s in STATUSES}}
@@ -178,7 +135,7 @@ class Store:
         return result
 
     def list(self, filters):
-        allowed = ('status', 'assignee', 'label', 'parent_id', 'unresolved', 'limit', 'offset')
+        allowed = ('status', 'assignee', 'creator', 'label', 'parent_id', 'unresolved', 'hidden', 'limit', 'offset')
         fields(filters, allowed)
         try:
             limit, offset = int(filters.get('limit', 50)), int(filters.get('offset', 0))
@@ -186,17 +143,20 @@ class Store:
             fail('invalid_pagination', 'Invalid pagination')
         if not 1 <= limit <= 100 or offset < 0:
             fail('invalid_pagination', 'limit 1..100; offset >=0')
+        hidden = filters.get('hidden', '0')
+        if hidden not in ('0', '1', 'only'):
+            fail('invalid_field', 'hidden must be 0, 1 or only')
         with self.connect() as db:
             items = self.all(db)
         result = sorted(items.values(), key=lambda i: i['id'], reverse=True)
-        for key in ('status', 'assignee', 'label', 'parent_id', 'unresolved'):
+        if hidden != '1':
+            result = [i for i in result if bool(i.get('hidden')) == (hidden == 'only')]
+        for key in ('status', 'assignee', 'creator', 'label', 'parent_id', 'unresolved'):
             if key not in filters:
                 continue
             value = filters[key]
             if key == 'unresolved':
-                if value not in ('1', 'true', '0', 'false'):
-                    fail('invalid_field', 'unresolved must be 1 or 0')
-                if value in ('1', 'true'):
+                if flag(value, 'unresolved'):
                     result = [i for i in result if i['status'] not in RESOLVED]
             elif key == 'label':
                 result = [i for i in result if value in i['labels']]
@@ -207,7 +167,7 @@ class Store:
                     fail('invalid_id', 'Invalid parent ID')
                 result = [i for i in result if (parent in i['parent_ids'] if parent is not None else not i['parent_ids'])]
             else:
-                result = [i for i in result if i[key] == value]
+                result = [i for i in result if i.get(key) == value]
         return {'issues': [self.view(i, items) for i in result[offset:offset+limit]],
                 'total': len(result), 'next_offset': offset+limit if offset+limit < len(result) else None}
 
@@ -221,8 +181,13 @@ class Store:
         short['body_bytes'] = len(event['body'].encode())
         if not event.get('title'):
             line = ' '.join(''.join(' ' if unicodedata.category(c) in ('Cc', 'Zl', 'Zp') else c for c in event['body'][:4 * EXCERPT_CHARS]).split())
-            short['excerpt'] = line if len(line) <= EXCERPT_CHARS else line[:EXCERPT_CHARS - 1].rstrip() + '\u2026'
+            short['excerpt'] = line if len(line) <= EXCERPT_CHARS else line[:EXCERPT_CHARS - 1].rstrip() + '…'
         return short
+
+    @staticmethod
+    def concealed(event):
+        """A hidden comment as listed: who hid it and when, without its title or text (read it with `event()`)."""
+        return {k: v for k, v in event.items() if k not in ('body', 'title', 'mentions')}
 
     def event(self, issue_id, event_id):
         with self.connect() as db:
@@ -232,25 +197,39 @@ class Store:
             fail('event_not_found', 'No such activity on this issue', 404)
         return dict(json.loads(row['data']), id=row['id'])
 
-    def show(self, issue_id, offset=0, limit=50, titles=False):
+    def show(self, issue_id, offset=0, limit=50, titles=False, events='all', hidden=False):
+        """An issue with its activity, newest first. events='comments' lists comments only (no system entries);
+        hidden comments are listed as stubs unless hidden=True."""
         if type(offset) is not int or offset < 0 or not 1 <= limit <= 100:
             fail('invalid_pagination', 'limit 1..100; offset >=0')
+        if events not in ('all', 'comments'):
+            fail('invalid_field', 'events must be all or comments')
+        where = " AND json_extract(data,'$.kind')='comment'" if events == 'comments' else ''
         with self.connect() as db:
             items = self.all(db)
             issue = self.view(self.get(items, issue_id), items)
-            rows = db.execute('SELECT id,data FROM activity WHERE issue_id=? ORDER BY id DESC LIMIT ? OFFSET ?',
+            rows = db.execute(f'SELECT id,data FROM activity WHERE issue_id=?{where} ORDER BY id DESC LIMIT ? OFFSET ?',
                               (issue_id, limit+1, offset)).fetchall()
             referenced = refs.referenced_by(db, issue_id, items)
-        return {'issue': issue, 'referenced_by': referenced, 'children': [self.view(items[n], items) for n in items.kids.get(issue_id, ())][:100],
-                'children_total': len(items.kids.get(issue_id, ())),
-                'activity': [(self.titles_only if titles else (lambda e: e))(dict(json.loads(r['data']), id=r['id'])) for r in rows[:limit]],
-                'next_activity_offset': offset+limit if len(rows)>limit else None}
+        activity = []
+        for row in rows[:limit]:
+            event = dict(json.loads(row['data']), id=row['id'])
+            if event.get('hidden') and not hidden:
+                event = self.concealed(event)
+            elif titles:
+                event = self.titles_only(event)
+            activity.append(event)
+        kids = [n for n in items.kids.get(issue_id, ()) if not items[n].get('hidden')]
+        return {'issue': issue, 'referenced_by': [r for r in referenced if not items[r['issue']['id']].get('hidden')],
+                'children': [self.view(items[n], items) for n in kids][:100], 'children_total': len(kids),
+                'activity': activity, 'next_activity_offset': offset+limit if len(rows) > limit else None}
 
     SEARCH_FIELDS = ('q', 'status', 'assignee', 'label', 'author', 'from', 'to', 'limit')
 
     def search(self, params):
         """GET /v1/search: validates every parameter, then ranks matches over titles, descriptions and comments. Results
-        name who wrote the matched text and carry a bounded plain-text snippet that is untrusted author data."""
+        name who wrote the matched text and carry a bounded plain-text snippet that is untrusted author data. Hidden
+        issues and hidden comments are not searched."""
         fields(params, self.SEARCH_FIELDS)
         if not self.search_ready:
             fail('search_index_building', 'The search index is not ready', 503)
@@ -278,7 +257,9 @@ class Store:
             fail('invalid_field', f'a query of only one- and two-character words may have at most {fulltext.MAX_SHORT_ONLY_TERMS} of them')
         with self.connect() as db:
             items = self.all(db)
-            results, truncated = fulltext.search(db, items, clean, limit)
+            hidden = {r[0] for r in db.execute("SELECT id FROM activity WHERE json_extract(data,'$.hidden') IS NOT NULL")}
+            visible = {k: v for k, v in items.items() if not v.get('hidden')}
+            results, truncated = fulltext.search(db, visible, clean, limit, skip_events=hidden)
         return {'results': results, 'count': len(results), 'limit': limit, 'candidate_cap': fulltext.CANDIDATES, 'truncated': truncated}
 
     def children(self, issue_id, offset=0, limit=50):
@@ -287,13 +268,9 @@ class Store:
         with self.connect() as db:
             items = self.all(db)
         self.get(items, issue_id)
-        children = [items[n] for n in items.kids.get(issue_id, ())]
+        children = [items[n] for n in items.kids.get(issue_id, ()) if not items[n].get('hidden')]
         return {'issues': [self.view(i, items) for i in children[offset:offset+limit]],
                 'total': len(children), 'next_offset': offset+limit if offset+limit<len(children) else None}
-
-    def editable(self, issue, actor):
-        claim = self.active_claim(issue)
-        return actor['id'] in (issue['creator'], issue['assignee'], claim['holder'] if claim else None) or (actor['kind'] == 'human' and actor.get('role') in ('owner', 'admin'))
 
     def validate(self, issue, items, directory):
         text(issue['title'], 'title', 300)
@@ -309,15 +286,6 @@ class Store:
             fail('invalid_field', 'Labels must be unique')
         if issue['assignee'] is not None and (not isinstance(issue['assignee'], str) or issue['assignee'] not in {p['id'] for p in directory}):
             fail('assignee_unavailable', 'Use a stable ID from the Treer directory')
-        waiting = issue.get('waiting_on')
-        if waiting is not None:
-            if not isinstance(waiting, str) or issue['status'] != 'blocked':
-                fail('invalid_field', 'waiting_on needs status blocked and a string value')
-            if waiting in ('leader', 'user'):
-                if not self.leader_agent:
-                    fail('leader_unconfigured', 'This Issues App has no leader Agent configured, so waiting_on leader/user is unavailable')
-            elif waiting not in {p['id'] for p in directory if p.get('kind') == 'agent'}:
-                fail('invalid_field', 'waiting_on must be an Agent from the directory, leader or user')
         dependencies = issue['blocked_by']
         if not isinstance(dependencies, list) or len(dependencies)>50:
             fail('invalid_field', 'blocked_by must be a list of at most 50 IDs')
@@ -335,40 +303,11 @@ class Store:
                 seen.add(dependency)
                 pending.extend(items[dependency]['blocked_by'])
 
-    RESP_MEMORY = 24 * 3600     # a party that was responsible within this window does not restart the clock when it becomes responsible again
-
-    def track_progress(self, issue, before, action, actor, now):
-        """Moves the reminder clock (`rv`, `progress_at`) only for real progress: the party that was responsible acting on
-        the issue, or the responsibility passing to a party that was NOT responsible in the last 24 hours (so flipping
-        blocked/in_progress or bouncing between two parties cannot keep an issue out of the stale view). Other people's
-        comments and edits never move it."""
-        if action == 'create':
-            reason = 'created'
-        else:
-            old, _ = self.responsible(before)
-            new, _ = self.responsible(issue)
-            reason = None
-            if old != new:
-                earlier = issue.get('resp_seen') or {}
-                seen = dict(earlier)
-                if old:
-                    seen[old] = now
-                if not (new is not None and now - earlier.get(new, -self.RESP_MEMORY) < self.RESP_MEMORY):
-                    reason = 'responsible_changed'
-                issue['resp_seen'] = dict(sorted(seen.items(), key=lambda kv: kv[1])[-8:])
-            elif action in ('update', 'comment') and old and actor['id'] == old:
-                reason = 'responsible_activity'
-        if reason:
-            issue['rv'] = issue.get('rv', 0) + 1
-            issue['progress_at'] = stamp(now)
-            issue['progress_reason'] = reason
-            issue['progress_resets'] = issue.get('progress_resets', 0) + 1
-
     LINKS_PER_MINUTE = 30
 
     def rate_links(self, principal, now, weight=1):
         """Relation changes are limited per principal (a sliding minute), counted per link ADDED (removing links is free, so a
-        full set can always be cleared), so one request that adds 50 links costs 50 and no one can churn other people's hierarchies."""
+        full set can always be cleared), so one request that adds 50 links costs 50 and no one can churn hierarchies."""
         hits = [t for t in self.link_hits.get(principal, []) if now - t < 60]
         if len(hits) + weight > self.LINKS_PER_MINUTE:
             self.link_hits[principal] = hits
@@ -393,19 +332,20 @@ class Store:
         return None
 
     @staticmethod
-    def link_event(db, issue_id, kind, other, actor_id, now, other_role=None):
+    def record(db, issue_id, actor_id, kind, summary, now, changes=None):
+        return db.execute('INSERT INTO activity(issue_id,data) VALUES(?,?)', (issue_id, json.dumps({
+            'actor': actor_id, 'kind': kind, 'at': stamp(now), 'summary': summary,
+            'changes': changes or {}, 'notification': {'status': 'not_requested'}}))).lastrowid
+
+    def link_event(self, db, issue_id, kind, other, actor_id, now, other_role=None):
         role = other_role or 'child'
-        db.execute('INSERT INTO activity(issue_id,data) VALUES(?,?)', (issue_id, json.dumps({
-            'actor': actor_id, 'kind': kind, 'at': stamp(now),
-            'summary': (f'Child #{other} linked' if kind == 'link' else f'Child #{other} unlinked') if role == 'child'
-                       else (f'Linked under #{other}' if kind == 'link' else f'Unlinked from #{other}'),
-            'changes': {role: other}, 'notification': {'status': 'not_requested'}})))
+        summary = (f'Child #{other} linked' if kind == 'link' else f'Child #{other} unlinked') if role == 'child' \
+            else (f'Linked under #{other}' if kind == 'link' else f'Unlinked from #{other}')
+        self.record(db, issue_id, actor_id, kind, summary, now, {role: other})
 
     def link_children(self, parent_id, body, actor):
-        """POST /v1/issues/ID/children {add:[…], remove:[…]}: attach EXISTING issues under this one (or detach them). Adding needs
-        edit rights on the PARENT (you are arranging your own summary issue) and changes nothing about the child but its
-        relation; removing needs edit rights on the parent or on the child, so a child's owner can always take it out. Every
-        change leaves a trace in both issues' activity."""
+        """POST /v1/issues/ID/children {add:[…], remove:[…]}: attach EXISTING issues under this one (or detach them). It
+        changes nothing about a child but its relation; every change leaves a trace in both issues' activity."""
         fields(body, ('add', 'remove'))
         lists = {}
         for key in ('add', 'remove'):
@@ -419,13 +359,7 @@ class Store:
             db.execute('BEGIN IMMEDIATE')
             now = self.clock()
             items = self.all(db)
-            parent = self.get(items, parent_id)
-            if lists['add']:
-                claim = self.active_claim(parent)
-                if claim and claim['holder'] != actor['id']:
-                    fail('claim_owned', 'Another principal holds the active lease', 409)
-                if not self.editable(parent, actor):
-                    fail('forbidden', 'Only someone who may edit the parent can attach children to it', 403)
+            self.get(items, parent_id)
             self.rate_links(actor['id'], now, len(lists['add']))
             for child_id in lists['add']:
                 child = self.get(items, child_id)
@@ -436,23 +370,52 @@ class Store:
                 self.link_event(db, parent_id, 'link', child_id, actor['id'], now)
                 self.link_event(db, child_id, 'link', parent_id, actor['id'], now, 'parent')
                 items = self.all(db)
-                parent = items[parent_id]
             for child_id in lists['remove']:
                 child = self.get(items, child_id)
                 if parent_id not in child['parent_ids']:
                     continue
-                if not (self.editable(parent, actor) or self.editable(child, actor)):
-                    fail('forbidden', 'Only someone who may edit the parent or the child can remove the link', 403)
                 hierarchy.write(db, child_id, child['parent_ids'], [p for p in child['parent_ids'] if p != parent_id], actor['id'], now)
                 self.link_event(db, parent_id, 'unlink', child_id, actor['id'], now)
                 self.link_event(db, child_id, 'unlink', parent_id, actor['id'], now, 'parent')
                 items = self.all(db)
         return self.show(parent_id)
 
+    def set_hidden(self, issue_id, event_id, hide, actor):
+        """Hide (soft-delete) or restore an issue (event_id None) or one comment. Nothing is removed: the flag records
+        who and when, an activity entry records the change, and restoring clears the flag."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            now = self.clock()
+            items = self.all(db)
+            issue = self.get(items, issue_id)
+            mark = {'by': actor['id'], 'at': stamp(now)} if hide else None
+            if event_id is None:
+                if bool(issue.get('hidden')) != hide:
+                    issue['hidden'] = mark
+                    issue['version'] += 1
+                    issue['updated_at'] = stamp(now)
+                    db.execute('UPDATE issues SET data=? WHERE id=?', (json.dumps({k: v for k, v in issue.items() if k not in ('parent_id', 'parent_ids')}), issue_id))
+                    self.record(db, issue_id, actor['id'], 'hide' if hide else 'restore', 'Issue hidden' if hide else 'Issue restored', now)
+            else:
+                row = db.execute('SELECT data FROM activity WHERE id=? AND issue_id=?', (event_id, issue_id)).fetchone()
+                if row is None:
+                    fail('event_not_found', 'No such activity on this issue', 404)
+                event = json.loads(row['data'])
+                if event.get('kind') != 'comment':
+                    fail('not_a_comment', 'Only comments can be hidden; other activity is history', 409)
+                if bool(event.get('hidden')) != hide:
+                    if hide:
+                        event['hidden'] = mark
+                    else:
+                        event.pop('hidden', None)
+                    db.execute('UPDATE activity SET data=? WHERE id=?', (json.dumps(event), event_id))
+                    self.record(db, issue_id, actor['id'], 'hide' if hide else 'restore',
+                                f'Comment {event_id} hidden' if hide else f'Comment {event_id} restored', now, {'comment': event_id})
+        return self.show(issue_id, hidden=True)
+
     def mutate(self, issue_id, action, body, actor, directory, paths=None):
-        allowed = ('title', 'description', 'status', 'priority', 'labels', 'assignee', 'parent_id', 'parent_ids', 'blocked_by', 'waiting_on')
-        fields(body, allowed if action == 'create' else (*allowed, 'version') if action == 'update'
-               else ('body', 'title') if action == 'comment' else ('action', 'seconds'))
+        allowed = ('title', 'description', 'status', 'priority', 'labels', 'assignee', 'parent_id', 'parent_ids', 'blocked_by')
+        fields(body, allowed if action == 'create' else (*allowed, 'version') if action == 'update' else ('body', 'title'))
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             now = self.clock()
@@ -460,8 +423,8 @@ class Store:
             new_parents = self.wanted_parents(body) if action in ('create', 'update') else None      # None: not touching the relations
             if action == 'create':
                 issue = dict(title='', description='', status='open', priority='normal', labels=[],
-                             assignee=None, blocked_by=[], creator=actor['id'], waiting_on=None,
-                             created_at=stamp(now), updated_at=stamp(now), version=0, claim=None, rv=0, progress_at=stamp(now), **{'id': -1})
+                             assignee=None, blocked_by=[], creator=actor['id'],
+                             created_at=stamp(now), updated_at=stamp(now), version=0, **{'id': -1})
                 issue.update({k: v for k, v in body.items() if k not in ('parent_id', 'parent_ids')})
                 issue['parent_ids'], issue['parent_id'] = [], None
                 self.validate(issue, items, directory)
@@ -477,20 +440,13 @@ class Store:
                 issue = self.get(items, issue_id)
                 old_assignee = issue['assignee']
                 before = dict(issue)
-                claim = self.active_claim(issue)
-                if action != 'comment' and claim and claim['holder'] != actor['id']:
-                    fail('claim_owned', 'Another principal holds the active lease', 409)
                 if action == 'update':
-                    if not self.editable(issue, actor):
-                        fail('forbidden', 'Only creator, assignee or human admin may edit', 403)
                     if 'version' in body and (type(body['version']) is not int or body['version'] != issue['version']):
                         fail('version_conflict', 'Reload the issue before editing', 409)
                     issue.update({k: v for k, v in body.items() if k not in ('version', 'parent_id', 'parent_ids')})
                     if new_parents is not None and new_parents != issue['parent_ids']:
                         hierarchy.check_parents(issue_id, new_parents, items, fail)
                         self.rate_links(actor['id'], now, len(set(new_parents) - set(issue['parent_ids'])))
-                    if issue['status'] != 'blocked' and 'waiting_on' not in body:
-                        issue['waiting_on'] = None          # leaving blocked ends the wait; the assignee is responsible again
                     self.validate(issue, items, directory)
                     summary = 'Issue updated: ' + ', '.join(k for k in body if k != 'version')
                 elif action == 'comment':
@@ -500,22 +456,6 @@ class Store:
                         if title != title.strip() or any(unicodedata.category(c) in ('Cc', 'Zl', 'Zp') for c in title):
                             fail('invalid_field', 'comment title must be one trimmed line without control characters')
                     summary = 'New comment'
-                elif action == 'claim':
-                    operation = body.get('action', 'acquire')
-                    seconds = body.get('seconds', 900)
-                    if operation not in ('acquire', 'renew', 'release') or type(seconds) is not int or not 1 <= seconds <= 86400:
-                        fail('invalid_lease', 'action acquire/renew/release; seconds 1..86400')
-                    if operation in ('renew', 'release') and (not claim or claim['holder'] != actor['id']):
-                        fail('claim_missing', 'No active lease owned by caller', 409)
-                    if operation != 'release':
-                        if issue['status'] in RESOLVED or issue['assignee'] not in (None, actor['id']):
-                            fail('not_claimable', 'Issue must be active and unassigned or assigned to caller', 409)
-                        if any(items[d]['status'] not in RESOLVED for d in issue['blocked_by']):
-                            fail('dependencies_unresolved', 'Resolve blocking issues before claiming', 409)
-                        issue['claim'] = {'holder': actor['id'], 'expires_at': stamp(now+seconds)}
-                    else:
-                        issue['claim'] = None
-                    summary = 'Lease ' + operation
                 else:
                     fail('route_not_found', 'Unknown action', 404)
             changed = {k for k, v in body.items() if k not in ('version', 'body', 'parent_id', 'parent_ids') and before.get(k) != v} if action == 'update' else set()
@@ -529,47 +469,27 @@ class Store:
                         changed.add('parent_ids')
                     link_events = [('link', p) for p in added] + [('unlink', p) for p in removed]
             if action == 'comment':
-                mention_text, earlier = body['body'], ''
-            elif action in ('create', 'update'):
+                mention_text, earlier = '\n'.join(v for v in (body.get('title'), body['body']) if v), ''
+            else:
                 mention_text = issue['title'] + '\n' + issue['description']
                 earlier = before.get('title', '') + '\n' + before.get('description', '')
-            else:
-                mention_text = earlier = ''
             mentions = sorted(resolve_mentions(mention_text, directory, paths) - resolve_mentions(earlier, directory, paths) - {actor['id']})
-            if action in ('create', 'update') and issue['status'] in ('in_progress', 'done'):
-                if any(items[d]['status'] not in RESOLVED for d in issue['blocked_by']):
-                    fail('dependencies_unresolved', 'Resolve blocking issues before starting or completing', 409)
-            if issue['status'] in RESOLVED:
-                issue['claim'] = None
-            if issue.get('waiting_on') != before.get('waiting_on'):
-                issue['waiting_by'] = actor['id'] if issue.get('waiting_on') else None
-                issue['waiting_at'] = stamp(now) if issue.get('waiting_on') else None
-            self.track_progress(issue, before, action, actor, now)
+            if action != 'comment' and issue['status'] in ('in_progress', 'done') and any(items[d]['status'] not in RESOLVED for d in issue['blocked_by']):
+                fail('dependencies_unresolved', 'Resolve blocking issues before starting or completing', 409)
             issue['version'] += 1
             issue['updated_at'] = stamp(now)
             event = {'actor': actor['id'], 'kind': action, 'at': stamp(now), 'summary': summary,
                      'changes': {k: v for k, v in body.items() if k != 'body'} if action in ('create', 'update') else {},
-                     'notification': {'status': 'pending' if action in ('create', 'update', 'comment') else 'not_requested'}}
+                     'notification': {'status': 'pending'}}
             if link_events:
                 event['changes'] = {**{k: v for k, v in event['changes'].items() if k not in ('parent_id', 'parent_ids')}, 'parent_ids': issue['parent_ids']}
             if action == 'comment':
                 event['body'] = body['body']
                 if body.get('title') is not None:
                     event['title'] = body['title']
-                    intent, target, note = parse_intent(body['title'], directory)
-                    if intent != 'fyi':
-                        event['intent'] = intent        # stored once, never re-derived from the text later
-                        if target:
-                            event['intent_target'] = target
-                    elif note:
-                        event['intent_note'] = note
             if mentions:
                 event['mentions'] = mentions
             db.execute('UPDATE issues SET data=? WHERE id=?', (json.dumps({k: v for k, v in issue.items() if k not in ('parent_id', 'parent_ids')}), issue_id))
-            if action == 'comment' and self.release_agent and actor['id'] == self.release_agent:
-                sha8 = shipped_sha(body.get('title'))
-                if sha8 and issue['status'] not in RESOLVED and (issue.get('assignee') or '').startswith('ag_'):
-                    db.execute('INSERT OR IGNORE INTO shipped_signals(issue_id,sha8,created_at) VALUES(?,?,?)', (issue_id, sha8, now))
             event_id = db.execute('INSERT INTO activity(issue_id,data) VALUES(?,?)', (issue_id, json.dumps(event))).lastrowid
             for kind, parent in link_events:        # the other end sees it too: a trace in the parent's activity (who, when, which child)
                 self.link_event(db, parent, kind, issue_id, actor['id'], now)
@@ -579,316 +499,41 @@ class Store:
             names = {p['id']: p.get('name', p['id']) for p in directory}
             notice = notice_for(action, actor, before, issue, changed, mentions, names, body.get('title') if action == 'comment' else None)
             recipients = recipients_for(action, issue, old_assignee, changed, mentions, actor['id']) if notice else []
+            assigned = issue['assignee'] if issue['assignee'] != old_assignee and issue['assignee'] != actor['id'] else None
             missed = unresolved_mentions(mention_text, directory, paths) if mention_text != earlier else []
-        return issue_id, event_id, event, recipients, notice, missed
+        return issue_id, event_id, event, recipients, notice, missed, assigned
 
-    def _overflow(self, db, recipient, text, now):
-        row = db.execute("SELECT pending FROM notify_windows WHERE recipient=? AND issue_id=0 AND actor=''", (recipient,)).fetchone()
-        pending = json.loads(row['pending']) if row else []
-        if row and pending:
-            db.execute("UPDATE notify_windows SET pending=? WHERE recipient=? AND issue_id=0 AND actor=''", (json.dumps((pending + [text])[-50:]), recipient))
-        else:   # no pending updates: this one starts a fresh window
-            db.execute("INSERT OR REPLACE INTO notify_windows(recipient,issue_id,actor,window_start,pending,attempts) VALUES(?,0,'',?,?,0)",
-                       (recipient, now, json.dumps([text])))
-
-    def claim_notifications(self, issue_id, recipients, summary, now, actor_id, limit=20):
-        """Split recipients into (send now, coalesced, throttled). Windows are per (recipient, issue, ACTOR): an event is only
-        ever merged into a window opened by a send that the same actor's token already got Core to accept, so a
-        digest (sent under the App identity) can never carry an actor's event to someone their Policy denies.
-        Each recipient also has an hourly budget of immediate Messages; the excess goes to one per-recipient
-        digest, which bounds the total regardless of how many issues are touched. The overflow digest is also sent
-        under the App identity, so only an actor whom Core already let message that recipient THIS HOUR
-        (notify_proven, written after a successful send) may overflow into it; anyone else is throttled (dropped)."""
-        send, merged, throttled = [], [], []
+    # -- wake-ups --------------------------------------------------------------------------------------------------
+    def wake_claim(self, target, issue_id, now, window):
+        """True (and the slot is taken) unless this Agent was woken about this issue less than `window` seconds ago."""
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            for recipient in recipients:
-                row = db.execute('SELECT window_start,pending FROM notify_windows WHERE recipient=? AND issue_id=? AND actor=?',
-                                 (recipient, issue_id, actor_id)).fetchone()
-                pending = json.loads(row['pending']) if row else []
-                if row and (now < row['window_start'] + WINDOW or pending):
-                    db.execute('UPDATE notify_windows SET pending=? WHERE recipient=? AND issue_id=? AND actor=?',
-                               (json.dumps((pending + [summary])[-50:]), recipient, issue_id, actor_id))
-                    merged.append(recipient)
-                    continue
-                hour = int(now // 3600)
-                used = db.execute('SELECT immediate FROM notify_budget WHERE recipient=? AND hour=?', (recipient, hour)).fetchone()
-                if used and used['immediate'] >= limit:
-                    if db.execute('SELECT 1 FROM notify_proven WHERE recipient=? AND actor=? AND hour=?', (recipient, actor_id, hour)).fetchone():
-                        self._overflow(db, recipient, f'#{issue_id} {summary}', now)
-                        merged.append(recipient)
-                    else:
-                        throttled.append(recipient)
-                    continue
-                db.execute('INSERT INTO notify_budget(recipient,hour,immediate) VALUES(?,?,1) ON CONFLICT(recipient,hour) DO UPDATE SET immediate=immediate+1',
-                           (recipient, hour))
-                db.execute('INSERT OR REPLACE INTO notify_windows(recipient,issue_id,actor,window_start,pending,attempts) VALUES(?,?,?,?,?,0)',
-                           (recipient, issue_id, actor_id, now, '[]'))
-                send.append(recipient)
-        return send, merged, throttled
-
-    def prove_notifications(self, recipients, actor_id, now):
-        """Core accepted this actor's Message to these recipients: they may use the overflow digest this hour."""
-        with self.connect() as db:
-            for recipient in recipients:
-                db.execute('INSERT OR IGNORE INTO notify_proven(recipient,actor,hour) VALUES(?,?,?)', (recipient, actor_id, int(now // 3600)))
-
-    def release_notifications(self, issue_id, recipients, actor_id, now):
-        """A failed immediate send proved nothing: drop the claim INCLUDING anything merged into it meanwhile (it was
-        never authorised by Core) and give the budget back, so the next event simply retries."""
-        with self.connect() as db:
-            for recipient in recipients:
-                db.execute('DELETE FROM notify_windows WHERE recipient=? AND issue_id=? AND actor=?', (recipient, issue_id, actor_id))
-                db.execute('UPDATE notify_budget SET immediate=MAX(0,immediate-1) WHERE recipient=? AND hour=?', (recipient, int(now // 3600)))
-                db.execute('DELETE FROM notify_proven WHERE recipient=? AND actor=? AND hour=?', (recipient, actor_id, int(now // 3600)))
-
-    def due_digests(self, now):
-        with self.connect() as db:
-            rows = db.execute("SELECT recipient,issue_id,actor,window_start,pending FROM notify_windows WHERE pending!='[]' "
-                              "AND window_start+(CASE WHEN actor=? THEN ? ELSE ? END)<=?", (HOURLY, HOURLY_WINDOW, WINDOW, now)).fetchall()
-        return [{'recipient': r['recipient'], 'issue_id': r['issue_id'], 'actor': r['actor'], 'start': r['window_start'],
-                 'pending': json.loads(r['pending'])} for r in rows]
-
-    def digest_done(self, recipient, issue_id, actor, now):
-        with self.connect() as db:
-            db.execute("UPDATE notify_windows SET window_start=?, pending='[]', attempts=0 WHERE recipient=? AND issue_id=? AND actor=?",
-                       (now, recipient, issue_id, actor))
-
-    def digest_failed(self, recipient, issue_id, actor, limit):
-        with self.connect() as db:
-            db.execute('UPDATE notify_windows SET attempts=attempts+1 WHERE recipient=? AND issue_id=? AND actor=?', (recipient, issue_id, actor))
-            db.execute("UPDATE notify_windows SET pending='[]' WHERE recipient=? AND issue_id=? AND actor=? AND attempts>=?", (recipient, issue_id, actor, limit))
-
-    def prune_windows(self, now):
-        with self.connect() as db:
-            db.execute("DELETE FROM notify_windows WHERE pending='[]' AND window_start+?<=?", (WINDOW, now))
-            db.execute('DELETE FROM notify_budget WHERE hour < ?', (int(now // 3600) - 2,))
-            db.execute('DELETE FROM notify_proven WHERE hour < ?', (int(now // 3600) - 2,))
-
-    # -- per-recipient notification policy ---------------------------------------------------------------------------
-    def policies(self):
-        with self.connect() as db:
-            return {r['recipient']: r['mode'] for r in db.execute('SELECT recipient,mode FROM notify_policy')}
-
-    def set_policy(self, subject, mode, by, now):
-        """Records the change and an append-only, bounded audit row (who, whom, old and new mode, when)."""
-        if mode not in POLICY_MODES:
-            fail('invalid_field', 'mode must be all or asks')
-        with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT mode FROM notify_policy WHERE recipient=?', (subject,)).fetchone()
-            old = row['mode'] if row else 'all'
-            db.execute('INSERT INTO notify_policy(recipient,mode,updated_by,updated_at) VALUES(?,?,?,?) '
-                       'ON CONFLICT(recipient) DO UPDATE SET mode=excluded.mode, updated_by=excluded.updated_by, updated_at=excluded.updated_at',
-                       (subject, mode, by, now))
-            db.execute('INSERT INTO notify_policy_audit(at,actor,subject,old,new) VALUES(?,?,?,?,?)', (now, by, subject, old, mode))
-            db.execute('DELETE FROM notify_policy_audit WHERE id <= (SELECT MAX(id) FROM notify_policy_audit) - 1000')
-        return {'agent': subject, 'mode': mode, 'previous': old}
-
-    def policy_audit(self, limit=50):
-        with self.connect() as db:
-            rows = db.execute('SELECT at,actor,subject,old,new FROM notify_policy_audit ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
-        return [dict(r) for r in rows]
-
-    def ask_push_allowed(self, recipient, author, now):
-        """At most ASK_PER_AUTHOR ask-type pushes per author per recipient per hour: prefixing every comment with
-        [decision] cannot flood a recipient. Counts the attempt; the excess falls back to the filtered digest path."""
-        hour = int(now // 3600)
-        with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT pushes FROM notify_ask_budget WHERE recipient=? AND author=? AND hour=?', (recipient, author, hour)).fetchone()
-            if row and row['pushes'] >= ASK_PER_AUTHOR:
+            row = db.execute('SELECT at FROM wakes WHERE target=? AND issue_id=?', (target, issue_id)).fetchone()
+            if row and window > 0 and now - row['at'] < window:
                 return False
-            db.execute('INSERT INTO notify_ask_budget(recipient,author,hour,pushes) VALUES(?,?,?,1) '
-                       'ON CONFLICT(recipient,author,hour) DO UPDATE SET pushes=pushes+1', (recipient, author, hour))
-            db.execute('DELETE FROM notify_ask_budget WHERE hour < ?', (hour - 2,))
+            db.execute('INSERT OR REPLACE INTO wakes(target,issue_id,at) VALUES(?,?,?)', (target, issue_id, now))
+            db.execute('DELETE FROM wakes WHERE at < ?', (now - max(window, 3600) * 4,))
         return True
 
-    def actor_proven(self, recipient, actor, now):
-        """Core let this actor message this recipient in the current hour (written after a successful send)."""
+    def wake_release(self, target, issue_id):
+        """A wake that failed for a transient reason does not hold the dedupe slot."""
         with self.connect() as db:
-            return db.execute('SELECT 1 FROM notify_proven WHERE recipient=? AND actor=? AND hour=?', (recipient, actor, int(now // 3600))).fetchone() is not None
-
-    def queue_hourly(self, recipient, issue_id, summary, now):
-        """A filtered update joins the recipient's hourly digest for this issue (opened by its first update). Beyond
-        HOURLY_ISSUES open digests the rest fold into the per-recipient overflow digest. Returns 'hourly' or 'overflow'."""
-        with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT pending FROM notify_windows WHERE recipient=? AND issue_id=? AND actor=?', (recipient, issue_id, HOURLY)).fetchone()
-            pending = json.loads(row['pending']) if row else []
-            if pending:
-                db.execute('UPDATE notify_windows SET pending=? WHERE recipient=? AND issue_id=? AND actor=?',
-                           (json.dumps((pending + [summary])[-50:]), recipient, issue_id, HOURLY))
-                return 'hourly'
-            open_count = db.execute("SELECT COUNT(*) FROM notify_windows WHERE recipient=? AND actor=? AND pending!='[]'", (recipient, HOURLY)).fetchone()[0]
-            if open_count >= HOURLY_ISSUES:
-                self._overflow(db, recipient, f'#{issue_id} {summary}', now)
-                return 'overflow'
-            db.execute('INSERT OR REPLACE INTO notify_windows(recipient,issue_id,actor,window_start,pending,attempts) VALUES(?,?,?,?,?,0)',
-                       (recipient, issue_id, HOURLY, now, json.dumps([summary])))
-        return 'hourly'
-
-    def unresolved_by_assignee(self, prefix='ag_', skip_labels=()):
-        """Unresolved (not done/closed/note) issue IDs per assignee whose stable ID starts with prefix. Issues carrying
-        any of skip_labels (e.g. long-lived epics) are not counted."""
-        skip = {label.lower() for label in skip_labels}
-        with self.connect() as db:
-            items = self.all(db)
-        result = {}
-        for issue in sorted(items.values(), key=lambda i: i['id']):
-            assignee = issue['assignee']
-            if assignee and assignee.startswith(prefix) and issue['status'] not in RESOLVED and not skip & {label.lower() for label in issue['labels']}:
-                result.setdefault(assignee, []).append(issue['id'])
-        return result
-
-    def reminder_candidates(self, prefix='ag_', skip_labels=()):
-        """(issue ID, recipient, reminder version, progress epoch, kind) of every unresolved, non-skipped issue that needs
-        reminding. The recipient is the party who can move it: the Agent it waits on (`waiting`), else its Agent assignee
-        (`own`); an issue nobody clear owns (unassigned) goes to the leader Agent as `orphan` when one is configured.
-        The version is `rv`, which only real progress by the responsible party (or a change of party) moves."""
-        skip = {label.lower() for label in skip_labels}
-        with self.connect() as db:
-            items = self.all(db)
-        result = []
-        for i in sorted(items.values(), key=lambda i: i['id']):
-            if i['status'] in RESOLVED or skip & {label.lower() for label in i['labels']}:
-                continue
-            party, kind = self.responsible(i)
-            if party is None and i['assignee'] is None and not i.get('waiting_on') and self.leader_agent:
-                party, kind = self.leader_agent, 'orphan'
-            if party is None or not party.startswith(prefix):
-                continue
-            result.append((i['id'], party, i['rv'], datetime.fromisoformat(i['progress_at'].replace('Z', '+00:00')).timestamp(), kind))
-        return result
-
-    def reminder_sync(self, candidates, now, first):
-        """Aligns the persisted backoff with the issues: issues that stopped needing a reminder lose their state; a new one
-        starts at `first` from now (so a fresh deployment does not remind anyone at once); progress (rv) starts over; a
-        change of recipient without progress keeps the schedule. Idempotent."""
-        wanted = {c[0]: c[1:4] for c in candidates}
-        with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
-            current = {row['issue_id']: row for row in db.execute('SELECT * FROM reminder_backoff')}
-            for issue_id in set(current) - set(wanted):
-                db.execute('DELETE FROM reminder_backoff WHERE issue_id=?', (issue_id,))
-            for issue_id, (recipient, version, updated) in wanted.items():
-                row = current.get(issue_id)
-                if row is None:
-                    start = now                       # newly tracked (also: just deployed): the first interval starts now
-                elif row['version'] != version:
-                    start = min(now, max(updated, now - first))   # progress: counted from when it happened (never in the future)
-                elif row['assignee'] != recipient:
-                    db.execute('UPDATE reminder_backoff SET assignee=? WHERE issue_id=?', (recipient, issue_id))
-                    continue
-                else:
-                    continue
-                db.execute('INSERT OR REPLACE INTO reminder_backoff(issue_id,assignee,version,interval,next_due,count) VALUES(?,?,?,?,?,0)',
-                           (issue_id, recipient, version, first, max(now, start + first)))
-
-    def shipped_pending(self, skip_labels=()):
-        """(issue ID, sha8, assignee) of recorded 'looks shipped' signals not yet delivered. Signals for issues that were
-        resolved or lost their Agent assignee in the meantime are settled without a message."""
-        with self.connect() as db:
-            rows = db.execute('SELECT issue_id,sha8 FROM shipped_signals WHERE sent_at IS NULL ORDER BY created_at,issue_id').fetchall()
-            items = self.all(db)
-        skip = {label.lower() for label in skip_labels}
-        out = []
-        for row in rows:
-            issue = items.get(row['issue_id'])
-            assignee = issue['assignee'] if issue else None
-            kept = issue and issue['status'] not in RESOLVED and (assignee or '').startswith('ag_') and not skip & {l.lower() for l in issue['labels']}
-            out.append((row['issue_id'], row['sha8'], assignee if kept else None))
-        return out
-
-    def shipped_done(self, pairs, now):
-        with self.connect() as db:
-            for issue_id, sha8 in pairs:
-                db.execute('UPDATE shipped_signals SET sent_at=? WHERE issue_id=? AND sha8=?', (now, issue_id, sha8))
-
-    def reminder_budget_left(self, recipient, now, limit):
-        """Messages a recipient may still get this hour (a cap on reminder volume however many issues point at them)."""
-        with self.connect() as db:
-            row = db.execute('SELECT messages FROM reminder_budget WHERE recipient=? AND hour=?', (recipient, int(now // 3600))).fetchone()
-        return limit - (row['messages'] if row else 0)
-
-    def reminder_budget_spend(self, recipient, now):
-        hour = int(now // 3600)
-        with self.connect() as db:
-            db.execute('INSERT INTO reminder_budget(recipient,hour,messages) VALUES(?,?,1) ON CONFLICT(recipient,hour) DO UPDATE SET messages=messages+1', (recipient, hour))
-            db.execute('DELETE FROM reminder_budget WHERE hour < ?', (hour - 2,))
-
-    def stale(self, hours, limit, offset, skip_labels=()):
-        """Unresolved, non-skipped issues without progress for more than `hours`, oldest first: who is responsible, what
-        they wait on (and who set it, when), how long since ANY activity, and how often/why the clock was last moved."""
-        if type(hours) is not int or not 1 <= hours <= 720:
-            fail('invalid_field', 'hours must be an integer 1..720')
-        if type(limit) is not int or type(offset) is not int or not 1 <= limit <= 100 or offset < 0:
-            fail('invalid_pagination', 'limit 1..100; offset >=0')
-        skip = {label.lower() for label in skip_labels}
-        now = self.clock()
-        with self.connect() as db:
-            items = self.all(db)
-        rows = []
-        for i in items.values():
-            if i['status'] in RESOLVED or skip & {label.lower() for label in i['labels']}:
-                continue
-            progress = datetime.fromisoformat(i['progress_at'].replace('Z', '+00:00')).timestamp()
-            if now - progress <= hours * 3600:
-                continue
-            party, kind = self.responsible(i)
-            rows.append((progress, {
-                'id': i['id'], 'title': i['title'], 'status': i['status'], 'priority': i['priority'], 'assignee': i['assignee'],
-                'responsible': party, 'responsible_kind': kind or 'none', 'waiting_on': i.get('waiting_on'),
-                'waiting_by': i.get('waiting_by'), 'waiting_at': i.get('waiting_at'),
-                'stale_hours': int((now - progress) // 3600),
-                'since_any_activity_hours': int((now - datetime.fromisoformat(i['updated_at'].replace('Z', '+00:00')).timestamp()) // 3600),
-                'progress_at': i['progress_at'], 'progress_reason': i.get('progress_reason', 'before_tracking'),
-                'progress_resets': i.get('progress_resets', 0)}))
-        rows.sort(key=lambda r: (r[0], r[1]['id']))
-        page = [r[1] for r in rows[offset:offset + limit]]
-        return {'issues': page, 'total': len(rows), 'hours': hours, 'next_offset': offset + limit if offset + limit < len(rows) else None}
-
-    def reminder_due(self, now):
-        with self.connect() as db:
-            rows = db.execute('SELECT issue_id,assignee,version,interval,count FROM reminder_backoff WHERE next_due<=? ORDER BY assignee,issue_id', (now,)).fetchall()
-        return [dict(row) for row in rows]
-
-    def reminder_advance(self, issue_ids, now, factor, maximum):
-        """After a delivered reminder: the next interval is the last one times `factor`, capped at `maximum`."""
-        with self.connect() as db:
-            db.execute('BEGIN IMMEDIATE')
-            for issue_id in issue_ids:
-                row = db.execute('SELECT interval FROM reminder_backoff WHERE issue_id=?', (issue_id,)).fetchone()
-                if row is None:
-                    continue
-                interval = min(row['interval'] * factor, maximum)
-                db.execute('UPDATE reminder_backoff SET interval=?, next_due=?, count=count+1 WHERE issue_id=?', (interval, now + interval, issue_id))
-
-    def reminder_next_due(self, after):
-        """The nearest FUTURE due time. Rows that are already due (but were not sent because the Agent was busy) must not count,
-        or the scheduler would wake every second for them."""
-        with self.connect() as db:
-            return db.execute('SELECT MIN(next_due) FROM reminder_backoff WHERE next_due>?', (after,)).fetchone()[0]
-
-    def reminder_states(self):
-        with self.connect() as db:
-            return {row['issue_id']: dict(row) for row in db.execute('SELECT * FROM reminder_backoff')}
-
-    def reminded(self, slot, assignee):
-        with self.connect() as db:
-            return db.execute('SELECT 1 FROM reminders WHERE slot=? AND assignee=?', (slot, assignee)).fetchone() is not None
-
-    def record_reminder(self, slot, assignee, issue_ids):
-        with self.connect() as db:
-            db.execute('INSERT OR IGNORE INTO reminders(slot,assignee,issue_ids,sent_at) VALUES(?,?,?,?)',
-                       (slot, assignee, json.dumps(issue_ids), self.clock()))
-            # Bounded history: only recent slots matter for de-duplication.
-            db.execute('DELETE FROM reminders WHERE slot < ?', (slot - 24 * 14,))
+            db.execute('DELETE FROM wakes WHERE target=? AND issue_id=?', (target, issue_id))
 
     def notification(self, event_id, result):
+        """Stores the delivery result. Wake outcomes a background wake already recorded are kept, whichever write is first."""
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT data FROM activity WHERE id=?', (event_id,)).fetchone()
             event = json.loads(row['data'])
-            event['notification'] = result
+            done = {k: v for k, v in ((event.get('notification') or {}).get('wake') or {}).items() if v != 'pending'}
+            event['notification'] = dict(result, wake={**result['wake'], **done}) if 'wake' in result else result
+            db.execute('UPDATE activity SET data=? WHERE id=?', (json.dumps(event), event_id))
+
+    def record_wake(self, event_id, outcome):
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT data FROM activity WHERE id=?', (event_id,)).fetchone()
+            event = json.loads(row['data'])
+            event.setdefault('notification', {}).setdefault('wake', {}).update(outcome)
             db.execute('UPDATE activity SET data=? WHERE id=?', (json.dumps(event), event_id))

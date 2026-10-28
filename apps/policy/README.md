@@ -188,6 +188,14 @@ apps/policy/treer-policy preview simulation.json   # explain contract
 
 Agent publish/preview requires `provider_operator` authority.
 
+## Letting an App wake Agents
+
+`agent.prompt` is denied by default. An App that prompts Agents under its own
+identity, such as [Issues](../issues/README.md) on assignment or @mention, needs
+an allow rule for its runtime ID (`treer app show PATH`), for example
+`{"id":"issues-app-wakes-agents","priority":40,"effect":"allow","subjects":[{"id":"app_RUNTIME_ID"}],"actions":["agent.prompt"],"resources":[{"kind":"agent"}]}`;
+add a `tree` selector to the resource to limit which Agents it may reach.
+
 ## Isolating the administration Agent
 
 Place the administration Agent and the App in a dedicated folder and gate access

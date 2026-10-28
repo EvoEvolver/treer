@@ -1,18 +1,18 @@
 import { Fragment } from "react";
 import { useApp } from "../context";
-import { NOT_ALLOWED, PRIORITY_GLYPH, STATUSES, canEdit, displayName, words } from "../lib";
+import { PRIORITY_GLYPH, STATUSES, displayName, words } from "../lib";
 import type { Issue, Route, Status } from "../types";
 import { Avatar } from "./Avatar";
 
-export type View = "list" | "tree" | "stale";
+export type View = "list" | "tree";
 
 export function IssueLine({ issue, selected = false, focused = false }: { issue: Issue; selected?: boolean; focused?: boolean }) {
-  const { people, me, open, closeIssue, reopenIssue, busy } = useApp();
+  const { people, open, closeIssue, reopenIssue, busy } = useApp();
   const person = people.find((p) => p.id === issue.assignee);
-  const closed = issue.status === "closed", allowed = canEdit(me, issue);
+  const closed = issue.status === "closed";
   const act = closed ? reopenIssue : closeIssue;
   return (
-    <div className={"issue-line" + (selected ? " selected" : "") + (focused ? " kb" : "")} data-issue-id={issue.id}>
+    <div className={"issue-line" + (selected ? " selected" : "") + (focused ? " kb" : "") + (issue.hidden ? " is-hidden" : "")} data-issue-id={issue.id}>
       <button type="button" className="issue-row" onClick={() => open(issue.id)}
           aria-label={`ISS-${issue.id} ${issue.title} · ${words(issue.status)} · ${displayName(people, issue.assignee)}`}>
         <span className={"st st-" + issue.status} title={words(issue.status)}></span>
@@ -23,14 +23,14 @@ export function IssueLine({ issue, selected = false, focused = false }: { issue:
         </span>
         <span className="issue-meta">
           {issue.progress.total > 0 && <span className="progress" title="Descendants complete">{issue.progress.completed}/{issue.progress.total}</span>}
-          {issue.claim && <span title="Leased">⚑</span>}
+          {issue.hidden && <span className="tag" title="Hidden">hidden</span>}
           <span className={"priority " + issue.priority} title={issue.priority + " priority"}>{issue.priority === "normal" ? "" : PRIORITY_GLYPH[issue.priority]}</span>
           <span title={displayName(people, issue.assignee)}><Avatar person={person} /></span>
         </span>
       </button>
-      <button type="button" className="row-close" disabled={busy || !allowed} onClick={() => act(issue)}
+      <button type="button" className="row-close" disabled={busy} onClick={() => act(issue)}
           aria-label={(closed ? "Reopen" : "Close") + ` ISS-${issue.id}`}
-          title={allowed ? (closed ? "Reopen issue" : "Close issue (X)") : NOT_ALLOWED}>{closed ? "Reopen" : "Close"}</button>
+          title={closed ? "Reopen issue" : "Close issue (X)"}>{closed ? "Reopen" : "Close"}</button>
     </div>
   );
 }
