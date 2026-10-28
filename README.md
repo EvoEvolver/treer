@@ -7,8 +7,8 @@
 **Run every coding agent, on every machine, from one place.**
 
 Treer is an open, self-hostable control plane for coding agents. Keep Codex,
-Claude, Pi, OpenCode, and plain terminals running on the machines that own your
-code, then connect their Apps and conversations in the same workspace.
+Claude, any other CLI agent, and plain terminals running on the machines that own
+your code, then connect their Apps and conversations in the same workspace.
 
 [Try the canary](https://app.canary.treer.ai/) ·
 [Product site](https://www.treer.ai/) ·
@@ -40,8 +40,7 @@ environment as it is.
 A saved launch can be restored after machine restart with `treer-agent-server restore --workspace WORKSPACE_ID`. Treer preserves intended-running Agents and Managed Apps; explicitly stopped workloads stay stopped. It does not restore in-memory Agent conversations.
 
 Treer does not ship another Agent runtime. It coordinates the tools and
-environments you already use through the browser and CLI, including a responsive
-mobile browser interface. Native iOS/Android clients have been retired.
+environments you already use through the browser (desktop and mobile) and CLI.
 
 ## How it works
 
@@ -55,7 +54,7 @@ flowchart LR
 
     subgraph Machine["Enrolled machine"]
         Controller["Controller"] <--> Host["Stable Host"]
-        Host --> Agents["Codex · Claude · Pi · OpenCode · terminal"]
+        Host --> Agents["Codex · Claude · any CLI · terminal"]
         Agents --> AIS["Agent Interface Server"]
         Host --> Apps["Workspace Apps"]
     end
@@ -70,45 +69,22 @@ publish SSH or local service ports.
 
 ## Get started
 
-The hosted canary is the current place to try Treer. Self-hosting is covered in
-the [operator guide](docs/operator-guide.md).
-
-Build a single-container central server from a clean checkout with
-`./scripts/build-single-image.sh` (Git and Docker with Buildx required). It builds
-`treer-single:<commit>` locally and prints the `docker run` command; it never
-publishes an image or starts/replaces a running server. Open
-`http://console.treer.localhost:8080`; retrieve the generated
-admin password with `docker exec treer cat /data/private/admin-password` in a
-private terminal. Machines enroll separately. See
-[Single container](deploy/README.md#single-container) for hardened flags,
-two-origin public HTTPS setup, updates and backup/restore.
-
 1. Open the [canary console](https://app.canary.treer.ai/) and create or select a
    workspace.
-2. Choose **Add machine** and run the installer and enrollment commands the
-   console shows. On macOS and Linux the installer is
-   `curl -fsSL 'https://proxy.canary.treer.ai/install.sh' | sh`; the console
-   also shows the Windows PowerShell form and the single-use enrollment command.
-   Windows requires an account in the Administrators group; other accounts are
-   refused with a clear error instead of a partial install.
-3. Install the [Agent launcher](launchers/agent/README.md#create-an-agent) on that
-   machine with `treer-agent-server launcher --node /absolute/node install`
-   (Node.js 22+), then choose **+ → Add agent**, pick the machine, and pick a
-   profile such as Claude + UI or Codex + UI. A plain terminal needs no
-   launcher. Install and sign in to the Agent runtime yourself.
+2. Choose **Add machine** and run the install and enrollment commands it shows
+   (`curl -fsSL 'https://proxy.canary.treer.ai/install.sh' | sh` on macOS and
+   Linux; a PowerShell form for Windows, which requires an administrator
+   account).
+3. For the browser Agent UI, install the [Agent launcher](launchers/agent/README.md)
+   on that machine with `treer-agent-server launcher --node /absolute/node install`
+   (Node.js 22+). Then choose **+ → Add agent** and a profile such as
+   **Claude + UI** or **Codex + UI**; the **terminal** profiles and a plain
+   Terminal need no launcher. Install and sign in to the Agent CLI yourself.
 
-New workspaces include two launcher profiles, **Claude + UI** and **Codex + UI**,
-plus **Claude (terminal)** and **Codex (terminal)** for machines without the
-launcher. Existing workspace profiles are left unchanged; installing the
-launcher manages its UI profiles.
-UI profiles default to unattended full authority; use a separate OS account,
-container or VM when isolation is needed. Terminal profiles resolve bare
-`claude`/`codex` only from absolute directories in the Agent's final `PATH`.
-Do not start either kind in an untrusted repository: provider hooks/MCP/settings
-can execute with the machine account's authority.
-
-The console opens on a workspace overview, keeps open agent pages in tabs, and
-is available in English and Simplified Chinese.
+To run your own control plane, use the Compose stack or build the single
+container (`./scripts/build-single-image.sh`); see the
+[operator guide](docs/operator-guide.md) and
+[self-hosted deployment](deploy/README.md).
 
 > [!IMPORTANT]
 > Agents run with the operating-system authority of the account that starts the

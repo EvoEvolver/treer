@@ -48,7 +48,8 @@ SHA=<full commit on origin/main>
 ROOT=$HOME/apps-deployed/telegram-bridge
 git -C /path/to/repo archive --prefix="releases/$SHA/" "$SHA:apps/telegram" | tar -x -C "$ROOT"
 ln -sfn "releases/$SHA" "$ROOT/current"
-treer agent admin startup set /infra/telegram-bridge --cwd apps-deployed/telegram-bridge -- \
+treer agent admin create --machine <server-id> --kind command --name telegram-bridge \
+  --folder /infra --cwd apps-deployed/telegram-bridge -- \
   env TREER_APP_CONFIG=$HOME/.config/treer/telegram/config.json \
       TREER_APP_STATE_DIR=$HOME/.local/share/treer/apps/telegram \
       /absolute/python3 current/telegram.py
@@ -59,7 +60,8 @@ treer app create --machine <server-id> --name telegram-settings --folder /infra 
   /absolute/python3 current/telegram-settings.py --proxy-url https://PROXY.example/
 ```
 
-To upgrade, export the next commit, repoint `current`, then restart both processes.
+To upgrade, export the next commit, repoint `current`, then restart both processes
+(`treer agent admin restart /infra/telegram-bridge`, `treer app restart /infra/telegram-settings`).
 State lives outside the release, so rolling back means repointing `current`. Do not
 create the settings App with `--public`.
 

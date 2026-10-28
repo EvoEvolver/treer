@@ -68,7 +68,7 @@ Work through the sections in order. An earlier failure outranks a later polish.
 - Keep the information density of the neighbouring screen. Tree, Overview and
   map share hierarchy and sibling order; never regroup into a different order.
 - An empty state says what to do next, once. Do not add a second hint when the
-  screen already has a primary prompt (#108); keep deliberate footers.
+  screen already has a primary prompt; keep deliberate footers.
 - Long names, paths and IDs truncate with a title or wrap; they never push
   controls off screen.
 
@@ -103,9 +103,10 @@ Work through the sections in order. An earlier failure outranks a later polish.
 
 - Console: add keys to `en.ts` and `zh.ts` and call `t()` in render code; never evaluate
   `t()` at module load. Use `tnodes`, `statusLabel`, `roleLabel`, `intlLocale()`.
-- Terms follow the launcher UI (工作中, 空闲, 已阻塞, Agent, 工作区). App UIs
-  (Issues, Telegram, email) are not in the Console dictionary: follow their own
-  language handling.
+- Terms follow the launcher UI (`launchers/agent/ui/src/i18n`: 工作中, 空闲,
+  已阻塞, Agent, 工作区). App UIs (for example `apps/issues/ui`,
+  `apps/telegram/ui`, `apps/mail/web`) are not in the Console dictionary: follow
+  their own language handling.
 - Check long Chinese and English strings both fit.
 
 ## Pre-delivery pass
@@ -116,5 +117,6 @@ Work through the sections in order. An earlier failure outranks a later polish.
 3. Empty, loading, error and long-content states of the changed view.
 4. Switch language en/zh.
 5. `pnpm run check:contrast`, `typecheck`, build and the focused Playwright
-   spec; screenshots saved outside the repository for the review comment.
+   spec (`web/e2e/` keeps only key journeys; add one only for a new journey).
+   Keep screenshots outside the repository.
 6. Update `web/README.md` (or the App README) in the same change.

@@ -19,15 +19,13 @@ second manual.
   by `treer --skill macos-container`.
 - The root [README](README.md) is the concise product entry point. Detailed
   setup and operator examples belong in [the operator guide](docs/operator-guide.md).
-- [PLAN.md](PLAN.md) and dated [research](docs/research/) preserve design
-  history. Use source, tests, and maintained docs for current behavior.
+- Docs describe current behavior; Git history holds earlier designs.
 
 ## Read by task
 
 | Task | Start here |
 | --- | --- |
-| Understand product scope | [docs/product.md](docs/product.md) |
-| Classify or sequence future capabilities | [docs/roadmap.md](docs/roadmap.md) |
+| Understand product scope and limits | [docs/product.md](docs/product.md) |
 | Change components, Core Message, or protocols | [docs/architecture.md](docs/architecture.md) |
 | Change auth, isolation, policy, or trust claims | [docs/security.md](docs/security.md) |
 | Verify a change or assess known gaps | [docs/quality.md](docs/quality.md) |
@@ -43,15 +41,17 @@ second manual.
 | Path | Responsibility |
 | --- | --- |
 | `crates/treer-proxy` | Public API, auth, policy, App identity, Core Message/DAG/outbox, workspace routing |
-| `crates/treer-agent-server` | Machine Controller, local API, Proxy link, networking |
+| `crates/treer-agent-server` | Machine Controller, CLI parser, local API, Proxy link, recovery, networking, signed update |
 | `crates/treer-agent-host` | Stable local process ownership and idempotent mutations |
 | `crates/treer-agent-runtime` | PTY lifecycle, output replay, working-directory boundary |
 | `crates/treer-cli` | Thin authenticated argv/stream client; command parsing lives in Agent Server |
 | `crates/treer-protocol` | Shared Proxy, Controller, browser, and CLI models |
 | `crates/treer-host-protocol` | Controller-to-Host socket contract |
+| `crates/treer-platform` | Local IPC, user paths, private files, environment filtering, Windows process ownership |
 | `apps` | Managed workspace Apps, channel presentation, configuration, state, and docs; no Agent adapters or AIS |
-| `launchers/agent` | Single optional Agent launcher: native Rust runtime (Codex/Claude adapters, AIS), shared browser UI, Node dispatcher/installer, profiles |
-| `web` | Standalone React control plane with runtime Proxy URL configuration |
+| `launchers/agent` | Optional Agent launcher: native Codex/Claude adapters, AIS, shared browser UI, installer, profiles |
+| `web` | Console (React) with runtime Proxy URL configuration |
+| `deploy`, `scripts` | Self-host images, updater sidecar, build/sign/publish/deploy tooling |
 
 ## Change discipline
 

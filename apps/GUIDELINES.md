@@ -4,9 +4,9 @@ This document defines the HTTP presentation contract for standalone Treer Apps.
 It keeps one predictable App root useful to both Agents and humans through
 HTTP representation negotiation.
 
-Agent Interface Servers (AIS), including Codex UI and Pi UI, are not standalone
-App indexes. They continue to expose the `ui_path` registered in their AIS
-manifest. Channel bridges without an HTTP presentation surface do not need to
+Agent Interface Servers (AIS), served by the Agent launcher in
+`launchers/agent`, are not standalone App indexes. They expose the `ui_path`
+registered with the Controller. Channel bridges without an HTTP presentation surface do not need to
 invent one.
 
 ## Route layout
@@ -138,7 +138,7 @@ Use this browser authentication order:
 2. Without an identity header, explicit service-audience Bearer authentication
    may be supported for programmatic clients.
 3. Without either header, fall back to an App's own OAuth session or a
-   **Sign in with Treer** button for direct/legacy access. Do not show that
+   **Sign in with Treer** button for direct access. Do not show that
    button while a supplied identity is being resolved or after successful
    automatic identification.
 
