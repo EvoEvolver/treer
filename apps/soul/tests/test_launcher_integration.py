@@ -1,9 +1,9 @@
 """Opt-in actual launcher CLI integration, all data in temporary directories.
 
-SOUL_TEST_LAUNCHER must point to an installed `treer-agent` command or the
+SOUL_TEST_LAUNCHER must point to an installed `treer-launch` command or the
 native launcher binary (both accept `session ...`), e.g. a fixture-harness build:
 `cargo build --locked --features fixture-harness --manifest-path launchers/agent/Cargo.toml`
-then launchers/agent/target/debug/treer-agent-launcher.
+then launchers/agent/target/debug/treer-launch.
 No inference, credentials, Agent creation, restart or real machine calls.
 """
 import os
@@ -24,7 +24,7 @@ class LauncherIntegration(ClientTest):
         # echoing double so no provider process is ever launched.
         import shlex
         cli=Path(os.environ['SOUL_TEST_LAUNCHER']).resolve()
-        script=self.root/'treer-agent'
+        script=self.root/'treer-launch'
         script.write_text('#!/bin/sh\nif [ "$1" = session ]; then exec '+shlex.quote(str(cli))+' "$@"; fi\nexec '
                           +shlex.quote(sys.executable)+' '+shlex.quote(str(self.root/'fake-start.py'))+' "$@"\n')
         (self.root/'fake-start.py').write_text((Path(__file__).parent/'fake_session.py').read_text())

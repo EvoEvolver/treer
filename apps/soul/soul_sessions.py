@@ -42,18 +42,20 @@ def copy_snapshot(source, destination, jsonl=False):
 
 
 def launcher_path():
-    """The installed `treer-agent` command (per-user shim), or an explicit override."""
+    """The installed `treer-launch` command (else its deprecated `treer-agent`
+    alias), or an explicit TREER_AGENT_LAUNCHER override."""
     override=os.environ.get('TREER_AGENT_LAUNCHER')
     candidates=[Path(override).expanduser()] if override else [
-        Path(found) for found in [shutil.which('treer-agent')] if found]+[Path.home()/'.local/bin/treer-agent']
+        Path(found) for name in ('treer-launch','treer-agent')
+        for found in [shutil.which(name),Path.home()/'.local/bin'/name] if found]
     for path in candidates:
         if path.is_file() and os.access(path,os.X_OK): return path.resolve()
     if override: raise RuntimeError('Configured launcher is not executable')
-    raise RuntimeError('treer-agent launcher not installed; install it or configure TREER_AGENT_LAUNCHER')
+    raise RuntimeError('treer-launch is not installed (it ships with Treer); install Treer or configure TREER_AGENT_LAUNCHER')
 
 
 def run_transfer(*args):
-    # `treer-agent session ...` runs the launcher's native offline transfer CLI.
+    # `treer-launch session ...` runs the launcher's native offline transfer CLI.
     with tempfile.TemporaryFile() as output:
         result=subprocess.run([str(launcher_path()),'session',*args],stdin=subprocess.DEVNULL,stdout=output,
                               stderr=subprocess.DEVNULL,timeout=60)
@@ -65,7 +67,7 @@ def run_transfer(*args):
 
 def require_transfer_harness(harness):
     if harness!='claude':
-        raise RuntimeError('treer-agent session transfer supports Claude only; '+str(harness)+' sessions cannot be saved or restored')
+        raise RuntimeError('treer-launch session transfer supports Claude only; '+str(harness)+' sessions cannot be saved or restored')
 
 
 def validate_bundle(bundle,harness=None,session=None):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Contract double for the installed `treer-agent` command.
+"""Contract double for the installed `treer-launch` command.
 
-`treer-agent session export|import ...` follows the native transfer CLI
+`treer-launch session export|import ...` follows the native transfer CLI
 (Claude only, explicit --config-dir); fixture supplies explicit source paths, no
 native discovery. Any other argv is a normal Agent start and is echoed as JSON.
 """

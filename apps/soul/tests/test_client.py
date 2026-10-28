@@ -46,8 +46,8 @@ elif args[:3]==['agent','admin','create']: print(json.dumps({'agent_id':'ag_new'
 else: sys.exit(2)
 ''')
         fake.chmod(0o755)
-        # Fake installed `treer-agent` command (start and `session` subcommand).
-        launcher=self.root/'treer-agent'
+        # Fake installed `treer-launch` command (start and `session` subcommand).
+        launcher=self.root/'treer-launch'
         launcher.write_text((APP/'tests/fake_session.py').read_text())
         launcher.chmod(0o755)
         self.session_log=self.root/'session.log'
@@ -120,12 +120,12 @@ else: sys.exit(2)
         self.assertTrue(record['contains_secrets'])
         self.assertEqual(list(self.tmp.iterdir()),[])
 
-    def test_save_and_restore_invoke_installed_treer_agent_session_cli(self):
+    def test_save_and_restore_invoke_installed_treer_launch_session_cli(self):
         self.claude()
         # No override: Soul finds the per-user installed shim, as on a bundle install.
-        installed=self.home/'.local/bin/treer-agent'
+        installed=self.home/'.local/bin/treer-launch'
         installed.parent.mkdir(parents=True)
-        installed.write_bytes((self.root/'treer-agent').read_bytes()); installed.chmod(0o755)
+        installed.write_bytes((self.root/'treer-launch').read_bytes()); installed.chmod(0o755)
         env={k:v for k,v in self.env.items() if k!='TREER_AGENT_LAUNCHER'}
         record=json.loads(self.call('save','--harness','claude','--visibility','workspace',env=env).stdout)
         result=json.loads(self.call('run',record['soul_id'],env=env).stdout)
@@ -139,16 +139,25 @@ else: sys.exit(2)
 
     def test_preflight_probe_detects_installed_session_cli(self):
         import client
-        installed=self.home/'.local/bin/treer-agent'
+        installed=self.home/'.local/bin/treer-launch'
         installed.parent.mkdir(parents=True)
-        installed.write_bytes((self.root/'treer-agent').read_bytes()); installed.chmod(0o755)
+        installed.write_bytes((self.root/'treer-launch').read_bytes()); installed.chmod(0o755)
         env={k:v for k,v in self.env.items() if k!='TREER_AGENT_LAUNCHER'}
         probe=json.loads(subprocess.check_output([sys.executable,'-c',client.PREFLIGHT,'claude'],env=env,timeout=30))
         self.assertEqual((probe['launcher'],probe['session_transfer']),(str(installed.resolve()),True))
-        old=self.root/'old-treer-agent'
+        old=self.root/'old-treer-launch'
         old.write_text('#!/bin/sh\nexit 1\n'); old.chmod(0o755)
         probe=json.loads(subprocess.check_output([sys.executable,'-c',client.PREFLIGHT,'claude'],env=dict(env,TREER_AGENT_LAUNCHER=str(old)),timeout=30))
         self.assertEqual((probe['launcher'],probe['session_transfer']),(str(old.resolve()),False))
+
+    def test_preflight_falls_back_to_deprecated_treer_agent_alias(self):
+        import client
+        legacy=self.home/'.local/bin/treer-agent'
+        legacy.parent.mkdir(parents=True)
+        legacy.write_bytes((self.root/'treer-launch').read_bytes()); legacy.chmod(0o755)
+        env={k:v for k,v in self.env.items() if k!='TREER_AGENT_LAUNCHER'}
+        probe=json.loads(subprocess.check_output([sys.executable,'-c',client.PREFLIGHT,'claude'],env=env,timeout=30))
+        self.assertEqual((probe['launcher'],probe['session_transfer']),(str(legacy.resolve()),True))
 
     def test_codex_is_not_saved_and_self_requires_authoritative_session(self):
         denied=self.call('save','--harness','codex',success=False)
