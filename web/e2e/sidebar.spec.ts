@@ -1,21 +1,36 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page, type WebSocketRoute } from '@playwright/test'
 import { mapSnapshot, mockTreeMapApi } from './fixtures/treemap'
 
 const build = { version: 'test', git_commit: 'test' }
+// literature is blocked on the online workstation; reviewer-b sits on the offline build-node.
+const agents = mapSnapshot.agents.map((agent) => agent.agent_id === 'researcher' ? { ...agent, status: 'blocked' } : agent)
+const snapshot = { ...mapSnapshot, agents, servers: mapSnapshot.servers.map((machine) => ({ ...machine, controller_build: build, host_build: build })) }
 
-// Daily triage from the sidebar: attention inbox, search, machines; and the phone's way in.
+async function fixture(page: Page) {
+  await mockTreeMapApi(page)
+  let events: WebSocketRoute | undefined
+  await page.routeWebSocket(/\/events$/, (socket) => { events = socket })
+  await page.route('**/snapshot', (route) => route.fulfill({ json: snapshot }))
+  return { send: (data: unknown) => events!.send(JSON.stringify({ event: 'workspace.snapshot', data })) }
+}
+
+// Daily triage from the sidebar: inbox, search, machines.
 for (const theme of ['light', 'dark']) test(`sidebar inbox, search and machines ${theme}`, async ({ page }, info) => {
   await page.setViewportSize({ width: 1360, height: 900 })
   await page.addInitScript((value) => localStorage.setItem('treer-theme', value), theme)
-  await mockTreeMapApi(page)
-  await page.route('**/snapshot', (route) => route.fulfill({ json: { ...mapSnapshot, servers: mapSnapshot.servers.map((machine) => ({ ...machine, controller_build: build, host_build: build })) } }))
+  const backend = await fixture(page)
   await page.goto('/')
   const sidebar = page.locator('#tree-sidebar')
   const inbox = sidebar.getByRole('list', { name: 'Needs attention' })
-  // reviewer-b runs on the offline build-node, so it needs attention.
+  // Per-Agent problems are listed; Agents on an offline machine collapse into one machine row.
   await expect(inbox.getByRole('link')).toHaveCount(1)
-  await expect(inbox.getByRole('link', { name: 'Open /Product/reviewer, offline', exact: true })).toBeVisible()
+  await expect(inbox.getByRole('link', { name: 'Open /Research/literature, blocked', exact: true })).toBeVisible()
+  await expect(inbox.getByRole('button', { name: /^build-node offline/ })).toContainText('1 Agents down')
   await page.screenshot({ path: info.outputPath(`sidebar-${theme}.png`) })
+
+  // An Agent that stops working while it is not open shows up as finished, until it is opened.
+  backend.send({ ...snapshot, revision: 2, agents: agents.map((agent) => agent.agent_id === 'designer' ? { ...agent, status: 'idle' } : agent) })
+  await expect(inbox.getByRole('link', { name: 'Open /Product/design, finished', exact: true })).toBeVisible()
 
   // Ctrl/Cmd+K focuses search; matching rows and their folders stay, everything else hides.
   await page.keyboard.press('ControlOrMeta+k')
@@ -30,25 +45,27 @@ for (const theme of ['light', 'dark']) test(`sidebar inbox, search and machines 
   await expect(sidebar.getByText('Nothing matches “zzz-none”')).toBeVisible()
   await search.press('Escape')
   await expect(search).toHaveValue('')
-  await expect(tree.getByRole('treeitem', { name: 'Research', exact: true })).toBeVisible()
 
-  // Opening from the inbox selects the workload like the Tree does.
-  await inbox.getByRole('link').first().click()
-  await expect(page.getByRole('tab', { name: 'Tab /Product/reviewer', exact: true })).toHaveAttribute('aria-selected', 'true')
+  // Opening from the inbox selects the workload like the Tree does, and clears "finished".
+  await inbox.getByRole('link', { name: 'Open /Product/design, finished', exact: true }).click()
+  await expect(page.getByRole('tab', { name: 'Tab /Product/design', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(inbox.getByRole('link', { name: /design/ })).toHaveCount(0)
 
-  // Machines are one click away, with their health.
+  // The offline machine row and the Machines section both open the machine page.
+  await inbox.getByRole('button', { name: /^build-node offline/ }).click()
+  await expect(page.getByRole('heading', { name: 'build-node', exact: true })).toBeVisible()
   const machines = sidebar.getByRole('list', { name: 'Machines' })
   await expect(machines.getByRole('button', { name: /^build-node 1 workloads offline$/ })).toBeVisible()
   await machines.getByRole('button', { name: /^workstation/ }).click()
-  await expect(page.getByRole('heading', { name: 'workstation', exact: true }).first()).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'workstation', exact: true })).toBeVisible()
 })
 
-test('the phone shows the attention count on its way into the sidebar', async ({ page }) => {
+test('the phone shows the inbox count on its way into the sidebar', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
-  await mockTreeMapApi(page)
+  await fixture(page)
   await page.goto('/')
   const browse = page.getByRole('button', { name: 'Browse tree', exact: true })
-  await expect(browse.locator('[data-attention-badge]')).toHaveText('1')
+  await expect(browse.locator('[data-attention-badge]')).toHaveText('2')
   await browse.click()
-  await expect(page.locator('#tree-sidebar').getByRole('list', { name: 'Needs attention' }).getByRole('link')).toHaveCount(1)
+  await expect(page.locator('#tree-sidebar').getByRole('list', { name: 'Needs attention' }).getByRole('listitem')).toHaveCount(2)
 })

@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from "react"
-import { ChevronRight, Monitor, Plus, Search, X } from "lucide-react"
+import { ChevronRight, CircleCheck, Monitor, Plus, Search, X } from "lucide-react"
 import { machineName, type Agent, type AppDeployment, type Machine, type WorkloadTreeState } from "@/lib/api"
 import { attentionGroups } from "@/lib/attention"
 import { agentPath, workloadKind } from "@/lib/workload-path"
 import { workspaceWorkloads } from "@/lib/workspace-workloads"
 import { workloadLinkProps } from "@/lib/workload-link"
 import { WorkloadIcon } from "@/components/workload-icon"
-import { TreeRow, TreeStatus, treeStatus } from "@/components/tree-row"
+import { TreeRow, TreeStatus, treeStatus, type TreeStatusKey } from "@/components/tree-row"
 import { cn } from "@/lib/utils"
-import { t } from "@/i18n"
+import { statusLabel, t } from "@/i18n"
 
 // A collapsible sidebar section with a sticky heading; open state is remembered per section.
 export function SidebarSection({ id, title, count, tone, action, children, defaultOpen = true }: {
@@ -66,33 +66,83 @@ export const matches = (query: string, ...values: (string | undefined)[]) => {
   return !q || values.some((value) => value?.toLocaleLowerCase().includes(q))
 }
 
-// The triage inbox: every Agent that is blocked, failed or on an offline machine, flat, with its path.
-export function AttentionSection({ agents, apps, machines, tree, query, selectedId, workloadHref, onOpen }: {
-  agents: Agent[]; apps: AppDeployment[]; machines: Machine[]; tree: WorkloadTreeState; query: string; selectedId: string | null
-  workloadHref: (id: string) => string; onOpen: (id: string) => void
-}) {
+export type InboxEntry =
+  | { kind: "agent"; agent: Agent; path: string; status: TreeStatusKey }
+  | { kind: "machine"; machine: Machine; agents: Agent[] }
+  | { kind: "finished"; agent: Agent; path: string }
+
+// The triage inbox, widest impact first: one row per offline machine (its Agents are all down
+// for the same reason), then per-Agent problems (blocked, failed), then Agents that finished
+// working while you were elsewhere (observed by this browser; the API has no read state).
+export function buildInbox({ agents, apps, machines, tree, finished }: { agents: Agent[]; apps: AppDeployment[]; machines: Machine[]; tree: WorkloadTreeState; finished: ReadonlySet<string> }): InboxEntry[] {
   const online = new Set(machines.filter((machine) => machine.status === "online").map((machine) => machine.server_id))
-  const items = attentionGroups(workspaceWorkloads(agents, apps), machines).attention
-    .map((agent) => ({ agent, path: agentPath(agent, tree) }))
-    .filter(({ agent, path }) => matches(query, agent.name, path))
+  const workloads = workspaceWorkloads(agents, apps)
+  const problems: InboxEntry[] = [], down = new Map<string, Agent[]>()
+  for (const agent of attentionGroups(workloads, machines).attention) {
+    if (!online.has(agent.server_id)) { down.set(agent.server_id, [...(down.get(agent.server_id) ?? []), agent]); continue }
+    problems.push({ kind: "agent", agent, path: agentPath(agent, tree), status: treeStatus(agent.status, true) ?? "blocked" })
+  }
+  const offline: InboxEntry[] = [...down].map(([id, list]) => ({ kind: "machine" as const, machine: machines.find((machine) => machine.server_id === id) ?? { server_id: id } as Machine, agents: list }))
+  const done: InboxEntry[] = workloads.filter((agent) => finished.has(agent.agent_id) && agent.kind !== "app" && online.has(agent.server_id) && !["blocked", "failed"].includes(agent.status))
+    .map((agent) => ({ kind: "finished" as const, agent, path: agentPath(agent, tree) }))
+  return [...offline, ...problems, ...done]
+}
+
+export function AttentionSection({ inbox, machines, query, selectedId, workloadHref, onOpen, onOpenMachine }: {
+  inbox: InboxEntry[]; machines: Machine[]; query: string; selectedId: string | null
+  workloadHref: (id: string) => string; onOpen: (id: string) => void; onOpenMachine: (id: string) => void
+}) {
+  const items = inbox.filter((entry) => entry.kind === "machine" ? matches(query, machineName(entry.machine)) : matches(query, entry.agent.name, entry.path))
   const [all, setAll] = useState(false)
   if (!items.length) return null
   // A short inbox keeps the Tree in view; searching or "show all" lists everything.
   const limit = all || query.trim() ? items.length : ATTENTION_PREVIEW
   return <SidebarSection id="attention" title={t("sidebar.attention")} count={items.length} tone="attention">
-    <ul aria-label={t("sidebar.attention")}>{items.slice(0, limit).map(({ agent, path }) => {
-      const status = treeStatus(agent.status, online.has(agent.server_id))
+    <ul aria-label={t("sidebar.attention")}>{items.slice(0, limit).map((entry) => {
+      if (entry.kind === "machine") {
+        const name = machineName(entry.machine)
+        return <li key={`machine:${entry.machine.server_id}`}>
+          <TreeRow depth={0} treeKey={`attention-machine:${entry.machine.server_id}`} label={t("sidebar.machine_offline", { machine: name })} detail={t("sidebar.machine_agents_down", { count: entry.agents.length })}
+            title={entry.agents.map((agent) => agent.name).join(", ")} icon={<Monitor />} trailing={<TreeStatus status="offline" marker={false} />}
+            primary={{ kind: "button", onClick: () => onOpenMachine(entry.machine.server_id) }} />
+        </li>
+      }
+      const { agent, path } = entry
       const folder = path.slice(0, path.lastIndexOf("/")) || "/"
-      return <li key={agent.agent_id}>
+      const label = entry.kind === "finished" ? t("sidebar.finished") : statusLabel(entry.status)
+      return <li key={`${entry.kind}:${agent.agent_id}`}>
         <TreeRow depth={0} treeKey={`attention:${agent.agent_id}`} label={agent.name} detail={folder === "/" ? undefined : folder} selected={selectedId === agent.agent_id}
-          title={[path, machineName(machines.find((machine) => machine.server_id === agent.server_id), agent.server_id)].join(" · ")}
+          title={[path, machineName(machines.find((machine) => machine.server_id === agent.server_id), agent.server_id), label].join(" · ")}
           icon={<WorkloadIcon kind={workloadKind(agent)} />}
-          trailing={status && <TreeStatus status={status} marker={false} />}
-          primary={{ kind: "link", props: { ...workloadLinkProps(workloadHref(agent.agent_id), () => onOpen(agent.agent_id)), "aria-label": t("sidebar.open_attention", { path, status: status ? t(`status.${status}`) : "" }) } }} />
+          trailing={entry.kind === "finished" ? <span role="img" aria-label={label} title={label} className="grid place-items-center text-status-online"><CircleCheck aria-hidden="true" className="size-3.5" /></span> : <TreeStatus status={entry.status} marker={false} />}
+          primary={{ kind: "link", props: { ...workloadLinkProps(workloadHref(agent.agent_id), () => onOpen(agent.agent_id)), "aria-label": t("sidebar.open_attention", { path, status: label }) } }} />
       </li>
     })}</ul>
     {items.length > limit && <button type="button" onClick={() => setAll(true)} className="flex h-7 w-full items-center rounded-md pl-[26px] text-left text-xs text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring max-md:h-11">{t("sidebar.show_more", { count: items.length - limit })}</button>}
   </SidebarSection>
+}
+
+// "Finished" = this browser saw the Agent go from working to idle or exited while it was not open.
+// Kept per workspace in localStorage and cleared when the Agent is opened.
+export function useFinishedAgents(workspaceId: string | null, agents: Agent[], openId: string | null) {
+  const key = workspaceId ? `treer:finished:v1:${workspaceId}` : null
+  const read = () => { try { return new Set<string>(key ? JSON.parse(localStorage.getItem(key) ?? "[]") : []) } catch { return new Set<string>() } }
+  const [finished, setFinished] = useState<Set<string>>(read)
+  const previous = useRef<Map<string, string> | null>(null)
+  useEffect(() => { setFinished(read()); previous.current = null }, [key]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const before = previous.current
+    previous.current = new Map(agents.map((agent) => [agent.agent_id, agent.status]))
+    const next = new Set([...finished].filter((id) => id !== openId && agents.some((agent) => agent.agent_id === id && !["working", "starting"].includes(agent.status))))
+    if (before) for (const agent of agents) {
+      const was = before.get(agent.agent_id)
+      if ((was === "working" || was === "starting") && (agent.status === "idle" || agent.status === "exited") && agent.agent_id !== openId) next.add(agent.agent_id)
+    }
+    if (next.size === finished.size && [...next].every((id) => finished.has(id))) return
+    setFinished(next)
+    try { if (key) localStorage.setItem(key, JSON.stringify([...next])) } catch { /* optional */ }
+  }, [agents, openId]) // eslint-disable-line react-hooks/exhaustive-deps
+  return finished
 }
 const ATTENTION_PREVIEW = 5
 

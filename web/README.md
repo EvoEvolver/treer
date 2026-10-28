@@ -149,12 +149,18 @@ section headings (`sidebar-sections.tsx`).
 - **Search** (Cmd/Ctrl+K outside terminals and editors) filters the Tree by
   name or path, showing matches with their folders expanded, and also filters
   the attention list and machines. Escape clears; ArrowDown enters the rows.
-- **Needs attention** lists blocked and failed Agents and Agents on offline
-  machines (`lib/attention.ts`), flat with their folder, first five then
-  "Show N more". On phones the **Browse tree** button carries the count.
+- **Needs attention** is the triage inbox: blocked and failed Agents (flat,
+  with their folder), then one row per offline machine ("build-node offline ·
+  N Agents down", opens the machine page), then Agents that **finished**: this
+  browser saw them go from working to idle/exited while they were not open
+  (kept per workspace in localStorage, cleared on open; the API has no
+  per-user read state, so this only covers what the open Console observed).
+  First five rows, then "Show N more". On phones the **Browse tree** button
+  carries the row count.
 - **Machines** lists each machine with its workload count and online/offline
   state; a row opens the machine page, **+** opens Add machine. With no
-  machines the Tree shows a guide whose button opens Add machine directly.
+  machines the Tree shows a guide; it, the Overview card and "Add agent" all
+  open the same Add machine dialog.
 - Attention and Machines collapse from their heading (remembered per browser).
 
 ### Workspace Tree
@@ -195,13 +201,20 @@ addressed by stable IDs; display names are unique only within a folder.
 
 ### Overview, pins and map
 
-Workspaces open at **Overview** (no separate page header; the tab names it) without attaching a PTY. It keeps the Tree
-hierarchy and overlays status badges and subtree counts; filter chips
-(attention, working, idle) keep matches and their ancestors. Attention means
-blocked/failed Agents or live Agents on offline machines (`lib/attention.ts`).
+Workspaces open at **Overview** without attaching a PTY. It is a status
+board, not a second Tree: filter chips (attention, working, idle) with
+counts, then flat sections **Needs attention**, **Working**, **Idle**,
+**Stopped** and **Apps** (each row shows folder, machine and status text; long
+sections show a few rows and "Show N more"), then machine health cards that
+open the machine page. Attention means blocked/failed Agents or live Agents on
+offline machines (`lib/attention.ts`). Without an organization or workspace it
+shows one primary action (Create organization / Create workspace). Pages other
+than the terminal have no separate header bar on desktop; phones keep a bar
+with Back.
 
 On Proxies advertising `workspace.pins.v1`, **Pin to Overview** manages a
-shared, Core-stored list of up to 50 pins shown above the filters. Writes are
+shared, Core-stored list of up to 50 pins shown above the filters (pinned
+folders still expand in place there). Writes are
 not optimistic; older Proxies hide the feature.
 
 **Workspace map** opens a read-only squarified treemap
@@ -211,9 +224,12 @@ blocks too small to target.
 
 ### Tabs, deep links and focus mode
 
+Tabs are the working set of open pages: switching keeps a page's terminal
+connection or interface draft alive, which search and the inbox cannot.
 Opening a workload opens or selects its tab. Overview is pinned. Hidden tabs
-stay mounted (terminal connections, iframe drafts) up to 6 live pages on
-desktop / 4 on phones; older ones unmount and reconnect when reselected.
+stay mounted up to 6 live pages on desktop / 4 on phones; older ones unmount
+and reconnect when reselected (a reconnect icon marks them; the all-tabs menu
+explains this in one line).
 Closing a tab never stops the workload. Desktop shortcuts: Left/Right,
 Home/End, Delete, Ctrl/Cmd+1–9, Ctrl/Cmd+W (only while focus is in Console
 chrome).
@@ -239,7 +255,9 @@ link is used.
 Selecting an Agent opens its Agent Interface UI when it has one, otherwise its
 terminal; **Logs** always reaches the terminal.
 
-**Terminal** (`terminal-pane.tsx`): xterm.js over the Proxy PTY WebSocket, with
+**Terminal** (`terminal-pane.tsx`): full-bleed under one compact header
+(`workload-surface.tsx`: path, machine, Agent status, connection state only
+when not live, and Upload / Open in new tab / Reconnect). xterm.js over the Proxy PTY WebSocket, with
 reconnect from a stream cursor, fit-on-resize (never resizing the PTY to a
 hidden zero-size container) and mobile key rows (`mobile-terminal-keys.tsx`).
 Historical output replay swallows terminal queries (DA, CPR/DSR, DECRQM, OSC
