@@ -334,12 +334,14 @@ impl AppState {
     }
 
     /// Capabilities the browser read models expose per machine. The Web only
-    /// decides between upload routes and whether the typed update entry exists;
+    /// decides between upload routes, whether the typed update entry exists and
+    /// whether the hardware metrics panel can load;
     /// unrelated Controller capabilities stay in the connection table.
     pub(crate) const READ_MODEL_CAPABILITIES: &'static [&'static str] = &[
         treer_protocol::controller_update::CAPABILITY,
         treer_protocol::CAPABILITY_MACHINE_UPLOAD,
         treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3,
+        treer_protocol::CAPABILITY_MACHINE_METRICS,
     ];
 
     fn read_model_capabilities<'a>(
