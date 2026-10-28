@@ -27,7 +27,7 @@ type Primary =
   | { kind: "link"; props: { href: string } & HTMLAttributes<HTMLAnchorElement> }
   | { kind: "button"; onClick: () => void; toggles?: boolean }
 
-export function TreeRow({ depth, expanded, toggle, primary, treeKey, icon, label, title, muted, trailing, actions, selected, highlight, rowProps }: {
+export function TreeRow({ depth, expanded, toggle, primary, treeKey, icon, label, detail, title, muted, trailing, actions, selected, highlight, rowProps }: {
   depth: number
   /** undefined for leaves; a folder or expandable node passes its state. */
   expanded?: boolean
@@ -37,6 +37,8 @@ export function TreeRow({ depth, expanded, toggle, primary, treeKey, icon, label
   treeKey: string
   icon: ReactNode
   label: string
+  /** Secondary muted text after the name, e.g. the containing folder. */
+  detail?: string
   title?: string
   muted?: boolean
   trailing?: ReactNode
@@ -49,7 +51,7 @@ export function TreeRow({ depth, expanded, toggle, primary, treeKey, icon, label
   const content = <>
     <span aria-hidden={toggle ? "true" : undefined} className="grid w-4 shrink-0 place-items-center">{expanded !== undefined && !toggle && chevron}</span>
     <span className={cn("grid size-4 shrink-0 place-items-center [&_svg]:size-4", selected ? "text-primary" : "text-muted-foreground")}>{icon}</span>
-    <span className={cn("min-w-0 flex-1 truncate", muted && !selected && "text-muted-foreground")}>{label}</span>
+    <span className={cn("min-w-0 flex-1 truncate", muted && !selected && "text-muted-foreground")}>{label}{detail && <span className="ml-1.5 text-[11px] font-normal text-muted-foreground">{detail}</span>}</span>
     {trailing && <span className={cn("flex shrink-0 items-center gap-1", actions && "md:[@media(pointer:fine)]:group-hover/row:opacity-0 md:[@media(pointer:fine)]:group-focus-within/row:opacity-0 md:[@media(pointer:fine)]:group-has-[[data-state=open]]/row:opacity-0")}>{trailing}</span>}
   </>
   const className = cn(
@@ -88,9 +90,9 @@ export function treeStatus(status: string, online: boolean): TreeStatusKey | nul
 export const isAttention = (key: TreeStatusKey | null) => key === "blocked" || key === "failed" || key === "offline"
 export const isInactive = (key: TreeStatusKey | null) => key === "exited" || key === "stopped"
 
-export function TreeStatus({ status }: { status: TreeStatusKey }) {
+export function TreeStatus({ status, marker = true }: { status: TreeStatusKey; marker?: boolean }) {
   const label = statusLabel(status)
-  const common = { role: "img", "aria-label": label, title: label, "data-tree-status": status }
+  const common = { role: "img", "aria-label": label, title: label, "data-tree-status": marker ? status : undefined }
   if (status === "working" || status === "starting") return <span {...common} className="mx-1 size-2 shrink-0 rounded-full bg-status-working" />
   if (isInactive(status)) return <span {...common} className="mx-1 size-2 shrink-0 rounded-full border-[1.5px] border-muted-foreground" />
   const Icon = status === "failed" ? CircleX : status === "offline" ? WifiOff : CircleAlert

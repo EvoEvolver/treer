@@ -139,6 +139,24 @@ and joins only after explicit confirmation (`/api/invitations/accept`). After
 OAuth, a pending invitation is read from `/api/invitations/pending`. Invitation
 tokens stay in memory and JSON bodies, never URLs or storage.
 
+### Sidebar
+
+The sidebar is the navigator, ordered by how often each part is used:
+organization and workspace switchers, **Overview**, **Search**, **Needs
+attention**, the **Tree**, then **Machines**, in one scroll region with sticky
+section headings (`sidebar-sections.tsx`).
+
+- **Search** (Cmd/Ctrl+K outside terminals and editors) filters the Tree by
+  name or path, showing matches with their folders expanded, and also filters
+  the attention list and machines. Escape clears; ArrowDown enters the rows.
+- **Needs attention** lists blocked and failed Agents and Agents on offline
+  machines (`lib/attention.ts`), flat with their folder, first five then
+  "Show N more". On phones the **Browse tree** button carries the count.
+- **Machines** lists each machine with its workload count and online/offline
+  state; a row opens the machine page, **+** opens Add machine. With no
+  machines the Tree shows a guide whose button opens Add machine directly.
+- Attention and Machines collapse from their heading (remembered per browser).
+
 ### Workspace Tree
 
 The sidebar Tree shows folders, Agents and Apps in persisted sibling order,
@@ -177,7 +195,7 @@ addressed by stable IDs; display names are unique only within a folder.
 
 ### Overview, pins and map
 
-Workspaces open at **Overview** without attaching a PTY. It keeps the Tree
+Workspaces open at **Overview** (no separate page header; the tab names it) without attaching a PTY. It keeps the Tree
 hierarchy and overlays status badges and subtree counts; filter chips
 (attention, working, idle) keep matches and their ancestors. Attention means
 blocked/failed Agents or live Agents on offline machines (`lib/attention.ts`).

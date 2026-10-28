@@ -396,8 +396,9 @@ for (const mobile of [false, true]) {
 
 // Helpers — machine entries in workspace settings are <button>s whose accessible
 // name includes the machine name, root path and build label.
-const workstationRow = (page: Page) => page.getByRole("button", { name: /^workstation(\s|$)/ })
-const cloudboxRow = (page: Page) => page.getByRole("button", { name: /^cloudbox(\s|$)/ })
+// Machine rows in workspace settings; the sidebar's Machines section has its own rows.
+const workstationRow = (page: Page) => page.locator("main > section").getByRole("button", { name: /^workstation(\s|$)/ })
+const cloudboxRow = (page: Page) => page.locator("main > section").getByRole("button", { name: /^cloudbox(\s|$)/ })
 const agentsTab = (page: Page) => page.locator("aside").getByText("Tree", { exact: true })
 const appsTab = agentsTab
 
@@ -811,9 +812,8 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) test(
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: info.outputPath(`machine-guide-${theme}-${mobile ? '390' : '1360'}.png`) })
   await expect.poll(async () => { await setup.focus(); return setup.evaluate((element) => element === document.activeElement) }).toBe(true)
+  // The sidebar guide goes straight to the enrollment commands, without a detour through settings.
   await setup.press('Enter')
-  await expect(page.getByText('Add a machine to create agents', { exact: true })).toBeVisible()
-  await page.getByRole('tabpanel', { name: 'Settings', exact: true }).getByRole('button', { name: 'Set up a machine', exact: true }).click()
   await expect(page.getByRole('dialog').getByRole('heading', { name: 'Add machine', exact: true })).toBeVisible()
 })
 
