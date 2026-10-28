@@ -58,6 +58,7 @@ $failures = @()
 $staging = Join-Path $env:SystemDrive ('treer-standard-check-' + $userName)
 $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $server = $null
+$step = 0
 
 # Runs $Command (PowerShell source) as the standard user. The per-user folders
 # are taken from the user's own token, never inherited from the runner.
@@ -72,19 +73,25 @@ $env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp'
 $env:TMP = $env:TEMP
 [IO.Directory]::CreateDirectory($env:TEMP) | Out-Null
 '@
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($prelude + "`n" + $Command + "`nexit `$LASTEXITCODE"))
+    # The step runs from a script file in the staging directory (read+execute
+    # for the user): -Credential uses CreateProcessWithLogonW, whose command
+    # line is limited to 1024 characters, so an -EncodedCommand of the prelude
+    # fails with "The parameter is incorrect".
+    $script:step += 1
+    $stepScript = Join-Path $staging ("step-$($script:step).ps1")
+    [IO.File]::WriteAllText($stepScript, $prelude + "`n" + $Command + "`nexit `$LASTEXITCODE`n", [Text.UTF8Encoding]::new($true))
     $stdout = [IO.Path]::GetTempFileName()
     $stderr = [IO.Path]::GetTempFileName()
     try {
         # Windows PowerShell 5.1 rejects -NoNewWindow together with -Credential.
         $process = Start-Process -FilePath $powershell -Credential $credential -LoadUserProfile `
-            -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
+            -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $stepScript) `
             -WorkingDirectory $staging -WindowStyle Hidden -Wait -PassThru `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr
         $output = (Get-Content -Raw $stdout -ErrorAction SilentlyContinue) + (Get-Content -Raw $stderr -ErrorAction SilentlyContinue)
         $exit = $process.ExitCode
     } finally {
-        Remove-Item -Force -ErrorAction SilentlyContinue $stdout, $stderr
+        Remove-Item -Force -ErrorAction SilentlyContinue $stdout, $stderr, $stepScript
     }
     Write-Host "::group::[$Label] exit=$exit"
     Write-Host $output
