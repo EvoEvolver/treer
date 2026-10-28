@@ -36,7 +36,10 @@ pub struct FileError {
 }
 impl FileError {
     fn new(status: u16, message: &str) -> Self {
-        Self { status: StatusCode::from_u16(status).unwrap(), message: message.into() }
+        Self {
+            status: StatusCode::from_u16(status).unwrap(),
+            message: message.into(),
+        }
     }
 }
 fn io_error(error: &io::Error) -> FileError {
@@ -54,18 +57,27 @@ struct Resolved {
     path: String,
 }
 
-async fn filesystem_slot(slots: Arc<tokio::sync::Semaphore>) -> Result<tokio::sync::OwnedSemaphorePermit, FileError> {
-    tokio::time::timeout(Duration::from_secs(1), slots.acquire_owned()).await
-        .ok().and_then(Result::ok)
+async fn filesystem_slot(
+    slots: Arc<tokio::sync::Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, FileError> {
+    tokio::time::timeout(Duration::from_secs(1), slots.acquire_owned())
+        .await
+        .ok()
+        .and_then(Result::ok)
         .ok_or_else(|| FileError::new(429, "Workspace filesystem workers are busy; try again"))
 }
 
 #[cfg(feature = "fixture-harness")]
 fn fixture_worker_gate() {
-    let Ok(path) = std::env::var("RUST_SPIKE_FILES_WORKER_GATE") else { return; };
+    let Ok(path) = std::env::var("RUST_SPIKE_FILES_WORKER_GATE") else {
+        return;
+    };
     let directory = PathBuf::from(path);
-    if !directory.is_dir() { return; }
-    let _entry = crate::fs_util::create_new(&directory.join(format!("started-{}", uuid::Uuid::new_v4())));
+    if !directory.is_dir() {
+        return;
+    }
+    let _entry =
+        crate::fs_util::create_new(&directory.join(format!("started-{}", uuid::Uuid::new_v4())));
     let deadline = Instant::now() + Duration::from_secs(5);
     while directory.is_dir() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
@@ -73,7 +85,11 @@ fn fixture_worker_gate() {
 }
 
 /// Resolve `rel` inside `root`: no `..`, no NUL, no absolute path or symlink leaving the canonical root.
-async fn workspace_path(root: &Path, rel: &str, slots: Arc<tokio::sync::Semaphore>) -> Result<Resolved, FileError> {
+async fn workspace_path(
+    root: &Path,
+    rel: &str,
+    slots: Arc<tokio::sync::Semaphore>,
+) -> Result<Resolved, FileError> {
     let slot = filesystem_slot(slots).await?;
     let (root, rel) = (root.to_path_buf(), rel.to_owned());
     tokio::task::spawn_blocking(move || {
@@ -81,8 +97,9 @@ async fn workspace_path(root: &Path, rel: &str, slots: Arc<tokio::sync::Semaphor
         #[cfg(feature = "fixture-harness")]
         fixture_worker_gate();
         workspace_path_blocking(&root, &rel)
-    }).await
-        .map_err(|_| FileError::new(500, "Unable to resolve workspace path"))?
+    })
+    .await
+    .map_err(|_| FileError::new(500, "Unable to resolve workspace path"))?
 }
 fn workspace_path_blocking(root: &Path, rel: &str) -> Result<Resolved, FileError> {
     if rel.contains('\0') || rel.split(['/', '\\']).any(|segment| segment == "..") {
@@ -92,7 +109,11 @@ fn workspace_path_blocking(root: &Path, rel: &str) -> Result<Resolved, FileError
     // a replacement root symlink as a new workspace on a later request.
     let canonical_root = root.to_path_buf();
     let requested = Path::new(if rel.is_empty() { "." } else { rel });
-    let mut candidate = if requested.is_absolute() { PathBuf::new() } else { canonical_root.clone() };
+    let mut candidate = if requested.is_absolute() {
+        PathBuf::new()
+    } else {
+        canonical_root.clone()
+    };
     for component in requested.components() {
         match component {
             std::path::Component::CurDir => {}
@@ -104,7 +125,10 @@ fn workspace_path_blocking(root: &Path, rel: &str) -> Result<Resolved, FileError
     }
     let canonical = std::fs::canonicalize(&candidate).map_err(|e| io_error(&e))?;
     if !canonical.starts_with(&canonical_root) {
-        return Err(FileError::new(403, "Symlink points outside the working directory"));
+        return Err(FileError::new(
+            403,
+            "Symlink points outside the working directory",
+        ));
     }
     let path = candidate
         .strip_prefix(&canonical_root)
@@ -116,18 +140,27 @@ fn workspace_path_blocking(root: &Path, rel: &str) -> Result<Resolved, FileError
     Ok(Resolved { canonical, path })
 }
 
-async fn list_files(root: &Path, rel: &str, slot: Option<tokio::sync::OwnedSemaphorePermit>) -> Result<Value, FileError> {
+async fn list_files(
+    root: &Path,
+    rel: &str,
+    slot: Option<tokio::sync::OwnedSemaphorePermit>,
+) -> Result<Value, FileError> {
     let (root, rel) = (root.to_path_buf(), rel.to_owned());
     tokio::task::spawn_blocking(move || {
         let _slot = slot; // Cancellation must not release the slot while the worker still runs.
         #[cfg(feature = "fixture-harness")]
         fixture_worker_gate();
         list_files_blocking(&root, &rel)
-    }).await.map_err(|_| FileError::new(500, "Unable to list workspace directory"))?
+    })
+    .await
+    .map_err(|_| FileError::new(500, "Unable to list workspace directory"))?
 }
 fn list_files_blocking(root: &Path, rel: &str) -> Result<Value, FileError> {
     let directory = workspace_path_blocking(root, rel)?;
-    if !std::fs::metadata(&directory.canonical).map_err(|e| io_error(&e))?.is_dir() {
+    if !std::fs::metadata(&directory.canonical)
+        .map_err(|e| io_error(&e))?
+        .is_dir()
+    {
         return Err(FileError::new(400, "Not a directory"));
     }
     let reader = std::fs::read_dir(&directory.canonical).map_err(|e| io_error(&e))?;
@@ -138,13 +171,25 @@ fn list_files_blocking(root: &Path, rel: &str) -> Result<Value, FileError> {
         let name = entry.file_name().to_string_lossy().into_owned();
         scanned += 1;
         if scanned > TREE_ENTRY_LIMIT {
-            return Err(FileError::new(413, "Directory exceeds the 4096 entry listing limit"));
+            return Err(FileError::new(
+                413,
+                "Directory exceeds the 4096 entry listing limit",
+            ));
         }
-        let child_path = if directory.path.is_empty() { name.clone() } else { format!("{}/{}", directory.path, name) };
+        let child_path = if directory.path.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", directory.path, name)
+        };
         // Outside/broken symlinks are not navigable; other errors stay visible.
         let child = match workspace_path_blocking(root, &child_path) {
             Ok(child) => child,
-            Err(error) if error.status == StatusCode::FORBIDDEN || error.status == StatusCode::NOT_FOUND => continue,
+            Err(error)
+                if error.status == StatusCode::FORBIDDEN
+                    || error.status == StatusCode::NOT_FOUND =>
+            {
+                continue
+            }
             Err(error) => return Err(error),
         };
         let metadata = match std::fs::metadata(&child.canonical) {
@@ -164,14 +209,22 @@ fn list_files_blocking(root: &Path, rel: &str) -> Result<Value, FileError> {
         ));
     }
     // kind first ("directory" < "file"), then the name case-insensitively like the Node localeCompare.
-    nodes.sort_by(|a, b| (!a.0).cmp(&!b.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())).then_with(|| a.1.cmp(&b.1)));
+    nodes.sort_by(|a, b| {
+        (!a.0)
+            .cmp(&!b.0)
+            .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+            .then_with(|| a.1.cmp(&b.1))
+    });
     Ok(json!({"path":directory.path,"entries":nodes.into_iter().map(|n| n.2).collect::<Vec<_>>()}))
 }
 
 /// Open an admitted (canonical, inside the root) regular file. The type is
 /// checked before opening so a FIFO or device is never opened.
 async fn open_regular(canonical: &Path) -> Result<(tokio::fs::File, std::fs::Metadata), FileError> {
-    if !std::fs::metadata(canonical).map_err(|e| io_error(&e))?.is_file() {
+    if !std::fs::metadata(canonical)
+        .map_err(|e| io_error(&e))?
+        .is_file()
+    {
         return Err(FileError::new(400, "Not a regular file"));
     }
     let file = crate::fs_util::open_read(canonical).map_err(|e| io_error(&e))?;
@@ -182,15 +235,28 @@ async fn open_regular(canonical: &Path) -> Result<(tokio::fs::File, std::fs::Met
     Ok((tokio::fs::File::from_std(file), metadata))
 }
 
-async fn preview_file(root: &Path, rel: &str, slots: Arc<tokio::sync::Semaphore>) -> Result<Value, FileError> {
+async fn preview_file(
+    root: &Path,
+    rel: &str,
+    slots: Arc<tokio::sync::Semaphore>,
+) -> Result<Value, FileError> {
     let file = workspace_path(root, rel, slots).await?;
     let (mut handle, metadata) = open_regular(&file.canonical).await?;
     let mut bytes = Vec::with_capacity(PREVIEW_LIMIT + 1);
-    (&mut handle).take(PREVIEW_LIMIT as u64 + 1).read_to_end(&mut bytes).await.map_err(|e| io_error(&e))?;
+    (&mut handle)
+        .take(PREVIEW_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| io_error(&e))?;
     let truncated = bytes.len() > PREVIEW_LIMIT;
     bytes.truncate(PREVIEW_LIMIT);
-    let name = Path::new(&file.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    Ok(json!({"path":file.path,"name":name,"content":String::from_utf8_lossy(&bytes),"size":metadata.len(),"truncated":truncated}))
+    let name = Path::new(&file.path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Ok(
+        json!({"path":file.path,"name":name,"content":String::from_utf8_lossy(&bytes),"size":metadata.len(),"truncated":truncated}),
+    )
 }
 
 fn error_response(error: FileError, fallback_404: &str, fallback_500: &str) -> Response {
@@ -199,19 +265,40 @@ fn error_response(error: FileError, fallback_404: &str, fallback_500: &str) -> R
         500 => fallback_500.to_string(),
         _ => error.message,
     };
-    json_response(error.status, json!({"error":{"code":"file_access_failed","message":message}}))
+    json_response(
+        error.status,
+        json!({"error":{"code":"file_access_failed","message":message}}),
+    )
 }
 fn json_response(status: StatusCode, value: Value) -> Response {
-    (status, [(header::CONTENT_TYPE, "application/json; charset=utf-8"), (header::CACHE_CONTROL, "no-store")], value.to_string()).into_response()
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        value.to_string(),
+    )
+        .into_response()
 }
 
 /// RFC 6266 attachment header: an ASCII fallback plus a UTF-8 filename* (RFC 5987 percent-encoding).
 pub fn content_disposition(name: &str) -> String {
     let fallback: String = name
         .chars()
-        .map(|c| if (' '..='~').contains(&c) && !matches!(c, '"' | '\\' | '%' | ';') { c } else { '_' })
+        .map(|c| {
+            if (' '..='~').contains(&c) && !matches!(c, '"' | '\\' | '%' | ';') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    let fallback = if fallback.is_empty() { "download".to_string() } else { fallback };
+    let fallback = if fallback.is_empty() {
+        "download".to_string()
+    } else {
+        fallback
+    };
     let mut encoded = String::new();
     for byte in name.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
@@ -241,7 +328,10 @@ impl<R: AsyncRead + Unpin> Stream for DownloadBody<R> {
     type Item = io::Result<Bytes>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if self.started.elapsed() > self.max {
-            return Poll::Ready(Some(Err(io::Error::new(io::ErrorKind::TimedOut, "download duration cap"))));
+            return Poll::Ready(Some(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "download duration cap",
+            ))));
         }
         Pin::new(&mut self.inner).poll_next(cx)
     }
@@ -256,10 +346,19 @@ pub struct Files {
     pub idle: Duration,
 }
 fn millis(name: &str, default: u64) -> Duration {
-    Duration::from_millis(std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok()).filter(|v| *v > 0).unwrap_or(default).max(100))
+    Duration::from_millis(
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(default)
+            .max(100),
+    )
 }
 impl Files {
-    pub fn max_duration(&self) -> Duration { self.max }
+    pub fn max_duration(&self) -> Duration {
+        self.max
+    }
     pub fn new(root: PathBuf) -> io::Result<Self> {
         // main passes the configured canonical cwd; requests are confined to it.
         if !std::fs::metadata(&root)?.is_dir() {
@@ -274,7 +373,13 @@ impl Files {
         })
     }
 
-    pub async fn handle(&self, method: &str, query: &str, headers: &HeaderMap, path: &str) -> Response {
+    pub async fn handle(
+        &self,
+        method: &str,
+        query: &str,
+        headers: &HeaderMap,
+        path: &str,
+    ) -> Response {
         let file_path = query_value(query, "path").unwrap_or_default();
         if path == "/v1/files/download" {
             return self.download(method, headers, &file_path).await;
@@ -292,10 +397,16 @@ impl Files {
                 Ok(slot) => list_files(&self.root, &file_path, Some(slot)).await,
                 Err(error) => Err(error),
             }
-        } else { preview_file(&self.root, &file_path, self.browsing.clone()).await };
+        } else {
+            preview_file(&self.root, &file_path, self.browsing.clone()).await
+        };
         match result {
             Ok(value) => json_response(StatusCode::OK, value),
-            Err(error) => error_response(error, "File or directory not found", "Unable to read file or directory"),
+            Err(error) => error_response(
+                error,
+                "File or directory not found",
+                "Unable to read file or directory",
+            ),
         }
     }
 
@@ -310,12 +421,20 @@ impl Files {
         }
         // A page on another site must not start a download in the user's browser; same-origin, same-site and typed URLs pass.
         if headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) == Some("cross-site") {
-            return json_response(StatusCode::FORBIDDEN, json!({"error":{"code":"cross_site_download","message":"Downloads cannot be started from another site"}}));
+            return json_response(
+                StatusCode::FORBIDDEN,
+                json!({"error":{"code":"cross_site_download","message":"Downloads cannot be started from another site"}}),
+            );
         }
         if self.active.fetch_add(1, Ordering::SeqCst) >= MAX_CONCURRENT {
             self.active.fetch_sub(1, Ordering::SeqCst);
-            let mut response = json_response(StatusCode::TOO_MANY_REQUESTS, json!({"error":{"code":"too_many_downloads","message":"Too many downloads are running; try again in a moment"}}));
-            response.headers_mut().insert(header::RETRY_AFTER, "2".parse().unwrap());
+            let mut response = json_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({"error":{"code":"too_many_downloads","message":"Too many downloads are running; try again in a moment"}}),
+            );
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, "2".parse().unwrap());
             return response;
         }
         // From here the slot is held by this guard: if the request future is dropped while the open is pending, it is released.
@@ -337,8 +456,16 @@ impl Files {
                 json!({"error":{"code":"file_too_large","message":format!("This file is larger than the {} GiB download limit", DOWNLOAD_LIMIT_BYTES >> 30),"limit_bytes":DOWNLOAD_LIMIT_BYTES,"size":size}}),
             );
         }
-        let name = Path::new(&resolved.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let body = DownloadBody { inner: tokio_util::io::ReaderStream::with_capacity(file.take(size), 64 * 1024), started: Instant::now(), max: self.max, _slot: slot };
+        let name = Path::new(&resolved.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let body = DownloadBody {
+            inner: tokio_util::io::ReaderStream::with_capacity(file.take(size), 64 * 1024),
+            started: Instant::now(),
+            max: self.max,
+            _slot: slot,
+        };
         (
             StatusCode::OK,
             [
@@ -357,7 +484,11 @@ impl Files {
 fn query_value(query: &str, key: &str) -> Option<String> {
     query.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        (k == key).then(|| percent_encoding::percent_decode_str(&v.replace('+', " ")).decode_utf8_lossy().into_owned())
+        (k == key).then(|| {
+            percent_encoding::percent_decode_str(&v.replace('+', " "))
+                .decode_utf8_lossy()
+                .into_owned()
+        })
     })
 }
 
@@ -372,30 +503,53 @@ pub struct WriteTimeout<T> {
 }
 impl<T> WriteTimeout<T> {
     pub fn new(inner: T, idle: Duration) -> Self {
-        Self { inner, idle, sleep: Box::pin(tokio::time::sleep(idle)), armed: false, _permit: None }
+        Self {
+            inner,
+            idle,
+            sleep: Box::pin(tokio::time::sleep(idle)),
+            armed: false,
+            _permit: None,
+        }
     }
-    pub fn with_permit(inner: T, idle: Duration, permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+    pub fn with_permit(
+        inner: T,
+        idle: Duration,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Self {
         let mut io = Self::new(inner, idle);
         io._permit = Some(permit);
         io
     }
     fn stalled(&mut self, cx: &mut Context<'_>) -> bool {
         if !self.armed {
-            self.sleep.as_mut().reset(tokio::time::Instant::now() + self.idle);
+            self.sleep
+                .as_mut()
+                .reset(tokio::time::Instant::now() + self.idle);
             self.armed = true;
         }
         std::future::Future::poll(self.sleep.as_mut(), cx).is_ready()
     }
 }
 impl<T: AsyncRead + Unpin> AsyncRead for WriteTimeout<T> {
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }
 impl<T: AsyncWrite + Unpin> AsyncWrite for WriteTimeout<T> {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         match Pin::new(&mut self.inner).poll_write(cx, buf) {
-            Poll::Pending if self.stalled(cx) => Poll::Ready(Err(io::Error::new(io::ErrorKind::TimedOut, "write idle timeout"))),
+            Poll::Pending if self.stalled(cx) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "write idle timeout",
+            ))),
             other => {
                 if other.is_ready() {
                     self.armed = false;
@@ -406,7 +560,10 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteTimeout<T> {
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match Pin::new(&mut self.inner).poll_flush(cx) {
-            Poll::Pending if self.stalled(cx) => Poll::Ready(Err(io::Error::new(io::ErrorKind::TimedOut, "write idle timeout"))),
+            Poll::Pending if self.stalled(cx) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "write idle timeout",
+            ))),
             other => {
                 if other.is_ready() {
                     self.armed = false;
@@ -439,7 +596,12 @@ mod tests {
         }
     }
     async fn json(response: Response) -> Value {
-        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap()
+        serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -449,26 +611,91 @@ mod tests {
         std::fs::write(fixture.0.join("hello.txt"), "hello").unwrap();
         std::fs::write(fixture.0.join("nested/inner.txt"), "inner").unwrap();
         let files = Files::new(fixture.0.clone()).unwrap();
-        let tree = files.handle("GET", "", &HeaderMap::new(), "/v1/files/tree").await;
+        let tree = files
+            .handle("GET", "", &HeaderMap::new(), "/v1/files/tree")
+            .await;
         assert_eq!(tree.status(), StatusCode::OK);
         let tree = json(tree).await;
-        let names: Vec<_> = tree["entries"].as_array().unwrap().iter().map(|e| (e["name"].as_str().unwrap().to_owned(), e["kind"].as_str().unwrap().to_owned())).collect();
-        assert_eq!(names, [("nested".to_owned(), "directory".to_owned()), ("hello.txt".to_owned(), "file".to_owned())]);
-        let nested = json(files.handle("GET", "path=nested", &HeaderMap::new(), "/v1/files/tree").await).await;
+        let names: Vec<_> = tree["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["name"].as_str().unwrap().to_owned(),
+                    e["kind"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("nested".to_owned(), "directory".to_owned()),
+                ("hello.txt".to_owned(), "file".to_owned())
+            ]
+        );
+        let nested = json(
+            files
+                .handle("GET", "path=nested", &HeaderMap::new(), "/v1/files/tree")
+                .await,
+        )
+        .await;
         assert_eq!(nested["entries"][0]["path"], "nested/inner.txt");
-        let preview = files.handle("GET", "path=nested/inner.txt", &HeaderMap::new(), "/v1/files").await;
+        let preview = files
+            .handle(
+                "GET",
+                "path=nested/inner.txt",
+                &HeaderMap::new(),
+                "/v1/files",
+            )
+            .await;
         assert_eq!(preview.status(), StatusCode::OK);
         assert_eq!(preview.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(json(preview).await["content"], "inner");
-        let outside = if cfg!(windows) { "C:/hello.txt" } else { "/etc/hosts" };
+        let outside = if cfg!(windows) {
+            "C:/hello.txt"
+        } else {
+            "/etc/hosts"
+        };
         for path in ["../hello.txt", "nested/../../hello.txt", outside] {
-            let response = files.handle("GET", &format!("path={path}"), &HeaderMap::new(), "/v1/files").await;
+            let response = files
+                .handle(
+                    "GET",
+                    &format!("path={path}"),
+                    &HeaderMap::new(),
+                    "/v1/files",
+                )
+                .await;
             assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
         }
-        assert_eq!(files.handle("GET", "path=missing", &HeaderMap::new(), "/v1/files").await.status(), StatusCode::NOT_FOUND);
-        assert_eq!(files.handle("GET", "path=nested", &HeaderMap::new(), "/v1/files").await.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(files.handle("GET", "path=hello.txt", &HeaderMap::new(), "/v1/files/tree").await.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(files.handle("POST", "path=hello.txt", &HeaderMap::new(), "/v1/files").await.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            files
+                .handle("GET", "path=missing", &HeaderMap::new(), "/v1/files")
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            files
+                .handle("GET", "path=nested", &HeaderMap::new(), "/v1/files")
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            files
+                .handle("GET", "path=hello.txt", &HeaderMap::new(), "/v1/files/tree")
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            files
+                .handle("POST", "path=hello.txt", &HeaderMap::new(), "/v1/files")
+                .await
+                .status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
     }
 
     #[tokio::test]
@@ -485,11 +712,19 @@ mod tests {
         assert_eq!(download().await.status(), StatusCode::TOO_MANY_REQUESTS);
         drop(first);
         drop(second);
-        let body = axum::body::to_bytes(download().await.into_body(), 1024).await.unwrap();
+        let body = axum::body::to_bytes(download().await.into_body(), 1024)
+            .await
+            .unwrap();
         assert_eq!(&body[..], b"hello");
         let mut headers = HeaderMap::new();
         headers.insert("sec-fetch-site", "cross-site".parse().unwrap());
-        assert_eq!(files.handle("GET", "path=source", &headers, "/v1/files/download").await.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            files
+                .handle("GET", "path=source", &headers, "/v1/files/download")
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[cfg(unix)]
@@ -507,15 +742,31 @@ mod tests {
         symlink("..", root.join("nested/back-to-root")).unwrap();
         symlink(&outside, root.join("outside-link")).unwrap();
         let files = Files::new(root).unwrap();
-        for (parent, name, link) in [("", "root-link", "root-link"), ("nested", "back-to-root", "nested/back-to-root")] {
+        for (parent, name, link) in [
+            ("", "root-link", "root-link"),
+            ("nested", "back-to-root", "nested/back-to-root"),
+        ] {
             let listing = list_files(&files.root, parent, None).await.unwrap();
-            let entry = listing["entries"].as_array().unwrap().iter().find(|entry| entry["name"] == name).expect("root-target link must be visible");
+            let entry = listing["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["name"] == name)
+                .expect("root-target link must be visible");
             assert_eq!(entry["kind"], "directory");
             assert_eq!(entry["path"], link);
             let linked = list_files(&files.root, link, None).await.unwrap();
             assert_eq!(linked["path"], link);
-            assert!(linked["entries"].as_array().unwrap().iter().any(|entry| entry["name"] == "proof"));
-            assert!(!linked["entries"].as_array().unwrap().iter().any(|entry| entry["name"] == "outside-link"));
+            assert!(linked["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["name"] == "proof"));
+            assert!(!linked["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["name"] == "outside-link"));
         }
         assert!(list_files(&files.root, "outside-link", None).await.is_err());
         assert!(workspace_path_blocking(&files.root, "outside-link/data").is_err());
@@ -525,21 +776,35 @@ mod tests {
     #[tokio::test]
     async fn fifo_entries_are_skipped_and_never_opened() {
         let fixture = Fixture::new();
-        assert!(std::process::Command::new("mkfifo").arg(fixture.0.join("pipe")).status().unwrap().success());
+        assert!(std::process::Command::new("mkfifo")
+            .arg(fixture.0.join("pipe"))
+            .status()
+            .unwrap()
+            .success());
         std::fs::write(fixture.0.join("file"), "x").unwrap();
         let files = Files::new(fixture.0.clone()).unwrap();
         let listing = list_files(&files.root, "", None).await.unwrap();
         assert_eq!(listing["entries"].as_array().unwrap().len(), 1);
-        let preview = tokio::time::timeout(Duration::from_secs(2), files.handle("GET", "path=pipe", &HeaderMap::new(), "/v1/files")).await.unwrap();
+        let preview = tokio::time::timeout(
+            Duration::from_secs(2),
+            files.handle("GET", "path=pipe", &HeaderMap::new(), "/v1/files"),
+        )
+        .await
+        .unwrap();
         assert_eq!(preview.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn concurrent_tree_reads_are_independent() {
         let fixture = Fixture::new();
-        for n in 0..16 { std::fs::write(fixture.0.join(format!("entry-{n}")), "accepted").unwrap(); }
+        for n in 0..16 {
+            std::fs::write(fixture.0.join(format!("entry-{n}")), "accepted").unwrap();
+        }
         let files = Files::new(fixture.0.clone()).unwrap();
-        let (first, second) = tokio::join!(list_files(&files.root, "", None), list_files(&files.root, "", None));
+        let (first, second) = tokio::join!(
+            list_files(&files.root, "", None),
+            list_files(&files.root, "", None)
+        );
         let first = first.unwrap();
         let second = second.unwrap();
         assert_eq!(first["entries"].as_array().unwrap().len(), 16);

@@ -195,9 +195,16 @@ treer-agent-server connect --key 'enr_v1_...' --proxy 'https://PROXY_HOST/' \
 ```
 
 `connect` succeeds only when the Controller reports `proxy_connected`.
-Reconnecting the same hostname into the same workspace reuses its machine ID
-and rotates the credential, so a revoked or deleted machine can be enrolled
-again with a fresh key without uninstalling.
+Reconnecting the same hostname into the same workspace with the same root and
+Proxy reuses its machine ID and rotates the credential; running workloads are
+untouched. Running the Console's connect command again also replaces a stale
+local registration, so you never need `service uninstall` first: if the root
+(`--root`) or Proxy differs, or the Proxy no longer accepts the old machine
+identity (for example, the machine was deleted in the Console), the old Host
+and Controller for that workspace stop and the new configuration is registered
+and started, like a reinstall. Files under the old root are not moved or
+deleted. When the old Host still runs workloads, `connect` says how many will
+stop and asks once (`y/N`); non-interactive runs need `--replace`.
 
 **Service modes** (`--service-mode`): `auto`/`nohup` (default; detached, survives
 logout, not reboot), `systemd` (Linux user unit; enable linger for it to
@@ -225,9 +232,8 @@ The Host runs detached as your user; nothing is registered to start at login,
 so run `treer-agent-server restore --workspace WS` after a reboot. Use Windows
 executables in launch profiles (the interactive fallback is `cmd.exe`) and
 `curl.exe` rather than PowerShell's `curl` alias. To move an existing root,
-stop the service and run
-`treer-agent-server service --workspace WS relocate-root --root DIR --accept-workload-migration`;
-it does not move files or rewrite saved paths.
+rerun the connect command with the new `--root` and a fresh enrollment key; it
+does not move files or rewrite saved paths.
 
 ### Managing a machine
 
@@ -492,12 +498,12 @@ Control-plane updates do not touch machines.
 
 ### Machines
 
-Update a machine from its Console page (enter a version such as `v0.1.16`), or
+Update a machine from its Console page (enter a version such as `v0.2.0`), or
 via the API with any principal allowed `machine.exec` on it:
 
 ```bash
 curl -X POST "$PROXY/api/workspaces/$WS/machines/$SERVER/controller-update" \
-  -H 'content-type: application/json' -d '{"version":"v0.1.16"}'
+  -H 'content-type: application/json' -d '{"version":"v0.2.0"}'
 curl "$PROXY/api/workspaces/$WS/machines/$SERVER/controller-update"   # idle|downloading|installing|restarting|failed|done
 ```
 
@@ -505,7 +511,7 @@ or on the machine itself:
 
 ```bash
 treer-agent-server update                       # stable channel
-treer-agent-server update --version v0.1.16
+treer-agent-server update --version v0.2.0
 treer-agent-server update --release-base-url https://releases.example/ --public-key /trusted/release.pub.pem
 ```
 
@@ -557,12 +563,12 @@ or directory is reported, not retried forever.
 (optionally `--service-mode systemd|launchd|nohup`). A running Host is never
 orphaned; if its current manager cannot stop it, repair tells you what to stop.
 
-**Re-adding a deleted machine.** Run the new `connect` command. The same
-installation is reactivated under its machine ID; a different installation gets
-a new ID, and the Controller replaces the stale local service registration
-(keeping `.bak-<timestamp>` copies of its config files, which still hold the
-revoked token; delete them once the new machine works). To start clean:
-`treer-agent-server service --workspace WS uninstall`, then connect again.
+**Re-adding a deleted machine.** Run the new `connect` command, with a new
+`--root` if you want one. The same installation is reactivated under its machine
+ID; when the Proxy no longer accepts the old identity it enrolls a new machine,
+and `connect` replaces the stale local service registration (keeping
+`.bak-<timestamp>` copies of its config files when the machine ID changes; they
+still hold the revoked token, delete them once the new machine works).
 
 **`command_not_found` on launch.** Bare commands resolve only through absolute
 `PATH` directories of the workload environment; relative commands such as
@@ -579,11 +585,10 @@ uninstaller, then
 `TREER_NETWORK_MODE=plain treer-agent-server service --workspace WS repair`.
 
 **Private state unavailable.** `TREER_AGENT_PRIVATE_STATE_DIR` is withheld when
-the Agent's cwd contains the state directory (for example a root at `$HOME`) or
-when the directory fails its ownership check; the Controller log names the
-reason (`agent_private_state_*`). Use a different
-root, or fix ownership of `agent-private/<server_id>` while the Controller is
-stopped.
+the Controller cannot create or open `agent-private/<server_id>/<agent_id>` in
+its state directory; the Controller log names the reason
+(`agent_private_state_*`). Fix the directory (it must be writable by the
+machine account) while the Controller is stopped.
 
 **File transfer uncertain.** `machine_file_commit_uncertain` or a lost reply
 means the file may be published. Inspect the destination before retrying;

@@ -173,7 +173,10 @@ pub(crate) const LEGACY_LAUNCHER: &str = "treer-agent";
 /// Derived from the Controller's location only, never from TREER_BIN or PATH.
 pub(crate) fn launcher_path(controller: &Path) -> PathBuf {
     let cli = format!("treer{}", std::env::consts::EXE_SUFFIX);
-    let beside = controller.parent().map(Path::to_path_buf).unwrap_or_default();
+    let beside = controller
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
     let conventional = controller
         .parent()
         .and_then(Path::parent)
@@ -193,7 +196,8 @@ pub(crate) fn launcher_path(controller: &Path) -> PathBuf {
 /// symlink on Unix, a copy on Windows. A user's own unrelated script of that
 /// name is left alone (reported as `Ok(false)`).
 pub(crate) fn link_legacy_launcher(launcher: &Path) -> Result<bool> {
-    let alias = launcher.with_file_name(format!("{LEGACY_LAUNCHER}{}", std::env::consts::EXE_SUFFIX));
+    let alias =
+        launcher.with_file_name(format!("{LEGACY_LAUNCHER}{}", std::env::consts::EXE_SUFFIX));
     if let Ok(metadata) = fs::symlink_metadata(&alias) {
         if metadata.is_file() {
             let mut head = Vec::new();
@@ -211,7 +215,10 @@ pub(crate) fn link_legacy_launcher(launcher: &Path) -> Result<bool> {
         if fs::read_link(&alias).is_ok_and(|target| target == Path::new(LAUNCHER)) {
             return Ok(true);
         }
-        let temporary = alias.with_file_name(format!(".{LEGACY_LAUNCHER}.new-{}", Uuid::new_v4().simple()));
+        let temporary = alias.with_file_name(format!(
+            ".{LEGACY_LAUNCHER}.new-{}",
+            Uuid::new_v4().simple()
+        ));
         std::os::unix::fs::symlink(LAUNCHER, &temporary)
             .with_context(|| format!("failed to create {}", alias.display()))?;
         if let Err(error) = fs::rename(&temporary, &alias) {

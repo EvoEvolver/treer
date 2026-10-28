@@ -120,7 +120,12 @@ fn read(roots: &[PathBuf], cwd: &Path, task: &Value, session: &str, limit: usize
         }
     } else if let Some(user) = user_task_root().filter(|_| fallback) {
         // The provider's default shell-task output location (Unix).
-        PathBuf::from("/tmp").join(user).join(&project).join(session).join("tasks").join(format!("{id}.output"))
+        PathBuf::from("/tmp")
+            .join(user)
+            .join(&project)
+            .join(session)
+            .join("tasks")
+            .join(format!("{id}.output"))
     } else {
         bail!("Task output is not available");
     };
@@ -134,17 +139,25 @@ fn read(roots: &[PathBuf], cwd: &Path, task: &Value, session: &str, limit: usize
     let unavailable = || anyhow::anyhow!("Task output is outside trusted roots or unavailable");
     let canonical = std::fs::canonicalize(&path).map_err(|_| unavailable())?;
     let allowed = roots.iter().enumerate().any(|(index, root)| {
-        let Ok(relative) = canonical.strip_prefix(root) else { return false };
+        let Ok(relative) = canonical.strip_prefix(root) else {
+            return false;
+        };
         if index == 0 {
             return true;
         }
-        let mut parts = relative.components().map(|c| c.as_os_str().to_string_lossy());
+        let mut parts = relative
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy());
         parts.next().is_some_and(|name| task_root_name_ok(&name))
             && parts.next().is_some_and(|name| name == project)
             && parts.next().is_some_and(|name| name == session)
             && parts.next().is_some_and(|name| name == "tasks")
     });
-    if !allowed || !std::fs::metadata(&canonical).map_err(|_| unavailable())?.is_file() {
+    if !allowed
+        || !std::fs::metadata(&canonical)
+            .map_err(|_| unavailable())?
+            .is_file()
+    {
         bail!(unavailable());
     }
     let mut file = crate::fs_util::open_read(&canonical).map_err(|_| unavailable())?;
@@ -183,11 +196,18 @@ mod tests {
         let output = Output::new(&cwd).unwrap();
         let task = json!({"id":"a","outputFile":cwd.join("output")});
         assert_eq!(
-            output.read(task.clone(), "session".into(), Some("5")).await.unwrap()["content"],
+            output
+                .read(task.clone(), "session".into(), Some("5"))
+                .await
+                .unwrap()["content"],
             "bytes"
         );
         std::fs::write(root.join("outside"), "secret").unwrap();
-        for path in [root.join("outside"), cwd.join("../outside"), cwd.join("missing")] {
+        for path in [
+            root.join("outside"),
+            cwd.join("../outside"),
+            cwd.join("missing"),
+        ] {
             assert!(output
                 .read(json!({"id":"a","outputFile":path}), "session".into(), None)
                 .await
@@ -202,15 +222,24 @@ mod tests {
         let user = format!("claude-{}", rustix::process::getuid().as_raw());
         #[cfg(windows)]
         let user = "claude".to_string();
-        let native = std::env::temp_dir().join(user).join(&project).join("session/tasks");
+        let native = std::env::temp_dir()
+            .join(user)
+            .join(&project)
+            .join("session/tasks");
         std::fs::create_dir_all(&native).unwrap();
         std::fs::write(native.join("a.output"), "native tail").unwrap();
         let native_task = json!({"id":"a","outputFile":native.join("a.output")});
         assert_eq!(
-            output.read(native_task.clone(), "session".into(), None).await.unwrap()["content"],
+            output
+                .read(native_task.clone(), "session".into(), None)
+                .await
+                .unwrap()["content"],
             "native tail"
         );
-        assert!(output.read(native_task, "other".into(), None).await.is_err());
+        assert!(output
+            .read(native_task, "other".into(), None)
+            .await
+            .is_err());
         std::fs::remove_dir_all(native.parent().unwrap().parent().unwrap()).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -226,11 +255,20 @@ mod tests {
         std::fs::write(root.join("outside"), "secret").unwrap();
         std::os::unix::fs::symlink(root.join("outside"), cwd.join("link")).unwrap();
         let fifo = cwd.join("fifo");
-        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
         let output = Output::new(&cwd).unwrap();
         for path in [cwd.join("link"), fifo] {
             let read = output.read(json!({"id":"a","outputFile":path}), "session".into(), None);
-            assert!(tokio::time::timeout(std::time::Duration::from_secs(2), read).await.unwrap().is_err());
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), read)
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
         }
         std::fs::remove_dir_all(root).unwrap();
     }

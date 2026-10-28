@@ -47,7 +47,9 @@ pub(crate) fn prepare(args: &[String]) -> Result<Next> {
             println!("{USAGE}");
             return Ok(Next::Exit(0));
         }
-        Some(first) if first.starts_with("--") && args.iter().any(|arg| arg == "--help" || arg == "-h") => {
+        Some(first)
+            if first.starts_with("--") && args.iter().any(|arg| arg == "--help" || arg == "-h") =>
+        {
             println!("{USAGE}");
             return Ok(Next::Exit(0));
         }
@@ -110,7 +112,9 @@ fn update(args: &[String]) -> Result<i32> {
     let exe = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .context("cannot resolve the installed treer-launch executable")?;
-    let directory = exe.parent().context("treer-launch has no parent directory")?;
+    let directory = exe
+        .parent()
+        .context("treer-launch has no parent directory")?;
     let controller = crate::tools::companion("treer-agent-server").context(
         "treer-agent-server was not found next to treer-launch or on PATH; install Treer first",
     )?;
@@ -134,18 +138,36 @@ mod tests {
     // One test owns these process-wide variables.
     #[test]
     fn launch_arguments_become_runtime_environment() {
-        for name in ["AGENT_UI_HARNESS", "AGENT_UI_SESSION_ID", "AGENT_UI_CWD", "RUST_SPIKE_REGISTER", "CODEX_UI_CWD"] {
+        for name in [
+            "AGENT_UI_HARNESS",
+            "AGENT_UI_SESSION_ID",
+            "AGENT_UI_CWD",
+            "RUST_SPIKE_REGISTER",
+            "CODEX_UI_CWD",
+        ] {
             std::env::remove_var(name);
         }
         // An explicit registration choice keeps the given environment.
         std::env::set_var("RUST_SPIKE_REGISTER", "0");
         std::env::set_var("AGENT_UI_PORT_FILE", "/test/port");
-        assert!(matches!(prepare(&args(&["--harness", "codex"])), Ok(Next::Run)));
+        assert!(matches!(
+            prepare(&args(&["--harness", "codex"])),
+            Ok(Next::Run)
+        ));
         assert_eq!(std::env::var("RUST_SPIKE_REGISTER").unwrap(), "0");
         assert_eq!(std::env::var("AGENT_UI_PORT_FILE").unwrap(), "/test/port");
         std::env::remove_var("RUST_SPIKE_REGISTER");
         std::env::set_var("AGENT_UI_PORT_FILE", "/parent/port");
-        let prepared = prepare(&args(&["--harness", "claude", "--runtime", "rust", "--session-id", "s1", "--cwd", "/work"]));
+        let prepared = prepare(&args(&[
+            "--harness",
+            "claude",
+            "--runtime",
+            "rust",
+            "--session-id",
+            "s1",
+            "--cwd",
+            "/work",
+        ]));
         assert!(matches!(prepared, Ok(Next::Run)));
         assert_eq!(std::env::var("AGENT_UI_HARNESS").unwrap(), "claude");
         assert_eq!(std::env::var("AGENT_UI_SESSION_ID").unwrap(), "s1");
@@ -156,20 +178,41 @@ mod tests {
         std::env::remove_var("AGENT_UI_HARNESS");
         std::env::remove_var("AGENT_UI_CWD");
         std::env::set_var("CODEX_UI_CWD", "/legacy");
-        assert!(matches!(prepare(&args(&["--thread-id", "t1"])), Ok(Next::Run)));
+        assert!(matches!(
+            prepare(&args(&["--thread-id", "t1"])),
+            Ok(Next::Run)
+        ));
         assert_eq!(std::env::var("AGENT_UI_HARNESS").unwrap(), "codex");
         assert_eq!(std::env::var("AGENT_UI_SESSION_ID").unwrap(), "t1");
         assert_eq!(std::env::var("AGENT_UI_CWD").unwrap(), "/legacy");
 
-        assert!(prepare(&args(&["--runtime", "node"])).unwrap_err().to_string().contains("Node runtime was removed"));
-        assert!(prepare(&args(&["--harness", "acp"])).unwrap_err().to_string().contains("unsupported harness"));
+        assert!(prepare(&args(&["--runtime", "node"]))
+            .unwrap_err()
+            .to_string()
+            .contains("Node runtime was removed"));
+        assert!(prepare(&args(&["--harness", "acp"]))
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported harness"));
         assert!(prepare(&args(&["--acp-command", "x"])).is_err());
         assert!(prepare(&args(&["--harness"])).is_err());
         assert!(matches!(prepare(&[]), Ok(Next::Run)));
         assert!(matches!(prepare(&args(&["--version"])), Ok(Next::Exit(0))));
-        assert!(matches!(prepare(&args(&["--harness", "codex", "--help"])), Ok(Next::Exit(0))));
-        assert!(matches!(prepare(&args(&["session", "--help"])), Ok(Next::Run)));
-        for name in ["AGENT_UI_HARNESS", "AGENT_UI_SESSION_ID", "AGENT_UI_CWD", "RUST_SPIKE_REGISTER", "CODEX_UI_CWD"] {
+        assert!(matches!(
+            prepare(&args(&["--harness", "codex", "--help"])),
+            Ok(Next::Exit(0))
+        ));
+        assert!(matches!(
+            prepare(&args(&["session", "--help"])),
+            Ok(Next::Run)
+        ));
+        for name in [
+            "AGENT_UI_HARNESS",
+            "AGENT_UI_SESSION_ID",
+            "AGENT_UI_CWD",
+            "RUST_SPIKE_REGISTER",
+            "CODEX_UI_CWD",
+        ] {
             std::env::remove_var(name);
         }
     }

@@ -39,17 +39,37 @@ pub struct Adapter {
 pub enum Request {
     Local(Value),
     Wire(Value),
-    Input { wire: Value, dispatched: Value },
-    Steer { wire: Value, turn: String, epoch: u64, item: Value, after: Option<String> },
+    Input {
+        wire: Value,
+        dispatched: Value,
+    },
+    Steer {
+        wire: Value,
+        turn: String,
+        epoch: u64,
+        item: Value,
+        after: Option<String>,
+    },
 }
-const IMAGE_BYTES: usize = 24*1024*1024;
-const IMAGE_BASE64_BYTES: usize = 32*1024*1024;
+const IMAGE_BYTES: usize = 24 * 1024 * 1024;
+const IMAGE_BASE64_BYTES: usize = 32 * 1024 * 1024;
 fn image_source(source: &Value) -> Result<usize> {
     use base64::Engine;
-    let data=source["data"].as_str().ok_or_else(||anyhow::anyhow!("claude_image_input_invalid"))?;
-    if source["type"]!="base64" || data.is_empty() || data.len()>crate::image_format::FILE_LIMIT.div_ceil(3)*4 {bail!("claude_image_input_invalid");}
-    let bytes=base64::engine::general_purpose::STANDARD.decode(data).map_err(|_|anyhow::anyhow!("claude_image_input_invalid"))?;
-    if crate::image_format::format(&bytes)?.0!=source["media_type"] {bail!("claude_image_input_invalid");}
+    let data = source["data"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("claude_image_input_invalid"))?;
+    if source["type"] != "base64"
+        || data.is_empty()
+        || data.len() > crate::image_format::FILE_LIMIT.div_ceil(3) * 4
+    {
+        bail!("claude_image_input_invalid");
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|_| anyhow::anyhow!("claude_image_input_invalid"))?;
+    if crate::image_format::format(&bytes)?.0 != source["media_type"] {
+        bail!("claude_image_input_invalid");
+    }
     Ok(bytes.len())
 }
 impl Adapter {
@@ -58,19 +78,35 @@ impl Adapter {
     pub fn refusal_diagnostic(&self, error: &anyhow::Error) -> Value {
         let message = error.to_string();
         let code = match message.as_str() {
-            code @ ("claude_session_mismatch" | "claude_task_session_missing"
-            | "claude_task_result_origin" | "claude_task_result_missing"
-            | "claude_task_input_interleaving" | "claude_unowned_task_result"
-            | "claude_task_run_limit" | "claude_control_response_kind" | "claude_control_identity"
-            | "claude_unowned_stream" | "claude_unowned_assistant"
-            | "claude_unowned_result" | "claude_unknown_tool_result"
-            | "claude_tool_id" | "claude_message_id" | "claude_block_identity"
-            | "claude_block_limit" | "claude_tool_input_limit"
-            | "claude_item_identity" | "claude_item_limit"
+            code @ ("claude_session_mismatch"
+            | "claude_task_session_missing"
+            | "claude_task_result_origin"
+            | "claude_task_result_missing"
+            | "claude_task_input_interleaving"
+            | "claude_unowned_task_result"
+            | "claude_task_run_limit"
+            | "claude_control_response_kind"
+            | "claude_control_identity"
+            | "claude_unowned_stream"
+            | "claude_unowned_assistant"
+            | "claude_unowned_result"
+            | "claude_unknown_tool_result"
+            | "claude_tool_id"
+            | "claude_message_id"
+            | "claude_block_identity"
+            | "claude_block_limit"
+            | "claude_tool_input_limit"
+            | "claude_item_identity"
+            | "claude_item_limit"
             | "claude_model_catalog_invalid"
-            | "claude_terminal_conflict" | "claude_turn_limit"
-            | "claude_command_identity" | "claude_command_session" | "claude_command_interleaving"
-            | "claude_command_limit" | "claude_command_state" | "claude_command_incomplete"
+            | "claude_terminal_conflict"
+            | "claude_turn_limit"
+            | "claude_command_identity"
+            | "claude_command_session"
+            | "claude_command_interleaving"
+            | "claude_command_limit"
+            | "claude_command_state"
+            | "claude_command_incomplete"
             | "claude_invocation_limit") => code,
             _ => "claude_protocol_refused",
         };
@@ -80,7 +116,10 @@ impl Adapter {
     // Current process state only. This says nothing about historical effects
     // and must never be used as terminal receipt/history authority.
     pub fn idle_for_disposition(&self) -> bool {
-        self.active.is_none() && self.pending_interrupts.is_empty() && self.task_followup.is_none() && self.native_command.is_none()
+        self.active.is_none()
+            && self.pending_interrupts.is_empty()
+            && self.task_followup.is_none()
+            && self.native_command.is_none()
     }
     pub fn new(session: String) -> Result<Self> {
         if session.is_empty()
@@ -132,116 +171,260 @@ impl Adapter {
         self.native_command = None;
         self.scheduled_result = None;
     }
-    pub fn forget_control(&mut self, id: u64) { self.model_controls.remove(&id); self.effort_controls.remove(&id); }
-    pub fn commit_effort(&mut self, result: &Value) -> Result<Value> {
-        if result["unsupported"]==true {return Ok(result.clone());}
-        if result["probe"]==true {
-            self.effort_supported=true;
-        } else {
-            if !result.get("effort").is_some_and(|e|e.is_null()||Self::effort(e).is_some()) {bail!("claude_effort_ack_invalid");}
-            self.current_effort=result["effort"].clone();
-            self.effort_known=true;
-            // Invalidate already-queued selection reports captured before ACK.
-            self.effort_revision+=1;
-        }
-        Ok(json!({"reasoningEffort":self.current_effort,"effortSelectionStatus":self.effort_status(),"effortRevision":self.effort_revision,"modelOptions":self.visible_models()}))
+    pub fn forget_control(&mut self, id: u64) {
+        self.model_controls.remove(&id);
+        self.effort_controls.remove(&id);
     }
-    fn effort_status(&self) -> &'static str {if self.effort_known {"confirmed"}else{"unknown"}}
-    pub fn unknown_effort(&mut self) {self.current_effort=Value::Null;self.effort_known=false;self.effort_revision+=1;}
-    pub fn effort_revision(&self) -> u64 {self.effort_revision}
+    pub fn commit_effort(&mut self, result: &Value) -> Result<Value> {
+        if result["unsupported"] == true {
+            return Ok(result.clone());
+        }
+        if result["probe"] == true {
+            self.effort_supported = true;
+        } else {
+            if !result
+                .get("effort")
+                .is_some_and(|e| e.is_null() || Self::effort(e).is_some())
+            {
+                bail!("claude_effort_ack_invalid");
+            }
+            self.current_effort = result["effort"].clone();
+            self.effort_known = true;
+            // Invalidate already-queued selection reports captured before ACK.
+            self.effort_revision += 1;
+        }
+        Ok(
+            json!({"reasoningEffort":self.current_effort,"effortSelectionStatus":self.effort_status(),"effortRevision":self.effort_revision,"modelOptions":self.visible_models()}),
+        )
+    }
+    fn effort_status(&self) -> &'static str {
+        if self.effort_known {
+            "confirmed"
+        } else {
+            "unknown"
+        }
+    }
+    pub fn unknown_effort(&mut self) {
+        self.current_effort = Value::Null;
+        self.effort_known = false;
+        self.effort_revision += 1;
+    }
+    pub fn effort_revision(&self) -> u64 {
+        self.effort_revision
+    }
     fn effort(value: &Value) -> Option<String> {
-        let value=value.as_str()?.trim().to_ascii_lowercase();
-        matches!(value.as_str(),"none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"|"ultra").then_some(value)
+        let value = value.as_str()?.trim().to_ascii_lowercase();
+        matches!(
+            value.as_str(),
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+        )
+        .then_some(value)
     }
     fn visible_models(&self) -> Vec<Value> {
-        self.models.iter().map(|model|{let mut model=model.clone();if !self.effort_supported {model["supportedReasoningEfforts"]=json!([]);}model}).collect()
+        self.models
+            .iter()
+            .map(|model| {
+                let mut model = model.clone();
+                if !self.effort_supported {
+                    model["supportedReasoningEfforts"] = json!([]);
+                }
+                model
+            })
+            .collect()
     }
     fn validate_settings(&self, params: &Value) -> Result<()> {
-        if let Some(effort)=params.get("reasoningEffort") {
-            let model=match params.get("model") {Some(model)=>model.as_str().map(|s|self.resolved(s)),None=>self.current_model.clone()};
-            if !self.effort_supported || !effort.is_null() && !self.models.iter().any(|m|Some(m["model"].as_str().unwrap_or_default())==model.as_deref() && m["supportedReasoningEfforts"].as_array().is_some_and(|levels|levels.iter().any(|e|e["reasoningEffort"]==*effort))) {
+        if let Some(effort) = params.get("reasoningEffort") {
+            let model = match params.get("model") {
+                Some(model) => model.as_str().map(|s| self.resolved(s)),
+                None => self.current_model.clone(),
+            };
+            if !self.effort_supported
+                || !effort.is_null()
+                    && !self.models.iter().any(|m| {
+                        Some(m["model"].as_str().unwrap_or_default()) == model.as_deref()
+                            && m["supportedReasoningEfforts"]
+                                .as_array()
+                                .is_some_and(|levels| {
+                                    levels.iter().any(|e| e["reasoningEffort"] == *effort)
+                                })
+                    })
+            {
                 bail!("claude_reasoning_effort_not_supported");
             }
         }
         Ok(())
     }
-    pub fn model_revision(&self) -> u64 {self.model_revision}
+    pub fn model_revision(&self) -> u64 {
+        self.model_revision
+    }
     // Called only by the waiting RPC future after its exact response wins
     // against the response deadline. Parsing an ACK alone is not commitment.
     pub fn commit_model(&mut self, result: &Value) -> Result<Value> {
-        let model=Self::model_name(&result["model"]).ok_or_else(||anyhow::anyhow!("claude_model_ack_invalid"))?;
+        let model = Self::model_name(&result["model"])
+            .ok_or_else(|| anyhow::anyhow!("claude_model_ack_invalid"))?;
         Ok(self.observe_model(model)["params"].clone())
     }
     fn model_name(value: &Value) -> Option<&str> {
-        value.as_str().filter(|s| !s.is_empty() && s.len() <= 1024 && !s.chars().any(char::is_control))
+        value
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 1024 && !s.chars().any(char::is_control))
     }
     fn resolved(&self, model: &str) -> String {
-        self.aliases.get(model).cloned().unwrap_or_else(||model.into())
+        self.aliases
+            .get(model)
+            .cloned()
+            .unwrap_or_else(|| model.into())
     }
     fn option(alias: &str, model: &str, name: &str, description: &str) -> Value {
         json!({"id":alias,"model":model,"displayName":name,"description":description,"isDefault":alias=="default","hidden":false,"supportedReasoningEfforts":[],"defaultReasoningEffort":null})
     }
     fn observe_model(&mut self, value: &str) -> Value {
         let model = self.resolved(value);
-        if !self.current_effort.is_null() && !self.models.iter().any(|m|m["model"]==model && m["supportedReasoningEfforts"].as_array().is_some_and(|levels|levels.iter().any(|e|e["reasoningEffort"]==self.current_effort))) {self.unknown_effort();}
-        if !self.models.iter().any(|m|m["model"]==model) && self.models.len()<128 {
-            self.models.push(Self::option(&model,&model,&model,"Current model reported by Claude"));
+        if !self.current_effort.is_null()
+            && !self.models.iter().any(|m| {
+                m["model"] == model
+                    && m["supportedReasoningEfforts"]
+                        .as_array()
+                        .is_some_and(|levels| {
+                            levels
+                                .iter()
+                                .any(|e| e["reasoningEffort"] == self.current_effort)
+                        })
+            })
+        {
+            self.unknown_effort();
         }
-        self.current_model=Some(model.clone());
-        self.model_revision+=1;
+        if !self.models.iter().any(|m| m["model"] == model) && self.models.len() < 128 {
+            self.models.push(Self::option(
+                &model,
+                &model,
+                &model,
+                "Current model reported by Claude",
+            ));
+        }
+        self.current_model = Some(model.clone());
+        self.model_revision += 1;
         json!({"method":"thread/model/updated","params":{"threadId":self.session,"model":model,"modelOptions":self.visible_models(),"modelRevision":self.model_revision,"reasoningEffort":self.current_effort,"effortSelectionStatus":self.effort_status(),"effortRevision":self.effort_revision}})
     }
     fn catalog(&mut self, response: &Value) -> Result<()> {
         self.goals_supported = crate::claude_goal::supported(response);
-        self.models.clear();self.aliases.clear();
-        if let Some(models)=response.get("models") {
-            let models=models.as_array().filter(|m|m.len()<=128).ok_or_else(||anyhow::anyhow!("claude_model_catalog_invalid"))?;
+        self.models.clear();
+        self.aliases.clear();
+        if let Some(models) = response.get("models") {
+            let models = models
+                .as_array()
+                .filter(|m| m.len() <= 128)
+                .ok_or_else(|| anyhow::anyhow!("claude_model_catalog_invalid"))?;
             for info in models {
-                let Some(alias)=Self::model_name(&info["value"]).or_else(||Self::model_name(&info["id"])) else {continue;};
-                let model=Self::model_name(&info["resolvedModel"]).unwrap_or(alias);
-                self.aliases.insert(alias.into(),model.into());
-                let mut option=Self::option(alias,model,Self::model_name(&info["displayName"]).unwrap_or(model),info["description"].as_str().filter(|s|s.len()<=4096).unwrap_or(""));
-                if info["supportsEffort"]==true {
-                    let mut levels=Vec::new();
-                    for value in info["supportedEffortLevels"].as_array().into_iter().flatten().take(32) {
-                        if let Some(value)=Self::effort(value) {let entry=json!({"reasoningEffort":value,"description":""});if !levels.contains(&entry) {levels.push(entry);}}
+                let Some(alias) =
+                    Self::model_name(&info["value"]).or_else(|| Self::model_name(&info["id"]))
+                else {
+                    continue;
+                };
+                let model = Self::model_name(&info["resolvedModel"]).unwrap_or(alias);
+                self.aliases.insert(alias.into(), model.into());
+                let mut option = Self::option(
+                    alias,
+                    model,
+                    Self::model_name(&info["displayName"]).unwrap_or(model),
+                    info["description"]
+                        .as_str()
+                        .filter(|s| s.len() <= 4096)
+                        .unwrap_or(""),
+                );
+                if info["supportsEffort"] == true {
+                    let mut levels = Vec::new();
+                    for value in info["supportedEffortLevels"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .take(32)
+                    {
+                        if let Some(value) = Self::effort(value) {
+                            let entry = json!({"reasoningEffort":value,"description":""});
+                            if !levels.contains(&entry) {
+                                levels.push(entry);
+                            }
+                        }
                     }
-                    option["supportedReasoningEfforts"]=json!(levels);
+                    option["supportedReasoningEfforts"] = json!(levels);
                 }
-                if let Some(prior)=self.models.iter_mut().find(|m|m["model"]==model) {
-                    if prior["isDefault"]==true {*prior=option;}
-                } else {self.models.push(option);}
+                if let Some(prior) = self.models.iter_mut().find(|m| m["model"] == model) {
+                    if prior["isDefault"] == true {
+                        *prior = option;
+                    }
+                } else {
+                    self.models.push(option);
+                }
             }
         }
-        if self.current_model.is_none() {self.current_model=self.aliases.get("default").cloned();}
-        if let Some(model)=self.current_model.clone() {self.observe_model(&model);}
+        if self.current_model.is_none() {
+            self.current_model = self.aliases.get("default").cloned();
+        }
+        if let Some(model) = self.current_model.clone() {
+            self.observe_model(&model);
+        }
         Ok(())
     }
     pub fn request(&mut self, id: u64, method: &str, params: &Value) -> Result<Request> {
         Ok(match method {
             "initialize" => {
-                self.model_controls.insert(id,String::new());
-                Request::Wire(json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"initialize"}}))
-            },
+                self.model_controls.insert(id, String::new());
+                Request::Wire(
+                    json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"initialize"}}),
+                )
+            }
             "model/list" => Request::Local(json!({"data":self.visible_models()})),
-            "settings/validate" => {self.validate_settings(params)?;Request::Local(json!({}))},
+            "settings/validate" => {
+                self.validate_settings(params)?;
+                Request::Local(json!({}))
+            }
             "effort/probe" | "effort/set" => {
-                let probe=method=="effort/probe";
-                if probe && !self.models.iter().any(|m|m["supportedReasoningEfforts"].as_array().is_some_and(|e|!e.is_empty())) {return Ok(Request::Local(json!({"unsupported":true})));}
-                if !probe {self.validate_settings(params)?;self.settings_epoch+=1;}
-                self.effort_controls.insert(id,if probe {json!({"probe":true})}else{json!({"effort":params["reasoningEffort"]})});
-                let settings=if probe {json!({})}else{json!({"effortLevel":params["reasoningEffort"]})};
-                Request::Wire(json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"apply_flag_settings","settings":settings}}))
-            },
-            "thread/goal/get" => Request::Local(json!({"goal":null,"supported":self.goals_supported,"confirmed":false})),
+                let probe = method == "effort/probe";
+                if probe
+                    && !self.models.iter().any(|m| {
+                        m["supportedReasoningEfforts"]
+                            .as_array()
+                            .is_some_and(|e| !e.is_empty())
+                    })
+                {
+                    return Ok(Request::Local(json!({"unsupported":true})));
+                }
+                if !probe {
+                    self.validate_settings(params)?;
+                    self.settings_epoch += 1;
+                }
+                self.effort_controls.insert(
+                    id,
+                    if probe {
+                        json!({"probe":true})
+                    } else {
+                        json!({"effort":params["reasoningEffort"]})
+                    },
+                );
+                let settings = if probe {
+                    json!({})
+                } else {
+                    json!({"effortLevel":params["reasoningEffort"]})
+                };
+                Request::Wire(
+                    json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"apply_flag_settings","settings":settings}}),
+                )
+            }
+            "thread/goal/get" => Request::Local(
+                json!({"goal":null,"supported":self.goals_supported,"confirmed":false}),
+            ),
             "model/set" => {
-                let model=Self::model_name(&params["model"]).ok_or_else(||anyhow::anyhow!("claude_model_invalid"))?;
+                let model = Self::model_name(&params["model"])
+                    .ok_or_else(|| anyhow::anyhow!("claude_model_invalid"))?;
                 // An attempt, including an unacknowledged one, invalidates old
                 // input model reports as evidence of the future selection.
-                self.settings_epoch+=1;
-                self.model_controls.insert(id,model.into());
-                Request::Wire(json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"set_model","model":model}}))
-            },
+                self.settings_epoch += 1;
+                self.model_controls.insert(id, model.into());
+                Request::Wire(
+                    json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"set_model","model":model}}),
+                )
+            }
             "thread/start" | "thread/resume" => {
                 if params["threadId"]
                     .as_str()
@@ -258,10 +441,15 @@ impl Adapter {
                 if steering && (self.task_followup.is_some() || self.native_command.is_some()) {
                     bail!("claude_steer_native_invocation_busy");
                 }
-                if params.get("threadId").is_some_and(|id| id != &self.session) || steering && params["threadId"] != self.session {
+                if params.get("threadId").is_some_and(|id| id != &self.session)
+                    || steering && params["threadId"] != self.session
+                {
                     bail!("claude_session_mismatch");
                 }
-                if steering && (self.active.is_none() || params["expectedTurnId"].as_str() != self.active.as_deref()) {
+                if steering
+                    && (self.active.is_none()
+                        || params["expectedTurnId"].as_str() != self.active.as_deref())
+                {
                     bail!("claude_steer_turn_mismatch");
                 }
                 if !steering && self.active.is_some() {
@@ -270,18 +458,30 @@ impl Adapter {
                 let inputs = params["input"]
                     .as_array()
                     .ok_or_else(|| anyhow::anyhow!("claude_input"))?;
-                let mut content=Vec::new();let mut image_count=0;let mut image_bytes=0;
+                let mut content = Vec::new();
+                let mut image_count = 0;
+                let mut image_bytes = 0;
                 for input in inputs {
                     match input["type"].as_str() {
-                        Some("text")=>{let text=input["text"].as_str().ok_or_else(||anyhow::anyhow!("claude_input_invalid"))?;content.push(json!({"type":"text","text":text}));},
-                        Some("image")=>{
-                            let source=&input["source"];
-                            image_count+=1;image_bytes+=image_source(source)?;
-                            if image_count>crate::image_format::COUNT_LIMIT || image_bytes>IMAGE_BYTES {bail!("claude_image_input_invalid");}
-                            let data=source["data"].as_str().unwrap();
+                        Some("text") => {
+                            let text = input["text"]
+                                .as_str()
+                                .ok_or_else(|| anyhow::anyhow!("claude_input_invalid"))?;
+                            content.push(json!({"type":"text","text":text}));
+                        }
+                        Some("image") => {
+                            let source = &input["source"];
+                            image_count += 1;
+                            image_bytes += image_source(source)?;
+                            if image_count > crate::image_format::COUNT_LIMIT
+                                || image_bytes > IMAGE_BYTES
+                            {
+                                bail!("claude_image_input_invalid");
+                            }
+                            let data = source["data"].as_str().unwrap();
                             content.push(json!({"type":"image","source":{"type":"base64","media_type":source["media_type"],"data":data}}));
-                        },
-                        _=>bail!("claude_input_invalid"),
+                        }
+                        _ => bail!("claude_input_invalid"),
                     }
                 }
                 let text = inputs
@@ -295,8 +495,8 @@ impl Adapter {
                     let turn = uuid::Uuid::new_v4().to_string();
                     let id = format!("user-{turn}");
                     self.active = Some(turn);
-                    self.input_model_revision=self.model_revision;
-                    self.input_settings_epoch=Some(self.settings_epoch);
+                    self.input_model_revision = self.model_revision;
+                    self.input_settings_epoch = Some(self.settings_epoch);
                     self.items.clear();
                     self.order.clear();
                     self.blocks.clear();
@@ -308,22 +508,36 @@ impl Adapter {
                 // Correlated local dispatch result is emitted only after stdin write completes.
                 // Register before releasing the adapter lock for write: a
                 // producer command/start may race that write's return.
-                if self.input_commands.len()>=1024 {bail!("claude_command_limit");}
+                if self.input_commands.len() >= 1024 {
+                    bail!("claude_command_limit");
+                }
                 self.input_commands.insert(user_id.clone());
-                let wire=json!({"type":"user","uuid":user_id,"session_id":self.session,"message":{"role":"user","content":content},"parent_tool_use_id":null});
+                let wire = json!({"type":"user","uuid":user_id,"session_id":self.session,"message":{"role":"user","content":content},"parent_tool_use_id":null});
                 if steering {
-                    Request::Steer {wire,turn:self.active.clone().unwrap(),epoch:self.invocation_epoch,item:json!({"id":user_id,"type":"userMessage","text":text}),after:self.order.last().cloned()}
+                    Request::Steer {
+                        wire,
+                        turn: self.active.clone().unwrap(),
+                        epoch: self.invocation_epoch,
+                        item: json!({"id":user_id,"type":"userMessage","text":text}),
+                        after: self.order.last().cloned(),
+                    }
                 } else {
-                    Request::Input {wire,dispatched:self.dispatched()}
+                    Request::Input {
+                        wire,
+                        dispatched: self.dispatched(),
+                    }
                 }
             }
             "turn/interrupt" => {
-                if self.task_followup.is_some() || self.native_command.is_some() {bail!("claude_interrupt_task_invocation_busy");}
+                if self.task_followup.is_some() || self.native_command.is_some() {
+                    bail!("claude_interrupt_task_invocation_busy");
+                }
                 let turn = self
                     .active
                     .clone()
                     .ok_or_else(|| anyhow::anyhow!("claude_no_active_turn"))?;
-                self.pending_interrupts.insert(id, (turn,self.invocation_epoch));
+                self.pending_interrupts
+                    .insert(id, (turn, self.invocation_epoch));
                 Request::Wire(
                     json!({"type":"control_request","request_id":id.to_string(),"request":{"subtype":"interrupt"}}),
                 )
@@ -331,10 +545,20 @@ impl Adapter {
             _ => bail!("claude_method_unsupported"),
         })
     }
-    pub fn steered(&mut self, turn: &str, epoch: u64, item: Value, after: Option<&str>) -> Result<Value> {
+    pub fn steered(
+        &mut self,
+        turn: &str,
+        epoch: u64,
+        item: Value,
+        after: Option<&str>,
+    ) -> Result<Value> {
         // The turn ended while this input was being written. Claude runs
         // queued input as its next invocation, so the input starts a new turn.
-        if self.active.is_none() && self.invocation_epoch==epoch && self.task_followup.is_none() && self.native_command.is_none() {
+        if self.active.is_none()
+            && self.invocation_epoch == epoch
+            && self.task_followup.is_none()
+            && self.native_command.is_none()
+        {
             let text = item["text"].as_str().unwrap_or("").to_owned();
             self.active = Some(uuid::Uuid::new_v4().to_string());
             self.input_model_revision = self.model_revision;
@@ -348,21 +572,41 @@ impl Adapter {
             return Ok(self.dispatched());
         }
         // A background invocation started meanwhile: the input is not tracked.
-        if self.active.as_deref()!=Some(turn) || self.invocation_epoch!=epoch
-            || self.task_followup.is_some() || self.native_command.is_some() {bail!("claude_steer_outcome_unknown");}
-        let id=item["id"].as_str().ok_or_else(||anyhow::anyhow!("claude_item_identity"))?.to_owned();
-        self.retain(id.clone(),item)?;
-        self.order.retain(|entry|entry!=&id);
-        let position=match after {
-            Some(anchor)=>self.order.iter().position(|entry|entry==anchor).map(|i|i+1).ok_or_else(||anyhow::anyhow!("claude_steer_anchor_missing"))?,
-            None=>0,
+        if self.active.as_deref() != Some(turn)
+            || self.invocation_epoch != epoch
+            || self.task_followup.is_some()
+            || self.native_command.is_some()
+        {
+            bail!("claude_steer_outcome_unknown");
+        }
+        let id = item["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("claude_item_identity"))?
+            .to_owned();
+        self.retain(id.clone(), item)?;
+        self.order.retain(|entry| entry != &id);
+        let position = match after {
+            Some(anchor) => self
+                .order
+                .iter()
+                .position(|entry| entry == anchor)
+                .map(|i| i + 1)
+                .ok_or_else(|| anyhow::anyhow!("claude_steer_anchor_missing"))?,
+            None => 0,
         };
-        self.order.insert(position,id);
+        self.order.insert(position, id);
         Ok(self.dispatched())
     }
     pub fn dispatched(&self) -> Value {
-        let mut items=vec![json!({"id":format!("user-{}",self.active.as_deref().unwrap_or("")),"type":"userMessage","text":self.user})];
-        items.extend(self.order.iter().filter_map(|id|self.items.get(id)).cloned());
+        let mut items = vec![
+            json!({"id":format!("user-{}",self.active.as_deref().unwrap_or("")),"type":"userMessage","text":self.user}),
+        ];
+        items.extend(
+            self.order
+                .iter()
+                .filter_map(|id| self.items.get(id))
+                .cloned(),
+        );
         json!({"turn":{"id":self.active,"status":"inProgress","items":items}})
     }
     fn item_event(&self, item: Value) -> Value {
@@ -481,121 +725,199 @@ impl Adapter {
         // matching command/completed sequence, with NO user UUID or result
         // origin. Only this explicit wire scope can admit such output. Never
         // borrow the waiting user input's turn or receipt for it.
-        if event["type"]=="command_lifecycle" {
-            let id=event["command_uuid"].as_str().filter(|s|!s.is_empty()&&s.len()<=512)
-                .ok_or_else(||anyhow::anyhow!("claude_command_identity"))?;
-            if event["session_id"]!=self.session {bail!("claude_command_session");}
-            if event["state"]=="queued" {return Ok(vec![]);}
-            if self.input_commands.contains(id) {
-                if self.native_command.is_some() {bail!("claude_command_interleaving");}
-                if event["state"]=="completed" {self.input_commands.remove(id);}
-                else if event["state"]!="started" {bail!("claude_command_state");}
+        if event["type"] == "command_lifecycle" {
+            let id = event["command_uuid"]
+                .as_str()
+                .filter(|s| !s.is_empty() && s.len() <= 512)
+                .ok_or_else(|| anyhow::anyhow!("claude_command_identity"))?;
+            if event["session_id"] != self.session {
+                bail!("claude_command_session");
+            }
+            if event["state"] == "queued" {
                 return Ok(vec![]);
             }
-            if event["state"]=="started" {
-                if uuid::Uuid::parse_str(id).is_err() || self.native_command.is_some() || self.task_followup.is_some()
-                    || self.native_commands.contains(id) {bail!("claude_command_interleaving");}
-                if self.native_commands.len()>=1024 {bail!("claude_command_limit");}
-                self.native_commands.insert(id.into());
-                self.native_command=Some(id.into());
-                self.invocation_epoch=self.invocation_epoch.checked_add(1).ok_or_else(||anyhow::anyhow!("claude_invocation_limit"))?;
-            } else if event["state"]=="completed" && self.native_command.as_deref()==Some(id) {
-                if self.task_followup.is_some() {bail!("claude_command_incomplete");}
-                self.native_command=None;
-                if let Some(turn)=self.scheduled_result.take() {
-                    return Ok(vec![json!({"method":"thread/claude-scheduled-output","params":{"threadId":self.session,"turn":turn}})]);
+            if self.input_commands.contains(id) {
+                if self.native_command.is_some() {
+                    bail!("claude_command_interleaving");
                 }
-            } else if event["state"]=="completed" && self.native_command.is_none() {
+                if event["state"] == "completed" {
+                    self.input_commands.remove(id);
+                } else if event["state"] != "started" {
+                    bail!("claude_command_state");
+                }
+                return Ok(vec![]);
+            }
+            if event["state"] == "started" {
+                if uuid::Uuid::parse_str(id).is_err()
+                    || self.native_command.is_some()
+                    || self.task_followup.is_some()
+                    || self.native_commands.contains(id)
+                {
+                    bail!("claude_command_interleaving");
+                }
+                if self.native_commands.len() >= 1024 {
+                    bail!("claude_command_limit");
+                }
+                self.native_commands.insert(id.into());
+                self.native_command = Some(id.into());
+                self.invocation_epoch = self
+                    .invocation_epoch
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("claude_invocation_limit"))?;
+            } else if event["state"] == "completed" && self.native_command.as_deref() == Some(id) {
+                if self.task_followup.is_some() {
+                    bail!("claude_command_incomplete");
+                }
+                self.native_command = None;
+                if let Some(turn) = self.scheduled_result.take() {
+                    return Ok(vec![
+                        json!({"method":"thread/claude-scheduled-output","params":{"threadId":self.session,"turn":turn}}),
+                    ]);
+                }
+            } else if event["state"] == "completed" && self.native_command.is_none() {
                 // A normal result retires local IDs even on older producers
                 // without lifecycle events. A later completion has no authority.
                 return Ok(vec![]);
-            } else {bail!("claude_command_state");}
+            } else {
+                bail!("claude_command_state");
+            }
             return Ok(vec![]);
         }
         // Native task completion can start its own model invocation AFTER the
         // submitted input's result. Its result has task origin, not an input
         // UUID. Keep all of that invocation separate, even if a new local
         // input has already been written and is waiting in Claude's queue.
-        let task_init=event["type"]=="system" && event["subtype"]=="init"
+        let task_init = event["type"] == "system"
+            && event["subtype"] == "init"
             && event.get("user_message_uuids").is_none()
-            && (self.task_runs.values().any(|consumed| !consumed)||self.native_command.is_some());
+            && (self.task_runs.values().any(|consumed| !consumed) || self.native_command.is_some());
         if task_init && self.task_followup.is_none() {
-            if self.scheduled_result.is_some() {bail!("claude_command_incomplete");}
-            if event["session_id"]!=self.session {bail!("claude_task_session_missing");}
-            let mut followup=Self::new(self.session.clone())?;
-            self.invocation_epoch=self.invocation_epoch.checked_add(1).ok_or_else(||anyhow::anyhow!("claude_invocation_limit"))?;
-            followup.active=Some(uuid::Uuid::new_v4().to_string());
-            self.task_followup=Some(Box::new(followup));
+            if self.scheduled_result.is_some() {
+                bail!("claude_command_incomplete");
+            }
+            if event["session_id"] != self.session {
+                bail!("claude_task_session_missing");
+            }
+            let mut followup = Self::new(self.session.clone())?;
+            self.invocation_epoch = self
+                .invocation_epoch
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("claude_invocation_limit"))?;
+            followup.active = Some(uuid::Uuid::new_v4().to_string());
+            self.task_followup = Some(Box::new(followup));
             return Ok(vec![]);
         }
-        if self.task_followup.is_some() && matches!(event["type"].as_str(),Some("stream_event"|"assistant"|"user"|"result")) {
-            let final_result=event["type"]=="result";
-            let run=event["origin"]["runId"].as_str().unwrap_or("").to_owned();
-            let scheduled=event.get("origin").is_none() && self.native_command.is_some();
-            if final_result && (event["session_id"]!=self.session
-                || (!scheduled && (event["origin"]["kind"]!="task-notification"
-                    || event["origin"]["producer"]!="session-task" || self.task_runs.get(&run)!=Some(&false)))
-                || event.get("user_message_uuids").is_some() || event.get("user_message_uuid").is_some()) {
+        if self.task_followup.is_some()
+            && matches!(
+                event["type"].as_str(),
+                Some("stream_event" | "assistant" | "user" | "result")
+            )
+        {
+            let final_result = event["type"] == "result";
+            let run = event["origin"]["runId"].as_str().unwrap_or("").to_owned();
+            let scheduled = event.get("origin").is_none() && self.native_command.is_some();
+            if final_result
+                && (event["session_id"] != self.session
+                    || (!scheduled
+                        && (event["origin"]["kind"] != "task-notification"
+                            || event["origin"]["producer"] != "session-task"
+                            || self.task_runs.get(&run) != Some(&false)))
+                    || event.get("user_message_uuids").is_some()
+                    || event.get("user_message_uuid").is_some())
+            {
                 bail!("claude_task_result_origin");
             }
             // Origin admission belongs to this outer adapter. The inner
             // transcript mapper must not interpret it as a second invocation.
-            let mut mapped_event=event;
-            if final_result {mapped_event.as_object_mut().unwrap().remove("origin");}
-            let messages=self.task_followup.as_mut().unwrap().consume(mapped_event)?;
+            let mut mapped_event = event;
+            if final_result {
+                mapped_event.as_object_mut().unwrap().remove("origin");
+            }
+            let messages = self.task_followup.as_mut().unwrap().consume(mapped_event)?;
             // Partial content is bounded by the ordinary per-turn adapter
             // limits. Publish only a complete origin-validated display turn.
             if final_result {
-                if !scheduled {self.task_runs.insert(run.clone(),true);}
-                self.task_followup=None;
-                let mut turn=messages.into_iter().find(|m|m["method"]=="turn/completed")
-                    .ok_or_else(||anyhow::anyhow!("claude_task_result_missing"))?["params"]["turn"].clone();
-                turn["items"].as_array_mut().unwrap().retain(|i|i["type"]!="userMessage");
-                turn["projectionOnly"]=json!(true);
+                if !scheduled {
+                    self.task_runs.insert(run.clone(), true);
+                }
+                self.task_followup = None;
+                let mut turn = messages
+                    .into_iter()
+                    .find(|m| m["method"] == "turn/completed")
+                    .ok_or_else(|| anyhow::anyhow!("claude_task_result_missing"))?["params"]
+                    ["turn"]
+                    .clone();
+                turn["items"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|i| i["type"] != "userMessage");
+                turn["projectionOnly"] = json!(true);
                 if scheduled {
-                    turn["nativeCommandId"]=json!(self.native_command);
-                    self.scheduled_result=Some(turn);
+                    turn["nativeCommandId"] = json!(self.native_command);
+                    self.scheduled_result = Some(turn);
                     return Ok(vec![]);
                 }
-                turn["taskRunId"]=json!(run);
-                return Ok(vec![json!({"method":"thread/claude-task-output","params":{"threadId":self.session,"turn":turn}})]);
+                turn["taskRunId"] = json!(run);
+                return Ok(vec![
+                    json!({"method":"thread/claude-task-output","params":{"threadId":self.session,"turn":turn}}),
+                ]);
             }
             return Ok(vec![]);
         }
-        if self.task_followup.is_some() && event["type"]=="system" && event["subtype"]=="init" {
+        if self.task_followup.is_some() && event["type"] == "system" && event["subtype"] == "init" {
             bail!("claude_task_input_interleaving");
         }
-        if self.native_command.is_some() && (matches!(event["type"].as_str(),Some("stream_event"|"assistant"|"user"|"result"))
-            || event["type"]=="system" && event["subtype"]=="init") {
+        if self.native_command.is_some()
+            && (matches!(
+                event["type"].as_str(),
+                Some("stream_event" | "assistant" | "user" | "result")
+            ) || event["type"] == "system" && event["subtype"] == "init")
+        {
             bail!("claude_command_incomplete");
         }
-        if event["type"]=="result" && event["origin"]["kind"]=="task-notification" {
+        if event["type"] == "result" && event["origin"]["kind"] == "task-notification" {
             bail!("claude_unowned_task_result");
         }
-        if event["type"]=="system" && event["subtype"]=="task_notification"
-            && matches!(event["status"].as_str(),Some("completed"|"failed"|"stopped")) {
-            if let (Some(task),Some(run))=(Self::model_name(&event["task_id"]),Self::model_name(&event["run_id"])) {
+        if event["type"] == "system"
+            && event["subtype"] == "task_notification"
+            && matches!(
+                event["status"].as_str(),
+                Some("completed" | "failed" | "stopped")
+            )
+        {
+            if let (Some(task), Some(run)) = (
+                Self::model_name(&event["task_id"]),
+                Self::model_name(&event["run_id"]),
+            ) {
                 if !task.is_empty() && !self.task_runs.contains_key(run) {
-                    if self.task_runs.len()>=1024 {bail!("claude_task_run_limit");}
-                    self.task_runs.insert(run.into(),false);
+                    if self.task_runs.len() >= 1024 {
+                        bail!("claude_task_run_limit");
+                    }
+                    self.task_runs.insert(run.into(), false);
                 }
             }
         }
         let mut out = vec![];
         if self.goals_supported {
-            if let Some(turn)=&self.active {
-                if let Some(mut ack)=crate::claude_goal::acknowledgement(&event,&self.user) {
-                    ack["threadId"]=json!(self.session);ack["turnId"]=json!(turn);
+            if let Some(turn) = &self.active {
+                if let Some(mut ack) = crate::claude_goal::acknowledgement(&event, &self.user) {
+                    ack["threadId"] = json!(self.session);
+                    ack["turnId"] = json!(turn);
                     out.push(json!({"method":"thread/claude-goal/ack","params":ack}));
                 }
             }
             for mut completion in crate::claude_goal::completions(&event) {
-                completion["threadId"]=json!(self.session);
+                completion["threadId"] = json!(self.session);
                 out.push(json!({"method":"thread/claude-goal/completion","params":completion}));
             }
         }
-        if event["type"]=="assistant" && self.input_settings_epoch==Some(self.settings_epoch) && self.model_revision<=self.input_model_revision {
-            if let Some(model)=Self::model_name(&event["message"]["model"]).filter(|m|*m!="<synthetic>") {
+        if event["type"] == "assistant"
+            && self.input_settings_epoch == Some(self.settings_epoch)
+            && self.model_revision <= self.input_model_revision
+        {
+            if let Some(model) =
+                Self::model_name(&event["message"]["model"]).filter(|m| *m != "<synthetic>")
+            {
                 out.push(self.observe_model(model));
             }
         }
@@ -613,22 +935,29 @@ impl Adapter {
                 if !matches!(r["subtype"].as_str(), Some("success" | "error")) {
                     bail!("claude_control_response_kind");
                 }
-                if let Some((turn,epoch)) = self.pending_interrupts.remove(&id) {
-                    if r["subtype"]=="success" && epoch!=self.invocation_epoch {
-                        return Ok(vec![json!({"id":id,"error":{"code":"claude_interrupt_outcome_unknown"}})]);
+                if let Some((turn, epoch)) = self.pending_interrupts.remove(&id) {
+                    if r["subtype"] == "success" && epoch != self.invocation_epoch {
+                        return Ok(vec![
+                            json!({"id":id,"error":{"code":"claude_interrupt_outcome_unknown"}}),
+                        ]);
                     }
                     if r["subtype"] == "success" && self.active.as_ref() == Some(&turn) {
                         self.interrupted = true;
                     }
                 }
-                let control=self.model_controls.remove(&id);
-                let effort=self.effort_controls.remove(&id);
-                let mut result=r["response"].clone();
-                if r["subtype"]=="success" {
-                    if let Some(candidate)=effort {result=candidate;}
-                    if let Some(model)=control {
-                        if model.is_empty() {self.catalog(&result)?;}
-                        else {result=json!({"model":self.resolved(&model)});}
+                let control = self.model_controls.remove(&id);
+                let effort = self.effort_controls.remove(&id);
+                let mut result = r["response"].clone();
+                if r["subtype"] == "success" {
+                    if let Some(candidate) = effort {
+                        result = candidate;
+                    }
+                    if let Some(model) = control {
+                        if model.is_empty() {
+                            self.catalog(&result)?;
+                        } else {
+                            result = json!({"model":self.resolved(&model)});
+                        }
                     }
                 }
                 out.push(if r["subtype"] == "error" {
@@ -736,9 +1065,12 @@ impl Adapter {
                             // A final-only message can repeat another message's
                             // body. Only this same message owns streamed blocks.
                             let streamed = (message == self.message)
-                                .then(|| self.blocks.values()
-                                    .find(|(_, old, _)| old == b)
-                                    .map(|(id, _, _)| id.clone()))
+                                .then(|| {
+                                    self.blocks
+                                        .values()
+                                        .find(|(_, old, _)| old == b)
+                                        .map(|(id, _, _)| id.clone())
+                                })
                                 .flatten();
                             let id = b["id"]
                                 .as_str()
@@ -789,11 +1121,25 @@ impl Adapter {
             }
             // system idle may precede result: never dispatch another turn here.
             Some("system") => {
-                if matches!(event["subtype"].as_str(), Some("background_tasks_changed"|"task_started"|"task_updated"|"task_notification")) {
+                if matches!(
+                    event["subtype"].as_str(),
+                    Some(
+                        "background_tasks_changed"
+                            | "task_started"
+                            | "task_updated"
+                            | "task_notification"
+                    )
+                ) {
                     out.push(json!({"method":"thread/tasks/updated","params":{"threadId":self.session,"event":event}}));
                 }
-                if event["subtype"]=="init" && ((self.input_settings_epoch.is_none() && self.settings_epoch==0) || (self.input_settings_epoch==Some(self.settings_epoch) && self.model_revision<=self.input_model_revision)) {
-                    if let Some(model)=Self::model_name(&event["model"]) {out.push(self.observe_model(model));}
+                if event["subtype"] == "init"
+                    && ((self.input_settings_epoch.is_none() && self.settings_epoch == 0)
+                        || (self.input_settings_epoch == Some(self.settings_epoch)
+                            && self.model_revision <= self.input_model_revision))
+                {
+                    if let Some(model) = Self::model_name(&event["model"]) {
+                        out.push(self.observe_model(model));
+                    }
                 }
             }
             // Agents run without permission prompts; allow whatever Claude asks.
@@ -817,59 +1163,108 @@ mod task_followup_tests {
     use super::*;
     #[test]
     fn scheduled_invocation_epoch_protects_interrupt_and_waiting_input() {
-        let mut a=Adapter::new("session".into()).unwrap();
-        let Request::Input {wire,..}=a.request(1,"turn/start",&json!({"input":[{"type":"text","text":"B"}]})).unwrap() else {panic!()};
-        let input=wire["uuid"].clone();
-        a.request(2,"turn/interrupt",&json!({})).unwrap();
-        let id="91d7ab21-8b8e-40ce-913b-4eb60e7e6fa2";
-        let start=json!({"type":"command_lifecycle","session_id":"session","command_uuid":id,"state":"started"});
-        a.consume(start.clone()).unwrap();assert!(!a.idle_for_disposition());
-        assert!(a.request(3,"turn/interrupt",&json!({})).is_err());
+        let mut a = Adapter::new("session".into()).unwrap();
+        let Request::Input { wire, .. } = a
+            .request(
+                1,
+                "turn/start",
+                &json!({"input":[{"type":"text","text":"B"}]}),
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        let input = wire["uuid"].clone();
+        a.request(2, "turn/interrupt", &json!({})).unwrap();
+        let id = "91d7ab21-8b8e-40ce-913b-4eb60e7e6fa2";
+        let start = json!({"type":"command_lifecycle","session_id":"session","command_uuid":id,"state":"started"});
+        a.consume(start.clone()).unwrap();
+        assert!(!a.idle_for_disposition());
+        assert!(a.request(3, "turn/interrupt", &json!({})).is_err());
         assert!(a.request(4,"turn/steer",&json!({"threadId":"session","expectedTurnId":a.active,"input":[{"type":"text","text":"not Cron input"}]})).is_err());
-        a.consume(json!({"type":"system","subtype":"init","session_id":"session"})).unwrap();
-        a.consume(json!({"type":"result","session_id":"session","result":"cron"})).unwrap();
+        a.consume(json!({"type":"system","subtype":"init","session_id":"session"}))
+            .unwrap();
+        a.consume(json!({"type":"result","session_id":"session","result":"cron"}))
+            .unwrap();
         assert!(!a.idle_for_disposition());
         let output=a.consume(json!({"type":"command_lifecycle","session_id":"session","command_uuid":id,"state":"completed"})).unwrap();
-        assert_eq!(output[0]["method"],"thread/claude-scheduled-output");
+        assert_eq!(output[0]["method"], "thread/claude-scheduled-output");
         let ack=a.consume(json!({"type":"control_response","response":{"subtype":"success","request_id":"2","response":{}}})).unwrap();
-        assert_eq!(ack[0]["error"]["code"],"claude_interrupt_outcome_unknown");assert!(!a.interrupted);
+        assert_eq!(ack[0]["error"]["code"], "claude_interrupt_outcome_unknown");
+        assert!(!a.interrupted);
         // The local input's started/init/result remain ordinary, not Cron.
         a.consume(json!({"type":"command_lifecycle","session_id":"session","command_uuid":input,"state":"started"})).unwrap();
         a.consume(json!({"type":"system","subtype":"init","session_id":"session","user_message_uuids":[input]})).unwrap();
-        let result=a.consume(json!({"type":"result","session_id":"session","user_message_uuids":[input]})).unwrap();
-        assert_eq!(result.last().unwrap()["params"]["turn"]["status"],"completed");
-        assert!(a.consume(start).is_err(),"duplicate command must not arm another invocation");
+        let result = a
+            .consume(json!({"type":"result","session_id":"session","user_message_uuids":[input]}))
+            .unwrap();
+        assert_eq!(
+            result.last().unwrap()["params"]["turn"]["status"],
+            "completed"
+        );
+        assert!(
+            a.consume(start).is_err(),
+            "duplicate command must not arm another invocation"
+        );
     }
     #[test]
     fn scheduled_scope_requires_exact_session_init_and_completion() {
-        for fault in ["session","init","completion","origin","input"] {
-            let mut a=Adapter::new("session".into()).unwrap();
-            let start=json!({"type":"command_lifecycle","session_id":if fault=="session"{"other"}else{"session"},"command_uuid":"91d7ab21-8b8e-40ce-913b-4eb60e7e6fa2","state":"started"});
-            if fault=="session" {assert!(a.consume(start).is_err());continue;}
+        for fault in ["session", "init", "completion", "origin", "input"] {
+            let mut a = Adapter::new("session".into()).unwrap();
+            let start = json!({"type":"command_lifecycle","session_id":if fault=="session"{"other"}else{"session"},"command_uuid":"91d7ab21-8b8e-40ce-913b-4eb60e7e6fa2","state":"started"});
+            if fault == "session" {
+                assert!(a.consume(start).is_err());
+                continue;
+            }
             a.consume(start).unwrap();
-            if fault=="init" {assert!(a.consume(json!({"type":"stream_event"})).is_err());continue;}
-            a.consume(json!({"type":"system","subtype":"init","session_id":"session"})).unwrap();
-            if fault=="completion" {assert!(a.consume(json!({"type":"command_lifecycle","session_id":"session","command_uuid":"91d7ab21-8b8e-40ce-913b-4eb60e7e6fa2","state":"completed"})).is_err());continue;}
-            let mut result=json!({"type":"result","session_id":"session"});
-            if fault=="origin" {result["origin"]=json!({"kind":"unknown"});}else{result["user_message_uuid"]=json!("waiting-input");}
+            if fault == "init" {
+                assert!(a.consume(json!({"type":"stream_event"})).is_err());
+                continue;
+            }
+            a.consume(json!({"type":"system","subtype":"init","session_id":"session"}))
+                .unwrap();
+            if fault == "completion" {
+                assert!(a.consume(json!({"type":"command_lifecycle","session_id":"session","command_uuid":"91d7ab21-8b8e-40ce-913b-4eb60e7e6fa2","state":"completed"})).is_err());
+                continue;
+            }
+            let mut result = json!({"type":"result","session_id":"session"});
+            if fault == "origin" {
+                result["origin"] = json!({"kind":"unknown"});
+            } else {
+                result["user_message_uuid"] = json!("waiting-input");
+            }
             assert!(a.consume(result).is_err());
         }
     }
     #[test]
     fn scheduled_start_during_steer_write_is_unknown_without_retaining_input() {
-        let mut a=Adapter::new("session".into()).unwrap();
-        a.request(1,"turn/start",&json!({"input":[{"type":"text","text":"B"}]})).unwrap();
+        let mut a = Adapter::new("session".into()).unwrap();
+        a.request(
+            1,
+            "turn/start",
+            &json!({"input":[{"type":"text","text":"B"}]}),
+        )
+        .unwrap();
         let Request::Steer {turn,epoch,item,after,..}=a.request(2,"turn/steer",&json!({"threadId":"session","expectedTurnId":a.active,"input":[{"type":"text","text":"not proven"}]})).unwrap() else {panic!()};
         a.consume(json!({"type":"command_lifecycle","session_id":"session","command_uuid":"91d7ab21-8b8e-40ce-913b-4eb60e7e6fa2","state":"started"})).unwrap();
-        assert_eq!(a.steered(&turn,epoch,item,after.as_deref()).unwrap_err().to_string(),"claude_steer_outcome_unknown");
-        assert_eq!(a.dispatched()["turn"]["items"].as_array().unwrap().len(),1);
+        assert_eq!(
+            a.steered(&turn, epoch, item, after.as_deref())
+                .unwrap_err()
+                .to_string(),
+            "claude_steer_outcome_unknown"
+        );
+        assert_eq!(a.dispatched()["turn"]["items"].as_array().unwrap().len(), 1);
     }
     #[test]
     fn refusal_diagnostics_never_publish_error_context_or_native_content() {
         let a = Adapter::new("private-session".into()).unwrap();
         let refusal = a.refusal_diagnostic(&anyhow::anyhow!("claude_unowned_stream"));
         assert_eq!(refusal["code"], "claude_unowned_stream");
-        for error in ["secret provider body", "claude_unowned_stream: private context", "private-session"] {
+        for error in [
+            "secret provider body",
+            "claude_unowned_stream: private context",
+            "private-session",
+        ] {
             let diagnostic = a.refusal_diagnostic(&anyhow::anyhow!(error.to_owned()));
             assert_eq!(diagnostic["code"], "claude_protocol_refused");
             assert!(!diagnostic.to_string().contains(error));
@@ -877,41 +1272,55 @@ mod task_followup_tests {
     }
     #[test]
     fn interrupt_cannot_borrow_task_invocation_ack_for_waiting_input() {
-        let mut a=Adapter::new("session".into()).unwrap();
-        a.active=Some("waiting-B".into());
-        assert!(matches!(a.request(10,"turn/interrupt",&json!({})).unwrap(),Request::Wire(_)));
+        let mut a = Adapter::new("session".into()).unwrap();
+        a.active = Some("waiting-B".into());
+        assert!(matches!(
+            a.request(10, "turn/interrupt", &json!({})).unwrap(),
+            Request::Wire(_)
+        ));
         a.consume(json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","run_id":"run","status":"completed"})).unwrap();
-        a.consume(json!({"type":"system","subtype":"init","session_id":"session"})).unwrap();
+        a.consume(json!({"type":"system","subtype":"init","session_id":"session"}))
+            .unwrap();
         // Refusal is BEFORE producing any native control/write request.
-        assert!(a.request(11,"turn/interrupt",&json!({})).is_err());
+        assert!(a.request(11, "turn/interrupt", &json!({})).is_err());
         // Even if the task completes before the interrupt ACK, the epoch must
         // remember that it crossed an invocation boundary.
         a.consume(json!({"type":"result","session_id":"session","origin":{"kind":"task-notification","producer":"session-task","runId":"run"}})).unwrap();
         let ack=a.consume(json!({"type":"control_response","response":{"request_id":"10","subtype":"success","response":{}}})).unwrap();
-        assert_eq!(ack[0]["error"]["code"],"claude_interrupt_outcome_unknown");
-        assert!(!a.interrupted);assert!(a.pending_interrupts.is_empty());
-        let result=a.consume(json!({"type":"result","session_id":"session","result":"B actually completed"})).unwrap();
-        assert_eq!(result.last().unwrap()["params"]["turn"]["status"],"completed");
+        assert_eq!(ack[0]["error"]["code"], "claude_interrupt_outcome_unknown");
+        assert!(!a.interrupted);
+        assert!(a.pending_interrupts.is_empty());
+        let result = a
+            .consume(
+                json!({"type":"result","session_id":"session","result":"B actually completed"}),
+            )
+            .unwrap();
+        assert_eq!(
+            result.last().unwrap()["params"]["turn"]["status"],
+            "completed"
+        );
     }
     #[test]
     fn unowned_task_result_cannot_complete_current_input() {
-        let mut a=Adapter::new("session".into()).unwrap();
-        a.active=Some("local-input".into());
+        let mut a = Adapter::new("session".into()).unwrap();
+        a.active = Some("local-input".into());
         assert!(a.consume(json!({"type":"result","session_id":"session","origin":{"kind":"task-notification","producer":"session-task","runId":"unknown"}})).is_err());
-        assert_eq!(a.active.as_deref(),Some("local-input"));
+        assert_eq!(a.active.as_deref(), Some("local-input"));
     }
     #[test]
     fn buffered_task_is_not_idle_and_duplicate_run_cannot_arm_it_again() {
-        let mut a=Adapter::new("session".into()).unwrap();
-        let notification=json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"own-task","run_id":"run","status":"completed"});
+        let mut a = Adapter::new("session".into()).unwrap();
+        let notification = json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"own-task","run_id":"run","status":"completed"});
         a.consume(notification.clone()).unwrap();
-        a.consume(json!({"type":"system","subtype":"init","session_id":"session"})).unwrap();
+        a.consume(json!({"type":"system","subtype":"init","session_id":"session"}))
+            .unwrap();
         assert!(!a.idle_for_disposition());
         let output=a.consume(json!({"type":"result","session_id":"session","result":"task result","origin":{"kind":"task-notification","producer":"session-task","runId":"run"}})).unwrap();
-        assert_eq!(output[0]["method"],"thread/claude-task-output");
+        assert_eq!(output[0]["method"], "thread/claude-task-output");
         assert!(a.idle_for_disposition());
         a.consume(notification).unwrap();
-        a.consume(json!({"type":"system","subtype":"init","session_id":"session"})).unwrap();
+        a.consume(json!({"type":"system","subtype":"init","session_id":"session"}))
+            .unwrap();
         assert!(a.consume(json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"duplicate"}}})).is_err());
     }
 }
@@ -923,38 +1332,68 @@ mod model_tests {
     }
     #[test]
     fn model_catalog_and_control_scope_do_not_promote_late_old_turn_or_expired_ack() {
-        let mut a=Adapter::new("session".into()).unwrap();
-        a.request(1,"initialize",&json!({})).unwrap();
-        ack(&mut a,1,json!({"models":[{"value":"default","resolvedModel":"sonnet-version"},{"value":"sonnet","resolvedModel":"sonnet-version"},{"value":"opus","resolvedModel":"opus-version"}]}));
-        assert_eq!(a.models.len(),2);assert_eq!(a.models[0]["id"],"sonnet");
-        a.request(2,"turn/start",&json!({"input":[{"type":"text","text":"A"}]})).unwrap();
-        a.request(3,"model/set",&json!({"model":"opus"})).unwrap();
-        let result=ack(&mut a,3,json!({}));assert_eq!(result.last().unwrap()["result"]["model"],"opus-version");
+        let mut a = Adapter::new("session".into()).unwrap();
+        a.request(1, "initialize", &json!({})).unwrap();
+        ack(
+            &mut a,
+            1,
+            json!({"models":[{"value":"default","resolvedModel":"sonnet-version"},{"value":"sonnet","resolvedModel":"sonnet-version"},{"value":"opus","resolvedModel":"opus-version"}]}),
+        );
+        assert_eq!(a.models.len(), 2);
+        assert_eq!(a.models[0]["id"], "sonnet");
+        a.request(
+            2,
+            "turn/start",
+            &json!({"input":[{"type":"text","text":"A"}]}),
+        )
+        .unwrap();
+        a.request(3, "model/set", &json!({"model":"opus"})).unwrap();
+        let result = ack(&mut a, 3, json!({}));
+        assert_eq!(result.last().unwrap()["result"]["model"], "opus-version");
         a.commit_model(&result.last().unwrap()["result"]).unwrap();
         let late=a.consume(json!({"type":"assistant","message":{"id":"old-A","model":"sonnet-version","content":[{"type":"text","text":"old model output"}]}})).unwrap();
-        assert!(!late.iter().any(|e|e["method"]=="thread/model/updated"));
-        assert_eq!(a.current_model.as_deref(),Some("opus-version"));
-        a.request(4,"model/set",&json!({"model":"expired"})).unwrap();a.forget_control(4);
-        ack(&mut a,4,json!({}));assert_eq!(a.current_model.as_deref(),Some("opus-version"));
+        assert!(!late.iter().any(|e| e["method"] == "thread/model/updated"));
+        assert_eq!(a.current_model.as_deref(), Some("opus-version"));
+        a.request(4, "model/set", &json!({"model":"expired"}))
+            .unwrap();
+        a.forget_control(4);
+        ack(&mut a, 4, json!({}));
+        assert_eq!(a.current_model.as_deref(), Some("opus-version"));
         // An ACK parsed in the drop/forget gap still cannot commit a choice:
         // the timed-out RPC future never consumes this candidate result.
-        a.request(6,"model/set",&json!({"model":"gap"})).unwrap();
-        let candidate=ack(&mut a,6,json!({}));assert_eq!(candidate.last().unwrap()["result"]["model"],"gap");
-        a.forget_control(6);assert_eq!(a.current_model.as_deref(),Some("opus-version"));
-        a.consume(json!({"type":"result","subtype":"success","is_error":false})).unwrap();
-        let stale=a.consume(json!({"type":"system","subtype":"init","model":"old-after-timeout"})).unwrap();
-        assert!(!stale.iter().any(|e|e["method"]=="thread/model/updated"));
-        assert_eq!(a.current_model.as_deref(),Some("opus-version"));
-        a.request(5,"turn/start",&json!({"input":[{"type":"text","text":"B"}]})).unwrap();
-        let fresh=a.consume(json!({"type":"system","subtype":"init","model":"reported-actual"})).unwrap();
-        assert!(fresh.iter().any(|e|e["params"]["model"]=="reported-actual"));
-        assert_eq!(a.current_model.as_deref(),Some("reported-actual"));
+        a.request(6, "model/set", &json!({"model":"gap"})).unwrap();
+        let candidate = ack(&mut a, 6, json!({}));
+        assert_eq!(candidate.last().unwrap()["result"]["model"], "gap");
+        a.forget_control(6);
+        assert_eq!(a.current_model.as_deref(), Some("opus-version"));
+        a.consume(json!({"type":"result","subtype":"success","is_error":false}))
+            .unwrap();
+        let stale = a
+            .consume(json!({"type":"system","subtype":"init","model":"old-after-timeout"}))
+            .unwrap();
+        assert!(!stale.iter().any(|e| e["method"] == "thread/model/updated"));
+        assert_eq!(a.current_model.as_deref(), Some("opus-version"));
+        a.request(
+            5,
+            "turn/start",
+            &json!({"input":[{"type":"text","text":"B"}]}),
+        )
+        .unwrap();
+        let fresh = a
+            .consume(json!({"type":"system","subtype":"init","model":"reported-actual"}))
+            .unwrap();
+        assert!(fresh
+            .iter()
+            .any(|e| e["params"]["model"] == "reported-actual"));
+        assert_eq!(a.current_model.as_deref(), Some("reported-actual"));
     }
     #[test]
     fn malformed_catalog_refuses_boundedly_and_invalid_model_never_emits_control() {
-        let mut a=Adapter::new("session".into()).unwrap();
-        assert!(a.request(2,"model/set",&json!({"model":"bad\nmodel"})).is_err());
-        a.request(1,"initialize",&json!({})).unwrap();
+        let mut a = Adapter::new("session".into()).unwrap();
+        assert!(a
+            .request(2, "model/set", &json!({"model":"bad\nmodel"}))
+            .is_err());
+        a.request(1, "initialize", &json!({})).unwrap();
         assert!(a.consume(json!({"type":"control_response","response":{"subtype":"success","request_id":"1","response":{"models":{}}}})).is_err());
     }
 }
@@ -985,28 +1424,39 @@ pub async fn line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<
             .position(|b| *b == b'\n')
             .map(|i| i + 1)
             .unwrap_or(chunk.len());
-        if bytes.len() + end > IMAGE_BASE64_BYTES+2*1024*1024 {
+        if bytes.len() + end > IMAGE_BASE64_BYTES + 2 * 1024 * 1024 {
             bail!("claude_frame_limit");
         }
         bytes.extend_from_slice(&chunk[..end]);
         reader.consume(end);
         if bytes.last() == Some(&b'\n') {
-            let mut frame=crate::bounded_json::decode(&bytes).map_err(|_| anyhow::anyhow!("claude_invalid_frame"))?;
-            if bytes.len()>2*1024*1024 {
+            let mut frame = crate::bounded_json::decode(&bytes)
+                .map_err(|_| anyhow::anyhow!("claude_invalid_frame"))?;
+            if bytes.len() > 2 * 1024 * 1024 {
                 // Claude can echo the submitted image blocks. Validate then
                 // discard only those payloads; user echo never settles input.
                 // Nonimage data retains the original two-MiB admission cap.
-                if frame["type"]!="user" {bail!("claude_frame_limit");}
-                let content=frame["message"]["content"].as_array_mut().ok_or_else(||anyhow::anyhow!("claude_frame_limit"))?;
-                let mut count=0;let mut total=0;
+                if frame["type"] != "user" {
+                    bail!("claude_frame_limit");
+                }
+                let content = frame["message"]["content"]
+                    .as_array_mut()
+                    .ok_or_else(|| anyhow::anyhow!("claude_frame_limit"))?;
+                let mut count = 0;
+                let mut total = 0;
                 for block in content {
-                    if block["type"]=="image" {
-                        count+=1;total+=image_source(&block["source"])?;
-                        if count>crate::image_format::COUNT_LIMIT || total>IMAGE_BYTES {bail!("claude_frame_limit");}
-                        block["source"]["data"]=json!("");
+                    if block["type"] == "image" {
+                        count += 1;
+                        total += image_source(&block["source"])?;
+                        if count > crate::image_format::COUNT_LIMIT || total > IMAGE_BYTES {
+                            bail!("claude_frame_limit");
+                        }
+                        block["source"]["data"] = json!("");
                     }
                 }
-                if count==0 || serde_json::to_vec(&frame)?.len()>2*1024*1024 {bail!("claude_frame_limit");}
+                if count == 0 || serde_json::to_vec(&frame)?.len() > 2 * 1024 * 1024 {
+                    bail!("claude_frame_limit");
+                }
             }
             return Ok(Some(frame));
         }
@@ -1030,82 +1480,193 @@ mod tests {
     #[test]
     fn image_inputs_require_bounded_valid_native_image_bytes() {
         use base64::Engine;
-        let data="R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
-        let source=json!({"type":"base64","media_type":"image/gif","data":data});
+        let data = "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+        let source = json!({"type":"base64","media_type":"image/gif","data":data});
         assert!(image_source(&source).is_ok());
-        for invalid in [json!({"type":"url","media_type":"image/gif","data":data}),json!({"type":"base64","media_type":"image/png","data":data}),json!({"type":"base64","media_type":"image/gif","data":"!!!!"}),json!({"type":"base64","media_type":"image/gif","data":base64::engine::general_purpose::STANDARD.encode(b"not an image")})] {assert!(image_source(&invalid).is_err());}
-        let mut a=adapter();let blocks=vec![json!({"type":"image","source":source});9];
-        assert!(a.request(1,"turn/start",&json!({"input":blocks})).is_err());
-        assert!(a.active.is_none(),"invalid images refuse before starting input");
-        assert!(a.request(2,"turn/start",&json!({"input":[{"type":"localImage","path":"/not/admitted"}]})).is_err());
+        for invalid in [
+            json!({"type":"url","media_type":"image/gif","data":data}),
+            json!({"type":"base64","media_type":"image/png","data":data}),
+            json!({"type":"base64","media_type":"image/gif","data":"!!!!"}),
+            json!({"type":"base64","media_type":"image/gif","data":base64::engine::general_purpose::STANDARD.encode(b"not an image")}),
+        ] {
+            assert!(image_source(&invalid).is_err());
+        }
+        let mut a = adapter();
+        let blocks = vec![json!({"type":"image","source":source}); 9];
+        assert!(a
+            .request(1, "turn/start", &json!({"input":blocks}))
+            .is_err());
+        assert!(
+            a.active.is_none(),
+            "invalid images refuse before starting input"
+        );
+        assert!(a
+            .request(
+                2,
+                "turn/start",
+                &json!({"input":[{"type":"localImage","path":"/not/admitted"}]})
+            )
+            .is_err());
     }
     #[tokio::test]
     async fn large_user_image_echo_is_bounded_validated_and_never_becomes_turn_authority() {
         use base64::Engine;
-        let mut image=base64::engine::general_purpose::STANDARD.decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==").unwrap();image.pop();image.extend([0x21,0xfe]);
-        for _ in 0..8192 {image.push(255);image.extend([65;255]);}image.extend([0,0x3b]);
-        let source=json!({"type":"base64","media_type":"image/gif","data":base64::engine::general_purpose::STANDARD.encode(image)});
-        let frame=json!({"type":"user","message":{"content":[{"type":"image","source":source}]}});
-        let mut bytes=serde_json::to_vec(&frame).unwrap();assert!(bytes.len()>2*1024*1024);bytes.extend(b"\n{\"type\":\"result\",\"result\":\"done\"}\n");
-        let mut reader=tokio::io::BufReader::new(bytes.as_slice());let echo=line(&mut reader).await.unwrap().unwrap();
-        assert_eq!(echo["message"]["content"][0]["source"]["data"],"");
-        let mut a=adapter();start(&mut a);let events=a.consume(echo).unwrap();
-        assert!(!events.iter().any(|e|e["method"]=="turn/completed"));assert!(a.active.is_some());
-        assert_eq!(a.dispatched()["turn"]["items"].as_array().unwrap().len(),1,"echo adds no input receipt or item");
-        let result=line(&mut reader).await.unwrap().unwrap();assert_eq!(result["type"],"result");
-        let oversized=json!({"type":"assistant","message":{"content":"x".repeat(2*1024*1024)}}).to_string()+"\n";
-        assert!(line(&mut tokio::io::BufReader::new(oversized.as_bytes())).await.is_err());
-        let mut fake=frame;fake["message"]["content"][0]["source"]["media_type"]=json!("image/png");
-        let malformed=fake.to_string()+"\n";assert!(line(&mut tokio::io::BufReader::new(malformed.as_bytes())).await.is_err());
+        let mut image = base64::engine::general_purpose::STANDARD
+            .decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
+            .unwrap();
+        image.pop();
+        image.extend([0x21, 0xfe]);
+        for _ in 0..8192 {
+            image.push(255);
+            image.extend([65; 255]);
+        }
+        image.extend([0, 0x3b]);
+        let source = json!({"type":"base64","media_type":"image/gif","data":base64::engine::general_purpose::STANDARD.encode(image)});
+        let frame = json!({"type":"user","message":{"content":[{"type":"image","source":source}]}});
+        let mut bytes = serde_json::to_vec(&frame).unwrap();
+        assert!(bytes.len() > 2 * 1024 * 1024);
+        bytes.extend(b"\n{\"type\":\"result\",\"result\":\"done\"}\n");
+        let mut reader = tokio::io::BufReader::new(bytes.as_slice());
+        let echo = line(&mut reader).await.unwrap().unwrap();
+        assert_eq!(echo["message"]["content"][0]["source"]["data"], "");
+        let mut a = adapter();
+        start(&mut a);
+        let events = a.consume(echo).unwrap();
+        assert!(!events.iter().any(|e| e["method"] == "turn/completed"));
+        assert!(a.active.is_some());
+        assert_eq!(
+            a.dispatched()["turn"]["items"].as_array().unwrap().len(),
+            1,
+            "echo adds no input receipt or item"
+        );
+        let result = line(&mut reader).await.unwrap().unwrap();
+        assert_eq!(result["type"], "result");
+        let oversized = json!({"type":"assistant","message":{"content":"x".repeat(2*1024*1024)}})
+            .to_string()
+            + "\n";
+        assert!(line(&mut tokio::io::BufReader::new(oversized.as_bytes()))
+            .await
+            .is_err());
+        let mut fake = frame;
+        fake["message"]["content"][0]["source"]["media_type"] = json!("image/png");
+        let malformed = fake.to_string() + "\n";
+        assert!(line(&mut tokio::io::BufReader::new(malformed.as_bytes()))
+            .await
+            .is_err());
     }
     #[test]
     fn steering_is_exact_turn_input_not_interrupt_or_new_turn() {
-        let mut a=adapter();start(&mut a);
-        let turn=a.active.clone().unwrap();
+        let mut a = adapter();
+        start(&mut a);
+        let turn = a.active.clone().unwrap();
         a.consume(json!({"type":"assistant","message":{"id":"before","content":[{"type":"text","text":"before steer"}]}})).unwrap();
-        for id in [2,3] {
+        for id in [2, 3] {
             let request=a.request(id,"turn/steer",&json!({"threadId":"synthetic-session","expectedTurnId":turn,"input":[{"type":"text","text":"same steer"}]})).unwrap();
-            let Request::Steer {wire,turn:expected,epoch,item,after}=request else {panic!("expected native steer")};
-            let dispatched=a.steered(&expected,epoch,item,after.as_deref()).unwrap();
-            assert_eq!(wire["type"],"user");assert!(wire["uuid"].is_string());
-            assert_eq!(wire["message"]["content"][0]["text"],"same steer");
-            assert_eq!(dispatched["turn"]["id"],turn);
+            let Request::Steer {
+                wire,
+                turn: expected,
+                epoch,
+                item,
+                after,
+            } = request
+            else {
+                panic!("expected native steer")
+            };
+            let dispatched = a.steered(&expected, epoch, item, after.as_deref()).unwrap();
+            assert_eq!(wire["type"], "user");
+            assert!(wire["uuid"].is_string());
+            assert_eq!(wire["message"]["content"][0]["text"], "same steer");
+            assert_eq!(dispatched["turn"]["id"], turn);
         }
-        assert!(a.request(4,"turn/steer",&json!({"threadId":"wrong","expectedTurnId":turn,"input":[]})).is_err());
-        assert!(a.request(5,"turn/steer",&json!({"threadId":"synthetic-session","expectedTurnId":"wrong","input":[]})).is_err());
-        let final_events=a.consume(json!({"type":"result","result":"done"})).unwrap();
-        let items=final_events.last().unwrap()["params"]["turn"]["items"].as_array().unwrap();
-        assert_eq!(items.iter().map(|i|i["text"].as_str().unwrap()).collect::<Vec<_>>(),["local user","before steer","same steer","same steer","done"]);
-        assert_ne!(items[2]["id"],items[3]["id"]);
-        assert!(a.request(6,"turn/steer",&json!({"threadId":"synthetic-session","expectedTurnId":turn,"input":[]})).is_err());
+        assert!(a
+            .request(
+                4,
+                "turn/steer",
+                &json!({"threadId":"wrong","expectedTurnId":turn,"input":[]})
+            )
+            .is_err());
+        assert!(a
+            .request(
+                5,
+                "turn/steer",
+                &json!({"threadId":"synthetic-session","expectedTurnId":"wrong","input":[]})
+            )
+            .is_err());
+        let final_events = a.consume(json!({"type":"result","result":"done"})).unwrap();
+        let items = final_events.last().unwrap()["params"]["turn"]["items"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|i| i["text"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "local user",
+                "before steer",
+                "same steer",
+                "same steer",
+                "done"
+            ]
+        );
+        assert_ne!(items[2]["id"], items[3]["id"]);
+        assert!(a
+            .request(
+                6,
+                "turn/steer",
+                &json!({"threadId":"synthetic-session","expectedTurnId":turn,"input":[]})
+            )
+            .is_err());
     }
     #[test]
     fn result_during_steer_write_starts_the_next_turn_not_old_turn_completion() {
-        let mut a=adapter();start(&mut a);
-        let turn=a.active.clone().unwrap();
+        let mut a = adapter();
+        start(&mut a);
+        let turn = a.active.clone().unwrap();
         let Request::Steer {turn:expected,epoch,item,after,..}=a.request(2,"turn/steer",&json!({"threadId":"synthetic-session","expectedTurnId":turn,"input":[{"type":"text","text":"raced steer"}]})).unwrap() else {panic!()};
-        let completed=a.consume(json!({"type":"result","result":"old turn result"})).unwrap();
-        let items=completed.last().unwrap()["params"]["turn"]["items"].as_array().unwrap();
-        assert!(!items.iter().any(|i|i["text"]=="raced steer"));
+        let completed = a
+            .consume(json!({"type":"result","result":"old turn result"}))
+            .unwrap();
+        let items = completed.last().unwrap()["params"]["turn"]["items"]
+            .as_array()
+            .unwrap();
+        assert!(!items.iter().any(|i| i["text"] == "raced steer"));
         // Claude runs the queued input next: it becomes its own turn.
-        let next=a.steered(&expected,epoch,item,after.as_deref()).unwrap();
-        assert_ne!(next["turn"]["id"],json!(turn));
-        assert_eq!(next["turn"]["items"][0]["text"],"raced steer");
-        let started=a.consume(json!({"type":"system","subtype":"init"})).unwrap();
-        assert_eq!(started[0]["method"],"turn/started");
-        let done=a.consume(json!({"type":"result","result":"steer answered"})).unwrap();
-        assert_eq!(done.last().unwrap()["params"]["turn"]["id"],next["turn"]["id"]);
+        let next = a.steered(&expected, epoch, item, after.as_deref()).unwrap();
+        assert_ne!(next["turn"]["id"], json!(turn));
+        assert_eq!(next["turn"]["items"][0]["text"], "raced steer");
+        let started = a
+            .consume(json!({"type":"system","subtype":"init"}))
+            .unwrap();
+        assert_eq!(started[0]["method"], "turn/started");
+        let done = a
+            .consume(json!({"type":"result","result":"steer answered"}))
+            .unwrap();
+        assert_eq!(
+            done.last().unwrap()["params"]["turn"]["id"],
+            next["turn"]["id"]
+        );
     }
     #[test]
     fn unknown_frames_are_ignored_and_permission_requests_are_allowed() {
-        let mut a=adapter();start(&mut a);
-        assert!(a.consume(json!({"type":"brand_new_frame_type","session_id":"synthetic-session"})).is_ok());
+        let mut a = adapter();
+        start(&mut a);
+        assert!(a
+            .consume(json!({"type":"brand_new_frame_type","session_id":"synthetic-session"}))
+            .is_ok());
         let out=a.consume(json!({"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"}}})).unwrap();
-        let reply=&out.last().unwrap()["params"]["wire"];
-        assert_eq!(reply["response"]["request_id"],"req-1");
-        assert_eq!(reply["response"]["response"]["behavior"],"allow");
-        assert_eq!(reply["response"]["response"]["updatedInput"]["command"],"ls");
-        assert!(a.consume(json!({"type":"result","session_id":"another-session"})).is_err(),"only a session mismatch is refused");
+        let reply = &out.last().unwrap()["params"]["wire"];
+        assert_eq!(reply["response"]["request_id"], "req-1");
+        assert_eq!(reply["response"]["response"]["behavior"], "allow");
+        assert_eq!(
+            reply["response"]["response"]["updatedInput"]["command"],
+            "ls"
+        );
+        assert!(
+            a.consume(json!({"type":"result","session_id":"another-session"}))
+                .is_err(),
+            "only a session mismatch is refused"
+        );
     }
     #[test]
     fn idle_is_not_a_result_and_cannot_release_a_second_turn() {
@@ -1169,7 +1730,12 @@ mod tests {
     #[test]
     fn equal_body_final_only_message_does_not_reuse_another_message_block() {
         let mut a = Adapter::new("session".into()).unwrap();
-        a.request(1, "turn/start", &json!({"input":[{"type":"text","text":"prompt"}]})).unwrap();
+        a.request(
+            1,
+            "turn/start",
+            &json!({"input":[{"type":"text","text":"prompt"}]}),
+        )
+        .unwrap();
         a.consume(json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"message-a"}}})).unwrap();
         a.consume(json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"same"}}})).unwrap();
         for id in ["message-a", "message-a", "message-b"] {
@@ -1188,39 +1754,93 @@ mod effort_tests {
     }
     #[test]
     fn effort_probe_and_ack_are_candidates_only_until_waiter_commits() {
-        let mut a=Adapter::new("session".into()).unwrap();
-        a.request(1,"initialize",&json!({})).unwrap();
-        ack(&mut a,1,json!({"models":[{"value":"default","resolvedModel":"native","supportsEffort":true,"supportedEffortLevels":["high"," HIGH ","bad",17]}]}));
-        assert_eq!(a.visible_models()[0]["supportedReasoningEfforts"],json!([]));
-        a.request(2,"effort/probe",&json!({})).unwrap();
-        let result=ack(&mut a,2,json!({}));assert!(!a.effort_supported);
+        let mut a = Adapter::new("session".into()).unwrap();
+        a.request(1, "initialize", &json!({})).unwrap();
+        ack(
+            &mut a,
+            1,
+            json!({"models":[{"value":"default","resolvedModel":"native","supportsEffort":true,"supportedEffortLevels":["high"," HIGH ","bad",17]}]}),
+        );
+        assert_eq!(
+            a.visible_models()[0]["supportedReasoningEfforts"],
+            json!([])
+        );
+        a.request(2, "effort/probe", &json!({})).unwrap();
+        let result = ack(&mut a, 2, json!({}));
+        assert!(!a.effort_supported);
         a.commit_effort(&result[0]["result"]).unwrap();
-        assert_eq!(a.visible_models()[0]["supportedReasoningEfforts"],json!([{"reasoningEffort":"high","description":""}]));
-        a.request(3,"effort/set",&json!({"reasoningEffort":"high"})).unwrap();
-        let result=ack(&mut a,3,json!({}));a.forget_control(3);
-        assert_eq!(result[0]["result"]["effort"],"high");assert!(!a.effort_known,"parse-before-cancel does not commit");
-        a.request(4,"effort/set",&json!({"reasoningEffort":null})).unwrap();a.forget_control(4);
-        let late=ack(&mut a,4,json!({}));assert!(a.commit_effort(&late[0]["result"]).is_err());
+        assert_eq!(
+            a.visible_models()[0]["supportedReasoningEfforts"],
+            json!([{"reasoningEffort":"high","description":""}])
+        );
+        a.request(3, "effort/set", &json!({"reasoningEffort":"high"}))
+            .unwrap();
+        let result = ack(&mut a, 3, json!({}));
+        a.forget_control(3);
+        assert_eq!(result[0]["result"]["effort"], "high");
+        assert!(!a.effort_known, "parse-before-cancel does not commit");
+        a.request(4, "effort/set", &json!({"reasoningEffort":null}))
+            .unwrap();
+        a.forget_control(4);
+        let late = ack(&mut a, 4, json!({}));
+        assert!(a.commit_effort(&late[0]["result"]).is_err());
         assert!(!a.effort_known);
-        a.request(5,"effort/set",&json!({"reasoningEffort":"high"})).unwrap();
-        let prior=a.observe_model("native");
-        let response=ack(&mut a,5,json!({}));let committed=a.commit_effort(&response[0]["result"]).unwrap();
-        assert!(prior["params"]["effortRevision"].as_u64()<committed["effortRevision"].as_u64(),"queued report cannot undo later effort ACK");
-        assert_eq!(prior["params"]["modelRevision"],json!(a.model_revision),"effort does not invalidate an independently learned model");
+        a.request(5, "effort/set", &json!({"reasoningEffort":"high"}))
+            .unwrap();
+        let prior = a.observe_model("native");
+        let response = ack(&mut a, 5, json!({}));
+        let committed = a.commit_effort(&response[0]["result"]).unwrap();
+        assert!(
+            prior["params"]["effortRevision"].as_u64() < committed["effortRevision"].as_u64(),
+            "queued report cannot undo later effort ACK"
+        );
+        assert_eq!(
+            prior["params"]["modelRevision"],
+            json!(a.model_revision),
+            "effort does not invalidate an independently learned model"
+        );
     }
     #[test]
     fn effort_attempt_preserves_epoch_and_validates_target_before_mutation() {
-        let mut a=Adapter::new("session".into()).unwrap();
-        a.request(1,"initialize",&json!({})).unwrap();
-        ack(&mut a,1,json!({"models":[{"value":"default","resolvedModel":"native","supportsEffort":true,"supportedEffortLevels":["high"]},{"value":"legacy"}]}));
-        a.request(2,"effort/probe",&json!({})).unwrap();let probe=ack(&mut a,2,json!({}));a.commit_effort(&probe[0]["result"]).unwrap();
-        assert!(a.request(3,"settings/validate",&json!({"model":"legacy","reasoningEffort":"high"})).is_err());
-        assert_eq!(a.settings_epoch,0);
-        a.request(4,"turn/start",&json!({"input":[{"type":"text","text":"A"}]})).unwrap();
-        a.request(5,"effort/set",&json!({"reasoningEffort":"high"})).unwrap();
-        a.unknown_effort();a.forget_control(5);
-        let old=a.consume(json!({"type":"system","subtype":"init","model":"old"})).unwrap();
-        assert!(!old.iter().any(|e|e["method"]=="thread/model/updated"));assert!(!a.effort_known);
-        assert!(a.request(6,"settings/validate",&json!({"model":null,"reasoningEffort":"high"})).is_err());
+        let mut a = Adapter::new("session".into()).unwrap();
+        a.request(1, "initialize", &json!({})).unwrap();
+        ack(
+            &mut a,
+            1,
+            json!({"models":[{"value":"default","resolvedModel":"native","supportsEffort":true,"supportedEffortLevels":["high"]},{"value":"legacy"}]}),
+        );
+        a.request(2, "effort/probe", &json!({})).unwrap();
+        let probe = ack(&mut a, 2, json!({}));
+        a.commit_effort(&probe[0]["result"]).unwrap();
+        assert!(a
+            .request(
+                3,
+                "settings/validate",
+                &json!({"model":"legacy","reasoningEffort":"high"})
+            )
+            .is_err());
+        assert_eq!(a.settings_epoch, 0);
+        a.request(
+            4,
+            "turn/start",
+            &json!({"input":[{"type":"text","text":"A"}]}),
+        )
+        .unwrap();
+        a.request(5, "effort/set", &json!({"reasoningEffort":"high"}))
+            .unwrap();
+        a.unknown_effort();
+        a.forget_control(5);
+        let old = a
+            .consume(json!({"type":"system","subtype":"init","model":"old"}))
+            .unwrap();
+        assert!(!old.iter().any(|e| e["method"] == "thread/model/updated"));
+        assert!(!a.effort_known);
+        assert!(a
+            .request(
+                6,
+                "settings/validate",
+                &json!({"model":null,"reasoningEffort":"high"})
+            )
+            .is_err());
     }
 }

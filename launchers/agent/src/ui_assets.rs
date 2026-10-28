@@ -14,7 +14,10 @@ mod tests {
     #[test]
     fn core_ui_entry_points_are_embedded() {
         for name in ["index.html", "boot.js", "ui.js", "ui.css", "ui-assets.json"] {
-            assert!(super::get(name).is_some_and(|bytes| !bytes.is_empty()), "{name}");
+            assert!(
+                super::get(name).is_some_and(|bytes| !bytes.is_empty()),
+                "{name}"
+            );
         }
         assert!(super::get("../Cargo.toml").is_none());
     }

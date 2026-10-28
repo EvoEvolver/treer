@@ -195,7 +195,10 @@ mod tests {
         fn live(&self, bytes: &[u8]) {
             let path = self.root.join("rust-spike.json");
             let _ = fs::remove_file(&path);
-            fs_util::create_new(&path).unwrap().write_all(bytes).unwrap();
+            fs_util::create_new(&path)
+                .unwrap()
+                .write_all(bytes)
+                .unwrap();
         }
     }
     impl Drop for Fixture {

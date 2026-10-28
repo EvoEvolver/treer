@@ -11,7 +11,10 @@ fn env(name: &str) -> Option<String> {
 /// accepts the `.cmd`/`.bat` shims that npm, pnpm and yarn install.
 fn candidates(name: &str) -> Vec<String> {
     if cfg!(windows) {
-        ["exe", "cmd", "bat"].iter().map(|ext| format!("{name}.{ext}")).collect()
+        ["exe", "cmd", "bat"]
+            .iter()
+            .map(|ext| format!("{name}.{ext}"))
+            .collect()
     } else {
         vec![name.to_string()]
     }
@@ -60,11 +63,15 @@ pub(crate) fn provider(harness: &str) -> Result<(String, Vec<String>)> {
         _ => ("CODEX_BIN", "codex"),
     };
     let path = match env(variable) {
-        Some(path) if !Path::new(&path).is_absolute() => bail!("{variable} must be an absolute path"),
+        Some(path) if !Path::new(&path).is_absolute() => {
+            bail!("{variable} must be an absolute path")
+        }
         Some(path) => PathBuf::from(path),
         None => match which(name) {
             Some(path) => path,
-            None => bail!("{name} was not found on PATH; install it or set {variable} to its absolute path"),
+            None => bail!(
+                "{name} was not found on PATH; install it or set {variable} to its absolute path"
+            ),
         },
     };
     Ok(launchable(path))
@@ -90,7 +97,9 @@ fn launchable(path: PathBuf) -> (String, Vec<String>) {
 }
 
 fn shim_target(shim: &Path) -> Option<(String, Vec<String>)> {
-    let bytes = std::fs::read(shim).ok().filter(|bytes| bytes.len() <= 64 * 1024)?;
+    let bytes = std::fs::read(shim)
+        .ok()
+        .filter(|bytes| bytes.len() <= 64 * 1024)?;
     let directory = shim.parent()?;
     let target = directory.join(shim_relative_target(&String::from_utf8_lossy(&bytes))?);
     if !target.is_file() {
@@ -104,7 +113,10 @@ fn shim_target(shim: &Path) -> Option<(String, Vec<String>)> {
     let node = Some(directory.join("node.exe"))
         .filter(|node| node.is_file())
         .or_else(|| which("node"))?;
-    Some((node.display().to_string(), vec![target.display().to_string()]))
+    Some((
+        node.display().to_string(),
+        vec![target.display().to_string()],
+    ))
 }
 
 /// The script (or bundled executable) a cmd-shim runs, relative to the
@@ -124,7 +136,9 @@ fn shim_relative_target(content: &str) -> Option<PathBuf> {
         .map(|relative| relative.trim_start_matches(['\\', '/']))
         .filter(|relative| {
             let lower = relative.to_ascii_lowercase();
-            [".js", ".cjs", ".mjs", ".exe"].iter().any(|ext| lower.ends_with(ext))
+            [".js", ".cjs", ".mjs", ".exe"]
+                .iter()
+                .any(|ext| lower.ends_with(ext))
                 && lower != "node.exe"
                 && !relative.contains('%')
         })
@@ -146,11 +160,18 @@ mod tests {
 
     #[test]
     fn npm_and_pnpm_shims_name_their_script() {
-        let npm: PathBuf = ["node_modules", "@openai", "codex", "bin", "codex.js"].iter().collect();
+        let npm: PathBuf = ["node_modules", "@openai", "codex", "bin", "codex.js"]
+            .iter()
+            .collect();
         assert_eq!(shim_relative_target(NPM), Some(npm));
-        let pnpm: PathBuf = ["..", "@anthropic-ai", "claude-code", "cli.js"].iter().collect();
+        let pnpm: PathBuf = ["..", "@anthropic-ai", "claude-code", "cli.js"]
+            .iter()
+            .collect();
         assert_eq!(shim_relative_target(PNPM), Some(pnpm));
-        assert_eq!(shim_relative_target("@echo off\r\nC:\\tools\\real.exe %*\r\n"), None);
+        assert_eq!(
+            shim_relative_target("@echo off\r\nC:\\tools\\real.exe %*\r\n"),
+            None
+        );
         assert_eq!(shim_relative_target("\"%dp0%\\node.exe\" %*"), None);
     }
 
@@ -180,10 +201,16 @@ mod tests {
         let (program, args) = launchable(base.join("codex.cmd"));
         assert_eq!(PathBuf::from(program), base.join("node.exe"));
         assert_eq!(args.len(), 1);
-        assert_eq!(std::fs::canonicalize(&args[0]).unwrap(), std::fs::canonicalize(&script).unwrap());
+        assert_eq!(
+            std::fs::canonicalize(&args[0]).unwrap(),
+            std::fs::canonicalize(&script).unwrap()
+        );
         // A batch file that is not a shim is run as itself.
         std::fs::write(base.join("other.cmd"), "@echo off\r\n").unwrap();
-        assert_eq!(launchable(base.join("other.cmd")), (base.join("other.cmd").display().to_string(), Vec::new()));
+        assert_eq!(
+            launchable(base.join("other.cmd")),
+            (base.join("other.cmd").display().to_string(), Vec::new())
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -203,7 +230,10 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "[app-server] [--listen] [stdio://]");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "[app-server] [--listen] [stdio://]"
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 }

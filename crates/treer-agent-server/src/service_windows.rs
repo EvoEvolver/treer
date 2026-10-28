@@ -20,7 +20,7 @@ fn log_path(paths: &ServicePaths, config: &ServiceConfig) -> PathBuf {
     ))
 }
 /// Serializes start/stop/relocation of one Host across processes and sessions.
-pub(crate) fn host_lock(paths: &ServicePaths, config: &ServiceConfig) -> Result<fs::File> {
+fn host_lock(paths: &ServicePaths, config: &ServiceConfig) -> Result<fs::File> {
     let path = paths.state_dir.join(format!(
         "agent-host-{}.lock",
         component_key(&config.server_id)

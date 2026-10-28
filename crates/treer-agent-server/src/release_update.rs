@@ -376,8 +376,10 @@ pub(crate) async fn download_launcher(
 ) -> Result<Vec<u8>> {
     let base = normalize_base_url(base)?;
     let manifest = signed_manifest(client, &base, version, key).await?;
-    let artifact = select_artifact(&manifest, version, platform, LAUNCHER_ARTIFACT)?
-        .with_context(|| format!("signed {version} manifest does not contain {platform}/{LAUNCHER_ARTIFACT}"))?;
+    let artifact =
+        select_artifact(&manifest, version, platform, LAUNCHER_ARTIFACT)?.with_context(|| {
+            format!("signed {version} manifest does not contain {platform}/{LAUNCHER_ARTIFACT}")
+        })?;
     fetch_binary(client, &base, artifact).await
 }
 

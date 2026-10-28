@@ -1,7 +1,7 @@
 # Release process
 
 - Status: maintained
-- Last reviewed: 2026-10-27
+- Last reviewed: 2026-10-28
 
 A release is an exact Git commit on `main`. The same commit is built once per
 platform by CI, deployed to the hosted Canary, then to Production, tagged for
@@ -199,3 +199,46 @@ manifest beside the other executables; there is no separate launcher channel.
 `treer-launch update` (`treer-agent-server launcher update`) installs only that
 artifact, by default at the installed Controller's version. Consumers treat a
 manifest without `treer-launch` as predating it.
+
+## Release notes
+
+### 0.2.0
+
+Breaking changes; read before upgrading a workspace or machine:
+
+- **Controller update protocol v2.** Controllers self-update by downloading a
+  signed release, replacing their executables and restarting the Host. A
+  machine on 0.1.x cannot follow the new protocol from the Console: run
+  `treer-agent-server update` once on each machine (or `update --version
+  v0.2.0`); later updates work from the Console again.
+- **Agent launcher renamed `treer-launch`.** It is a self-contained Rust binary
+  shipped in every signed release and installed or updated with Treer
+  (`treer-launch update`). `treer-agent` remains as an alias; the Node
+  launcher and its installer are gone.
+- **ACP profiles removed.** Only the Codex and Claude harnesses of
+  `treer-launch` are supported; recreate ACP Agents with one of them.
+- **Removed features:** Voice, Console provider CLI install, and Managed App
+  email. Their Proxy tables are dropped on upgrade: `controller_update_*`,
+  `provider_cli_*` and `app_email_*` (back them up first if you need history).
+- **Launcher auto-recovery.** The launcher no longer stops and waits for a
+  human: a failed provider is restarted and the same session resumed with
+  capped backoff and no attempt cap; an in-flight prompt is settled from the
+  resumed history and never replayed when history shows it was delivered; the
+  queue is never paused. The manual `acknowledge_unknown` recovery action and
+  the private-store VCS placement rule are removed. See
+  [launchers/agent/README.md](../launchers/agent/README.md).
+- **Re-enrolling replaces stale configuration.** `treer-agent-server connect`
+  on a machine that already has a registration for the workspace replaces it
+  when the root or Proxy changes or the Proxy no longer accepts the old
+  machine identity (for example, a machine deleted in the Console). Running
+  workloads on the old Host need one confirmation (or `--replace`).
+  `service relocate-root` is removed.
+- **Windows:** Treer installs and runs as a standard user, like Unix (the
+  Administrators-group rule and `windows_requires_administrator` are gone;
+  Host and registration locks are per-user file locks). `treer-launch` runs
+  the same journal, history/recovery, file browser (directory listing
+  included), image attachments and task-output code as on Unix, and finds
+  npm/pnpm/yarn `.cmd` provider shims on PATH without `CODEX_BIN`/`CLAUDE_BIN`.
+- **Legacy Node state import removed.** `--import-node-state`,
+  `--import-claude-state` and `--restore-node-backup` are gone; state left
+  under `<cwd>/.treer/agents/` by the Node launcher is ignored.

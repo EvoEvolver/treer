@@ -30,14 +30,17 @@ impl std::error::Error for PublicationUncertain {}
 
 /// A process-lifetime, nonblocking single-writer OS file lock. Keep the file
 /// in place: unlinking a lock file could let another process lock a new one.
-pub struct Lease { _file: File }
+pub struct Lease {
+    _file: File,
+}
 impl Lease {
     pub fn acquire(root: &Path, cwd: &Path, _agent: &str) -> Result<Self> {
-        let store = Store::open(root, cwd)
-            .map_err(|_| anyhow::anyhow!("private_state_unavailable"))?;
+        let store =
+            Store::open(root, cwd).map_err(|_| anyhow::anyhow!("private_state_unavailable"))?;
         let file = fs_util::open_or_create(&store.root.join(LEASE))
             .map_err(|_| anyhow::anyhow!("private_state_lease_unavailable"))?;
-        let metadata = file.metadata()
+        let metadata = file
+            .metadata()
             .map_err(|_| anyhow::anyhow!("private_state_lease_unavailable"))?;
         if !fs_util::is_private_file(&metadata) {
             bail!("private_state_lease_unavailable");
@@ -97,14 +100,18 @@ impl Store {
         if data.len() as u64 > LIVE_LIMIT {
             bail!("state too large");
         }
-        Ok(Some(crate::bounded_json::decode(&data)
-            .map_err(|_| anyhow::anyhow!("private_state_invalid"))?))
+        Ok(Some(
+            crate::bounded_json::decode(&data)
+                .map_err(|_| anyhow::anyhow!("private_state_invalid"))?,
+        ))
     }
     /// Write `bytes` to a new exclusive temporary and atomically replace
     /// `name` with it. The rename publishes the new bytes; a later
     /// directory-sync error is `PublicationUncertain`.
     fn publish(&self, temporary: &str, name: &str, bytes: &[u8]) -> Result<()> {
-        let temp = self.root.join(format!("{temporary}-{}.tmp", uuid::Uuid::new_v4()));
+        let temp = self
+            .root
+            .join(format!("{temporary}-{}.tmp", uuid::Uuid::new_v4()));
         let mut file = fs_util::create_new(&temp)?;
         let result = (|| -> Result<()> {
             file.write_all(bytes)?;
@@ -127,14 +134,17 @@ impl Store {
         result
     }
     pub fn save_stderr(&self, bytes: &[u8]) -> Result<()> {
-        if bytes.len() > STDERR_LIMIT { bail!("stderr_tail_too_large"); }
+        if bytes.len() > STDERR_LIMIT {
+            bail!("stderr_tail_too_large");
+        }
         self.publish(".rust-stderr", "rust-provider-stderr.log", bytes)
     }
     pub fn save(&self, state: &Value) -> Result<()> {
-        crate::bounded_json::admit(state)
-            .map_err(|_| anyhow::anyhow!("private_state_invalid"))?;
+        crate::bounded_json::admit(state).map_err(|_| anyhow::anyhow!("private_state_invalid"))?;
         #[cfg(feature = "fixture-harness")]
-        if fixture_checkpoint_failure(state) { bail!("fixture_checkpoint_failure"); }
+        if fixture_checkpoint_failure(state) {
+            bail!("fixture_checkpoint_failure");
+        }
         let data = serde_json::to_vec(state)?;
         if data.len() as u64 > LIVE_LIMIT {
             bail!("state too large");
@@ -144,7 +154,10 @@ impl Store {
         self.publish(".rust-spike", "rust-spike.json", &data)?;
         #[cfg(feature = "fixture-harness")]
         if std::env::var("RUST_SPIKE_CHECKPOINT_FAIL").as_deref() == Ok("directory-sync")
-            && state["records"].as_array().is_some_and(|records| !records.is_empty()) {
+            && state["records"]
+                .as_array()
+                .is_some_and(|records| !records.is_empty())
+        {
             return Err(PublicationUncertain.into());
         }
         Ok(())
@@ -156,14 +169,22 @@ impl Store {
 
 #[cfg(feature = "fixture-harness")]
 fn fixture_checkpoint_failure(state: &Value) -> bool {
-    let Ok(phase) = std::env::var("RUST_SPIKE_CHECKPOINT_FAIL") else { return false; };
+    let Ok(phase) = std::env::var("RUST_SPIKE_CHECKPOINT_FAIL") else {
+        return false;
+    };
     let record = &state["records"][0];
     let edit = &state["goals"]["edits"][0];
     match phase.as_str() {
-        "dispatch-intent" => record["submission"]["state"] == "running" && record["submission"]["turn_id"].is_null(),
+        "dispatch-intent" => {
+            record["submission"]["state"] == "running" && record["submission"]["turn_id"].is_null()
+        }
         "dispatch-result" => record["submission"]["turn_id"].is_string(),
         "completion" => record["submission"]["state"] == "done",
-        "completion-prune" => state["records"].as_array().is_some_and(|records| records.iter().any(|r| r["operation"] == "prune-fault" && r["submission"]["state"] == "done")),
+        "completion-prune" => state["records"].as_array().is_some_and(|records| {
+            records
+                .iter()
+                .any(|r| r["operation"] == "prune-fault" && r["submission"]["state"] == "done")
+        }),
         "notification-ack" => record["notified"] == true,
         "goal-applying" => edit["applying"] == true,
         "goal-applied" => edit["applied"] == true,
@@ -212,14 +233,22 @@ pub(crate) mod tests {
         let store = f.store();
         assert_eq!(store.load().unwrap(), None);
         for n in 0..3 {
-            store.save(&json!({"schema":1,"records":[],"revision":n})).unwrap();
+            store
+                .save(&json!({"schema":1,"records":[],"revision":n}))
+                .unwrap();
             assert_eq!(store.load().unwrap().unwrap()["revision"], n);
         }
         store.save_stderr(b"synthetic bounded diagnostic").unwrap();
         assert!(store.save_stderr(&[0; 8193]).is_err());
-        assert_eq!(fs::read(f.root.join("rust-provider-stderr.log")).unwrap(), b"synthetic bounded diagnostic");
+        assert_eq!(
+            fs::read(f.root.join("rust-provider-stderr.log")).unwrap(),
+            b"synthetic bounded diagnostic"
+        );
         // Only the published files and no leftover temporaries.
-        let mut names: Vec<_> = fs::read_dir(&f.root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        let mut names: Vec<_> = fs::read_dir(&f.root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
         names.sort();
         assert_eq!(names, ["rust-provider-stderr.log", "rust-spike.json"]);
     }
@@ -249,7 +278,10 @@ pub(crate) mod tests {
             };
         let _ = child.kill();
         child.wait().unwrap();
-        assert!(observed && refused, "real child must own the exclusive lease");
+        assert!(
+            observed && refused,
+            "real child must own the exclusive lease"
+        );
         let lease = Lease::acquire(&f.root, &f.cwd, "next").unwrap();
         assert!(f.root.join(LEASE).exists());
         drop(lease);
@@ -261,7 +293,11 @@ pub(crate) mod tests {
         let root = PathBuf::from(std::env::var_os("STORE_LEASE_ROOT").unwrap());
         let cwd = PathBuf::from(std::env::var_os("STORE_LEASE_CWD").unwrap());
         let _lease = Lease::acquire(&root, &cwd, "synthetic").unwrap();
-        fs::write(PathBuf::from(std::env::var_os("STORE_LEASE_READY").unwrap()), b"ready").unwrap();
+        fs::write(
+            PathBuf::from(std::env::var_os("STORE_LEASE_READY").unwrap()),
+            b"ready",
+        )
+        .unwrap();
         std::thread::sleep(Duration::from_secs(10));
     }
 }
@@ -273,7 +309,8 @@ mod unix_tests {
 
     #[test]
     fn placement_inside_cwd_or_vcs_is_allowed_but_unsafe_modes_are_refused() {
-        let home = fs::canonicalize(std::env::temp_dir()).unwrap()
+        let home = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
             .join(format!("rust-home-placement-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&home).unwrap();
         fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
@@ -283,7 +320,10 @@ mod unix_tests {
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let store = Store::open(&root, &home).unwrap();
         store.save(&serde_json::json!({"records":[]})).unwrap();
-        assert_eq!(store.load().unwrap(), Some(serde_json::json!({"records":[]})));
+        assert_eq!(
+            store.load().unwrap(),
+            Some(serde_json::json!({"records":[]}))
+        );
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(Store::open(&root, &home).is_err());
         fs::remove_dir_all(home).unwrap();
@@ -291,7 +331,8 @@ mod unix_tests {
 
     #[test]
     fn ambiguous_or_oversized_json_is_refused_without_rewriting_source() {
-        let base = fs::canonicalize(std::env::temp_dir()).unwrap()
+        let base = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
             .join(format!("rust-json-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&base).unwrap();
         fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
@@ -302,15 +343,24 @@ mod unix_tests {
         fs::create_dir(&cwd).unwrap();
         let store = Store::open(&root, &cwd).unwrap();
         let path = root.join("rust-spike.json");
-        let ambiguous = br#"{"dispatchBlocked":true,"dispatchBlocked":false,"credential-canary":"synthetic"}"#;
+        let ambiguous =
+            br#"{"dispatchBlocked":true,"dispatchBlocked":false,"credential-canary":"synthetic"}"#;
         fs::write(&path, ambiguous).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(store.load().unwrap_err().to_string(), "private_state_invalid");
+        assert_eq!(
+            store.load().unwrap_err().to_string(),
+            "private_state_invalid"
+        );
         assert_eq!(fs::read(&path).unwrap(), ambiguous);
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         let mut deep = Value::Null;
-        for _ in 0..32 { deep = serde_json::json!([deep]); }
-        assert_eq!(store.save(&deep).unwrap_err().to_string(), "private_state_invalid");
+        for _ in 0..32 {
+            deep = serde_json::json!([deep]);
+        }
+        assert_eq!(
+            store.save(&deep).unwrap_err().to_string(),
+            "private_state_invalid"
+        );
         assert_eq!(fs::read(&path).unwrap(), ambiguous);
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         let valid = serde_json::json!({"schema":1,"dispatchBlocked":true,"records":[]});

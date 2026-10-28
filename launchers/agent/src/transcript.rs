@@ -54,17 +54,31 @@ impl Transcript {
         if serde_json::to_writer(&mut counter, &turn).is_err() {
             return Err(HistoryLimit.into());
         }
-        let mut next_bytes=self.bytes-old_size+counter.bytes;
-        let mut next_count=self.turns.len()+usize::from(index.is_none());
-        let mut next_nodes=crate::provider_stream::shape_nodes(&turn)+self.turns.iter().enumerate().filter(|(i,_)|Some(*i)!=index).map(|(_,t)|crate::provider_stream::shape_nodes(t)).sum::<usize>();
-        let mut remove=Vec::new();
-        for (i,old) in self.turns.iter().enumerate() {
-            if next_bytes<=MAX_BYTES && next_count<=MAX_TURNS && next_nodes<=500_000 {break;}
-            if Some(i)!=index && old["status"]!="inProgress" {
-                remove.push(i);next_bytes-=self.sizes[i];next_count-=1;next_nodes-=crate::provider_stream::shape_nodes(old);
+        let mut next_bytes = self.bytes - old_size + counter.bytes;
+        let mut next_count = self.turns.len() + usize::from(index.is_none());
+        let mut next_nodes = crate::provider_stream::shape_nodes(&turn)
+            + self
+                .turns
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| Some(*i) != index)
+                .map(|(_, t)| crate::provider_stream::shape_nodes(t))
+                .sum::<usize>();
+        let mut remove = Vec::new();
+        for (i, old) in self.turns.iter().enumerate() {
+            if next_bytes <= MAX_BYTES && next_count <= MAX_TURNS && next_nodes <= 500_000 {
+                break;
+            }
+            if Some(i) != index && old["status"] != "inProgress" {
+                remove.push(i);
+                next_bytes -= self.sizes[i];
+                next_count -= 1;
+                next_nodes -= crate::provider_stream::shape_nodes(old);
             }
         }
-        if next_bytes>MAX_BYTES || next_count>MAX_TURNS || next_nodes>500_000 {return Err(HistoryLimit.into());}
+        if next_bytes > MAX_BYTES || next_count > MAX_TURNS || next_nodes > 500_000 {
+            return Err(HistoryLimit.into());
+        }
         self.bytes = self.bytes - old_size + counter.bytes;
         if let Some(i) = index {
             self.turns[i] = turn;
@@ -74,8 +88,17 @@ impl Transcript {
             self.turns.push(turn);
             self.sizes.push(counter.bytes);
         }
-        for i in remove.into_iter().rev() {self.bytes-=self.sizes.remove(i);self.turns.remove(i);self.dropped+=1;}
-        self.positions=self.turns.iter().enumerate().map(|(i,t)|(t["id"].as_str().unwrap().to_owned(),i)).collect();
+        for i in remove.into_iter().rev() {
+            self.bytes -= self.sizes.remove(i);
+            self.turns.remove(i);
+            self.dropped += 1;
+        }
+        self.positions = self
+            .turns
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t["id"].as_str().unwrap().to_owned(), i))
+            .collect();
         Ok(())
     }
 }
@@ -139,15 +162,17 @@ mod tests {
     #[test]
     fn recent_window_evicts_finished_turns_and_preserves_active() {
         let mut history = Transcript::default();
-        history.insert(json!({"id":"active","status":"inProgress"})).unwrap();
+        history
+            .insert(json!({"id":"active","status":"inProgress"}))
+            .unwrap();
         for n in 0..1000 {
             history
                 .insert(json!({"id":n.to_string(),"items":[]}))
                 .unwrap();
         }
         assert_eq!(history.len(), MAX_TURNS);
-        assert_eq!(history[0]["id"],"active");
-        assert_eq!(history[1]["id"],"951");
+        assert_eq!(history[0]["id"], "active");
+        assert_eq!(history[1]["id"], "951");
         history
             .insert(json!({"id":"active","status":"completed","items":["replacement"]}))
             .unwrap();

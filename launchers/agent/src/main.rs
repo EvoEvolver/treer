@@ -1,27 +1,27 @@
 mod attachments;
 use treer_agent_launcher::bounded_json;
+mod claude;
+mod claude_goal;
+mod cli;
+mod disk_history;
 mod files;
 mod fs_util;
 mod goals;
-mod claude_goal;
-mod disk_history;
-mod provider_stream;
 mod http;
 mod image_format;
 mod model;
+mod provider_stream;
 mod rpc;
-mod claude;
-mod soul_terminal;
-mod tasks;
-mod task_output;
 mod runtime;
-mod store;
-mod transcript;
-mod cli;
-mod tools;
-mod ui_assets;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod session_transfer;
+mod soul_terminal;
+mod store;
+mod task_output;
+mod tasks;
+mod tools;
+mod transcript;
+mod ui_assets;
 
 use anyhow::{bail, Result};
 use axum::{
@@ -78,22 +78,34 @@ async fn main() -> Result<()> {
         cli::Next::Exit(code) => std::process::exit(code),
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let mut launch = if std::env::args().nth(1).as_deref()==Some("session") && matches!(std::env::args().nth(2).as_deref(),Some("launch"|"run")) {
-        Some(session_transfer::launch(&std::env::args().skip(3).collect::<Vec<_>>(),std::env::args().nth(2).as_deref()==Some("run"))?)
-    } else {None};
+    let mut launch = if std::env::args().nth(1).as_deref() == Some("session")
+        && matches!(std::env::args().nth(2).as_deref(), Some("launch" | "run"))
+    {
+        Some(session_transfer::launch(
+            &std::env::args().skip(3).collect::<Vec<_>>(),
+            std::env::args().nth(2).as_deref() == Some("run"),
+        )?)
+    } else {
+        None
+    };
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    if let Some(launch)=&launch {
+    if let Some(launch) = &launch {
         // Before any child or background task. Select only the newly imported
         // isolated config; never copy auth files or use the source HOME.
-        std::env::set_var("AGENT_UI_CWD",&launch.cwd);
-        std::env::set_var("AGENT_UI_HARNESS","claude");
-        std::env::set_var("AGENT_UI_SESSION_ID",&launch.id);
-        if launch.owner_default {std::env::remove_var("CLAUDE_CONFIG_DIR");}
-        else {std::env::set_var("CLAUDE_CONFIG_DIR",&launch.config);}
+        std::env::set_var("AGENT_UI_CWD", &launch.cwd);
+        std::env::set_var("AGENT_UI_HARNESS", "claude");
+        std::env::set_var("AGENT_UI_SESSION_ID", &launch.id);
+        if launch.owner_default {
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+        } else {
+            std::env::set_var("CLAUDE_CONFIG_DIR", &launch.config);
+        }
     }
     if std::env::args().nth(1).as_deref() == Some("session") {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        if launch.is_none() {return session_transfer::cli(std::env::args().skip(2).collect());}
+        if launch.is_none() {
+            return session_transfer::cli(std::env::args().skip(2).collect());
+        }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         bail!("offline_session_transfer_unsupported_platform");
     }
@@ -111,8 +123,10 @@ async fn main() -> Result<()> {
         .map_err(|_| anyhow::anyhow!("workspace_file_root_unavailable"))?;
     let task_output = task_output::Output::new(&cwd)?;
     let agent = env("TREER_AGENT_ID").unwrap_or_default();
-    let harness=env("AGENT_UI_HARNESS").unwrap_or("codex".into());
-    if !matches!(harness.as_str(),"codex"|"claude") {bail!("unsupported harness");}
+    let harness = env("AGENT_UI_HARNESS").unwrap_or("codex".into());
+    if !matches!(harness.as_str(), "codex" | "claude") {
+        bail!("unsupported harness");
+    }
     if agent.len() > 128
         || !agent
             .bytes()
@@ -141,14 +155,14 @@ async fn main() -> Result<()> {
     }
     let _state_lease = store::Lease::acquire(&private_root, &cwd, &agent)?;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    if let Some(launch)=&mut launch {
-        if let Some(path)=env("AGENT_UI_PORT_FILE") {
+    if let Some(launch) = &mut launch {
+        if let Some(path) = env("AGENT_UI_PORT_FILE") {
             match std::fs::symlink_metadata(path) {
-                Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},
-                _=>bail!("explicit_launch_port_destination_unavailable"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                _ => bail!("explicit_launch_port_destination_unavailable"),
             }
         }
-        session_transfer::claim_launch(launch,&private_root,&agent)?;
+        session_transfer::claim_launch(launch, &private_root, &agent)?;
     }
     disk_history::prepare(&private_root, &cwd)?;
     let attachments = if !agent.is_empty() {
@@ -177,28 +191,60 @@ async fn main() -> Result<()> {
     let instance =
         env("AGENT_UI_INSTANCE_ID").unwrap_or(format!("rust-spike-{}", uuid::Uuid::new_v4()));
     let (provider, mut codex_args) = tools::provider(&harness)?;
-    codex_args.extend(if harness=="claude" {
-        if let Some(args)=env("RUST_SPIKE_CLAUDE_ARGS") {serde_json::from_str::<Vec<String>>(&args)?}
-        else {vec!["--print","--verbose","--output-format","stream-json","--input-format","stream-json","--include-partial-messages","--dangerously-skip-permissions"].into_iter().map(String::from).collect()}
+    codex_args.extend(if harness == "claude" {
+        if let Some(args) = env("RUST_SPIKE_CLAUDE_ARGS") {
+            serde_json::from_str::<Vec<String>>(&args)?
+        } else {
+            vec![
+                "--print",
+                "--verbose",
+                "--output-format",
+                "stream-json",
+                "--input-format",
+                "stream-json",
+                "--include-partial-messages",
+                "--dangerously-skip-permissions",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect()
+        }
     } else if let Some(args) = env("RUST_SPIKE_CODEX_ARGS") {
         serde_json::from_str::<Vec<String>>(&args)?
     } else {
         vec!["app-server".into(), "--listen".into(), "stdio://".into()]
     });
     let handle = runtime::spawn(runtime::Config {
-        claude:harness=="claude",
+        claude: harness == "claude",
         native_bootstrap: {
             #[cfg(any(target_os = "macos", target_os = "linux"))]
-            {launch.as_ref().filter(|l|l.history.is_object()).map(|l|l.history.clone())}
+            {
+                launch
+                    .as_ref()
+                    .filter(|l| l.history.is_object())
+                    .map(|l| l.history.clone())
+            }
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-            {None}
+            {
+                None
+            }
         },
-        claude_config_dir: if harness=="claude" {
-            #[cfg(any(target_os="macos",target_os="linux"))]
-            {launch.as_ref().filter(|l|!l.owner_default).map(|l|l.config.clone()).or_else(||env("CLAUDE_CONFIG_DIR").map(PathBuf::from))}
-            #[cfg(not(any(target_os="macos",target_os="linux")))]
-            {env("CLAUDE_CONFIG_DIR").map(PathBuf::from)}
-        } else {None},
+        claude_config_dir: if harness == "claude" {
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            {
+                launch
+                    .as_ref()
+                    .filter(|l| !l.owner_default)
+                    .map(|l| l.config.clone())
+                    .or_else(|| env("CLAUDE_CONFIG_DIR").map(PathBuf::from))
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                env("CLAUDE_CONFIG_DIR").map(PathBuf::from)
+            }
+        } else {
+            None
+        },
         cwd,
         private_root,
         codex: provider,
@@ -208,32 +254,48 @@ async fn main() -> Result<()> {
         capture_stderr: env("RUST_SPIKE_CAPTURE_STDERR").as_deref() == Some("1"),
     })?;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    if launch.as_ref().is_some_and(|l|l.history.is_object()) {
+    if launch.as_ref().is_some_and(|l| l.history.is_object()) {
         // No interface registration/port publication before successful startup.
-        let mut state=handle.state.clone();
-        let started=tokio::time::timeout(std::time::Duration::from_secs(100),async {
+        let mut state = handle.state.clone();
+        let started = tokio::time::timeout(std::time::Duration::from_secs(100), async {
             loop {
-                let snapshot=state.borrow_and_update().clone();
-                if snapshot["thread"]["status"]=="error" || snapshot["runtime"]["state"]=="blocked" {bail!("explicit_launch_startup_refused");}
-                if snapshot["ready"]==true && snapshot["runtime"]["state"]=="idle" && snapshot["thread"]["id"]==launch.as_ref().unwrap().id {return Ok::<_,anyhow::Error>(());}
-                state.changed().await.map_err(|_|anyhow::anyhow!("explicit_launch_stopped"))?;
+                let snapshot = state.borrow_and_update().clone();
+                if snapshot["thread"]["status"] == "error"
+                    || snapshot["runtime"]["state"] == "blocked"
+                {
+                    bail!("explicit_launch_startup_refused");
+                }
+                if snapshot["ready"] == true
+                    && snapshot["runtime"]["state"] == "idle"
+                    && snapshot["thread"]["id"] == launch.as_ref().unwrap().id
+                {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                state
+                    .changed()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("explicit_launch_stopped"))?;
             }
-        }).await;
-        if !matches!(started,Ok(Ok(()))) {
+        })
+        .await;
+        if !matches!(started, Ok(Ok(()))) {
             handle.shutdown().await?;
             bail!("explicit_launch_failed");
         }
     }
-    let publication=(|| -> Result<()> {
-      if let Some(file) = env("AGENT_UI_PORT_FILE") {
-        use std::io::Write;
-        let mut output = fs_util::create_new(std::path::Path::new(&file))?;
-        output.write_all(port.to_string().as_bytes())?;
-        output.sync_all()?;
-      }
-      Ok(())
+    let publication = (|| -> Result<()> {
+        if let Some(file) = env("AGENT_UI_PORT_FILE") {
+            use std::io::Write;
+            let mut output = fs_util::create_new(std::path::Path::new(&file))?;
+            output.write_all(port.to_string().as_bytes())?;
+            output.sync_all()?;
+        }
+        Ok(())
     })();
-    if let Err(error)=publication {handle.shutdown().await?;return Err(error);}
+    if let Err(error) = publication {
+        handle.shutdown().await?;
+        return Err(error);
+    }
     let app = App {
         runtime: handle.clone(),
         port,
@@ -399,32 +461,67 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
     if path == "/api/session/export" {
         // Snapshot contents are more sensitive than ordinary status. Unmarked
         // direct loopback requests (even with no browser Origin) do not qualify.
-        if app.agent.is_empty() || !matches!(header(request.headers(),"x-treer-interface-source"),Some("controller-api"|"proxy-ui")) {
-            return failure(StatusCode::FORBIDDEN,"controller_provenance_required");
+        if app.agent.is_empty()
+            || !matches!(
+                header(request.headers(), "x-treer-interface-source"),
+                Some("controller-api" | "proxy-ui")
+            )
+        {
+            return failure(StatusCode::FORBIDDEN, "controller_provenance_required");
         }
-        if method != "POST" { return failure(StatusCode::METHOD_NOT_ALLOWED,"snapshot_requires_post"); }
-        if request.uri().query().is_some() {return failure(StatusCode::BAD_REQUEST,"snapshot_selectors_forbidden");}
-        let Ok(_slot)=app.snapshot_slot.clone().try_acquire_owned() else {return failure(StatusCode::TOO_MANY_REQUESTS,"snapshot_busy");};
-        let bytes=match tokio::time::timeout(std::time::Duration::from_secs(2),to_bytes(request.into_body(),4096)).await {
-            Ok(Ok(bytes))=>bytes,
-            _=>return failure(StatusCode::BAD_REQUEST,"invalid_snapshot_request"),
+        if method != "POST" {
+            return failure(StatusCode::METHOD_NOT_ALLOWED, "snapshot_requires_post");
+        }
+        if request.uri().query().is_some() {
+            return failure(StatusCode::BAD_REQUEST, "snapshot_selectors_forbidden");
+        }
+        let Ok(_slot) = app.snapshot_slot.clone().try_acquire_owned() else {
+            return failure(StatusCode::TOO_MANY_REQUESTS, "snapshot_busy");
         };
-        let body=match bounded_json::decode(&bytes) {Ok(body)=>body,_=>return failure(StatusCode::BAD_REQUEST,"invalid_snapshot_request")};
-        if !body.as_object().is_some_and(|o|o.get("threadId").is_some_and(Value::is_string) &&
-            (o.len()==1 || o.len()==2 && o.get("auth")==Some(&json!("owner-default")))) {
-            return failure(StatusCode::BAD_REQUEST,"snapshot_exact_thread_required");
+        let bytes = match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            to_bytes(request.into_body(), 4096),
+        )
+        .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            _ => return failure(StatusCode::BAD_REQUEST, "invalid_snapshot_request"),
+        };
+        let body = match bounded_json::decode(&bytes) {
+            Ok(body) => body,
+            _ => return failure(StatusCode::BAD_REQUEST, "invalid_snapshot_request"),
+        };
+        if !body.as_object().is_some_and(|o| {
+            o.get("threadId").is_some_and(Value::is_string)
+                && (o.len() == 1 || o.len() == 2 && o.get("auth") == Some(&json!("owner-default")))
+        }) {
+            return failure(StatusCode::BAD_REQUEST, "snapshot_exact_thread_required");
         }
-        return match app.runtime.call("session/export",body).await {
-            Ok(mut value)=>{
-                value["runtimeSnapshot"]["agentId"]=json!(app.agent);
-                value["runtimeSnapshot"]["interfaceInstance"]=json!(app.instance);
-                json_response(StatusCode::OK,value)
-            },
-            Err(error)=>{
-                let reason=error.to_string();
-                let code=if matches!(reason.as_str(),"snapshot_thread_unavailable"|"snapshot_requires_idle_without_obligations"|"snapshot_explicit_config_required"|"snapshot_platform_unsupported"|"snapshot_provider_changed"|"snapshot_transport_unavailable"|"snapshot_deadline"|"snapshot_reader_busy") {reason.as_str()}else{"snapshot_source_refused"};
-                failure(StatusCode::CONFLICT,code)
-            },
+        return match app.runtime.call("session/export", body).await {
+            Ok(mut value) => {
+                value["runtimeSnapshot"]["agentId"] = json!(app.agent);
+                value["runtimeSnapshot"]["interfaceInstance"] = json!(app.instance);
+                json_response(StatusCode::OK, value)
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                let code = if matches!(
+                    reason.as_str(),
+                    "snapshot_thread_unavailable"
+                        | "snapshot_requires_idle_without_obligations"
+                        | "snapshot_explicit_config_required"
+                        | "snapshot_platform_unsupported"
+                        | "snapshot_provider_changed"
+                        | "snapshot_transport_unavailable"
+                        | "snapshot_deadline"
+                        | "snapshot_reader_busy"
+                ) {
+                    reason.as_str()
+                } else {
+                    "snapshot_source_refused"
+                };
+                failure(StatusCode::CONFLICT, code)
+            }
         };
     }
     if path == "/api/attachments" || path.starts_with("/api/attachments/") {
@@ -483,15 +580,47 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
     }
     let snapshot: Arc<Value> = app.runtime.state.borrow().clone();
     if method == "GET" && path.starts_with("/api/tasks/") {
-        let Some(segment)=path.strip_prefix("/api/tasks/").and_then(|s|s.strip_suffix("/output")) else {return failure(StatusCode::NOT_FOUND,"Task output route not found");};
-        let id=percent_encoding::percent_decode_str(segment).decode_utf8().ok().filter(|s|!s.is_empty() && s.len()<=1024 && !s.chars().any(char::is_control));
-        let Some(id)=id else {return failure(StatusCode::BAD_REQUEST,"invalid_task_id");};
-        let Some(task)=snapshot["backgroundTasks"].as_array().and_then(|tasks|tasks.iter().find(|t|t["id"]==id.as_ref())).cloned() else {return failure(StatusCode::NOT_FOUND,"Task not found");};
-        let url=reqwest::Url::parse(&format!("http://localhost/?{}",request.uri().query().unwrap_or(""))).unwrap();
-        let query=url.query_pairs().collect::<std::collections::HashMap<_,_>>();
-        return match app.task_output.read(task,snapshot["thread"]["id"].as_str().unwrap_or("").into(),query.get("tail").map(|s|s.as_ref())).await {
-            Ok(value)=>json_response(StatusCode::OK,value),
-            Err(error)=>json_response(StatusCode::BAD_REQUEST,json!({"error":error.to_string()})),
+        let Some(segment) = path
+            .strip_prefix("/api/tasks/")
+            .and_then(|s| s.strip_suffix("/output"))
+        else {
+            return failure(StatusCode::NOT_FOUND, "Task output route not found");
+        };
+        let id = percent_encoding::percent_decode_str(segment)
+            .decode_utf8()
+            .ok()
+            .filter(|s| !s.is_empty() && s.len() <= 1024 && !s.chars().any(char::is_control));
+        let Some(id) = id else {
+            return failure(StatusCode::BAD_REQUEST, "invalid_task_id");
+        };
+        let Some(task) = snapshot["backgroundTasks"]
+            .as_array()
+            .and_then(|tasks| tasks.iter().find(|t| t["id"] == id.as_ref()))
+            .cloned()
+        else {
+            return failure(StatusCode::NOT_FOUND, "Task not found");
+        };
+        let url = reqwest::Url::parse(&format!(
+            "http://localhost/?{}",
+            request.uri().query().unwrap_or("")
+        ))
+        .unwrap();
+        let query = url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+        return match app
+            .task_output
+            .read(
+                task,
+                snapshot["thread"]["id"].as_str().unwrap_or("").into(),
+                query.get("tail").map(|s| s.as_ref()),
+            )
+            .await
+        {
+            Ok(value) => json_response(StatusCode::OK, value),
+            Err(error) => {
+                json_response(StatusCode::BAD_REQUEST, json!({"error":error.to_string()}))
+            }
         };
     }
     if method == "GET" || method == "HEAD" {
@@ -519,12 +648,16 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
                 json!({"agent_id":app.agent,"interface_instance_id":app.instance,"status":snapshot["runtime"]["state"],"busy":snapshot["runtime"]["state"]=="working","queue_length":snapshot["queue"].as_array().map_or(0,Vec::len),"error":snapshot["runtime"]["error"]})
             }
             "/v1/transcript" => {
-                let query=request.uri().query().unwrap_or("");
-                if let Some(cursor)=query.split('&').find_map(|part|part.strip_prefix("cursor=")).filter(|s|!s.bytes().all(|b|b.is_ascii_digit())) {
-                    return history_page(&app,json!({"cursor":cursor}),true).await;
+                let query = request.uri().query().unwrap_or("");
+                if let Some(cursor) = query
+                    .split('&')
+                    .find_map(|part| part.strip_prefix("cursor="))
+                    .filter(|s| !s.bytes().all(|b| b.is_ascii_digit()))
+                {
+                    return history_page(&app, json!({"cursor":cursor}), true).await;
                 }
                 transcript(&app, &snapshot, query)
-            },
+            }
             "/v1/queue" => return call(&app, "queue", Value::Null, StatusCode::OK).await,
             p if p.starts_with("/v1/submissions/") => {
                 let Some(id) = submission_segment(p.trim_start_matches("/v1/submissions/")) else {
@@ -582,12 +715,14 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
         }
     };
     match path.as_str() {
-        "/api/tasks/clear-finished" => {
-            match app.runtime.call("tasks/clear-finished",body).await {
-                Ok(value)=>{let mut state=limited(&app.runtime.state.borrow(),50);state["removed"]=value["removed"].clone();json_response(StatusCode::OK,state)},
-                Err(_)=>failure(StatusCode::BAD_REQUEST,"Task records could not be cleared"),
+        "/api/tasks/clear-finished" => match app.runtime.call("tasks/clear-finished", body).await {
+            Ok(value) => {
+                let mut state = limited(&app.runtime.state.borrow(), 50);
+                state["removed"] = value["removed"].clone();
+                json_response(StatusCode::OK, state)
             }
-        }
+            Err(_) => failure(StatusCode::BAD_REQUEST, "Task records could not be cleared"),
+        },
         "/api/recovery" => call(&app, "recovery", body, StatusCode::ACCEPTED).await,
         "/api/goal" if method == "PUT" || method == "DELETE" => {
             let limit = history_limit(&body);
@@ -646,9 +781,12 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
             ui_call(&app, "settings", body, limit).await
         }
         "/api/history/older" => {
-            let cursor=body.get("cursor").cloned().unwrap_or_else(||snapshot["history"]["cursor"].clone());
-            history_page(&app,json!({"cursor":cursor}),false).await
-        },
+            let cursor = body
+                .get("cursor")
+                .cloned()
+                .unwrap_or_else(|| snapshot["history"]["cursor"].clone());
+            history_page(&app, json!({"cursor":cursor}), false).await
+        }
         _ => failure(StatusCode::NOT_IMPLEMENTED, "outside_rust_experiment_scope"),
     }
 }
@@ -721,7 +859,10 @@ async fn attachment_route(app: &App, request: Request<Body>, path: &str, method:
                         Some((Ok::<_, std::io::Error>(chunk), (bytes, end, permit)))
                     },
                 );
-                let chunks = futures_util::StreamExt::take_until(chunks, tokio::time::sleep(app.files.max_duration()));
+                let chunks = futures_util::StreamExt::take_until(
+                    chunks,
+                    tokio::time::sleep(app.files.max_duration()),
+                );
                 Response::builder()
                     .status(200)
                     .header(
@@ -782,7 +923,9 @@ async fn ui_call(app: &App, method: &str, body: Value, limit: usize) -> Response
             }
             json_response(StatusCode::OK, snapshot)
         }
-        Err(error) if error.to_string() == "operation_id conflict" => failure(StatusCode::CONFLICT, "operation_id_conflict"),
+        Err(error) if error.to_string() == "operation_id conflict" => {
+            failure(StatusCode::CONFLICT, "operation_id_conflict")
+        }
         Err(_) => failure(StatusCode::BAD_REQUEST, "operation_refused"),
     }
 }
@@ -793,7 +936,9 @@ async fn call(app: &App, method: &str, body: Value, status: StatusCode) -> Respo
         }
         Ok(value) if value.is_null() => failure(StatusCode::NOT_FOUND, "submission_not_found"),
         Ok(value) => json_response(status, value),
-        Err(error) if error.to_string() == "operation_id conflict" => failure(StatusCode::CONFLICT, "operation_id_conflict"),
+        Err(error) if error.to_string() == "operation_id conflict" => {
+            failure(StatusCode::CONFLICT, "operation_id_conflict")
+        }
         Err(_) => failure(StatusCode::BAD_REQUEST, "operation_refused"),
     }
 }
@@ -821,36 +966,83 @@ fn transcript(app: &App, snapshot: &Value, query: &str) -> Value {
     json!({"agent_id":app.agent,"interface_instance_id":app.instance,"page":page,"page_count":turns.len(),"next_page":next,"cursor":page.to_string(),"next_cursor":next.map(|n|json!(n.to_string())).unwrap_or_else(||snapshot["history"]["cursor"].clone()),"older_cursor":snapshot["history"]["cursor"],"entries":entries})
 }
 async fn history_page(app: &App, body: Value, ais: bool) -> Response {
-    let Ok(permit)=app.history_slot.clone().try_acquire_owned() else {return failure(StatusCode::TOO_MANY_REQUESTS,"history_page_busy");};
-    match app.runtime.call("history_page",body).await {
-        Ok(snapshot)=>{
-            let value=if ais {transcript(app,&snapshot,"limit=50")}else{snapshot};
-            let bytes=match serde_json::to_vec(&value) {Ok(bytes)=>bytes,Err(_)=>return failure(StatusCode::SERVICE_UNAVAILABLE,"history_page_unavailable")};
+    let Ok(permit) = app.history_slot.clone().try_acquire_owned() else {
+        return failure(StatusCode::TOO_MANY_REQUESTS, "history_page_busy");
+    };
+    match app.runtime.call("history_page", body).await {
+        Ok(snapshot) => {
+            let value = if ais {
+                transcript(app, &snapshot, "limit=50")
+            } else {
+                snapshot
+            };
+            let bytes = match serde_json::to_vec(&value) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return failure(StatusCode::SERVICE_UNAVAILABLE, "history_page_unavailable")
+                }
+            };
             // Keep the slot with the remaining response under socket
             // backpressure instead of releasing it when yielding one huge chunk.
-            let stream=futures_util::stream::unfold((bytes,0,permit),|(bytes,offset,permit)|async move {
-                if offset==bytes.len(){return None;}
-                let end=(offset+64*1024).min(bytes.len());
-                let chunk=bytes[offset..end].to_vec();
-                Some((Ok::<_,std::io::Error>(chunk),(bytes,end,permit)))
-            });
-            let stream=futures_util::StreamExt::take_until(stream,tokio::time::sleep(app.files.max_duration()));
-            (StatusCode::OK,[("content-type","application/json"),("cache-control","no-store")],Body::from_stream(stream)).into_response()
-        },
-        Err(error)=>{let (status,code)=match error.to_string().as_str() {"history_cursor_invalid"=>(StatusCode::BAD_REQUEST,"history_cursor_invalid"),"history_page_busy"=>(StatusCode::TOO_MANY_REQUESTS,"history_page_busy"),_=>(StatusCode::SERVICE_UNAVAILABLE,"history_page_unavailable")};failure(status,code)}
+            let stream = futures_util::stream::unfold(
+                (bytes, 0, permit),
+                |(bytes, offset, permit)| async move {
+                    if offset == bytes.len() {
+                        return None;
+                    }
+                    let end = (offset + 64 * 1024).min(bytes.len());
+                    let chunk = bytes[offset..end].to_vec();
+                    Some((Ok::<_, std::io::Error>(chunk), (bytes, end, permit)))
+                },
+            );
+            let stream = futures_util::StreamExt::take_until(
+                stream,
+                tokio::time::sleep(app.files.max_duration()),
+            );
+            (
+                StatusCode::OK,
+                [
+                    ("content-type", "application/json"),
+                    ("cache-control", "no-store"),
+                ],
+                Body::from_stream(stream),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            let (status, code) = match error.to_string().as_str() {
+                "history_cursor_invalid" => (StatusCode::BAD_REQUEST, "history_cursor_invalid"),
+                "history_page_busy" => (StatusCode::TOO_MANY_REQUESTS, "history_page_busy"),
+                _ => (StatusCode::SERVICE_UNAVAILABLE, "history_page_unavailable"),
+            };
+            failure(status, code)
+        }
     }
 }
 fn static_cache_control(path: &str) -> &'static str {
     let name = path.rsplit('/').next().unwrap_or("");
     let hashed = name.strip_suffix(".js").is_some_and(|stem| {
         if let Some(hash) = stem.strip_prefix("pdf-worker-") {
-            hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            hash.len() == 16
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         } else if let Some((prefix, hash)) = stem.rsplit_once('-') {
-            !prefix.is_empty() && prefix.bytes().all(|b| b.is_ascii_alphabetic())
-                && hash.len() == 8 && hash.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-        } else { false }
+            !prefix.is_empty()
+                && prefix.bytes().all(|b| b.is_ascii_alphabetic())
+                && hash.len() == 8
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        } else {
+            false
+        }
     });
-    if hashed { "private, max-age=31536000, immutable" } else { "no-store" }
+    if hashed {
+        "private, max-age=31536000, immutable"
+    } else {
+        "no-store"
+    }
 }
 
 /// Read `name` from a development `AGENT_UI_PUBLIC_DIR`, refusing links and escapes.
@@ -947,17 +1139,38 @@ fn submission_segment(encoded: &str) -> Option<String> {
 /// profile already chose an identity. Set before any child process starts.
 async fn set_git_identity(agent: &str) {
     let name = async {
-        let output = tokio::process::Command::new(treer_binary()).arg("whoami")
-            .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .kill_on_drop(true).output();
-        let output = tokio::time::timeout(std::time::Duration::from_secs(5), output).await.ok()?.ok()?;
+        let output = tokio::process::Command::new(treer_binary())
+            .arg("whoami")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), output)
+            .await
+            .ok()?
+            .ok()?;
         let value: Value = serde_json::from_slice(&output.stdout).ok()?;
         let agent = &value["agent"];
-        agent["path"].as_str().or(agent["name"].as_str()).filter(|s| !s.is_empty()).map(str::to_owned)
-    }.await.unwrap_or_else(|| agent.to_owned());
-    for (key, value) in [("GIT_AUTHOR_NAME", &name), ("GIT_COMMITTER_NAME", &name),
-        ("GIT_AUTHOR_EMAIL", &format!("{agent}@agents.treer.local")), ("GIT_COMMITTER_EMAIL", &format!("{agent}@agents.treer.local"))] {
-        if std::env::var_os(key).is_none() { std::env::set_var(key, value); }
+        agent["path"]
+            .as_str()
+            .or(agent["name"].as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+    .await
+    .unwrap_or_else(|| agent.to_owned());
+    for (key, value) in [
+        ("GIT_AUTHOR_NAME", &name),
+        ("GIT_COMMITTER_NAME", &name),
+        ("GIT_AUTHOR_EMAIL", &format!("{agent}@agents.treer.local")),
+        (
+            "GIT_COMMITTER_EMAIL",
+            &format!("{agent}@agents.treer.local"),
+        ),
+    ] {
+        if std::env::var_os(key).is_none() {
+            std::env::set_var(key, value);
+        }
     }
 }
 
