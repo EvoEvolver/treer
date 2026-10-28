@@ -292,6 +292,12 @@ class NotificationApiTest(MailProcessCase):
     proxy_class = EmailProxy
     extra_config = {"treer_bin": str(FAKE_TREER), "email_preview_chars": 20}
 
+    def test_email_links_survive_sign_in(self) -> None:
+        status, _, _ = self.request("GET", "/api/auth/start?return_to=" + urllib.parse.quote("/?message=msg_inbound"))
+        self.assertEqual(status, 302)
+        status, _, _ = self.request("GET", "/api/auth/start?return_to=" + urllib.parse.quote("//evil.example/"))
+        self.assertEqual(status, 400)
+
     def test_settings_status_test_send_and_agent_access(self) -> None:
         status, _, _ = self.request("GET", "/api/notifications")
         self.assertEqual(status, 401)

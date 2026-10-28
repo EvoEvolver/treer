@@ -147,10 +147,10 @@ class Notifier:
         return (row["access_token"], row["expires_at"]) if row else None
 
     def _state(self, db, settings: dict[str, Any], available: bool) -> tuple[str, float | None]:
-        if not settings["enabled"]:
-            return "disabled", None
         if not available:
             return "unavailable", None
+        if not settings["enabled"]:
+            return "disabled", None
         if not (settings["address"] or settings["directory_email"]):
             return "no_address", None
         grant = self._grant(db, settings["user_id"])
