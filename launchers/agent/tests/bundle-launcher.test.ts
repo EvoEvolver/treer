@@ -38,7 +38,7 @@ const fakeHttp = `import http from 'node:http';import fs from 'node:fs';
 const file=process.env.DELIVERY_FIXTURE;
 const server=http.createServer((req,res)=>{const db=JSON.parse(fs.readFileSync(file,'utf8')), item=Object.values(db.agents).find(a=>a.interface.port===server.address().port)||Object.values(db.agents)[0], id=item.agent_id;res.setHeader('Content-Type','application/json');
 if(req.url==='/v1/prompts'){let body='';req.on('data',c=>body+=c);req.on('end',()=>{const prompt=JSON.parse(body);if(req.headers['x-treer-interface-source']!=='controller-api'||req.headers['x-treer-agent-id']!==id||req.headers['x-treer-interface-instance']!==item.interface.instance_id||prompt.delivery!=='queue'||prompt.sender||prompt.notify){res.statusCode=403;res.end('{}');return;}db.calls.push(['local-prompt',id,prompt.operation_id]);db.messages[prompt.operation_id]=true;const tmp=file+'.http';fs.writeFileSync(tmp,JSON.stringify(db));fs.renameSync(tmp,file);res.end(JSON.stringify({accepted:true}));});}
-else if(req.url==='/api/state')res.end(JSON.stringify({ready:!(db.fail===id&&item.run_generation===2),harness:{id:'acp'},thread:{id:'session-'+id+(db.wrongSession===id&&item.run_generation===2?'-changed':''),cwd:db.controller.machine.root}}));
+else if(req.url==='/api/state')res.end(JSON.stringify({ready:!(db.fail===id&&item.run_generation===2),harness:{id:'codex'},thread:{id:'session-'+id+(db.wrongSession===id&&item.run_generation===2?'-changed':''),cwd:db.controller.machine.root}}));
 else if(req.url==='/v1/manifest')res.end(JSON.stringify({...db.contract,instance_id:item.interface.instance_id}));
 else res.end('UI');});
 server.listen(0,'127.0.0.1',()=>console.log(server.address().port));
@@ -67,7 +67,7 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   async function agent(id: string, name = id) {
     change((db) => {
       db.agents[id] = { agent_id: id, name, path: "/test/" + name, kind: "command", server_id: "srv_test", run_generation: 1, interface: { port: 0, instance_id: "old-" + id } };
-      db.startups[id] = { agent_id: id, enabled: true, cwd: ".", command: process.execPath, args: [join(machine, ".treer/launchers/agent/run.mjs"), "--harness", "acp", "--acp-command", "/trusted/provider.mjs", "--acp-arg", "preserve-me"] };
+      db.startups[id] = { agent_id: id, enabled: true, cwd: ".", command: process.execPath, args: [join(machine, ".treer/launchers/agent/run.mjs"), "--harness", "codex", "--name", "preserve-me"] };
     });
     const server = join(root, "http.mjs"); writeFileSync(server, fakeHttp);
     const child = spawn(process.execPath, [server], { env, stdio: "pipe" }); children.push(child);
@@ -115,7 +115,7 @@ test("rollout dry-run never changes startup/restarts; apply preserves provider/s
   const secondRestart = calls.findIndex((args: string[]) => args[2] === "restart" && args[3] === "ag_second");
   assert.ok(previewMessage >= 0 && secondRestart > previewMessage);
   for (const id of ["ag_preview", "ag_second", "ag_third"]) {
-    assert.deepEqual(f.read().startups[id].args.slice(1, 7), ["--harness", "acp", "--acp-command", "/trusted/provider.mjs", "--acp-arg", "preserve-me"]);
+    assert.deepEqual(f.read().startups[id].args.slice(1, 5), ["--harness", "codex", "--name", "preserve-me"]);
     assert.ok(f.read().startups[id].args.includes(`session-${id}`));
   }
   const again = await f.rollout(["ag_preview", "ag_second", "ag_third"], ["--apply"]);

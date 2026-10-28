@@ -206,8 +206,8 @@ mod default_profile_tests {
         let defaults = default_agent_launch_profiles().unwrap();
         let asset: Value = serde_json::from_str(DEFAULT_AGENT_LAUNCH_PROFILES).unwrap();
         let entries = asset["profiles"].as_array().unwrap();
-        assert_eq!(entries.len(), 6);
-        assert_eq!(defaults.len(), 8);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(defaults.len(), 4);
         for (actual, expected) in defaults.iter().zip(entries) {
             assert_eq!(actual.name, expected["name"]);
             assert_eq!(actual.description, expected["description"]);

@@ -5,22 +5,10 @@
   "type": "module",
   "scripts": {
     "test": "tsx --test tests/*.test.ts ui/tests/*.test.ts",
-    "test:live": "node tests/live.mjs",
-    "test:claude": "tsx tests/live-claude.ts",
-    "test:goal:live": "node tests/browser-goal-live.mjs",
-    "test:claude:settings": "node tests/browser-claude-settings.mjs",
-    "test:claude:settings:fake": "node tests/browser-claude-settings.mjs --fake",
-    "test:browser": "node tests/browser-ui.mjs",
-    "test:windows": "node tests/windows-smoke.mjs",
     "check": "npm run typecheck && npm run check:ui",
-    "start": "tsx src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p ui/tsconfig.json --noEmit",
     "build:ui": "node scripts/build-ui.mjs",
     "check:ui": "node scripts/check-ui.mjs"
-  },
-  "dependencies": {
-    "tsx": "^4.19.3",
-    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.0",
@@ -34,6 +22,8 @@
     "pdfjs-dist": "6.4.299",
     "react": "19.3.1",
     "react-dom": "19.3.1",
-    "typescript": "^5.8.3"
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3",
+    "ws": "^8.18.3"
   }
 }

@@ -141,7 +141,7 @@ function replacement(startup, snapshot, ctx) {
   const entry = /(?:^|[\\/])(?:run\.mjs|treer-agent\.mjs)$/i.test(args[0] || "");
   if (entry) args = args.slice(1);
   else if (!/(?:^|[\\/])treer-agent\.sh$/i.test(startup.command || "")) throw new Error("Only existing launcher startup commands can be migrated automatically");
-  const allowed = new Set(["--harness", "--session-id", "--thread-id", "--cwd", "--acp-command", "--acp-arg", "--name"]), preserved = [];
+  const allowed = new Set(["--harness", "--session-id", "--thread-id", "--cwd", "--name"]), preserved = [];
   for (let i = 0; i < args.length; i += 2) {
     if (!allowed.has(args[i]) || typeof args[i + 1] !== "string") throw new Error("Unknown saved launcher argument; preserve custom startup manually");
     if (!["--session-id", "--thread-id", "--cwd"].includes(args[i])) preserved.push(args[i], args[i + 1]);

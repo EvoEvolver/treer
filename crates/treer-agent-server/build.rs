@@ -196,7 +196,7 @@ fn main() {
             Some("1"),
             "official builds require a prepared TREER_LAUNCHER_PAYLOAD_DIR"
         );
-        for directory in ["src", "public", "scripts"] {
+        for directory in ["public", "scripts"] {
             source_files(&root, directory, &mut entries);
         }
         for file in ["package.json", "package-lock.json", "profiles.json"] {

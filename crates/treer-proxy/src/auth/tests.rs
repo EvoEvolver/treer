@@ -1521,10 +1521,6 @@ async fn new_workspaces_include_deletable_default_launch_profiles() {
             ("Claude + UI", "treer-agent"),
             ("Codex (terminal)", "codex"),
             ("Codex + UI", "treer-agent"),
-            ("Cursor + UI", "treer-agent"),
-            ("Gemini + UI", "treer-agent"),
-            ("Grok + UI", "treer-agent"),
-            ("OpenCode + UI", "treer-agent"),
         ]
     );
     assert!(profiles

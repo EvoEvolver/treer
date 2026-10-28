@@ -8,15 +8,15 @@ import { hermeticEnv } from "./hermetic.mjs";
 import test from "node:test";
 import { profileMigration } from "../scripts/profile-migration.mjs";
 const definitions = JSON.parse(readFileSync(new URL("../profiles.json", import.meta.url), "utf8")).profiles;
-test("dry-run converges six providers across three machines, protects unrelated profiles, and never mutates input", () => {
+test("dry-run converges every bundled provider across three machines, protects unrelated profiles, and never mutates input", () => {
   const profiles = definitions.flatMap((profile: any) => [
     { ...profile, command: "/Users/mac/.treer/launchers/agent/current/launchers/agent/scripts/treer-agent.sh", cwd: "treer" },
     ...["mac_m2", "mariana", "win_native"].map(machine => ({ ...profile, name: `${profile.name} (${machine})`, command: "/selected/node", cwd: ".", args: ["/machine/.treer/launchers/agent/run.mjs", ...profile.args] })),
   ]);
   profiles.push({ name: "Pockymoe Claude", command: "/owner/pockymoe", args: [], cwd: "." }, { name: "codex", command: "codex", args: ["--yolo"], cwd: "." });
   const before = structuredClone(profiles), plan = profileMigration(profiles, definitions);
-  assert.equal(plan.changes.filter((change: any) => change.operation === "update").length, 6);
-  assert.equal(plan.changes.filter((change: any) => change.operation === "delete").length, 18);
+  assert.equal(plan.changes.filter((change: any) => change.operation === "update").length, definitions.length);
+  assert.equal(plan.changes.filter((change: any) => change.operation === "delete").length, definitions.length * 3);
   assert.deepEqual(plan.keep, ["Pockymoe Claude", "codex"]);
   assert.deepEqual(profiles, before);
   for (const change of plan.changes.filter((change: any) => change.operation === "update")) {

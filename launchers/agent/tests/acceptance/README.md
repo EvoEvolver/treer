@@ -1,9 +1,9 @@
 # Console embed acceptance (real browser, real launcher-backed agent)
 
 > **Not part of the launcher payload.** Nothing in this directory is bundled into the launcher or its native artifacts; these are
-> test and release tooling that run from a checkout against a canary. Both scripts write a report file (default
-> `./console-embed-acceptance-report.json` and `./console-tasks-acceptance-report.json` in the working directory); those names
-> are git-ignored because a report can name canary hosts, workspace paths and agent ids. Keep reports under `.treer/` or set
+> test and release tooling that run from a checkout against a canary. The script writes a report file (default
+> `./console-embed-acceptance-report.json` in the working directory); that name
+> is git-ignored because a report can name canary hosts, workspace paths and agent ids. Keep reports under `.treer/` or set
 > `ACCEPT_REPORT_FILE` to a path outside the repository.
 
 ### Pinned scripts
@@ -11,11 +11,9 @@
 | Script | sha256 (as pinned by release) |
 | --- | --- |
 | `console-embed-acceptance.mjs` | `6b19f4a30e7c10cc246a2fda138e61337cba302a67782985ae4783ffa9d3ba40` |
-| `console-tasks-acceptance.mjs` | `640f310bdd09041a5bd221753cfd0f6de3129eb0adfd1f703304986d159ee75c` |
 
-An acceptance record names the hash the run printed. Editing either script changes its hash: the new hash needs a review and a
-new pin before it may be used as acceptance evidence (the release runner refuses any other hash). The self-tests and `standin.mjs`
-are not pinned; they exist to prove the scripts' mechanics and may change without a re-pin as long as the two blobs above do not.
+An acceptance record names the hash the run printed. Editing the script changes its hash: the new hash needs a review and a
+new pin before it may be used as acceptance evidence (the release runner refuses any other hash).
 
 Team rule (#98, 2026-10-19): any change to a Console, browser or embedding path must pass a **real-browser acceptance on
 canary against a real launcher-backed agent** before it ships. `console-embed-acceptance.mjs` is the launcher/UI side of that
@@ -84,40 +82,3 @@ other than the browser's navigation to the Console and the agent origin. An app 
   isolated; foreign framing and session-less access are refused). Release should add header-level probes for the rest.
 * Strict-refusal and compatibility-choice behaviour are exercised by web-dev's matrices, not by this script, because the
   canary fixture is expected to take the isolated path.
-
-## Self-test
-
-`node tests/acceptance/self-test.mjs` runs the script against a **local stand-in** (not Treer's Proxy or Console): a console
-origin framing the real launcher (fake Codex) through an agent origin that authenticates by cookie and adds
-`frame-ancestors`. It proves the script's mechanics: it passes the good stand-in and fails each of four broken ones
-(`no-frame-ancestors`, `anonymous-open`, `blank-embed`, `shared-origin`), and the report contains no cookie or token data.
-Chromium and Firefox only: WebKit blocks the third-party cookie this stand-in uses, so WebKit is left to the canary run.
-It also fails the scope guards (no allow-list, a bare domain, a Console outside the list: exit 2), a frame host that is not `ag-*`, `frame-ancestors *`, and a session-less request answered 200 with no redirect.
-`SELF_TEST_PW_NODE_MODULES=<dir containing @playwright>` runs the same script bytes with another Playwright install.
-
-## Tasks acceptance (`console-tasks-acceptance.mjs`, #184)
-
-Real-browser check of the launcher's background-task retention and **Clear finished tasks**, through the Console's embedded
-Agent view, against a disposable **Claude-harness fixture agent** (fake Claude, no credentials). The Tasks panel exists only
-for the Claude harness, so the Codex fixture cannot show it.
-
-Fixture launch (release owns it; same git archive of `launchers/agent` as the shipped SHA):
-
-```bash
-export CLAUDE_BIN=<launcher>/tests/fake-claude.mjs AGENT_UI_CWD=<scratch dir>
-exec node <launcher>/scripts/treer-agent.mjs --harness claude
-```
-
-The prompt `many-tasks` makes the fake report 105 completed tasks and one running task. With #184 the launcher keeps the
-running task plus the 20 newest finished ones (21 records); a build without #184 keeps 101, so this script fails on it by
-design. Inputs, scope rules (required canary allow-list, optional ignored blocked hosts), locale pin, report content and
-privacy rules are the same as for the embed script (environment only; `ACCEPT_EXPECT_FINISHED`, default 20, is the only
-addition). It sends only `many-tasks` and uses Clear finished tasks on that one agent; both are idempotent.
-
-Steps per engine: the embedded UI is usable and shows the Tasks button; `many-tasks` is accepted and one task is running;
-the panel holds exactly 21 records (1 running, 20 completed); Clear finished tasks has a 44 px trigger, the confirmation text
-and focus on its destructive button; Keep and Escape cancel (Escape does not close the panel) and return focus to the trigger;
-confirming leaves only the running record and focuses Close, with no alert; a reload still shows one record; no console errors,
-failed requests, HTTP errors or blocked requests. Run `node tests/acceptance/tasks-self-test.mjs` for the stand-in self-test
-(a real launcher with the Claude harness behind the same stand-in as `self-test.mjs`; it passes the good build and fails when
-the expected bound is wrong). Not covered: Treer's real embed handoff (use the embed script) and WebKit in the self-test.

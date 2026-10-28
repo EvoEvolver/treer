@@ -56,12 +56,11 @@ test("installer and native-smoke Controller fixtures advertise optional private-
   assert.equal(compatibility(contract, controller).status, "compatible");
   assert.equal(compatibility(contract, { ...controller, features: contract.required_features }).status, "compatible");
 });
-test("portable install is offline, saves all six profiles, idempotently retains assets and rolls back", (t) => {
+test("portable install is offline, saves all bundled profiles, idempotently retains assets and rolls back", (t) => {
   const f = fixture(t), result = f.call();
   assert.equal(f.call({ require_runtime: null }).operation, "install"); // Core's absent optional field serializes as null.
-  assert.equal(result.portable, true); assert.equal(result.profiles.length, 6);
+  assert.equal(result.portable, true); assert.equal(result.profiles.length, 2);
   assert.equal(f.call({ operation: "status" }).current_runtime.default, "rust");
-  assert.equal(f.call({ operation: "status" }).current_runtime.acp, "explicit-node");
   const installed = join(f.base, f.request.version); assert.equal(existsSync(join(installed, "node_modules")), false);
   assert.deepEqual(readFileSync(join(installed, "provider-recipes.json")), readFileSync(join(launcher, "provider-recipes.json")));
   const manifest = JSON.parse(readFileSync(join(installed, "bundle-manifest.json"), "utf8"));
@@ -213,20 +212,4 @@ test("bundle integrity, path traversal, symlink escape and concurrent locks fail
   writeFileSync(join(k.bundle, "bundle-manifest.json"), JSON.stringify(manifest)); k.request.version = `sha256-${digest(readFileSync(join(k.bundle, "bundle-manifest.json")))}`;
   assert.throws(() => k.call(), /manifest entry/);
   const m = fixture(t); writeFileSync(join(m.bundle, "extra.js"), "not listed"); assert.throws(() => m.call(), /integrity mismatch/);
-});
-test("portable runtime and Node entry register the same interface contract without shell or node_modules", async (t) => {
-  const f = fixture(t); f.call();
-  const child = spawn(process.execPath, [join(f.base, "run.mjs"), "--runtime", "node", "--harness", "codex"], { cwd: f.machine, env: hermeticEnv({ FIXTURE_ROOT: f.root, PATH: dirname(process.execPath), CODEX_BIN: join(launcher, "tests/fake-codex.mjs"), AGENT_UI_MESSAGE_WATCH: "0" }), stdio: "pipe" });
-  let error = ""; child.stderr.on("data", (chunk) => error += chunk);
-  t.after(() => child.kill());
-  const deadline = Date.now() + 10000;
-  let registration;
-  while (Date.now() < deadline && child.exitCode === null) {
-    const calls = readFileSync(join(f.root, "calls"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    registration = calls.find((args) => args[0] === "interface" && args[1] === "register");
-    if (registration) break; await new Promise((done) => setTimeout(done, 25));
-  }
-  assert.ok(registration, `portable registration missing: ${error}`);
-  assert.deepEqual(registration.flatMap((arg: string, i: number) => arg === "--capability" ? [registration[i + 1]] : []).sort(), f.request.controller.capabilities.slice().sort());
-  const exit = once(child, "exit"); child.kill(); await exit;
 });

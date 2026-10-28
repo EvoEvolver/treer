@@ -75,9 +75,9 @@ export function nativeRuntime(root, harnesses = ["codex", "claude"]) {
 export function runtimeStatus(root) {
   if (!existsSync(join(root, "native-runtime.json"))) {
     const nativeRequired = existsSync(join(root, "scripts/native-runtime.mjs"));
-    return { default: nativeRequired ? "unconfigured" : "node", codex: nativeRequired ? "unconfigured" : "node", claude: nativeRequired ? "unconfigured" : "node", acp: "explicit-node" };
+    return { default: nativeRequired ? "unconfigured" : "node", codex: nativeRequired ? "unconfigured" : "node", claude: nativeRequired ? "unconfigured" : "node" };
   }
   const metadata = readBinding(root);
   const value = nativeRuntime(root, ["codex", "claude"].filter(name => metadata.tools?.[name]));
-  return { default: "rust", codex: value.tools.codex ? "rust" : "unavailable-provider", claude: value.tools.claude ? "rust" : "unavailable-provider", acp: "explicit-node", source_commit: value.source_commit, executable: value.executable, platform: value.platform, arch: value.arch, providers: Object.fromEntries(Object.entries(value.tools).map(([name, tool]) => [name, { path: tool.path, version: tool.version, sha256: tool.sha256 }])) };
+  return { default: "rust", codex: value.tools.codex ? "rust" : "unavailable-provider", claude: value.tools.claude ? "rust" : "unavailable-provider", source_commit: value.source_commit, executable: value.executable, platform: value.platform, arch: value.arch, providers: Object.fromEntries(Object.entries(value.tools).map(([name, tool]) => [name, { path: tool.path, version: tool.version, sha256: tool.sha256 }])) };
 }
