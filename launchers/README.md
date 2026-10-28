@@ -22,10 +22,11 @@ A launcher must preserve these boundaries:
 
 There is one launcher:
 
-- [`agent`](agent/README.md) owns the AIS HTTP server, browser UI, installation,
-  switching and profiles. Native Codex/Claude and generic ACP are adapters under
-  `src/harness/`; new providers reuse an adapter or implement `HarnessRuntime`.
-  Agent interfaces do not belong under `apps/`.
+- [`agent`](agent/README.md) is a native Rust runtime (Codex app-server and
+  Claude stream-json adapters) that owns the AIS HTTP server and serves the
+  shared React UI, plus the Node 22+ dispatcher, installer and bundle/update
+  scripts and launch profiles. New providers become another
+  adapter in the same runtime; Agent interfaces do not belong under `apps/`.
 
 ## Instructions For Agents
 

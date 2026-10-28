@@ -84,7 +84,6 @@ function main() {
       if (native) writeFileSync(join(candidate, "native-runtime.json"), native, { mode: 0o600, flag: "wx" });
       if (runtimeStatus(candidate).default !== "rust" && selected.some(id => ["codex", "claude"].includes(id))) throw new Error("Native default manifest required; no Node fallback");
       run("npm", ["ci", "--omit=dev", "--no-audit", "--no-fund"], { cwd: candidate, stdio: ["ignore", "inherit", "inherit"] });
-      if (!existsSync(join(candidate, "node_modules/.bin/tsx")) || !existsSync(join(candidate, "node_modules/ws/package.json"))) throw new Error("Runtime dependencies missing after npm ci");
       renameSync(checkout, version);
     }
     const installed = join(version, "launchers/agent");

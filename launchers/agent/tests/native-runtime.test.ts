@@ -51,18 +51,13 @@ test("missing binding, changed image, wrong platform and missing provider fail w
   assert.equal(runtimeStatus(f.root).default, "unconfigured");
   assert.notEqual(f.run().status, 0);
 });
-test("ACP requires explicit Node selection and preserves provider argv", t => {
+test("the removed Node runtime and ACP harness refuse instead of falling back", t => {
   const f = fixture(t);
-  writeFileSync(join(f.root, "scripts/treer-agent-node.mjs"), 'console.log(JSON.stringify(process.argv.slice(2)))');
-  assert.match(f.run("--runtime", "rust", "--harness", "acp").stderr, /explicit --runtime node/);
-  const result = f.run("--runtime", "node", "--harness", "acp", "--acp-command", "provider", "--acp-arg", "value with spaces");
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), ["--harness", "acp", "--acp-command", "provider", "--acp-arg", "value with spaces"]);
-  const existingProfile = f.run("--harness", "acp", "--acp-command", "provider");
-  assert.equal(existingProfile.status, 0, existingProfile.stderr);
-  assert.deepEqual(JSON.parse(existingProfile.stdout), ["--harness", "acp", "--acp-command", "provider"]);
+  assert.match(f.run("--runtime", "node", "--harness", "codex").stderr, /Node runtime was removed/);
+  assert.match(f.run("--harness", "acp", "--acp-command", "provider").stderr, /Unsupported native launcher argument|Unsupported harness/);
+  assert.match(f.run("--harness", "acp").stderr, /Unsupported harness/);
   const profiles = JSON.parse(readFileSync(join(launcher, "profiles.json"), "utf8")).profiles;
-  for (const p of profiles.filter((p: any) => !["codex", "claude"].includes(p.id))) assert.match(p.description, /explicit Node/);
+  assert.deepEqual(profiles.map((p: any) => p.id), ["codex", "claude"]);
 });
 
 test("split UI native bindings refuse a missing worker even when core assets match", t => {

@@ -271,7 +271,6 @@ just updater-test
 just messaging-e2e
 just web-test
 (cd web && pnpm run check:contrast)
-just ais-e2e
 just service-canary
 just machine-artifacts-test
 node --test scripts/install-path.test.mjs
@@ -323,7 +322,7 @@ outside the initial implementation.
 | Network or ingress | Authentication/header, streaming, WebSocket, endpoint ownership, Agent cross-owner denial, and Canary coverage |
 | Workload HTTP entries | Per-entry signed identity, inherited environment, credential/header stripping, denied opens, HTTP/WebSocket/CONNECT, name resolution/rename with stable Policy IDs, stop cleanup, and hot/cold restoration |
 | Browser workflow | Typecheck/build, CORS/return-path checks, desktop and mobile validation |
-| Agent Interface adapter | Adapter unit tests plus `just ais-e2e` when a live Treer and vendor binary are available |
+| Agent Interface adapter | `just agent-launcher-test` (fixture-harness runtime and installer tests) |
 | Documentation | `node scripts/check-docs.mjs` |
 | Release publishing | `just machine-artifacts-test`, `node --test scripts/release-r2.test.mjs`; hosted downloads must match all twelve binaries without redirects; isolated R2 verification when publishing signed manifests |
 | Installed Controller updates | Node/Rust signature compatibility, tampered/missing metadata, trusted-key binding, manifest/path binding, duplicate/missing artifacts, size limits, bad-signature rejection, and the download→verify→replace→restart-request test |

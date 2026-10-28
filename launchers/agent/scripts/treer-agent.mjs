@@ -32,40 +32,28 @@ if (args[0] === "update") {
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => stopProcessTree(child));
 } else if (args.length === 1 && ["--help", "-h", "help"].includes(args[0])) {
   console.log("       treer-agent session --help  (Claude export/import/prepare/launch/persistent run; macOS/Linux)");
-  console.log("Usage: treer-agent [--harness codex|claude|acp] [--session-id ID|--thread-id ID] [--cwd ABS] [--name NAME] [--runtime rust|node]\n       treer-agent update [--controller ABS] [--treer ABS]\n       treer-agent update --latest [--treer ABS] [--root ABS]\n       treer-agent update --bundle ABS --sha256 MANIFEST_SHA256 [--treer ABS] [--root ABS]\n       treer-agent update --help\nCodex/Claude default to Rust; ACP explicitly uses Node. Update changes only the default for future starts; running Agents/Host/Controller are not restarted.");
+  console.log("Usage: treer-agent [--harness codex|claude] [--session-id ID|--thread-id ID] [--cwd ABS] [--name NAME]\n       treer-agent update [--controller ABS] [--treer ABS]\n       treer-agent update --latest [--treer ABS] [--root ABS]\n       treer-agent update --bundle ABS --sha256 MANIFEST_SHA256 [--treer ABS] [--root ABS]\n       treer-agent update --help\nUpdate changes only the default for future starts; running Agents/Host/Controller are not restarted.");
 } else {
 const mapping = { "--session-id": "AGENT_UI_SESSION_ID", "--thread-id": "AGENT_UI_SESSION_ID", "--cwd": "AGENT_UI_CWD", "--name": "AGENT_UI_NAME" };
-let runtime, harness = env.AGENT_UI_HARNESS || "codex", nodeArgs = [];
+let harness = env.AGENT_UI_HARNESS || "codex";
 for (let i = 0; i < args.length; i += 2) {
   const [key, value] = args.slice(i, i + 2);
-  if (typeof value !== "string" || !value && key !== "--acp-arg") throw new Error("Incomplete launcher argument");
-  if (key === "--runtime") runtime = value;
-  else { nodeArgs.push(key, value); if (key === "--harness") harness = value; }
+  if (typeof value !== "string" || !value) throw new Error("Incomplete launcher argument");
+  // Saved profiles may still carry `--runtime rust`; it is the only runtime.
+  if (key === "--runtime") { if (value !== "rust") throw new Error("The Node runtime was removed; only --runtime rust is supported"); continue; }
+  if (key === "--harness") harness = value;
+  else if (mapping[key]) env[mapping[key]] = value;
+  else throw new Error("Unsupported native launcher argument");
 }
-// Selecting the ACP harness is an explicit selection of its Node adapter,
-// not fallback from a failed native attempt. Existing workspace-global ACP
-// profile argv remain usable on machines with older installed entries.
-runtime ||= harness === "acp" ? "node" : "rust";
-if (!["node", "rust"].includes(runtime)) throw new Error("Select --runtime rust or explicit --runtime node");
-if (runtime === "node") {
-  process.argv = [process.argv[0], process.argv[1], ...nodeArgs];
-  await import("./treer-agent-node.mjs");
-} else {
-  if (!["codex", "claude"].includes(harness)) throw new Error("ACP is not Rust-adapted; select its explicit --runtime node profile");
-  for (let i = 0; i < nodeArgs.length; i += 2) {
-    const [key, value] = nodeArgs.slice(i, i + 2);
-    if (key !== "--harness" && !mapping[key]) throw new Error("Unsupported native launcher argument");
-    if (mapping[key]) env[mapping[key]] = value;
-  }
-  const binding = nativeRuntime(root, [harness]);
-  env.AGENT_UI_HARNESS = harness; env.AGENT_UI_CWD ||= env.CODEX_UI_CWD || process.cwd();
-  // A parent's port observation file belongs to that invocation. Rust owns
-  // its own registration, so no outer-wrapper port file is required here.
-  delete env.AGENT_UI_PORT_FILE;
-  env.AGENT_UI_PUBLIC_DIR = binding.public_dir; env.RUST_SPIKE_REGISTER = "1";
-  const child = spawnProvider(binding.executable.path, [], { env, stdio: "inherit" });
-  child.on("error", () => { process.exitCode = 1; });
-  child.on("exit", (code, signal) => { process.exitCode = code ?? (signal ? 1 : 0); });
-  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => stopProcessTree(child));
-}
+if (!["codex", "claude"].includes(harness)) throw new Error("Unsupported harness; select codex or claude");
+const binding = nativeRuntime(root, [harness]);
+env.AGENT_UI_HARNESS = harness; env.AGENT_UI_CWD ||= env.CODEX_UI_CWD || process.cwd();
+// A parent's port observation file belongs to that invocation. Rust owns
+// its own registration, so no outer-wrapper port file is required here.
+delete env.AGENT_UI_PORT_FILE;
+env.AGENT_UI_PUBLIC_DIR = binding.public_dir; env.RUST_SPIKE_REGISTER = "1";
+const child = spawnProvider(binding.executable.path, [], { env, stdio: "inherit" });
+child.on("error", () => { process.exitCode = 1; });
+child.on("exit", (code, signal) => { process.exitCode = code ?? (signal ? 1 : 0); });
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => stopProcessTree(child));
 }

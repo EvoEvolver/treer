@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { build } from "esbuild";
 import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -32,10 +31,11 @@ if (options["native-manifest"] || options["native-sha256"]) {
   if (bytes.length > 65536 || createHash("sha256").update(bytes).digest("hex") !== options["native-sha256"]) throw new Error("Native manifest integrity mismatch");
   writeFileSync(join(output, "native-runtime.json"), bytes, { mode: 0o600, flag: "wx" });
 }
-await build({ entryPoints: [join(source, "src/index.ts")], outfile: join(output, "runtime.mjs"), bundle: true,
-  platform: "node", format: "esm", target: "node22", minify: false,
-  external: ["bufferutil", "utf-8-validate"], define: { "process.env.WS_NO_BUFFER_UTIL": '"1"', "process.env.WS_NO_UTF_8_VALIDATE": '"1"' },
-  banner: { js: 'import {createRequire as __treerCreateRequire} from "node:module"; const require=__treerCreateRequire(import.meta.url);' } });
+// treer.launcher-payload/v1 names runtime.mjs as its entry, and installed
+// launchers and Controllers validate that. The Node runtime was removed: every
+// launch goes through scripts/treer-agent.mjs to the pinned native image, so
+// the entry is only a fail-closed compatibility marker.
+writeFileSync(join(output, "runtime.mjs"), 'console.error("The Node Agent runtime was removed; start Agents through scripts/treer-agent.mjs.");\nprocess.exit(1);\n');
 const files = [];
 function visit(directory) {
   for (const name of readdirSync(directory).sort()) {

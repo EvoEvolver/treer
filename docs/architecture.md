@@ -1071,14 +1071,14 @@ Missing fields are unknown, not compatible. Immutable versions and a private
 atomic current pointer separate asset installation from explicit Agent restart.
 See the [installation design](research/2026-10-13-launcher-subcommand-design.md).
 
-Harness-specific behavior lives in `launchers/agent/src/harness/{codex,claude,acp}`.
-Codex uses its native `codex app-server`; Claude Code uses its native stream-JSON
-interface. Cursor, Grok Build, OpenCode, and Gemini use the shared ACP adapter
-with provider-specific commands from the launch profiles. The Cursor profile
-uses `cursor-agent`, avoiding Grok Build's `agent` executable alias. Built-in
+The launcher runtime is a native Rust executable in `launchers/agent/src`.
+Codex uses its native `codex app-server`; Claude Code uses its native
+stream-JSON interface. A small Node dispatcher verifies the machine-bound
+native image before executing it. The earlier Node runtime and its shared ACP
+adapter (Cursor, Grok Build, OpenCode, Gemini) were removed. Built-in
 `--kind codex` and `--kind claude` remain ordinary TUI/PTY paths without AIS.
 
-The standalone Rust ACP launcher, Pi UI, DSH AIS, provider-specific AIS Apps,
+The standalone Rust ACP launcher, the Node runtime, Pi UI, DSH AIS, provider-specific AIS Apps,
 and `apps/ais-kit` have been retired in favor of this single launcher. Provider
 authentication belongs to each provider's own CLI/configuration; the launcher
 does not automatically reuse Codex credentials for other providers. This

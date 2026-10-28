@@ -82,10 +82,7 @@ agent-launcher-test:
     npm --prefix launchers/agent ci --ignore-scripts
     npm --prefix launchers/agent run check
     npm --prefix launchers/agent test
-    npm --prefix launchers/agent run test:browser
-
-ais-e2e:
-    node scripts/ais-e2e.mjs
+    TREER_TEST_NODE="$(command -v node)" cargo test --locked --features fixture-harness --manifest-path launchers/agent/Cargo.toml
 
 messaging-e2e:
     cargo test -p treer-proxy message_

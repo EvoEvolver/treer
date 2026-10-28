@@ -196,8 +196,8 @@ struct InstallArgs {
     /// Older Controllers reject this flag; never retry without it to bypass refusal.
     #[arg(long, value_parser = ["rust"])]
     require_runtime: Option<String>,
-    /// Profile provider (repeatable); defaults to all six bundled profiles.
-    #[arg(long = "agent", value_parser = ["codex", "claude", "gemini", "grok", "cursor", "opencode"])]
+    /// Profile provider (repeatable); defaults to all bundled profiles.
+    #[arg(long = "agent", value_parser = ["codex", "claude"])]
     agents: Vec<String>,
     /// Machine-relative working directory for saved profiles.
     #[arg(long)]

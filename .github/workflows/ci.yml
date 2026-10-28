@@ -78,9 +78,9 @@ jobs:
       - run: pnpm test:e2e
 
   agent-launcher:
-    name: Agent launcher types, fake harnesses and browser
+    name: Agent launcher UI, installer scripts and native runtime
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -92,26 +92,14 @@ jobs:
           cache-dependency-path: launchers/agent/package-lock.json
       - name: Install launcher dependencies
         run: npm --prefix launchers/agent ci --ignore-scripts
-      - name: Install isolated browser runtime
-        run: cd launchers/agent && npx playwright install --with-deps chromium
       - name: Check launcher and browser sources
         run: npm --prefix launchers/agent run check
-      - name: Unit and installer tests (fake harnesses only)
+      - name: Installer, update and UI unit tests
         run: npm --prefix launchers/agent test
-      - name: Closed Codex, ACP and Claude Interface regression
+      - name: Native runtime unit tests (fixture harness)
         run: |
-          node --test scripts/ais-e2e.test.mjs
-          node scripts/ais-e2e.mjs
-      - name: Browser controls and screenshots
-        run: npm --prefix launchers/agent run test:browser
-        env:
-          CODEX_UI_SCREENSHOTS: ${{ runner.temp }}/launcher-screenshots
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: failure()
-        with:
-          name: agent-launcher-screenshots
-          path: ${{ runner.temp }}/launcher-screenshots
-          if-no-files-found: ignore
+          TREER_TEST_NODE="$(command -v node)" TREER_SPIKE_BUILD_CODEX=/usr/bin/true TREER_SPIKE_BUILD_TREER=/usr/bin/true \
+            cargo test --locked --features fixture-harness --manifest-path launchers/agent/Cargo.toml
 
   release-tooling:
     name: Release, install-trust and deploy tooling

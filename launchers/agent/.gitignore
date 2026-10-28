@@ -1,3 +1,4 @@
+target/
 node_modules/
 # Acceptance report files (tests/acceptance): they can name canary hosts, workspace paths and agent ids.
 console-*-acceptance-report.json

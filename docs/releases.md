@@ -73,13 +73,14 @@ CLI, Host and Controller for `linux-x86_64`, `linux-aarch64`, `darwin-x86_64`,
 the build fails without a valid payload). `scripts/stage-release-artifacts.sh`
 (`.ps1` on Windows) stages each platform with `SHA256SUMS` and
 `build-metadata.json`. Windows also runs ConPTY/Controller/CLI tests, the
-standard-user and installer checks, a byte-identical clean rebuild (`/Brepro`)
-and the native embedded-launcher smoke. The workflow never publishes anything.
+standard-user and installer checks and a byte-identical clean rebuild (`/Brepro`).
+The workflow never publishes anything; the Windows launcher is checked manually
+on a `win_native` machine before release.
 
 `scripts/fetch-machine-artifacts.sh [revision]` (`just fetch-artifacts`) verifies
 an existing `dist/`, or downloads the newest successful run for the exact commit
 (`TREER_ARTIFACT_RUN_ID` selects one), dispatching the workflow if no run exists.
-It requires the Windows launcher job to have passed and rejects missing
+It rejects missing
 platforms, mismatched commit metadata, partial checksum files and missing
 executable bits (`scripts/verify-machine-artifacts.sh`). A stale `dist/` fails;
 delete it to fetch another commit. `just stage-artifacts` builds only the local

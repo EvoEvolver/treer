@@ -90,7 +90,7 @@ export function controllerInstall(request) {
           regular(request.npm_cli);
           try { execFileSync(request.node, [request.npm_cli, "ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: candidate, stdio: "ignore", timeout: 300000 }); }
           catch { throw new Error("Development dependency installation failed; candidate was not activated"); }
-          regular(join(candidate, "node_modules/tsx/dist/loader.mjs")); regular(join(candidate, "node_modules/ws/package.json"));
+         
         }
         renameSync(candidate, versionRoot);
       }
