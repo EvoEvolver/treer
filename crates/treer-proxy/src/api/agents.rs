@@ -11,7 +11,6 @@ mod machine_files;
 mod machine_upload;
 mod policy;
 mod profiles;
-mod provider_cli;
 mod reservations;
 #[path = "agents/startup.rs"]
 mod startup;
@@ -28,7 +27,6 @@ pub(super) use machine_upload::*;
 pub(super) use machine_upload::{set_part_windows_for_test, PART_BUFFERED_PEAK};
 pub(super) use policy::*;
 pub(super) use profiles::*;
-pub(super) use provider_cli::*;
 pub(super) use reservations::*;
 pub(super) use startup::*;
 pub(super) use terminal::*;

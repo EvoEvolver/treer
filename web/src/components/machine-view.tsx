@@ -1,4 +1,3 @@
-import { ProviderCliInstaller } from "@/components/provider-cli-installer"
 import { ControllerUpdater } from "@/components/controller-updater"
 import { agentPath } from "@/lib/workload-path"
 import { EmptyState, MachineRecovery, Status } from "@/components/control-plane-ui"
@@ -61,7 +60,7 @@ export function MachineOverviewView({ machine, agents, services, virtualHosts, t
       <Button variant="outline" className="shrink-0" onClick={onClose}>{t("org.close")}</Button>
     </div>
 
-    {workspaceId && <div className="mb-6 flex flex-wrap items-start gap-3"><ProviderCliInstaller key={`${workspaceId}/${machine.server_id}`} workspaceId={workspaceId} machine={machine} /><ControllerUpdater key={`${workspaceId}/${machine.server_id}`} workspaceId={workspaceId} machine={machine} /></div>}
+    {workspaceId && <div className="mb-6 flex flex-wrap items-start gap-3"><ControllerUpdater key={`${workspaceId}/${machine.server_id}`} workspaceId={workspaceId} machine={machine} /></div>}
     <div className="grid gap-10 md:grid-cols-2">
       <section className="space-y-3 rounded-md border p-4">
         <h2 className="text-sm font-semibold">{t("machine.build")}</h2>

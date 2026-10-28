@@ -169,23 +169,6 @@ other machines must configure it before using a portable profile. Profiles use
 `command=treer-agent`, `cwd=.`, and the same provider arguments on every machine.
 The executable/provider login is still the user's responsibility.
 
-Provider installation recipe data lives in `provider-recipes.json`, with source
-review records in `provider-review.json` and the execution handoff in
-[provider-recipes.md](provider-recipes.md). These files alone do not enable an
-installation API. The initial recipe data covers Codex/Gemini on POSIX with npm
-scripts disabled. Claude's reviewed npm recipe covers native arm64 macOS and
-glibc Linux (x64/arm64), requires two verified local tarballs, an offline install
-with explicit postinstall consent, and native-file verification before execution.
-Sealed real-install acceptance is required before release. All Windows recipes,
-Intel macOS Claude, and OpenCode/Cursor/Grok remain
-unsupported pending their execution review. Core must embed and validate this
-data and confirm the exact installation plan with the user. Top-level tarballs
-are pinned by SHA-512; transitive dependencies are not a reviewed lockfile.
-Installation accesses the official npm registry and writes the global npm
-prefix, ignores user npm configuration, never elevates or changes PATH, and
-never handles provider login. A successful prefix-local version check does not
-ensure that directory is on the Controller's service PATH.
-
 Windows uses a small console PE compiled by the OS .NET Framework 4 `csc.exe`
 at a fixed `%SystemRoot%\Microsoft.NET\Framework64\v4.0.30319` (or Framework)
 path; a missing compiler is a clear installation failure, not a `.cmd` fallback.

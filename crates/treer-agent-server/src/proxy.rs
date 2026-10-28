@@ -607,7 +607,6 @@ impl ProxyClient {
                             if matches!(
                                 envelope.command,
                                 AgentCommand::Exec { .. }
-                                    | AgentCommand::ProviderCliCheck { .. }
                             ) {
                                 if exec_ids.contains(&envelope.command_id) {
                                     continue;
@@ -1034,37 +1033,6 @@ impl ProxyClient {
             AgentCommand::ControllerUpdateStatus {} => {
                 CommandResult::success(command_id.clone(), crate::controller_update::status())
             }
-            AgentCommand::ProviderCliRecipes {} => self
-                .runtime
-                .provider_cli()
-                .recipes()
-                .map(|response| CommandResult::success(command_id.clone(), response))
-                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
-            AgentCommand::ProviderCliCheck { recipe } => self
-                .runtime
-                .provider_cli()
-                .check(&recipe)
-                .await
-                .map(|response| CommandResult::success(command_id.clone(), response))
-                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
-            AgentCommand::ProviderCliInstall {
-                operation_id,
-                recipe,
-                table_hash,
-                argv_hash,
-                consent,
-            } => self
-                .runtime
-                .provider_cli()
-                .install(&operation_id, &recipe, &table_hash, &argv_hash, &consent)
-                .map(|response| CommandResult::success(command_id.clone(), response))
-                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
-            AgentCommand::ProviderCliOperation { operation_id } => self
-                .runtime
-                .provider_cli()
-                .operation(&operation_id)
-                .map(|response| CommandResult::success(command_id.clone(), response))
-                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
             AgentCommand::UploadBegin {
                 upload_id,
                 directory,
@@ -1481,7 +1449,6 @@ mod tests {
                 interface_cache_path: root.join("interface.json"),
                 startup_store_path: root.join("startup.json"),
                 private_state_root: root.join("agent-private"),
-                provider_cli_root: root.join("provider-cli"),
             },
         )
         .unwrap();

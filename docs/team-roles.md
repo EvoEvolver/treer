@@ -9,7 +9,7 @@ of the people or Agent sessions currently filling them. Address team Agents by
 | --- | --- |
 | `core-dev` | `crates/`; Proxy, Controller, Host, runtime, protocol and CLI; database migrations; authentication, authorization, Policy and security boundaries; `docs/architecture.md`, `docs/security.md` |
 | `launcher-dev` | `launchers/agent/`, the single launcher; harness adapters, Agent UI, installation, switching and profiles; harness session export/import interfaces |
-| `apps-dev` | `apps/`; workspace Apps including issues, Soul, mail, telegram, paper, gits, policy, tower and email-endpoint; `apps/GUIDELINES.md`; App identity usage |
+| `apps-dev` | `apps/`; workspace Apps including issues, Soul, mail, telegram, paper, gits, policy and tower; `apps/GUIDELINES.md`; App identity usage |
 | `web-dev` | `web/`, React console and Playwright; console presentation of Core features; consistent path/folder semantics |
 | `release-eng` | `.github/`, `scripts/`, release and Canary deployment; installers, artifacts and signatures, machine updates; CI, test infrastructure and unstable tests; cross-review before merge; worktree hygiene and documentation indexes |
 | `leader` | Coordination, verification, user reports, machine updates and coordinated Agent restarts; no implementation code |

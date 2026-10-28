@@ -24,7 +24,6 @@ const requiredFiles = [
   "skills/treer/SKILL.md",
   "skills/treer-install/SKILL.md",
   "skills/treer-macos-container/SKILL.md",
-  "skills/treer-voice/SKILL.md",
   "deploy/apple-container-machine/Dockerfile",
 ];
 const excludedDirectories = new Set([
@@ -62,15 +61,12 @@ requireText("AGENTS.md", "apps/README.md");
 requireText("AGENTS.md", "skills/treer/SKILL.md");
 requireText("AGENTS.md", "skills/treer-install/SKILL.md");
 requireText("AGENTS.md", "skills/treer-macos-container/SKILL.md");
-requireText("AGENTS.md", "skills/treer-voice/SKILL.md");
 requireText("docs/README.md", "../apps/README.md");
 requireText("docs/README.md", "../apps/GUIDELINES.md");
 requireText("apps/README.md", "GUIDELINES.md");
 requireText("apps/README.md", "gits/README.md");
 requireText("docs/README.md", "../apps/gits/README.md");
 requireText("docs/README.md", "../deploy/README.md");
-requireText("docs/README.md", "../skills/treer-voice/SKILL.md");
-requireText("docs/README.md", "operator-guide.md#voice-apis-opt-in");
 requireText(
   "crates/treer-agent-server/src/cli_command.rs",
   'include_str!("../../../skills/treer/SKILL.md")',
@@ -82,10 +78,6 @@ requireText(
 requireText(
   "crates/treer-agent-server/src/cli_command.rs",
   'include_str!("../../../skills/treer-macos-container/SKILL.md")',
-);
-requireText(
-  "crates/treer-proxy/src/voice_llm.rs",
-  'include_str!("../../../skills/treer-voice/SKILL.md")',
 );
 
 function markdownFiles(directory) {

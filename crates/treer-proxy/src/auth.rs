@@ -887,8 +887,6 @@ mod machines;
 mod network;
 mod organizations;
 mod pins;
-mod provider_cli;
-pub(crate) use provider_cli::*;
 mod workload_tree;
 
 pub(crate) use handlers::*;

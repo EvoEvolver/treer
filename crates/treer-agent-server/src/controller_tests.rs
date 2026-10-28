@@ -115,7 +115,6 @@ async fn recovery_inventory_and_controller_replacement_retain_exited_output() {
         interface_cache_path: root.join("interfaces.json"),
         startup_store_path: root.join("startup.json"),
         private_state_root: root.join("agent-private"),
-        provider_cli_root: root.join("provider-cli"),
         root: root.clone(),
     };
     let (runtime, _) =
@@ -422,7 +421,6 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
             interface_cache_path: root.join("interfaces.json"),
             startup_store_path: saved_path.clone(),
             private_state_root: root.join("agent-private"),
-            provider_cli_root: root.join("provider-cli"),
             root: std::fs::canonicalize(&root).unwrap(),
         },
     )
@@ -982,7 +980,6 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
                 interface_cache_path: root.join("interfaces.json"),
                 startup_store_path: root.join("startup.json"),
                 private_state_root: root.join("agent-private"),
-                provider_cli_root: root.join("provider-cli"),
                 root: root.into(),
             },
         )
@@ -1669,7 +1666,6 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
             interface_cache_path: root.join("interfaces.json"),
             startup_store_path: root.join("startup.json"),
             private_state_root: root.join("agent-private"),
-            provider_cli_root: root.join("provider-cli"),
             root: std::fs::canonicalize(&root).unwrap(),
         },
     )
@@ -2202,7 +2198,6 @@ async fn upload_fixture() -> (ControllerRuntime, PathBuf, tokio::task::JoinHandl
         interface_cache_path: root.join("interfaces.json"),
         startup_store_path: root.join("startup.json"),
         private_state_root: root.join("agent-private"),
-        provider_cli_root: root.join("provider-cli"),
         root: root.clone(),
     };
     let (runtime, _) = ControllerRuntime::from_sync(host, initial, events, config).unwrap();
@@ -2944,7 +2939,6 @@ async fn agent_fixture_configured(
         interface_cache_path: root.join("interfaces.json"),
         startup_store_path: root.join("startup.json"),
         private_state_root: root.join("agent-private"),
-        provider_cli_root: root.join("provider-cli"),
         root: root.clone(),
     };
     configure(&mut config);

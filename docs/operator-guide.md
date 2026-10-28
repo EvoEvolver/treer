@@ -2038,22 +2038,6 @@ side effect of transfer or binary installation. Treer root constraints do not ma
 a sandbox: monitor/allow Policy can still permit ordinary sensitive files inside
 that root, and direct same-account OS access remains unrestricted.
 
-Provider CLI installation from the Console (`provider-clis` routes) needs Node
-22 with `npm` on the Controller account's PATH; the Controller shows the exact
-npm commands before anything runs, installs into npm's default global prefix
-for that Node (a non-writable prefix fails visibly, and Treer never elevates or
-edits PATH), keeps results under `<state dir>/provider-cli/` for 24 hours, and
-leaves provider login to the user. The confirmation also shows what the install
-would replace: the version the installed binary reports (or that something
-unreadable is there) next to the pinned target, with the action `install`,
-`replace` or `noop` (already at the pinned version, nothing to confirm). A
-downgrade or unknown existing version needs an extra explicit acknowledgement,
-and an installation that changes between confirmation and the install step is
-refused as `provider_cli_state_changed` without touching the prefix. Machines
-whose Controller predates this observation answer `provider_cli_controller_outdated`
-until updated. Windows machines list every recipe as unsupported in this
-release. See [security](security.md#provider-cli-installation).
-
 Windows machine exec has a 30-second ceiling and is owned by the Controller.
 Windows PowerShell 5.1 receives a fixed system module search directory from
 Win32 rather than an inherited PSModulePath. The path supplied by Treer excludes
@@ -2184,8 +2168,8 @@ python3 apps/telegram/telegram.py
 Telegram's point-of-contact (POC) routing is changed at runtime in the chat (`/poc`)
 or by Core control Messages to the bridge Agent, with no confirmation gate; the
 bridge Agent's Message Policy is therefore the authorization boundary for IM
-conversations, so allow only a minimal set of senders (see "Limits, audit and
-revoking access" in the Telegram guide).
+conversations, so allow only a minimal set of senders (see "Authorization
+boundary" in the Telegram guide).
 
 See the [App contract](../apps/README.md), [Mail guide](../apps/mail/README.md), and
 [Telegram guide](../apps/telegram/README.md). The App process can use every
@@ -2374,12 +2358,8 @@ deadline and bounds successful response bodies to 64 KiB. A category is not proo
 of non-delivery or authorization to retry an uncertain send. Old failures cannot
 be classified retroactively; do not resend solely to obtain a diagnostic.
 
-Deploy [email-endpoint](../apps/email-endpoint/README.md) as a workspace Managed
-App, initially in `outbox` mode. `proxy` mode falls back to local outbox only on
-`email_not_configured`; Policy/recipient failures remain visible retry failures.
-Older Proxies without this route return a visible failure; select outbox
-explicitly until the Proxy upgrade. Real email acceptance requires operator
-coordination after the route is deployed; automated tests use local fakes only.
+No bundled App currently uses this route; any Managed App may call it with its
+own runtime identity.
 
 ### Agent path targets
 

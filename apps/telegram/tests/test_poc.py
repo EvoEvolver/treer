@@ -361,39 +361,6 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class CtlTest(unittest.TestCase):
-    def test_payloads_and_submission(self) -> None:
-        import subprocess
-        import sys
-        from telegram_app.ctl import build, parser
-        p = parser()
-        cases = [
-            (["get", "--conversation=-10042:9"], {"im": "poc.get", "conversation": "-10042:9"}),
-            (["set", "--conversation=-5", "/team/x", "--wake"], {"im": "poc.set", "conversation": "-5", "to": "/team/x", "wake_agent": True}),
-            (["set", "--conversation=-5", "ag_y"], {"im": "poc.set", "conversation": "-5", "to": "ag_y"}),
-            (["handoff", "ag_z"], {"im": "poc.handoff", "to": "ag_z"}),
-            (["handoff", "ag_z", "--conversation=-7:1"], {"im": "poc.handoff", "to": "ag_z", "conversation": "-7:1"}),
-            (["disable", "--conversation=-1"], {"im": "poc.disable", "conversation": "-1"}),
-            (["list"], {"im": "poc.list"}), (["audit", "--limit", "5"], {"im": "audit", "limit": 5}), (["users"], {"im": "users.list"}),
-            (["user-set", "7", "Ann", "--disabled"], {"im": "users.set", "user_id": 7, "label": "Ann", "enabled": False}),
-        ]
-        for argv, expected in cases:
-            self.assertEqual(build(p.parse_args(argv)), expected, argv)
-        with tempfile.TemporaryDirectory() as directory:
-            state = Path(directory) / "state.json"
-            state.write_text("{}", encoding="utf-8")
-            env = {**os.environ, "FAKE_TREER_STATE": str(state), "TREER_CLI": str(FAKE_TREER)}
-            env.pop("IM_BRIDGE", None)
-            FAKE_TREER.chmod(0o755)
-            run = subprocess.run([sys.executable, str(APP_ROOT / "im-poc"), "--bridge", "/infra/im", "set", "--conversation=-5", "ag_y"], env=env, capture_output=True, text=True)
-            self.assertEqual(run.returncode, 0, run.stderr)
-            (message,) = json.loads(state.read_text())["messages"]
-            self.assertEqual(json.loads(message["body"]), {"im": "poc.set", "conversation": "-5", "to": "ag_y"})
-            self.assertEqual(message["recipients"][0]["id"], "/infra/im")
-            missing = subprocess.run([sys.executable, str(APP_ROOT / "im-poc"), "list"], env=env, capture_output=True, text=True)
-            self.assertEqual(missing.returncode, 2)
-
-
 class ReviewFixesTest(PocBase):
     admins = frozenset({"ag_admin"})
 

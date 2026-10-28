@@ -935,7 +935,6 @@ async fn console_routes_refuse_an_agent_origin_as_browser_origin() {
         messages,
         CapabilityRollout::all_enabled(),
         crate::updater::UpdaterClient::disabled(),
-        crate::voice::VoiceServices::disabled(),
     );
     let agent_origin = format!("https://{AGENT_HOST}");
     // An unsafe cookie-authenticated API route.
@@ -1047,7 +1046,6 @@ async fn agent_origin_url_is_hydrated_only_for_members_passing_the_gate() {
             messages.clone(),
             CapabilityRollout::all_enabled(),
             crate::updater::UpdaterClient::disabled(),
-            crate::voice::VoiceServices::disabled(),
         )
     };
     let get = |path: &str| {

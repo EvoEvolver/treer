@@ -12,10 +12,6 @@ mod workload_tree;
 pub use workload_tree::*;
 mod policy_path;
 pub use policy_path::*;
-mod provider_cli;
-pub use provider_cli::*;
-mod provider_cli_observation;
-pub use provider_cli_observation::*;
 pub mod controller_update;
 
 use chrono::{DateTime, Utc};

@@ -1,5 +1,9 @@
 # Unified endpoints — design E, research #155
 
+> The `apps/message-endpoint` prototype of this design (#159) was never cut over
+> and has been removed; `apps/telegram` remains the Telegram channel. The code is
+> in git history before the apps consolidation commit.
+
 2026-10-17; **research, not implementation approval**. User correction 3410:
 endpoints ARE real command Agent processes. D/D-lite/D-lite+ are withdrawn
 (historical research in `4359f482`); no processless identities or Core delegation. Core 3422 confirms existing
@@ -16,7 +20,7 @@ No private config/database contents or real credentials read. Mail is out of sco
 | --- | --- | --- |
 | [Telegram](../../apps/telegram/README.md) | registry/offsets/mappings/chunk retries in SQLite; bot-token file | bridge Agent + private settings App, one Core receive loop |
 | [HTTP](../../apps/telegram/http_app/README.md) | data/admin SQLite, token/pair hashes, cursors/maps | bridge Agent + public data/private settings Apps, one Core receive loop |
-| [Email](../../apps/email-endpoint/README.md) | contacts/thread IDs/digests/intents/OAuth sessions, private outbox; provider secrets stay Proxy-side | one private App, no receive loop; caller-authored Core messages/replies, App-runtime email |
+| Email (`apps/email-endpoint`, since removed) | contacts/thread IDs/digests/intents/OAuth sessions, private outbox; provider secrets stay Proxy-side | one private App, no receive loop; caller-authored Core messages/replies, App-runtime email |
 
 A (single public/admin process) rejected; B (three shared processes) saves memory
 but hub-authored messages fail endpoint identity requirement; C (separate Apps,

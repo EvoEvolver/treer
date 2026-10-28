@@ -2052,7 +2052,7 @@ fn config_dir() -> Result<PathBuf> {
 }
 
 /// Canonical Treer state directory. Every file below it (startup stores,
-/// private state, provider CLI results, service logs, machine identity) is
+/// private state, service logs, machine identity) is
 /// Controller-owned; the machine file-transfer root reserves it by identity.
 pub fn state_dir() -> Result<PathBuf> {
     #[cfg(windows)]
@@ -2077,11 +2077,6 @@ pub fn startup_state_path(server_id: &str) -> Result<PathBuf> {
 /// Controller-owned root for per-Agent private state; see `private_state`.
 pub fn agent_private_state_root() -> Result<PathBuf> {
     Ok(state_dir()?.join(crate::private_state::ROOT_DIRECTORY_NAME))
-}
-
-/// Controller-owned root for provider CLI jobs and results; see `provider_cli`.
-pub fn provider_cli_root() -> Result<PathBuf> {
-    Ok(state_dir()?.join(crate::provider_cli::ROOT_DIRECTORY_NAME))
 }
 
 #[cfg(unix)]

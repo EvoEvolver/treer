@@ -5,10 +5,8 @@ Treer separates durable coordination from machine-local process ownership.
 ```mermaid
 flowchart LR
     Web[Browser control plane] --> Proxy[Proxy]
-    VoiceClient[Optional Voice API client] -->|PCM ASR + utterance text| Proxy
     Proxy --> DB[(PostgreSQL)]
     Proxy <--> NATS[(NATS)]
-    Proxy --> VoiceLLM[Voice LLM upstream]
     Controller[Agent Server / Controller] <--> Proxy
     Controller <--> Host[Agent Host]
     Host --> Runtime[Agent runtime and PTY]
@@ -23,7 +21,7 @@ flowchart LR
 
 | Component | Owns |
 | --- | --- |
-| `treer-proxy` | Public API, authentication, Policy, App identity, PostgreSQL metadata, Core Message, routing, ingress, distributed coordination, Voice ASR proxy, and Voice command LLM |
+| `treer-proxy` | Public API, authentication, Policy, App identity, PostgreSQL metadata, Core Message, routing, ingress, and distributed coordination |
 | `treer-agent-server` | Machine Controller, authenticated CLI parser/business logic, local API, Proxy link, explicit TCP bridge, and launch snapshots |
 | `treer-agent-host` | Stable local child-process ownership and idempotent mutations |
 | `treer-agent-runtime` | PTY lifecycle, bounded output replay, and working-directory containment |
@@ -682,74 +680,6 @@ IDs-only signal `workspace.pins.changed`, which clients answer with a fresh
 `GET`. App and folder deletion cascade to pins; agent deletion removes them in
 its own transaction and reads filter on an unrevoked credential.
 
-Provider CLI installation (#123 part 2) is a human-session feature under
-`/api/workspaces/{ws}/machines/{machine}/provider-clis` (`GET recipes`,
-`POST prepare`, `POST install`, `POST check`, `GET operations/{id}`), gated by
-current workspace membership, Policy `machine.exec` on the machine and the
-`machine.provider-cli-install.v1` capability that both the Proxy health document
-and a Controller advertise (old peers fail with 501). `prepare` and `install`
-additionally require `machine.provider-cli-install.v2` (#134): a Controller
-that installs without first observing the prefix is refused with 409
-`provider_cli_controller_outdated`, never served by the unobserved flow. The recipe table is
-release data (`launchers/agent/provider-recipes.json`, schema
-`treer.provider-recipes/v1` at `schema_version` 2) embedded by `treer-protocol`
-and validated at Controller start: typed `npm-global` installs with exact
-version, SHA-512 `integrity`, allowlisted registry, a top-level
-`expected_version` equal to the pinned version, `ignore_scripts` or (only
-together with `binary_path` and per-platform `native_binaries` pins) an
-inline lifecycle review, `check` restricted to the recipe's `binary_names`
-and `--version`; any violation withholds the capability. Controllers whose
-table validates also advertise `machine.provider-cli-plan.v2` (#131): their
-plans may carry a `verify_file` step and native entries expand to nine steps
-(Node architecture probe, pack of root and native tarball, two SHA-512
-verifications, one offline install of both local tarballs, prefix,
-verify-file, probe). The Controller owns one expansion
-function that produces the plan shown at `recipes`/`prepare` and executed on
-`install`: `npm pack` into a private job directory, SHA-512 verification of the
-single tarball, `npm install --global <local tarball>`, `npm prefix --global`,
-then the probe from that prefix's `bin` (never PATH). Before minting a token,
-`prepare` is admitted against the per-minute attempt and live-token ceilings
-(`provider_cli_prepare_attempts`, counted before any Controller command and
-whatever the outcome), then runs the Controller's observation (`ProviderCliObservation`, the
-same procedure as `check`): `npm prefix --global` under the private job
-environment, an `lstat` of `<prefix>/bin/<binary>` and, only when a regular
-file inside the prefix is there, the recipe's version probe. The state is
-decided from evidence (`absent`, `installed` with a strict normalized semver,
-or `unknown` with a named reason), never from an error, and maps to exactly
-one action: `install`, `replace` (with a `version_relation` of `upgrade`,
-`downgrade`, `incomparable` or `unknown`) or `noop` (already at the pinned
-version: no token, no operation, no machine slot). The Proxy validates the
-observation's shape and consistency before using it (a malformed one is a
-502 Controller error). An unresolvable prefix is
-409 `provider_cli_state_unobservable`. The Proxy binds the hash of the
-displayed plan, the `observation_hash`
-(`treer.provider-cli-observation/v1` over recipe hash, target version, state,
-current version, executable and presence), the action and the relation into
-the 120-second single-use confirmation token (hashed at rest, bound to
-workspace, machine, user, session, recipe triple, table hash and Controller
-build); `install` refuses a busy machine or an old/offline Controller before
-consuming the token, requires `acknowledged_relation` equal to the bound
-relation for `downgrade`, `incomparable` and `unknown` (400 otherwise, token
-left usable), then consumes it and inserts the single active operation per
-machine (PostgreSQL partial unique index) in one transaction before
-dispatching exactly once with the consent. The Controller re-observes before
-any step and again immediately before the install step under the operation's
-deadline (unconfirmed cleanup ends the operation `unknown`, a spent budget
-ends it timed out, nothing spawns past the deadline) and fails the operation
-as `provider_cli_state_changed` (reporting the path-free `observed_before`
-summary) on any other difference, including the action having become `noop`.
-Truncated probe output never yields a version, and an observation whose probe
-left a process behind is refused at `prepare` (409
-`provider_cli_probe_unconfirmed`). Provider CLI commands are never
-replayed to a replacement Controller; a lost dispatch, a silent Controller past
-a ten-minute grace or a missing Controller record ends as `unknown`, which only
-the machine's own later report may resolve. Output lives only in the
-Controller's private store (24 hours, 64 results, refusal when full); the Proxy
-keeps scope, status, recipe hashes, argv hash, action, relation, observation
-hash and the observed state/version, and audit rows carry no token, output or
-path (the observed executable path reaches only the creator's `prepare` and
-`check` responses). See [security](security.md#provider-cli-installation).
-
 New human Agent creations also atomically record their original human creator,
 workspace and machine in `agent_creation_reservations`; legacy and non-human
 creations are not backfilled. Only that human's current workspace session can
@@ -1299,19 +1229,6 @@ outbox, indexes, WAL and backups separately.
 Legacy/local-auth enrollments without a durable workspace retain their existing
 behavior and have no organization audit attribution; no organization is invented.
 
-Hold-to-talk audio stays on the Proxy only long enough to forward 16 kHz PCM16
-to the configured ASR vendor. After a transcript is available, `POST
-/api/workspaces/{workspace_id}/voice/command` sends that text to an OpenAI
-Responses or Chat Completions upstream. The model receives
-[the voice skill](../skills/treer-voice/SKILL.md) and a compact roster, then
-calls a `treer` tool. The Proxy executes allowed CLI-equivalent commands
-(`status`, `whoami`, `machine list`, `agent ls|show|prompt|read`) in-process
-as the signed-in user and returns a speakable reply. Clients own recording,
-speech gating and presentation; the repository no longer ships native iOS/Android
-clients. Vendor ASR and LLM keys stay in Proxy environment variables. See
-[Voice configuration](operator-guide.md#voice-apis-opt-in). This is not the later
-confirm-card Voice Live protocol, and clients do not run the Treer CLI for it.
-
 Workspace access is either `organization` or `restricted`. The former admits
 every current organization member; the latter admits only direct user grants,
 group grants, workspace creators, and organization managers. Direct and group
@@ -1390,12 +1307,8 @@ PostgreSQL `app_email_sends` stores fingerprint/idempotency/state, and
 `app_email_attempts` is body-free delivery audit and rate history. Email is not
 Core Message and does not create or wake an Agent.
 
-The [email-endpoint App](../apps/email-endpoint/README.md) owns its SQLite
-thread-to-message/email mapping, retry queue, local outbox, membership/email
-bindings, HTML page, and optional wake. Core owns canonical message bodies and
-per-recipient delivery. Agent requests and human replies use their own verified
-service tokens through App Message routes. App-owned channel data does not add
-email fields to Core Message or use an App credential to impersonate a caller.
+An App that uses this route owns its own email/thread mapping and outbox; Core
+Message gains no email fields.
 
 ### Workspace tree target identity
 
