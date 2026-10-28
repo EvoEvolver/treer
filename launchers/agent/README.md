@@ -117,8 +117,8 @@ state (`rust-spike.json`, `RUST_SPIKE_*`). Startups that call `node
 those old files remain; change them to `treer-launch` with the same arguments.
 `<machine.root>/.treer/launchers/agent/` and `~/.local/bin/treer-agent.json`
 are no longer used and can be deleted once nothing references them. On
-Windows, the old `%LOCALAPPDATA%\Treer\bin\treer-agent.exe` shim is not touched;
-remove it or put the Treer install directory ahead of it on PATH.
+Windows, `install.ps1` replaces the old `%LOCALAPPDATA%\Treer\bin\treer-agent.exe`
+shim with the alias.
 
 ### Create an Agent
 

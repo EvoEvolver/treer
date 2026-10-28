@@ -218,14 +218,16 @@ pub(crate) fn link_legacy_launcher(launcher: &Path) -> Result<bool> {
             let _ = fs::remove_file(&temporary);
             return Err(error).with_context(|| format!("failed to replace {}", alias.display()));
         }
-        // Receipt of the pre-Rust shim.
-        let _ = fs::remove_file(alias.with_file_name(format!("{LEGACY_LAUNCHER}.json")));
     }
     #[cfg(not(unix))]
     {
         let bytes = fs::read(launcher)?;
         replace_executable(&alias, &bytes)?;
     }
+    // Integrity receipt written next to the pre-Rust shim.
+    let mut receipt = alias.into_os_string();
+    receipt.push(".json");
+    let _ = fs::remove_file(receipt);
     Ok(true)
 }
 
