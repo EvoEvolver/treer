@@ -79,7 +79,7 @@ struct AgentLaunch {
 }
 
 enum StartupRestoreOutcome {
-    Started(AgentInfo),
+    Started(Box<AgentInfo>),
     Attached,
 }
 
@@ -1534,7 +1534,7 @@ impl ControllerRuntime {
             .await
             .into_iter()
             .filter_map(|(id, result)| match result {
-                Ok(StartupRestoreOutcome::Started(info)) => Some((id, Ok(info))),
+                Ok(StartupRestoreOutcome::Started(info)) => Some((id, Ok(*info))),
                 Ok(StartupRestoreOutcome::Attached) => None,
                 Err(error) => Some((id, Err(error))),
             })
@@ -1613,10 +1613,7 @@ impl ControllerRuntime {
                 if let Ok(agent) = self.get(&agent_id) {
                     if let Ok(agent) = agent.lock() {
                         if !agent.info.status.is_terminal() {
-                            results.push((
-                                agent_id,
-                                Ok(StartupRestoreOutcome::Attached),
-                            ));
+                            results.push((agent_id, Ok(StartupRestoreOutcome::Attached)));
                             continue;
                         }
                     }
@@ -1636,7 +1633,7 @@ impl ControllerRuntime {
                     .update(&agent_id, |current| {
                         current.last_host_epoch.clone_from(&self.inner.host_epoch)
                     })
-                    .map(|()| StartupRestoreOutcome::Started(info))
+                    .map(|()| StartupRestoreOutcome::Started(Box::new(info)))
                     .map_err(startup_store_error),
                 Err(error) => Err(error),
             };

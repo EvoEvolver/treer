@@ -652,7 +652,12 @@ impl ProxyClient {
             return true;
         };
         match failure {
-            Some(failure) => reported.insert(key.to_owned(), failure.to_owned()).as_deref() != Some(failure),
+            Some(failure) => {
+                reported
+                    .insert(key.to_owned(), failure.to_owned())
+                    .as_deref()
+                    != Some(failure)
+            }
             None => reported.remove(key).is_some(),
         }
     }
