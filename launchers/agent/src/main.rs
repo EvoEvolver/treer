@@ -1,12 +1,11 @@
 #[cfg(unix)] mod attachments;
 #[cfg(windows)] #[path="windows_attachments.rs"] mod attachments;
 use treer_agent_launcher::bounded_json;
-#[cfg(unix)] mod files;
-#[cfg(windows)] #[path="windows_files.rs"] mod files;
+mod files;
+mod fs_util;
 mod goals;
 mod claude_goal;
-#[cfg(unix)] mod disk_history;
-#[cfg(windows)] #[path="windows_disk_history.rs"] mod disk_history;
+mod disk_history;
 mod provider_stream;
 mod http;
 mod image_format;
@@ -17,8 +16,7 @@ mod soul_terminal;
 mod tasks;
 mod task_output;
 mod runtime;
-#[cfg(unix)] mod store;
-#[cfg(windows)] #[path="windows_store.rs"] mod store;
+mod store;
 mod transcript;
 mod cli;
 mod tools;
@@ -99,21 +97,6 @@ async fn main() -> Result<()> {
         if launch.is_none() {return session_transfer::cli(std::env::args().skip(2).collect());}
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         bail!("offline_session_transfer_unsupported_platform");
-    }
-    #[cfg(all(windows, feature = "fixture-harness"))]
-    if std::env::args().nth(1).as_deref() == Some("--fixture-create-private-state") {
-        let root = PathBuf::from(env("TREER_RUST_SPIKE_STATE_DIR")
-            .ok_or_else(|| anyhow::anyhow!("fixture_state_path_required"))?);
-        if !root.is_absolute() { bail!("fixture_state_path_required"); }
-        let parent = root.parent().ok_or_else(|| anyhow::anyhow!("fixture_state_parent_required"))?;
-        let _parent = treer_platform::machine_file::Root::open(parent, &[])?;
-        // Exclusive creation only; this hook cannot repair/adopt existing state.
-        std::fs::create_dir(&root)?;
-        let _owned = treer_platform::machine_file::Root::open(&root, &[])?;
-        treer_platform::secure_directory(&root)?;
-        if !treer_platform::private_path_is_secure(&root)? { bail!("fixture_state_security_refused"); }
-        println!("fixture_private_state_created");
-        return Ok(());
     }
     if !cfg!(target_os = "macos") && !cfg!(target_os = "linux") && !cfg!(windows) {
         bail!("unsupported launcher platform")

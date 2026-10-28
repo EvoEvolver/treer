@@ -2,7 +2,7 @@
 // provider credentials/history, Controller, or production lifecycle is used.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {spawn, execFileSync} from 'node:child_process';
+import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {mkdtemp, mkdir, readFile, realpath, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -20,9 +20,7 @@ for(const harness of ['codex','claude'])test(`Windows native ${harness}: text qu
   const env={SystemRoot:process.env.SystemRoot,TEMP:root,TMP:root,USERPROFILE:root,PATH:process.env.PATH,
     AGENT_UI_CWD:cwd,TREER_RUST_SPIKE_STATE_DIR:state,AGENT_UI_PUBLIC_DIR:resolve('public'),AGENT_UI_PORT_FILE:port,AGENT_UI_PORT:'0',AGENT_UI_HARNESS:harness,
     CODEX_BIN:process.execPath,CLAUDE_BIN:process.execPath,RUST_SPIKE_CODEX_ARGS:JSON.stringify([resolve('tests/fake-codex.mjs')]),RUST_SPIKE_CLAUDE_ARGS:JSON.stringify([resolve('tests/fixtures/claude-stream.mjs')]),CLAUDE_FIXTURE_LOG:join(root,'calls'),FAKE_CODEX_COMPLETE_TURNS:'1',FAKE_CODEX_STATUS:'idle'};
-  assert.equal(execFileSync(binary,['--fixture-create-private-state'],{cwd,env,encoding:'utf8'}).trim(),'fixture_private_state_created');
-  // The same initializer must never adopt even our own already-created root.
-  assert.throws(()=>execFileSync(binary,['--fixture-create-private-state'],{cwd,env,stdio:'pipe'}));
+  await mkdir(state);
   const launch=()=>{
     const child=spawn(binary,[],{cwd,env,stdio:['ignore','pipe','pipe'],windowsHide:true});children.push(child);child.stdout.resume();
     let error='',spawnCode=null;

@@ -64,8 +64,6 @@ pub(crate) fn prepare(args: &[String]) -> Result<Next> {
             }
             return Ok(Next::Run);
         }
-        // Runtime maintenance flags read directly by main.
-        Some("--fixture-create-private-state") => return Ok(Next::Run),
         _ => {}
     }
     let mut harness = std::env::var("AGENT_UI_HARNESS")
