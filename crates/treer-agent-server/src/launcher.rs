@@ -225,17 +225,21 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    #[cfg(unix)]
     struct TempDir(PathBuf);
+    #[cfg(unix)]
     impl TempDir {
         fn path(&self) -> &Path {
             &self.0
         }
     }
+    #[cfg(unix)]
     impl Drop for TempDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+    #[cfg(unix)]
     fn tempdir() -> TempDir {
         let path = std::env::temp_dir().join(format!("treer-launcher-test-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir(&path).unwrap();
