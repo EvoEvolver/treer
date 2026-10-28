@@ -230,8 +230,9 @@ test.describe('Tree Stop and Delete are at the bottom and confirm first', () => 
       await openMenu(page, how)
       const names = await page.getByRole('menu').getByRole('menuitem').allInnerTexts()
       expect(names.slice(-2)).toEqual(['Stop', 'Delete'])
-      // A separator sits between the regular actions and the destructive pair.
-      await expect(page.getByRole('menu').getByRole('separator')).toHaveCount(1)
+      // Groups are separated; the last separator sits right before the destructive pair.
+      const order = await page.getByRole('menu').locator('[role="menuitem"], [role="separator"]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('role') === 'separator' ? '|' : node.textContent))
+      expect(order.slice(-3)).toEqual(['|', 'Stop', 'Delete'])
       await page.getByRole('menuitem', { name: 'Stop', exact: true }).click()
       await expect(page.getByRole('dialog').getByRole('heading', { name: /^Stop .*reviewer\?$/ })).toBeVisible()
       expect(stops).toEqual([])

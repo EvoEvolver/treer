@@ -12,7 +12,7 @@ export function WorkspacePinAction({ pins, target }: {
   const pinned = pins.pins.some((pin) => pin.kind === target.kind && pin.id === target.id)
   const Icon = pinned ? PinOff : Pin
   return <DropdownMenuItem className="[@media(pointer:coarse)]:min-h-11" disabled={pins.busy} onSelect={() => void pins.toggle(target)}>
-    <Icon aria-hidden="true" className="mr-2 size-3.5" />{t(pinned ? 'pins.unpin' : 'pins.pin')}
+    <Icon aria-hidden="true" />{t(pinned ? 'pins.unpin' : 'pins.pin')}
   </DropdownMenuItem>
 }
 

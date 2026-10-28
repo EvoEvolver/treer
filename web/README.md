@@ -144,17 +144,30 @@ tokens stay in memory and JSON bodies, never URLs or storage.
 The sidebar Tree shows folders, Agents and Apps in persisted sibling order,
 addressed by stable IDs; display names are unique only within a folder.
 
-- Rows are one line (icon + name) with a status dot for non-idle states; the
-  dot has a text name so colour is never the only cue.
-- The row "⋯" menu, right-click and Shift+F10 share one action list
-  (`menuItems` in `workload-tree.tsx`): open in new tab, copy path, rename,
-  move up/down/to folder, pin, edit startup command, logs, App settings,
-  Start/Restart, and Stop/Delete last with confirmation. Folder menus add new
-  folder/Agent. Tab menus deliberately have no Stop/Delete.
+- Every level (folders, Agents, Apps, App-owned nodes) uses one row component
+  (`tree-row.tsx`): indent, a reserved chevron slot, icon, name, then status or
+  actions. Rows are 28px on fine pointers and 44px on touch / below 768px;
+  guide lines sit under each parent's chevron. Long names truncate; the row
+  title shows the full Tree path and machine.
+- Status is shape plus colour and has a text name: a dot for working/starting,
+  a hollow ring (and muted name) for stopped/exited, an icon for blocked,
+  failed and machine offline. Idle and running Apps show nothing. A collapsed
+  folder shows how many hidden Agents need attention (else how many work).
+- The row "⋯" button appears on hover/focus (always on touch) and the
+  right-click menu and Shift+F10 share one action list (`menuItems` in
+  `workload-tree.tsx`), grouped as open (new tab, logs, App settings), run
+  (start, restart, startup command), organise (rename, copy path, move, pin)
+  and finally Stop/Delete after the last separator, each confirmed. Folder
+  menus add new folder/Agent. Tab menus deliberately have no Stop/Delete.
+- An App with an App-owned subtree has a disclosure chevron ("App contents")
+  on its own row; nested App nodes expand the same way.
+- Dragging highlights the target folder or the insertion line, and shows a
+  workspace-root drop zone at the bottom.
 - The header **+** menu has Add folder, Add agent and Add machine (opens the
   enrollment dialog). With no machines the Tree shows a setup button.
 - Keyboard: one Tab stop with roving tabindex; Up/Down/Home/End move, Right
-  expands or reaches the actions button, Left collapses or goes to the parent.
+  expands (folders, Apps, App nodes) or reaches the actions button, Left
+  collapses or goes to the parent.
 - The sidebar resizes (240–480px, double-click resets to 272px) and collapses
   with the footer button or Cmd+B / Ctrl+B (not captured inside terminals or
   rich-text editors). Below 768px the layout is mobile: **Browse tree** opens
