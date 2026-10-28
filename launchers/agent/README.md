@@ -22,17 +22,17 @@ The directory also holds what surrounds the runtime:
 
 | Path | Role |
 | --- | --- |
-| `src/`, `build.rs`, `Cargo.toml` | Native runtime (own Cargo workspace and `Cargo.lock`, separate from Core) |
-| `ui/`, `public/` | React page sources and the committed, byte-verified build the runtime serves |
-| `scripts/` | Node 22+ dispatcher (`treer-agent.mjs`), installer, bundle/update tooling, Windows/PATH shims |
-| `profiles.json` | Bundled launch profiles; also embedded by the Proxy as workspace defaults |
-| `interface-contract.json` | AIS contract compiled into the runtime and checked by the installer |
-| `tests/` | Node integration tests for the runtime and installer, plus fake providers |
+| `src/`, `build.rs`, `Cargo.toml` | Native runtime and `treer-launch` CLI (own Cargo workspace and `Cargo.lock`, separate from Core) |
+| `ui/`, `public/` | React page sources and the committed, byte-verified build, embedded into the binary at compile time |
+| `scripts/` | Node UI build and check tooling (development only) |
+| `profiles.json` | Launch profiles the Proxy creates as workspace defaults (`treer-launch` plus these arguments) |
+| `interface-contract.json` | AIS contract compiled into the runtime |
+| `tests/` | Node integration tests for the runtime, plus fake providers |
 
-Node is still required on each machine: it runs the installer and the small
-`treer-agent` dispatcher, which verifies the pinned native image and then execs
-it. The Node conversation runtime and its ACP adapter (Gemini, Grok, Cursor,
-OpenCode) were removed; `--harness acp` and `--runtime node` now refuse.
+The installed launcher is one self-contained executable, `treer-launch`; it
+needs no Node.js. The Node conversation runtime and its ACP adapter (Gemini,
+Grok, Cursor, OpenCode) were removed; `--harness acp` and `--runtime node`
+refuse, and `--runtime rust` (still in older saved profiles) is ignored.
 
 The private HTTP listener exposes the browser page plus prompt, transcript,
 state and abort operations. `GET /v1/transcript` pages by turn
@@ -66,198 +66,73 @@ or conversations; no general content redaction is provided. Never publish them.
 
 ## Installation and updates
 
-Official Controller releases embed the same-release launcher payload (UI,
-profiles, installer, dispatcher), authenticated by the signed Controller
-artifact. The native runtime is bound per machine by a `native-runtime.json`
-manifest (schema `treer.native-launcher/v1`) that pins the executable, the
-public UI assets and the native provider/Treer tools by path, size and SHA-256:
+`treer-launch` is part of every Treer release, next to `treer`,
+`treer-agent-host` and `treer-agent-server`, and is covered by the same signed
+manifest. Every Treer install path puts it next to `treer`, which is on PATH
+and first on every Agent's PATH: `install-official.sh` and the Proxy's machine
+install script (`~/.local/bin`), `install.ps1` on Windows, and the container
+images (`/app/bin`). Controller updates (`treer-agent-server update` and the
+Console's Controller update) replace it together with the other executables;
+they install it on machines that predate it. Running Agents keep the image
+they started with.
 
-```json
-{
-  "schema": "treer.native-launcher/v1",
-  "platform": "linux",
-  "arch": "x64",
-  "source_commit": "<native source full SHA>",
-  "executable": {"path": "/physical/runtime", "bytes": 1, "sha256": "<SHA256>"},
-  "public_dir": "/physical/runtime-assets/public",
-  "assets": [{"path": "/physical/runtime-assets/public/index.html", "bytes": 1, "sha256": "<SHA256>"}],
-  "tools": {
-    "treer": {"path": "/physical/treer", "bytes": 1, "sha256": "<SHA256>", "version": "<version>"},
-    "codex": {"path": "/physical/native-codex", "bytes": 1, "sha256": "<SHA256>", "version": "<version>"}
-  }
-}
-```
+The install also provides `treer-agent` as a deprecated alias (a symlink on
+Unix, a copy on Windows) because workspace profiles saved before the rename run
+`treer-agent --harness ...`. A pre-Rust `#!/bin/sh` Node shim of that name is
+replaced; an unrelated script of that name is left alone with a warning.
 
-`assets` lists every public file (`index.html`, `boot.js`, `ui.js`, `ui.css`,
-lazy chunks and the PDF worker). Bind `tools.claude` when that native provider
-is installed; a missing provider is reported as `unavailable-provider` and that
-harness refuses to start. Installation, status and launch verify physical
-paths, platform/architecture, byte counts, SHA-256 and native image headers. A
-missing, altered or wrong-platform binding refuses; there is no fallback.
-Executable paths must match the native binary's compiled tool bindings (see
-[Build and test](#build-and-test)). The manifest is part of the
-content-addressed payload and must not be edited after activation.
-
-The default launcher is installed through the local Controller:
-
-```bash
-treer-agent-server launcher install --node /absolute/trusted/path/to/node
-treer-agent-server launcher update --node /absolute/trusted/path/to/node --require-runtime rust
-treer-agent-server launcher status --node /absolute/trusted/path/to/node
-treer-agent-server launcher rollback --node /absolute/trusted/path/to/node
-```
-
-With multiple local Controller enrollments, discovery fails closed with
-`launcher_controller_ambiguous`; select `--workspace WORKSPACE_ID` (and
-`--url http://127.0.0.1:PORT` only when that still matches several). Node 22+
-is an external prerequisite; its executable is not authenticated by the
-Controller signature, so use a trusted absolute path. Provider CLIs and their
-authentication remain the operator's responsibility. A development Controller
-without a prepared payload refuses installation unless `--allow-network` and a
-trusted npm CLI enable lockfile-pinned `npm ci --ignore-scripts`.
-
-The installer checks every file's size/SHA-256, the interface contract and the
-selected Controller handshake before activation. The content version is
-`sha256-<SHA-256 of bundle-manifest.json>`, installed privately under
-`<machine.root>/.treer/launchers/agent/<content-version>/`. Profiles use the
-portable `treer-agent` command, whose per-user shim pins Node and the stable
-`run.mjs`; an atomic `current.json` pointer selects the default version without
-Windows symlink privileges. Running Agents resolve physical assets once and
-keep them across updates. Version directories remain for rollback; profile
-writes are read back, and failures restore prior profiles and the pointer. No
-update restarts running Agents. The contract declares a
-`launcher_security_epoch`; rollback refuses versions below the Controller's
-floor. Unix state files use 0600 and directories 0700; Windows uses
-current-user/SYSTEM-only ACLs.
-
-### Update the default entry
-
-`treer-agent --help` lists launch arguments and the update command:
+Update or repair only the launcher:
 
 ```sh
-treer-agent update                    # local Controller's embedded payload
-treer-agent update --latest           # launcher-stable GitHub release channel
-treer-agent update --bundle /absolute/prepared --sha256 MANIFEST_SHA256
+treer-launch update                      # the installed Controller's version
+treer-launch update --channel stable     # newest signed release on a channel
+treer-launch update --version v0.1.16
+treer-agent-server launcher install --from ./target/release/treer-launch  # local build
+treer-agent-server launcher status
 ```
 
-Without `--latest` or a bundle, the command calls the local Controller's
-guarded `launcher update --require-runtime rust`; it discovers the Controller
-beside the pinned Treer CLI or in its sibling `libexec` (override with
-`--controller ABS`). It never retries without the runtime requirement.
+`treer-launch update` runs `treer-agent-server launcher update --dir <its own
+directory>`. It fetches the signed release manifest (Ed25519, the same trust as
+Controller updates: `--release-base-url`, `--public-key`,
+`TREER_RELEASE_BASE_URL`, `TREER_RELEASE_PUBLIC_KEY`), downloads only the
+`treer-launch` artifact for this platform and checks its size and SHA-256,
+replaces the file atomically (keeping `treer-launch.old`), runs the new
+binary's `--version` and restores the previous file if it does not report the
+requested version. It is idempotent and never restarts Agents, the Host or the
+Controller. `launcher install` and `launcher update` are the same command.
 
-`--latest` resolves
-`https://github.com/EvoEvolver/treer/releases/download/launcher-stable/launcher-latest.json`
-once, selects the current OS/architecture and downloads its versioned package.
-Trust comes from the official repository over HTTPS plus the channel's SHA-256
-and per-file checksums; it is not an independent signature or rollback
-protection. Redirects are limited to GitHub's release asset host. An existing
-verified Rust installation is required because native binaries bind their
-provider and Treer paths at compile time; the published native's tool paths,
-versions and hashes must match it. `--release-url http://127.0.0.1:PORT/latest`
-selects a loopback fixture for tests only.
+At run time the launcher resolves the Treer CLI from `TREER_BIN` (set by the
+Controller for Agents), then PATH, then its own directory; providers from
+`CODEX_BIN` / `CLAUDE_BIN`, else `codex` / `claude` on PATH. On Windows the
+provider must be a native `.exe` (npm `.cmd` shims are not executed); set
+`CODEX_BIN` or `CLAUDE_BIN` when PATH only has a shim. The UI is embedded;
+`AGENT_UI_PUBLIC_DIR` serves a development `public/` directory instead.
 
-The result is JSON with current and target versions, source commit,
-runtime/provider status and whether the version changed. Updating the default
-never restarts, migrates or replays running Agents, Host or Controller. A
-failed or ambiguous command is not retried automatically; inspect
-`treer-agent-server launcher status` first.
+### Upgrading from the Node launcher
+
+Saved profiles and Agent startups that run `treer-agent --harness X
+[--runtime rust] ...` keep working through the alias, with the same private
+state (`rust-spike.json`, `RUST_SPIKE_*`). Startups that call `node
+<machine.root>/.treer/launchers/agent/run.mjs ...` only run while Node and
+those old files remain; change them to `treer-launch` with the same arguments.
+`<machine.root>/.treer/launchers/agent/` and `~/.local/bin/treer-agent.json`
+are no longer used and can be deleted once nothing references them. On
+Windows, the old `%LOCALAPPDATA%\Treer\bin\treer-agent.exe` shim is not touched;
+remove it or put the Treer install directory ahead of it on PATH.
 
 ### Create an Agent
 
-Install the launcher on each machine (above). Then:
+Every workspace has the default profiles **Codex + UI** and **Claude + UI**
+(`treer-launch --harness codex|claude`, `cwd=.`):
 
 - Web: **+ → Add agent → Claude + UI or Codex + UI**, then choose the machine.
-- CLI: `treer agent admin create --machine <m> --kind command --name <n> -- treer-agent --harness claude`.
+- CLI: `treer agent admin create --machine <m> --kind command --name <n> -- treer-launch --harness claude`.
 
-The installer pins Node and the launcher entry in one per-user command:
-`~/.local/bin/treer-agent` on macOS/Linux, or
-`%LOCALAPPDATA%\Treer\bin\treer-agent.exe` on Windows. Ensure that directory is
-on PATH; the installer does not rewrite shell profiles, registry values or
-running Host environments. Profiles use `command=treer-agent`, `cwd=.` and the
-same provider arguments on every machine. Accepted arguments are
-`--harness codex|claude`, `--session-id ID` (alias `--thread-id`),
-`--cwd ABS` and `--name NAME`.
-
-Only the named shim and its integrity receipt are atomically replaced. Links,
-unknown existing commands and bin directories writable by another POSIX user
-are refused; symlinked `~/.local` or bin directories are unsupported.
-
-To collapse an existing workspace's legacy profiles, install the shim on
-**all** machines, run `node launchers/agent/scripts/migrate-profiles.mjs
---dry-run`, review the diff, then rerun with `--apply`. It saves a private 0600
-backup of the original inventory first, adopts only recognized launcher
-commands with exact provider arguments, and leaves custom or referenced
-profiles intact. It does not change any Agent startup or restart anything.
-
-### Local prepared bundles (launcher-only delivery)
-
-An operator can deliver a launcher change without rebuilding the Controller.
-From a trusted checkout (after `npm --prefix launchers/agent ci`):
-
-```sh
-node launchers/agent/scripts/prepare-bundle.mjs --output /absolute/prepared \
-  --source-commit FULL_SOURCE_SHA \
-  --native-manifest /absolute/native-runtime.json --native-sha256 SHA256
-/absolute/node launchers/agent/scripts/bundle-launcher.mjs install \
-  --bundle /absolute/prepared --sha256 MANIFEST_SHA256 --treer /absolute/treer
-/absolute/node launchers/agent/scripts/bundle-launcher.mjs status --treer /absolute/treer
-/absolute/node launchers/agent/scripts/bundle-launcher.mjs rollback --treer /absolute/treer
-```
-
-`prepare-bundle.mjs` rebuilds the UI and refuses stale or extra `public/`
-assets, copies scripts/profiles/contract, and writes
-`bundle-manifest.json` (schema `treer.launcher-payload/v1`). The schema's
-`runtime.mjs` entry is kept for compatibility with installed launchers and
-Controllers; it is a fail-closed stub because every launch goes through
-`scripts/treer-agent.mjs`. Record the SHA-256 of `bundle-manifest.json`
-independently. Hashes provide integrity, not authorship: this is
-**local operator-approved delivery**, not a signed release, and it cannot
-deliver Core changes.
-
-`update` takes the same arguments as `install`; `rollback --version
-sha256-HASH` selects a retained version; `--agent` narrows and
-`--skip-profiles` disables profile writes; `--root ABS` chooses a separate
-installation root inside the enrolled machine root.
-
-For a staged switch of running Agents, list explicit Agent IDs/paths in a JSON
-array and name one disposable preview target:
-
-```sh
-/absolute/node launchers/agent/scripts/bundle-launcher.mjs rollout \
-  --bundle /absolute/prepared --sha256 MANIFEST_SHA256 --treer /absolute/treer \
-  --targets /absolute/targets.json --preview ag_PREVIEW --rollout-id preview-001
-# Repeat exactly the same command with --apply to execute the recorded plan.
-```
-
-Only enabled command Agents on this machine with a healthy launcher session are
-eligible; custom startups, provider mismatches, the leader and the caller are
-rejected. The preview is the sole first batch; later batches hold at most three
-Agents. Each target must re-register, serve its manifest and UI, become ready
-and keep the same native session ID before the next batch; it then receives one
-queued continuation with a stable operation ID. The private
-`rollouts/ID.json` journal (0600) records original and replacement startups;
-rerunning the same ID reconciles instead of repeating restarts. On failure,
-later batches stop and the previous pointer and startups are restored.
-
-### Source installs (development)
-
-`install.sh`, `scripts/apply.sh` and `bootstrap.sh` install from a Git
-checkout. They are development entry points: the Git source is not
-authenticated as an official release, and Codex/Claude profiles require an
-explicit `--native-manifest ABS --native-sha256 HASH`.
-
-```sh
-./launchers/agent/install.sh --agent codex --native-manifest /abs/native-runtime.json --native-sha256 SHA256
-./launchers/agent/scripts/apply.sh --agent claude   # install the committed local revision
-sha=FULL_40_CHARACTER_COMMIT_SHA
-curl -fsSL "https://raw.githubusercontent.com/EvoEvolver/treer/$sha/launchers/agent/bootstrap.sh" | sh -s -- --ref "$sha" --agent codex
-```
-
-Bootstrap requires Treer, Node.js 22+, npm, Git and tar, sparse-fetches only
-`launchers/agent` at the full SHA, verifies HEAD and runs the installer. Omit
-`--agent` to save both bundled profiles. Installation never creates or
-restarts an Agent; `treer agent admin profile launch "Codex + UI" --name NAME`
-is a separate action.
+Accepted arguments are `--harness codex|claude` (default `codex`),
+`--session-id ID` (alias `--thread-id`), `--cwd ABS` and `--name NAME`; see
+`treer-launch --help`. With no arguments the runtime is configured only by its
+environment (`AGENT_UI_*`) and does not register an interface, which the
+integration tests use.
 
 ## Resume and recovery
 
@@ -265,8 +140,8 @@ Resume an existing native session, including one created by the terminal CLI,
 without importing or summarizing its context:
 
 ```sh
-treer-agent --session-id THREAD_ID
-treer-agent --harness claude --session-id SESSION_ID
+treer-launch --session-id THREAD_ID
+treer-launch --harness claude --session-id SESSION_ID
 ```
 
 Codex resumes with `thread/resume` (`approvalPolicy: never`,
@@ -301,7 +176,7 @@ bytes. Legacy state is refused by default.
 
 ## Offline session transfer
 
-`treer-agent session ...` exports, inspects, prepares and launches Claude
+`treer-launch session ...` exports, inspects, prepares and launches Claude
 sessions in a new directory with a fresh session UUID, without touching the
 running Agent (macOS/Linux). See [SESSION-TRANSFER.md](SESSION-TRANSFER.md).
 The current session's HTTP export is `GET /api/session/export` with loopback
@@ -316,15 +191,8 @@ runtime checks them without repairing permissions, rejects reparse points and
 hardlinks, and holds a share-mode-zero lease against a second writer. Each
 provider is assigned a nested kill-on-close Job Object. Directory enumeration
 returns HTTP 501 and images are unavailable on Windows; text sessions, queue,
-receipts and restart checkpoints are supported. A Mac/Linux image or a Node
-payload never establishes Windows support: Windows needs its own accepted
-native image and `native-runtime.json`.
-
-The `treer-agent.exe` entry is a small console PE compiled by the OS .NET
-Framework 4 `csc.exe`; it forwards argv and exit status without a shell and
-places Node in a `KILL_ON_JOB_CLOSE` Job. Installation lives under the enrolled
-machine root at `.treer\launchers\agent`; choose a writable user-owned root
-(typically beneath `%LOCALAPPDATA%`) when enrolling.
+receipts and restart checkpoints are supported. `treer-launch.exe` is the
+Windows release artifact; `install.ps1` installs it next to `treer.exe`.
 
 ## Add a harness adapter
 
@@ -333,23 +201,22 @@ Implement the provider protocol in `src/` next to the Codex (`runtime.rs`,
 history and receipt model. Keep the HTTP API, file browser, prompt journal and
 browser UI shared; do not copy the UI or server per provider. Unsupported
 capabilities stay false/null, and a requested resume that fails never creates a
-new conversation. Bind the provider binary at build time in `build.rs`, accept
-the harness in `scripts/treer-agent.mjs` and `scripts/native-runtime.mjs`, add
-fake-provider tests under `tests/`, then add a profile to `profiles.json`.
+new conversation. Resolve the provider binary in `src/tools.rs`, accept the
+harness in `src/cli.rs`, add fake-provider tests under `tests/`, then add a
+profile to `profiles.json`.
 Installation must not start or authenticate the provider.
 
 ## Build and test
 
-Default builds bind native tools at **build time**: `build.rs` resolves
-`codex` and `treer` (and optionally Claude via `TREER_SPIKE_BUILD_CLAUDE`) to
-absolute native executables and refuses script wrappers. If `codex` on PATH is
-an npm wrapper, set `TREER_SPIKE_BUILD_CODEX` to the native binary.
-`TREER_SPIKE_TARGET_{CODEX,TREER,CLAUDE}` bind a different deployment path.
-The `fixture-harness` feature allows fake providers (`CODEX_BIN`, `CLAUDE_BIN`,
-`RUST_SPIKE_*_ARGS`) and is for tests only. Use a private `CARGO_TARGET_DIR`.
+`build.rs` embeds `public/`; nothing about the build machine is compiled in.
+The `fixture-harness` feature allows fake provider arguments
+(`RUST_SPIKE_*_ARGS`) and test hooks, and is for tests only. Release builds use
+the Core target directory so `treer-launch` lands next to the other release
+binaries:
+`cargo build --locked --release --manifest-path launchers/agent/Cargo.toml --target-dir target`.
 
 ```sh
-# UI, installer and update scripts
+# UI
 npm --prefix launchers/agent ci
 npm --prefix launchers/agent run check      # typecheck + byte-for-byte UI build check
 npm --prefix launchers/agent test
@@ -359,9 +226,9 @@ TREER_TEST_NODE="$(command -v node)" \
 cargo clippy --locked --features fixture-harness --manifest-path launchers/agent/Cargo.toml --all-targets -- -D warnings
 # Runtime integration tests against a fixture-harness build (run from launchers/agent)
 cargo build --locked --features fixture-harness
-RUST_SPIKE_BIN=$CARGO_TARGET_DIR/debug/treer-agent-launcher node --test tests/contract.mjs tests/claude-entry.mjs
+RUST_SPIKE_BIN=$CARGO_TARGET_DIR/debug/treer-launch node --test tests/contract.mjs tests/claude-entry.mjs
 # Release-feature artifact scan (no fixture overrides may survive)
-RUST_SPIKE_RELEASE_BIN=$CARGO_TARGET_DIR/release/treer-agent-launcher node --test tests/default-build.mjs
+RUST_SPIKE_RELEASE_BIN=$CARGO_TARGET_DIR/release/treer-launch node --test tests/default-build.mjs
 ```
 
 The other `tests/*-entry.mjs` suites (session launch, snapshot, transfer, owner

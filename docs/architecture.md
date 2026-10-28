@@ -29,7 +29,7 @@ flowchart LR
 | `crates/treer-protocol` | Shared Proxy/Controller/browser/CLI wire models and capability constants |
 | `crates/treer-host-protocol` | Controller-to-Host frames |
 | `crates/treer-platform` | Local IPC (Unix sockets, Windows named pipes), user paths, private files, environment filtering, Windows process ownership |
-| `launchers/agent` | Optional Agent launcher: native Codex/Claude adapters, one Agent Interface Server and browser UI per Agent |
+| `launchers/agent` | Agent launcher `treer-launch`: native Codex/Claude adapters, one Agent Interface Server and browser UI per Agent |
 | `apps/` | Workspace Apps: ordinary services with their own configuration, secrets and state |
 | `web/` | The Console (React), deployable as a static site, Worker, nginx image or served by the Proxy |
 | `deploy/updater` | Self-hosted Compose image updater; the only component with `docker.sock` |
@@ -227,8 +227,8 @@ markers defend against browsers, not against same-user local processes.
 The [Agent launcher](../launchers/agent/README.md) is the reference AIS: one
 native Rust runtime with Codex (`codex app-server`) and Claude Code
 (stream-JSON) adapters, one Treer Agent per harness session, and a shared UI.
-Release Controllers embed a matching launcher payload installed with
-`treer-agent-server launcher install`. `bridge` Agents are for providers that
+It ships as the `treer-launch` release executable, installed and updated
+with the other Treer binaries. `bridge` Agents are for providers that
 run outside the Host: their prompts go to a bounded Controller-local queue the
 bridge reads from `GET /api/agents/{id}/prompt-queue`.
 
@@ -416,7 +416,7 @@ restart (`service restart`), which stops workloads. See [Releases](releases.md).
 | Controller config (`~/.config/treer/agent-servers/`, `%LOCALAPPDATA%\Treer\agent-servers`) | `<server_id>-controller.json` / `-host.json`: Proxy URL, machine credential, root, listen address, service mode (0600) |
 | Controller state (`~/.local/state/treer`, `$XDG_STATE_HOME/treer`, `TREER_STATE_DIR`, `%LOCALAPPDATA%\Treer\state`) | Installation identity per hostname, launch snapshots, deletion fences, transfer journals, interface cache, Agent private state, logs |
 | Runtime directory (`$XDG_RUNTIME_DIR/treer` or private fallback) | Host socket |
-| Enrolled root `.treer/` | Launcher versions and other per-root local assets; refused by machine file APIs |
+| Enrolled root `.treer/` | Per-root local assets; refused by machine file APIs |
 | App state | Each App's own directory/database (`TREER_APP_STATE_DIR`) |
 
 Audit events for organization, workspace and Tree mutations are written in the

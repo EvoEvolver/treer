@@ -173,8 +173,9 @@ curl -fsSL 'https://PROXY_HOST/install.sh' | sh
 treer-agent-server connect --key 'enr_v1_...' --proxy 'https://PROXY_HOST/'
 ```
 
-The installer puts `treer` and a `treer-agent-server` symlink in `~/.local/bin`
-and the Host/Controller in `~/.local/libexec/treer`, and adds the bin directory
+The installer puts `treer`, the `treer-launch` Agent launcher (plus its
+deprecated `treer-agent` alias) and a `treer-agent-server` symlink in
+`~/.local/bin` and the Host/Controller in `~/.local/libexec/treer`, and adds the bin directory
 to your shell startup file (`TREER_INSTALL_MODIFY_PATH=0` to skip;
 `TREER_INSTALL_DIR`, `TREER_AGENT_SERVER_INSTALL_DIR` to relocate). On the
 official origins it requires Node.js 22+ and verifies the signed release
@@ -267,30 +268,29 @@ treer agent admin create --machine build-machine --kind command --name helper --
 ```
 
 New workspaces start with **Codex + UI** and **Claude + UI** (run
-`treer-agent --harness codex|claude`) and **Codex (terminal)** /
+`treer-launch --harness codex|claude`) and **Codex (terminal)** /
 **Claude (terminal)** (plain `codex`/`claude` in a PTY). The UI profiles default
 to unattended full authority. Agent kinds are `shell` (the Console's built-in
 Terminal), `command`, `bridge` and `app`.
 
 ### The Agent launcher
 
-The UI profiles need the launcher on the target machine. Release Controllers
-embed a matching, verified payload:
+The UI profiles run `treer-launch`, which every Treer install puts next to
+`treer` and every Controller update replaces. It needs no Node.js. Profiles
+saved before the rename call `treer-agent`, a deprecated alias the install
+also provides.
 
 ```bash
-treer-agent-server launcher --node /absolute/path/to/node install   # Node.js 22+
+treer-launch --version
+treer-launch update                          # match the installed Controller
+treer-agent-server launcher install          # repair: reinstall from the signed release
 treer-agent-server launcher status
-treer-agent-server launcher update
-treer-agent-server launcher rollback
 ```
 
-This installs the per-user `treer-agent` command and saves the launcher's
-profiles; it never starts Agents. Versions live in the root's
-`.treer/launchers/agent`. If a UI profile reports `command_not_found`, install
-the launcher on that machine and make sure its bin directory is on the
-Controller's `PATH`. With several local installs pass
-`launcher --workspace WS`. Provider CLIs and their logins are yours to install.
-Details: [launcher README](../launchers/agent/README.md).
+If a UI profile reports `command_not_found`, run `treer-agent-server launcher
+install` on that machine. Provider CLIs (`codex`, `claude`) and their logins
+are yours to install; `CODEX_BIN` / `CLAUDE_BIN` select a provider outside
+PATH. Details: [launcher README](../launchers/agent/README.md).
 
 ### Startup commands and repairs
 
@@ -511,8 +511,8 @@ treer-agent-server update --release-base-url https://releases.example/ --public-
 ```
 
 The Controller verifies the signed manifest and every binary, replaces
-`treer-agent-server`, `treer` and `treer-agent-host` in place (keeping one
-`<name>.old`), and restarts only the Controller; workloads keep running. The
+`treer-agent-server`, `treer`, `treer-agent-host` and `treer-launch` in place
+(keeping one `<name>.old`), and restarts only the Controller; workloads keep running. The
 new Host takes effect at the next `service restart`, which stops workloads. To
 roll back, rename each `<name>.old` over `<name>` and run
 `treer-agent-server service restart-controller`. Controllers that predate the
@@ -521,8 +521,8 @@ locally. Custom distributors need their own trusted key (`--public-key`); the
 bundled key is used only for `https://releases.treer.ai/`. On machines without
 the key, `node scripts/install-release-trust.mjs` installs it.
 
-After a Controller update, re-run `treer-agent-server launcher update` to move
-the launcher to the payload embedded in the new Controller.
+Running Agents keep the launcher image they started with; new and restarted
+Agents use the updated `treer-launch`.
 
 ## Backup and restore
 
@@ -591,5 +591,3 @@ means the file may be published. Inspect the destination before retrying;
 never add `--force` blindly. Leftover `.treer-transfer-*` files can be removed
 once no Controller holds them.
 
-**Launcher commands ambiguous.** `launcher_controller_ambiguous` means several
-local installs: pass `treer-agent-server launcher --workspace WS ...`.

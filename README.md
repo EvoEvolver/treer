@@ -75,11 +75,10 @@ publish SSH or local service ports.
    (`curl -fsSL 'https://proxy.canary.treer.ai/install.sh' | sh` on macOS and
    Linux; a PowerShell form for Windows, which requires an administrator
    account).
-3. For the browser Agent UI, install the [Agent launcher](launchers/agent/README.md)
-   on that machine with `treer-agent-server launcher --node /absolute/node install`
-   (Node.js 22+). Then choose **+ → Add agent** and a profile such as
-   **Claude + UI** or **Codex + UI**; the **terminal** profiles and a plain
-   Terminal need no launcher. Install and sign in to the Agent CLI yourself.
+3. Choose **+ → Add agent** and a profile such as **Claude + UI** or
+   **Codex + UI** (the [Agent launcher](launchers/agent/README.md) is
+   installed with Treer), or a **terminal** profile. Install and sign in to
+   the Agent CLI yourself.
 
 To run your own control plane, use the Compose stack or build the single
 container (`./scripts/build-single-image.sh`); see the
