@@ -117,3 +117,61 @@ for (const mobile of [false, true]) {
     })
   })
 }
+
+test.describe('mobile touch', () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true })
+
+  async function swipe(page: Page, fromY: number, toY: number) {
+    const box = (await page.locator(`${scope} .xterm-screen`).boundingBox())!
+    const x = box.x + box.width / 2
+    const cdp = await page.context().newCDPSession(page)
+    const point = (y: number) => [{ x, y: box.y + y, id: 1 }]
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: point(fromY) })
+    for (let step = 1; step <= 10; step++) {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: point(fromY + ((toY - fromY) * step) / 10) })
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await cdp.detach()
+  }
+  const topRow = (page: Page) => page.locator(`${scope} .xterm-rows > div`).first().textContent()
+
+  test('swiping scrolls the scrollback, and reaches TUIs as wheel input', async ({ page }) => {
+    const backend = new TerminalBackend()
+    for (let line = 0; line < 400; line++) backend.push(Buffer.from(`line ${line} ${'·'.repeat(line % 30)}\r\n`))
+    await attach(page, backend, true)
+    await settled(page, backend)
+    const bottom = await topRow(page)
+    const viewport = page.locator(`${scope} .xterm-viewport`)
+    const scrollTop = () => viewport.evaluate((element) => element.scrollTop)
+    const before = await scrollTop()
+    // Finger moves down: content follows it, revealing older lines.
+    await swipe(page, 100, 500)
+    await expect.poll(scrollTop).toBeLessThan(before - 200)
+    await expect.poll(() => topRow(page)).not.toBe(bottom)
+    await swipe(page, 500, 100)
+    await expect.poll(scrollTop).toBeGreaterThan(before - 100)
+    // The page itself must not scroll or zoom while the terminal is dragged.
+    expect(await page.evaluate(() => [scrollX, scrollY, visualViewport!.scale])).toEqual([0, 0, 1])
+    // A tap still focuses the terminal (and opens the soft keyboard).
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+    await page.locator(`${scope} .xterm-screen`).tap()
+    await expect(page.locator(`${scope} .xterm-helper-textarea`)).toBeFocused()
+
+    // A full-screen TUI with mouse reporting (Codex, Claude Code) receives
+    // wheel reports, like a desktop wheel would send.
+    backend.push(Buffer.from('\x1b[?1049h\x1b[?1000h\x1b[?1006hTUI'))
+    await settled(page, backend)
+    backend.inputs.length = 0
+    await swipe(page, 100, 400)
+    await expect.poll(() => backend.inputs.join('')).toMatch(/\x1b\[<64;\d+;\d+M/)
+    backend.inputs.length = 0
+    await swipe(page, 400, 100)
+    await expect.poll(() => backend.inputs.join('')).toMatch(/\x1b\[<65;\d+;\d+M/)
+    // Without mouse reporting the alternate screen gets arrow keys.
+    backend.push(Buffer.from('\x1b[?1000l\x1b[?1006l'))
+    await settled(page, backend)
+    backend.inputs.length = 0
+    await swipe(page, 100, 400)
+    await expect.poll(() => backend.inputs.join('')).toContain('\x1b[A')
+  })
+})

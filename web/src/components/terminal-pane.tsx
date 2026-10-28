@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 import { websocketUrl } from "@/lib/api"
 import { suppressReplayQueries } from "@/lib/terminal-replay"
+import { bindTouchScroll } from "@/lib/terminal-touch"
 import { t } from "@/i18n"
 
 type TerminalStatus = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
@@ -137,6 +138,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     const fit = new FitAddon()
     terminal.loadAddon(fit)
     terminal.open(host)
+    const unbindTouch = bindTouchScroll(host)
     focusRef.current = () => terminal.focus()
 
     let replayQueryHandlers: IDisposable[] = []
@@ -389,6 +391,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       window.clearTimeout(resizeTimer)
       window.cancelAnimationFrame(refreshFrame)
       observer.disconnect()
+      unbindTouch()
       input.dispose()
       parsed.dispose()
       endReplay()
