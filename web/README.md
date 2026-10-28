@@ -124,8 +124,7 @@ with the user's workspace authority; their sandbox is not a tenant boundary.
 Only the isolated Agent embed (below) runs on a separate origin. Embedded
 interfaces may open top-level pages (`allow-popups-to-escape-sandbox`) and
 should use `noopener,noreferrer`, as all Console-owned new-tab actions do. See
-[security](../docs/security.md) and the
-[web security review](../docs/research/2026-10-12-security-web.md).
+[security](../docs/security.md).
 
 ## Screens and concepts
 
