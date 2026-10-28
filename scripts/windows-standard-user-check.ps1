@@ -66,12 +66,22 @@ function Invoke-AsStandardUser {
     param([string]$Label, [string]$Command)
     $prelude = @'
 $ErrorActionPreference = 'Stop'
-$env:USERPROFILE = [Environment]::GetFolderPath('UserProfile')
-$env:LOCALAPPDATA = [Environment]::GetFolderPath('LocalApplicationData')
-$env:APPDATA = [Environment]::GetFolderPath('ApplicationData')
+# A process started with -Credential inherits the runner's environment, and a
+# profile that has never logged on interactively has no known-folder entries
+# yet (GetFolderPath('LocalApplicationData') is empty), so derive the standard
+# per-user layout from the user's own profile directory.
+$profileDirectory = [Environment]::GetFolderPath('UserProfile')
+$account = [Environment]::UserName
+if (-not $profileDirectory -or (Split-Path -Leaf $profileDirectory) -notlike "$account*") { throw "unexpected profile directory '$profileDirectory' for $account" }
+$env:USERNAME = $account
+$env:USERPROFILE = $profileDirectory
+$env:HOMEDRIVE = Split-Path -Qualifier $profileDirectory
+$env:HOMEPATH = Split-Path -NoQualifier $profileDirectory
+$env:LOCALAPPDATA = Join-Path $profileDirectory 'AppData\Local'
+$env:APPDATA = Join-Path $profileDirectory 'AppData\Roaming'
 $env:TEMP = Join-Path $env:LOCALAPPDATA 'Temp'
 $env:TMP = $env:TEMP
-[IO.Directory]::CreateDirectory($env:TEMP) | Out-Null
+foreach ($directory in @($env:LOCALAPPDATA, $env:APPDATA, $env:TEMP)) { [IO.Directory]::CreateDirectory($directory) | Out-Null }
 '@
     # The step runs from a script file in the staging directory (read+execute
     # for the user): -Credential uses CreateProcessWithLogonW, whose command
