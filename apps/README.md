@@ -74,8 +74,6 @@ They continue to expose their registered `ui_path`.
   uploads environment-bound state bundles and launches command Agents from them.
 - [`gits`](gits/README.md) is a small workspace-local Git Smart HTTP host for
   repositories shared by Agents and humans.
-- [`tower`](tower/README.md) is an experimental append-only evidence archive
-  with prefix-deduplicated ACP traces and evidence-linked reviewer findings.
 - [`policy`](policy/README.md) is a versioned workspace Policy Provider with a
   browser editor, publication status, cache invalidation, and decision simulator.
 
