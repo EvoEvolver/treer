@@ -286,7 +286,7 @@ untrusted workspace code. There is no distributed quota/rate limiter or durable
 audit export. Bundle reads intentionally contain rule identities/paths; do not
 put secrets in policy strings. State is immutable per revision but integrity
 against the machine account/admin is not guaranteed. App-local action checks
-(`app.use`, `email.send`, network restrictions) depend on separate Core/App
+(`app.use`, network restrictions) depend on separate Core/App
 integration; naming an action in a rule does not invent an enforcement hook.
 The simulator resolves existing current Tree paths; it cannot invent nonexistent
 nodes or spoof placement. Draft simulations are not persisted decisions.

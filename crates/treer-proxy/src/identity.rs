@@ -368,22 +368,8 @@ mod tests {
             .collect::<Vec<_>>();
         segments[1].push('x');
         assert!(!second.verify(&segments.join("."), "service-a").active);
-    }
-
-    #[tokio::test]
-    async fn expired_tokens_are_inactive() {
-        let auth = AuthStore::for_test("admin").await;
-        let issuer = IdentityIssuer::load(
-            &auth,
-            &Url::parse("https://treer.example/").expect("public URL"),
-        )
-        .await
-        .expect("issuer");
-        let token = issuer
-            .issue("workspace-a", "server-a", "agent-a", "service-a")
-            .expect("issue token");
         let future = Utc::now() + Duration::seconds(TOKEN_TTL_SECONDS + 1);
-        assert!(issuer
+        assert!(second
             .verify_at(&token.access_token, "service-a", future)
             .is_err());
     }

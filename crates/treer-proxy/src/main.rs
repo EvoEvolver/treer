@@ -621,59 +621,40 @@ mod tests {
     }
 
     #[test]
-    fn unspecified_listen_address_advertises_loopback_by_default() {
-        let url = public_url(None, None, "0.0.0.0:8787".parse().expect("valid address"))
-            .expect("public URL");
-        assert_eq!(url.as_str(), "http://127.0.0.1:8787/");
-    }
-
-    #[test]
-    fn configured_public_url_is_normalized() {
-        let configured = Url::parse("https://treer.example/base?old=1").expect("valid URL");
-        let url = public_url(
-            Some(configured),
-            None,
-            "127.0.0.1:8787".parse().expect("valid address"),
-        )
-        .expect("public URL");
-        assert_eq!(url.as_str(), "https://treer.example/");
-    }
-
-    #[test]
-    fn configured_app_url_is_normalized_independently() {
-        let proxy = Url::parse("https://proxy.treer.ai/").expect("proxy URL");
+    fn public_urls_are_normalized_and_default_from_the_bind_or_railway() {
+        let addr = |value: &str| value.parse::<SocketAddr>().unwrap();
+        for (configured, railway, listen, expected) in [
+            (None, None, "0.0.0.0:8787", "http://127.0.0.1:8787/"),
+            (None, None, "[::1]:8787", "http://[::1]:8787/"),
+            (
+                Some("https://treer.example/base?old=1"),
+                None,
+                "127.0.0.1:8787",
+                "https://treer.example/",
+            ),
+            (
+                None,
+                Some("treer-production.up.railway.app"),
+                "0.0.0.0:4321",
+                "https://treer-production.up.railway.app/",
+            ),
+        ] {
+            let configured = configured.map(|u| Url::parse(u).unwrap());
+            assert_eq!(
+                public_url(configured, railway, addr(listen))
+                    .unwrap()
+                    .as_str(),
+                expected
+            );
+        }
+        assert_eq!(listen_address(None, Some(4321)), addr("0.0.0.0:4321"));
+        let proxy = Url::parse("https://proxy.treer.ai/").unwrap();
         let app = app_public_url(
-            Some(Url::parse("https://app.treer.ai/admin?old=1").expect("app URL")),
+            Some(Url::parse("https://app.treer.ai/admin?old=1").unwrap()),
             &proxy,
-        )
-        .expect("normalized app URL");
-        assert_eq!(app.as_str(), "https://app.treer.ai/");
-        assert_eq!(
-            app_public_url(None, &proxy).expect("default app URL"),
-            proxy
         );
-    }
-
-    #[test]
-    fn ipv6_listen_address_is_a_valid_url() {
-        let url = public_url(None, None, "[::1]:8787".parse().expect("valid address"))
-            .expect("public URL");
-        assert_eq!(url.as_str(), "http://[::1]:8787/");
-    }
-
-    #[test]
-    fn railway_environment_selects_public_bind() {
-        assert_eq!(
-            listen_address(None, Some(4321)),
-            "0.0.0.0:4321".parse().expect("valid address")
-        );
-        let url = public_url(
-            None,
-            Some("treer-production.up.railway.app"),
-            "0.0.0.0:4321".parse().expect("valid address"),
-        )
-        .expect("public URL");
-        assert_eq!(url.as_str(), "https://treer-production.up.railway.app/");
+        assert_eq!(app.unwrap().as_str(), "https://app.treer.ai/");
+        assert_eq!(app_public_url(None, &proxy).unwrap(), proxy);
     }
 
     #[test]

@@ -415,67 +415,35 @@ impl PolicyStoreError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
     use sqlx::postgres::PgPoolOptions;
-    use treer_protocol::{
-        PolicyEffect, PolicyResourceSelector, PolicySubjectSelector, WorkspacePolicyRule,
-    };
     use uuid::Uuid;
 
     fn document() -> WorkspacePolicyDocument {
-        WorkspacePolicyDocument {
-            schema_version: POLICY_SCHEMA_VERSION,
-            defaults: BTreeMap::from([("agent.prompt".to_string(), PolicyEffect::Deny)]),
-            groups: BTreeMap::new(),
-            rules: vec![WorkspacePolicyRule {
-                bindings: Default::default(),
-                conditions: Vec::new(),
-                id: "allow-self-read".to_string(),
-                priority: 100,
-                effect: PolicyEffect::Allow,
-                subjects: vec![PolicySubjectSelector {
-                    tree: None,
-                    kind: Some(PolicyPrincipalKind::Agent),
-                    id: None,
-                    machine_id: None,
-                    group: None,
-                    is_self: true,
-                }],
-                actions: vec!["agent.metadata.read".to_string()],
-                resources: vec![PolicyResourceSelector {
-                    tree: None,
-                    kind: Some("agent".to_string()),
-                    id: None,
-                    principal_group: None,
-                }],
-            }],
-        }
+        serde_json::from_value(serde_json::json!({
+            "schema_version": POLICY_SCHEMA_VERSION,
+            "defaults": {"agent.prompt": "deny"},
+            "rules": [{"id": "allow-self-read", "priority": 100, "effect": "allow",
+                "subjects": [{"kind": "agent", "self": true}],
+                "actions": ["agent.metadata.read"],
+                "resources": [{"kind": "agent"}]}]
+        }))
+        .unwrap()
     }
 
     #[test]
-    fn validates_a_bounded_versioned_document() {
-        validate_document(&document()).expect("valid policy document");
-    }
-
-    #[test]
-    fn rejects_unknown_groups_and_duplicate_rules() {
+    fn validation_accepts_bounded_documents_and_rejects_unknown_groups_and_duplicates() {
+        validate_document(&document()).unwrap();
         let mut unknown_group = document();
         unknown_group.rules[0].resources[0].principal_group = Some("missing".to_string());
         assert_eq!(
-            validate_document(&unknown_group)
-                .expect_err("unknown group")
-                .code(),
+            validate_document(&unknown_group).unwrap_err().code(),
             "unknown_policy_group"
         );
-
         let mut duplicate = document();
         duplicate.rules.push(duplicate.rules[0].clone());
         assert_eq!(
-            validate_document(&duplicate)
-                .expect_err("duplicate rule")
-                .code(),
+            validate_document(&duplicate).unwrap_err().code(),
             "duplicate_policy_rule"
         );
     }

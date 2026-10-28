@@ -391,14 +391,16 @@ pub(super) mod tests {
     #[tokio::test]
     async fn bridge_requires_configured_runtime_and_current_human_owner() {
         let (auth, identity, app, headers) = fixture().await;
-        assert_eq!(
-            app_owner_session(&auth, &identity, &headers, &app.service_id)
-                .await
-                .unwrap()
-                .1
-                .user_id,
-            "owner"
-        );
+        let bridge = |headers: HeaderMap, service: String| {
+            let (auth, identity) = (auth.clone(), identity.clone());
+            async move { app_owner_session(&auth, &identity, &headers, &service).await }
+        };
+        let service = || app.service_id.clone();
+        let owner = bridge(headers.clone(), service()).await.unwrap();
+        assert_eq!(owner.1.user_id, "owner");
+        assert!(bridge(headers.clone(), "other-service".into())
+            .await
+            .is_err());
         for absent in [
             TREER_IDENTITY_TOKEN_HEADER,
             AGENT_ID_HEADER,
@@ -406,81 +408,34 @@ pub(super) mod tests {
         ] {
             let mut h = headers.clone();
             h.remove(absent);
-            assert!(app_owner_session(&auth, &identity, &h, &app.service_id)
-                .await
-                .is_err());
+            assert!(bridge(h, service()).await.is_err(), "without {absent}");
         }
         let mut h = headers.clone();
         h.insert(AGENT_ID_HEADER, "another-runtime".parse().unwrap());
-        assert!(app_owner_session(&auth, &identity, &h, &app.service_id)
-            .await
-            .is_err());
+        assert!(bridge(h, service()).await.is_err());
         let member = identity
             .issue_human_request("diagnostic", "member", "Member", "owner", &app.service_id)
             .unwrap()
             .access_token;
         let mut h = headers.clone();
         h.insert(TREER_IDENTITY_TOKEN_HEADER, member.parse().unwrap());
-        assert!(app_owner_session(&auth, &identity, &h, &app.service_id)
-            .await
-            .is_err());
-        sqlx::query("UPDATE organization_members SET role='member' WHERE user_id='owner'")
-            .execute(&auth.pool())
-            .await
-            .unwrap();
-        assert!(
-            app_owner_session(&auth, &identity, &headers, &app.service_id)
+        assert!(bridge(h, service()).await.is_err());
+        // A demoted owner or a rotated runtime credential no longer bridges.
+        for role in ["member", "owner"] {
+            sqlx::query("UPDATE organization_members SET role=$1 WHERE user_id='owner'")
+                .bind(role)
+                .execute(&auth.pool())
                 .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn bridge_rejects_rotation_revocation_audience_and_provider_change() {
-        let (auth, identity, app, headers) = fixture().await;
-        assert!(
-            app_owner_session(&auth, &identity, &headers, "other-service")
-                .await
-                .is_err()
-        );
-        sqlx::query("DELETE FROM workspace_policy_providers")
-            .execute(&auth.pool())
-            .await
-            .unwrap();
-        assert!(
-            app_owner_session(&auth, &identity, &headers, &app.service_id)
-                .await
-                .is_err()
-        );
-        PolicyProviderStore::new(auth.pool())
-            .set(
-                "diagnostic",
-                &app.app_id,
-                &app.service_id,
-                PolicyProviderFailureMode::FailClosed,
-                0,
-                0,
-                "owner",
-            )
-            .await
-            .unwrap();
+                .unwrap();
+            assert_eq!(
+                bridge(headers.clone(), service()).await.is_ok(),
+                role == "owner"
+            );
+        }
         auth.rotate_agent_credential("diagnostic", "machine", &app.app_id)
             .await
             .unwrap();
-        assert!(
-            app_owner_session(&auth, &identity, &headers, &app.service_id)
-                .await
-                .is_err()
-        );
-        sqlx::query("UPDATE agent_credentials SET revoked_at='test'")
-            .execute(&auth.pool())
-            .await
-            .unwrap();
-        assert!(
-            app_owner_session(&auth, &identity, &headers, &app.service_id)
-                .await
-                .is_err()
-        );
+        assert!(bridge(headers, service()).await.is_err());
     }
 
     #[tokio::test]

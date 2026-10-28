@@ -433,6 +433,32 @@ async fn simple(
     json_of(fixture.app.clone().oneshot(request).await.unwrap()).await
 }
 
+#[track_caller]
+fn refused(result: (StatusCode, Value, bool), status: StatusCode, expected: &str) {
+    assert_eq!(
+        (result.0, code(&result.1)),
+        (status, expected),
+        "{}",
+        result.1
+    );
+}
+
+fn id_of(body: &Value) -> String {
+    body["upload_id"].as_str().unwrap().to_owned()
+}
+
+async fn commit(fixture: &Fixture, id: &str) -> (StatusCode, Value, bool) {
+    simple(fixture, "POST", &format!("/{id}/commit"), "tok-member").await
+}
+
+async fn get(fixture: &Fixture, id: &str) -> (StatusCode, Value, bool) {
+    simple(fixture, "GET", &format!("/{id}"), "tok-member").await
+}
+
+async fn abort(fixture: &Fixture, id: &str) -> (StatusCode, Value, bool) {
+    simple(fixture, "DELETE", &format!("/{id}"), "tok-member").await
+}
+
 fn counts(fixture: &Fixture) -> (usize, usize, usize, usize, usize) {
     let fake = fixture.fake.state.lock().unwrap();
     (
@@ -464,7 +490,7 @@ async fn chunked_upload_streams_128_mib_in_parts_and_commits_once() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["state"], "active");
     assert_eq!(body["part_bytes_max"], MACHINE_UPLOAD_PART_MAX_BYTES);
-    let upload_id = body["upload_id"].as_str().unwrap().to_owned();
+    let upload_id = id_of(&body);
     assert!(
         upload_id.len() >= 36
             && upload_id.len() <= 68
@@ -485,13 +511,7 @@ async fn chunked_upload_streams_128_mib_in_parts_and_commits_once() {
         offset += part as u64;
         assert_eq!(body["committed_offset"], offset);
     }
-    let (status, body, _) = simple(
-        &fixture,
-        "POST",
-        &format!("/{upload_id}/commit"),
-        "tok-member",
-    )
-    .await;
+    let (status, body, _) = commit(&fixture, &upload_id).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["state"], "committed");
     assert_eq!(body["result"]["bytes_written"], total);
@@ -510,16 +530,10 @@ async fn chunked_upload_streams_128_mib_in_parts_and_commits_once() {
         "buffered bytes stay bounded per part: {peak}"
     );
     // Receipt replay and status agree; the Controller is not asked again.
-    let (status, replay, _) = simple(
-        &fixture,
-        "POST",
-        &format!("/{upload_id}/commit"),
-        "tok-member",
-    )
-    .await;
+    let (status, replay, _) = commit(&fixture, &upload_id).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(replay["result"], body["result"]);
-    let (status, seen, _) = simple(&fixture, "GET", &format!("/{upload_id}"), "tok-member").await;
+    let (status, seen, _) = get(&fixture, &upload_id).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(seen["state"], "committed");
     assert_eq!(counts(&fixture).3, 1);
@@ -573,11 +587,10 @@ async fn chunked_upload_refuses_before_any_body_or_command() {
         (status, code(&body)),
         (StatusCode::BAD_REQUEST, "invalid_idempotency_key")
     );
-    let (status, body, _) =
-        begin(&fixture, "tok-member", "machine-a", KEY_A, 10, "../escape").await;
-    assert_eq!(
-        (status, code(&body)),
-        (StatusCode::BAD_REQUEST, "invalid_machine_file_name")
+    refused(
+        begin(&fixture, "tok-member", "machine-a", KEY_A, 10, "../escape").await,
+        StatusCode::BAD_REQUEST,
+        "invalid_machine_file_name",
     );
     assert_eq!(
         counts(&fixture).0,
@@ -595,7 +608,7 @@ async fn chunked_upload_refuses_before_any_body_or_command() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    let upload_id = body["upload_id"].as_str().unwrap().to_owned();
+    let upload_id = id_of(&body);
     let first = vec![1_u8; MIB as usize];
     // Another member never sees it.
     for (method, path) in [("GET", ""), ("POST", "/commit"), ("DELETE", "")] {
@@ -654,12 +667,12 @@ async fn chunked_upload_refuses_before_any_body_or_command() {
     assert_eq!(counts(&fixture).1, 0, "no chunk was forwarded");
     // A wrong hash header discards the part on both sides; the retry lands.
     let wrong = part_request(&upload_id, "tok-member", 0, &first, &sha(b"other"));
-    let (status, body, _) = json_of(fixture.app.clone().oneshot(wrong).await.unwrap()).await;
-    assert_eq!(
-        (status, code(&body)),
-        (StatusCode::BAD_REQUEST, "upload_part_hash_mismatch")
+    refused(
+        json_of(fixture.app.clone().oneshot(wrong).await.unwrap()).await,
+        StatusCode::BAD_REQUEST,
+        "upload_part_hash_mismatch",
     );
-    let (status, seen, _) = simple(&fixture, "GET", &format!("/{upload_id}"), "tok-member").await;
+    let (status, seen, _) = get(&fixture, &upload_id).await;
     assert_eq!(
         (status, seen["committed_offset"].as_u64()),
         (StatusCode::OK, Some(0))
@@ -692,13 +705,7 @@ async fn chunked_upload_refuses_before_any_body_or_command() {
         (StatusCode::CONFLICT, "upload_part_conflict")
     );
     // Commit before completion is refused with the offset.
-    let (status, body, _) = simple(
-        &fixture,
-        "POST",
-        &format!("/{upload_id}/commit"),
-        "tok-member",
-    )
-    .await;
+    let (status, body, _) = commit(&fixture, &upload_id).await;
     assert_eq!(
         (status, code(&body)),
         (StatusCode::CONFLICT, "upload_incomplete")
@@ -718,11 +725,10 @@ async fn chunked_upload_begin_is_idempotent_and_quotas_hold_in_the_database() {
     assert_eq!(status, StatusCode::OK, "same key and parameters replays");
     assert_eq!(replay["upload_id"], first["upload_id"]);
     assert_eq!(counts(&fixture).0, 1, "no second Controller begin");
-    let (status, body, _) =
-        begin(&fixture, "tok-member", "machine-a", KEY_A, 2 * MIB, "a.bin").await;
-    assert_eq!(
-        (status, code(&body)),
-        (StatusCode::CONFLICT, "upload_begin_conflict")
+    refused(
+        begin(&fixture, "tok-member", "machine-a", KEY_A, 2 * MIB, "a.bin").await,
+        StatusCode::CONFLICT,
+        "upload_begin_conflict",
     );
     // Second upload fits the per-user quota, the third does not; another
     // member is unaffected; aborting frees the slot.
@@ -775,7 +781,7 @@ async fn chunked_upload_lease_serializes_parts_and_protects_abort() {
     let (status, body, _) =
         begin(&fixture, "tok-member", "machine-a", KEY_A, 2 * MIB, "l.bin").await;
     assert_eq!(status, StatusCode::CREATED);
-    let upload_id = body["upload_id"].as_str().unwrap().to_owned();
+    let upload_id = id_of(&body);
     fixture.fake.hold_chunks.store(true, Ordering::SeqCst);
     let first = vec![7_u8; MIB as usize];
     let held = {
@@ -800,8 +806,7 @@ async fn chunked_upload_lease_serializes_parts_and_protects_abort() {
         (status, code(&body), closes),
         (StatusCode::CONFLICT, "upload_busy", true)
     );
-    let (status, body, _) =
-        simple(&fixture, "DELETE", &format!("/{upload_id}"), "tok-member").await;
+    let (status, body, _) = abort(&fixture, &upload_id).await;
     assert_eq!((status, code(&body)), (StatusCode::CONFLICT, "upload_busy"));
     fixture.fake.hold_chunks.store(false, Ordering::SeqCst);
     fixture.fake.release.notify_waiters();
@@ -815,8 +820,7 @@ async fn chunked_upload_lease_serializes_parts_and_protects_abort() {
         (status, body["committed_offset"].as_u64()),
         (StatusCode::OK, Some(2 * MIB))
     );
-    let (status, body, _) =
-        simple(&fixture, "DELETE", &format!("/{upload_id}"), "tok-member").await;
+    let (status, body, _) = abort(&fixture, &upload_id).await;
     assert_eq!(
         (status, body["state"].as_str()),
         (StatusCode::OK, Some("aborted"))
@@ -825,25 +829,17 @@ async fn chunked_upload_lease_serializes_parts_and_protects_abort() {
     // A committed upload cannot be aborted into a lie.
     let (status, body, _) = begin(&fixture, "tok-member", "machine-a", KEY_B, MIB, "m.bin").await;
     assert_eq!(status, StatusCode::CREATED);
-    let upload_id = body["upload_id"].as_str().unwrap().to_owned();
+    let upload_id = id_of(&body);
     put_part(&fixture, &upload_id, 0, &first).await;
-    let (status, body, _) = simple(
-        &fixture,
-        "POST",
-        &format!("/{upload_id}/commit"),
-        "tok-member",
-    )
-    .await;
+    let (status, body, _) = commit(&fixture, &upload_id).await;
     assert_eq!(
         (status, body["state"].as_str()),
         (StatusCode::OK, Some("committed"))
     );
-    let (status, body, _) =
-        simple(&fixture, "DELETE", &format!("/{upload_id}"), "tok-member").await;
-    assert_eq!(
-        (status, code(&body)),
-        (StatusCode::CONFLICT, "upload_committed"),
-        "a published upload is never reported aborted"
+    refused(
+        abort(&fixture, &upload_id).await,
+        StatusCode::CONFLICT,
+        "upload_committed",
     );
     let aborted = audit_payloads(&fixture.auth, "machine.file.upload_aborted").await;
     assert_eq!(aborted.len(), 1);
@@ -856,7 +852,7 @@ async fn chunked_upload_status_reconciles_and_expiry_recovers_or_expires() {
     let (status, body, _) =
         begin(&fixture, "tok-member", "machine-a", KEY_A, 2 * MIB, "r.bin").await;
     assert_eq!(status, StatusCode::CREATED);
-    let upload_id = body["upload_id"].as_str().unwrap().to_owned();
+    let upload_id = id_of(&body);
     let first = vec![3_u8; MIB as usize];
     let (status, _, _) = put_part(&fixture, &upload_id, 0, &first).await;
     assert_eq!(status, StatusCode::OK);
@@ -869,7 +865,7 @@ async fn chunked_upload_status_reconciles_and_expiry_recovers_or_expires() {
     .execute(&fixture.auth.pool())
     .await
     .unwrap();
-    let (status, seen, _) = simple(&fixture, "GET", &format!("/{upload_id}"), "tok-member").await;
+    let (status, seen, _) = get(&fixture, &upload_id).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(seen["committed_offset"], MIB);
     assert_eq!(seen["reconciled"], true);
@@ -879,13 +875,7 @@ async fn chunked_upload_status_reconciles_and_expiry_recovers_or_expires() {
         (status, body["committed_offset"].as_u64()),
         (StatusCode::OK, Some(2 * MIB))
     );
-    let (status, body, _) = simple(
-        &fixture,
-        "POST",
-        &format!("/{upload_id}/commit"),
-        "tok-member",
-    )
-    .await;
+    let (status, body, _) = commit(&fixture, &upload_id).await;
     assert_eq!(
         (status, body["state"].as_str()),
         (StatusCode::OK, Some("committed"))
@@ -898,7 +888,7 @@ async fn chunked_upload_status_reconciles_and_expiry_recovers_or_expires() {
         .await
         .unwrap();
     super::agents::expire_machine_uploads(&fixture.state, &fixture.auth, &fixture.store).await;
-    let (status, seen, _) = simple(&fixture, "GET", &format!("/{upload_id}"), "tok-member").await;
+    let (status, seen, _) = get(&fixture, &upload_id).await;
     assert_eq!(
         (status, seen["state"].as_str()),
         (StatusCode::OK, Some("committed"))
@@ -912,7 +902,7 @@ async fn chunked_upload_status_reconciles_and_expiry_recovers_or_expires() {
     let (status, body, _) =
         begin(&fixture, "tok-member", "machine-a", KEY_B, MIB, "idle.bin").await;
     assert_eq!(status, StatusCode::CREATED);
-    let idle_id = body["upload_id"].as_str().unwrap().to_owned();
+    let idle_id = id_of(&body);
     sqlx::query("UPDATE machine_uploads SET last_part_at = '2000-01-01T00:00:00.000000Z' WHERE upload_id = $1")
         .bind(&idle_id)
         .execute(&fixture.auth.pool())
@@ -921,7 +911,7 @@ async fn chunked_upload_status_reconciles_and_expiry_recovers_or_expires() {
     let aborts_before = counts(&fixture).4;
     super::agents::expire_machine_uploads(&fixture.state, &fixture.auth, &fixture.store).await;
     assert_eq!(counts(&fixture).4, aborts_before + 1);
-    let (status, seen, _) = simple(&fixture, "GET", &format!("/{idle_id}"), "tok-member").await;
+    let (status, seen, _) = get(&fixture, &idle_id).await;
     assert_eq!(
         (
             status,
@@ -936,10 +926,10 @@ async fn chunked_upload_status_reconciles_and_expiry_recovers_or_expires() {
         .await
         .unwrap();
     super::agents::expire_machine_uploads(&fixture.state, &fixture.auth, &fixture.store).await;
-    let (status, body, _) = simple(&fixture, "GET", &format!("/{idle_id}"), "tok-member").await;
-    assert_eq!(
-        (status, code(&body)),
-        (StatusCode::NOT_FOUND, "upload_not_found")
+    refused(
+        get(&fixture, &idle_id).await,
+        StatusCode::NOT_FOUND,
+        "upload_not_found",
     );
     // A Controller that forgot an active upload (restart) ends it as
     // upload_lost; a committing row with a generic Controller error or no
@@ -955,9 +945,9 @@ async fn chunked_upload_status_reconciles_and_expiry_recovers_or_expires() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    let lost_id = body["upload_id"].as_str().unwrap().to_owned();
+    let lost_id = id_of(&body);
     fixture.fake.state.lock().unwrap().uploads.remove(&lost_id);
-    let (status, seen, _) = simple(&fixture, "GET", &format!("/{lost_id}"), "tok-member").await;
+    let (status, seen, _) = get(&fixture, &lost_id).await;
     assert_eq!(
         (
             status,
@@ -976,16 +966,10 @@ async fn chunked_upload_status_reconciles_and_expiry_recovers_or_expires() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    let generic_id = body["upload_id"].as_str().unwrap().to_owned();
+    let generic_id = id_of(&body);
     put_part(&fixture, &generic_id, 0, &first).await;
     *fixture.fake.fail_commit.lock().unwrap() = Some("state_error");
-    let (status, body, _) = simple(
-        &fixture,
-        "POST",
-        &format!("/{generic_id}/commit"),
-        "tok-member",
-    )
-    .await;
+    let (status, body, _) = commit(&fixture, &generic_id).await;
     assert_eq!(
         (status, code(&body)),
         (StatusCode::SERVICE_UNAVAILABLE, "controller_unavailable")
@@ -996,7 +980,7 @@ async fn chunked_upload_status_reconciles_and_expiry_recovers_or_expires() {
     // The fake dropped the upload on that failure, so the Controller now
     // answers unknown: still committing, until the lifetime ends it.
     super::agents::expire_machine_uploads(&fixture.state, &fixture.auth, &fixture.store).await;
-    let (_, seen, _) = simple(&fixture, "GET", &format!("/{generic_id}"), "tok-member").await;
+    let (_, seen, _) = get(&fixture, &generic_id).await;
     assert_eq!(
         (seen["state"].as_str(), seen["reconciled"].as_bool()),
         (Some("committing"), Some(true))
@@ -1007,7 +991,7 @@ async fn chunked_upload_status_reconciles_and_expiry_recovers_or_expires() {
         .await
         .unwrap();
     super::agents::expire_machine_uploads(&fixture.state, &fixture.auth, &fixture.store).await;
-    let (_, seen, _) = simple(&fixture, "GET", &format!("/{generic_id}"), "tok-member").await;
+    let (_, seen, _) = get(&fixture, &generic_id).await;
     assert_eq!(
         (
             seen["state"].as_str(),
@@ -1020,21 +1004,15 @@ async fn chunked_upload_status_reconciles_and_expiry_recovers_or_expires() {
     let (status, body, _) =
         begin(&fixture, "tok-member", "machine-a", KEY_C, MIB, "taken.bin").await;
     assert_eq!(status, StatusCode::CREATED);
-    let taken_id = body["upload_id"].as_str().unwrap().to_owned();
+    let taken_id = id_of(&body);
     put_part(&fixture, &taken_id, 0, &first).await;
     *fixture.fake.fail_commit.lock().unwrap() = Some("machine_file_exists");
-    let (status, body, _) = simple(
-        &fixture,
-        "POST",
-        &format!("/{taken_id}/commit"),
-        "tok-member",
-    )
-    .await;
-    assert_eq!(
-        (status, code(&body)),
-        (StatusCode::CONFLICT, "machine_file_exists")
+    refused(
+        commit(&fixture, &taken_id).await,
+        StatusCode::CONFLICT,
+        "machine_file_exists",
     );
-    let (status, seen, _) = simple(&fixture, "GET", &format!("/{taken_id}"), "tok-member").await;
+    let (status, seen, _) = get(&fixture, &taken_id).await;
     assert_eq!(
         (
             status,
@@ -1046,7 +1024,7 @@ async fn chunked_upload_status_reconciles_and_expiry_recovers_or_expires() {
 }
 
 #[tokio::test]
-async fn chunked_upload_part_timing_releases_the_lease_and_legacy_route_is_unchanged() {
+async fn chunked_upload_part_timing_releases_the_lease_and_legacy_route_keeps_its_limit() {
     struct Restore;
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -1062,7 +1040,7 @@ async fn chunked_upload_part_timing_releases_the_lease_and_legacy_route_is_uncha
     let (status, body, _) =
         begin(&fixture, "tok-member", "machine-a", KEY_A, MIB, "slow.bin").await;
     assert_eq!(status, StatusCode::CREATED);
-    let upload_id = body["upload_id"].as_str().unwrap().to_owned();
+    let upload_id = id_of(&body);
     let first = vec![9_u8; MIB as usize];
     let idle = Body::from_stream(futures_util::stream::once(async {
         tokio::time::sleep(Duration::from_millis(600)).await;
@@ -1109,39 +1087,6 @@ async fn chunked_upload_part_timing_releases_the_lease_and_legacy_route_is_uncha
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let Json(health) = super::health().await;
     assert!(health["capabilities"]
-        .as_array()
-        .unwrap()
-        .contains(&json!(CAPABILITY_MACHINE_UPLOAD_V3)));
-    let response = fixture
-        .app
-        .clone()
-        .oneshot(
-            base(
-                "GET",
-                "/api/workspaces/default/snapshot".into(),
-                "tok-member",
-            )
-            .body(Body::empty())
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    let (status, snapshot, _) = json_of(response).await;
-    assert_eq!(status, StatusCode::OK);
-    let servers = snapshot["servers"].as_array().unwrap();
-    let a = servers
-        .iter()
-        .find(|s| s["server_id"] == "machine-a")
-        .unwrap();
-    let old = servers
-        .iter()
-        .find(|s| s["server_id"] == "machine-old")
-        .unwrap();
-    assert!(a["capabilities"]
-        .as_array()
-        .unwrap()
-        .contains(&json!(CAPABILITY_MACHINE_UPLOAD_V3)));
-    assert!(!old["capabilities"]
         .as_array()
         .unwrap()
         .contains(&json!(CAPABILITY_MACHINE_UPLOAD_V3)));
@@ -1229,7 +1174,7 @@ async fn controller_failure_receipt_ends_the_row_immediately_with_the_fixed_code
     let (status, body, _) =
         begin(&fixture, "tok-member", "machine-a", KEY_A, 2 * MIB, "f.bin").await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    let upload_id = body["upload_id"].as_str().unwrap().to_owned();
+    let upload_id = id_of(&body);
     let (status, body, _) = put_part(&fixture, &upload_id, 0, &vec![1u8; MIB as usize]).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     {
@@ -1238,14 +1183,7 @@ async fn controller_failure_receipt_ends_the_row_immediately_with_the_fixed_code
         fake.failed
             .insert(upload_id.clone(), "machine_file_denied".to_string());
     }
-    let request = base(
-        "GET",
-        format!("{}/{upload_id}", uploads_uri("machine-a")),
-        "tok-member",
-    )
-    .body(Body::empty())
-    .unwrap();
-    let (status, seen, _) = json_of(fixture.app.clone().oneshot(request).await.unwrap()).await;
+    let (status, seen, _) = get(&fixture, &upload_id).await;
     assert_eq!(status, StatusCode::OK, "{seen}");
     assert_eq!(seen["state"], "failed", "{seen}");
     assert_eq!(seen["reconciled"], true);
@@ -1255,14 +1193,7 @@ async fn controller_failure_receipt_ends_the_row_immediately_with_the_fixed_code
     );
     // The receipt is terminal: a commit now answers the terminal state, and
     // the same begin key does not revive the row.
-    let request = base(
-        "POST",
-        format!("{}/{upload_id}/commit", uploads_uri("machine-a")),
-        "tok-member",
-    )
-    .body(Body::empty())
-    .unwrap();
-    let (status, body, _) = json_of(fixture.app.clone().oneshot(request).await.unwrap()).await;
+    let (status, body, _) = commit(&fixture, &upload_id).await;
     assert_ne!(status, StatusCode::OK, "{body}");
     let row = fixture.store.get(&upload_id).await.unwrap().unwrap();
     assert_eq!(row.state, crate::upload_store::UploadState::Failed);

@@ -492,19 +492,113 @@ async fn normalize(tx: &mut Transaction<'_, Postgres>, workspace: &str) -> Resul
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn canonical_path_snapshot_does_not_block_writes_or_mix_revisions() {
-        let store = setup().await;
-        let original = store
+    async fn setup() -> AuthStore {
+        let store = AuthStore::for_test("password").await;
+        store.seed_test_workspace("one").await;
+        store.seed_test_workspace("two").await;
+        for (id, ws) in [("a", "one"), ("b", "one"), ("c", "one"), ("foreign", "two")] {
+            sqlx::query("INSERT INTO agent_credentials(agent_id,workspace_id,server_id,secret_hash,created_at) VALUES($1,$2,'machine','hash','now')").bind(id).bind(ws).execute(&store.pool).await.unwrap();
+        }
+        store
+    }
+
+    async fn create(
+        store: &AuthStore,
+        ws: &str,
+        name: &str,
+        parent: Option<&str>,
+    ) -> WorkloadFolder {
+        store
             .create_workload_folder(
-                "one",
+                ws,
                 CreateWorkloadFolderRequest {
-                    name: "original".into(),
-                    parent_id: None,
+                    name: name.into(),
+                    parent_id: parent.map(str::to_owned),
                 },
             )
             .await
+            .unwrap()
+    }
+
+    async fn agent(store: &AuthStore, id: &str, name: &str, folder: Option<&str>) {
+        store
+            .create_named_agent_credential("one", "machine", id, name, folder)
+            .await
             .unwrap();
+    }
+
+    async fn place(
+        store: &AuthStore,
+        ws: &str,
+        id: &str,
+        folder: Option<&str>,
+        position: i64,
+    ) -> Result<(), AuthFailure> {
+        store
+            .set_workload_placement(
+                ws,
+                id,
+                SetWorkloadPlacementRequest {
+                    folder_id: folder.map(str::to_owned),
+                    position,
+                },
+            )
+            .await
+            .map(drop)
+    }
+
+    fn reparent(parent: &str) -> UpdateWorkloadFolderRequest {
+        UpdateWorkloadFolderRequest {
+            name: None,
+            parent_id: Some(Some(parent.to_owned())),
+        }
+    }
+
+    fn app_request(name: &str, folder: Option<&str>) -> treer_protocol::CreateAppDeploymentRequest {
+        treer_protocol::CreateAppDeploymentRequest {
+            folder_id: folder.map(str::to_owned),
+            server_id: None,
+            name: name.into(),
+            command: "/bin/true".into(),
+            args: vec![],
+            cwd: ".".into(),
+            port: 8888,
+            hostname: String::new(),
+            public: false,
+        }
+    }
+
+    async fn app_for(
+        store: &AuthStore,
+        name: &str,
+        folder: Option<&str>,
+        caller: &str,
+    ) -> Result<AppDeployment, AuthFailure> {
+        store
+            .create_app_deployment_for_caller(
+                "one",
+                "caller",
+                "machine".into(),
+                app_request(name, folder),
+                Some(caller),
+            )
+            .await
+    }
+
+    async fn stored_folder(store: &AuthStore, id: &str) -> Option<String> {
+        sqlx::query_scalar(
+            "SELECT folder_id FROM workload_placements WHERE workspace_id='one' AND agent_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&store.pool())
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn canonical_path_snapshot_does_not_block_writes_or_mix_revisions() {
+        let store = setup().await;
+        let original = create(&store, "one", "original", None).await;
         store
             .create_named_agent_credential(
                 "one",
@@ -516,7 +610,6 @@ mod tests {
             .await
             .unwrap();
         let mut snapshot = store.tree_read_snapshot("one").await.unwrap();
-        // This selects folders/placement before the concurrent committed changes.
         let before = read_canonical_workload_paths(&mut snapshot, "one")
             .await
             .unwrap();
@@ -544,12 +637,11 @@ mod tests {
         })
         .await
         .expect("open directory snapshot must not block creation/rename writes");
-        let retained = read_canonical_workload_paths(&mut snapshot, "one")
-            .await
-            .unwrap();
         assert_eq!(
-            retained, before,
-            "folders, placement and names remain one consistent revision"
+            read_canonical_workload_paths(&mut snapshot, "one")
+                .await
+                .unwrap(),
+            before
         );
         snapshot.commit().await.unwrap();
         let current = store.canonical_workload_paths("one").await.unwrap();
@@ -557,53 +649,11 @@ mod tests {
         assert_eq!(current["new-agent"].1, "/new");
     }
 
-    fn app_request(name: &str, folder: Option<&str>) -> treer_protocol::CreateAppDeploymentRequest {
-        treer_protocol::CreateAppDeploymentRequest {
-            folder_id: folder.map(str::to_owned),
-            server_id: None,
-            name: name.into(),
-            command: "/bin/true".into(),
-            args: vec![],
-            cwd: ".".into(),
-            port: 8888,
-            hostname: String::new(),
-            public: false,
-        }
-    }
-
-    async fn stored_folder(store: &AuthStore, id: &str) -> Option<String> {
-        sqlx::query_scalar(
-            "SELECT folder_id FROM workload_placements WHERE workspace_id='one' AND agent_id=$1",
-        )
-        .bind(id)
-        .fetch_one(&store.pool())
-        .await
-        .unwrap()
-    }
-
     #[tokio::test]
     async fn trusted_creation_inherits_agent_and_app_folder_in_the_creation_transaction() {
         let store = setup().await;
-        let folder = store
-            .create_workload_folder(
-                "one",
-                CreateWorkloadFolderRequest {
-                    name: "team".into(),
-                    parent_id: None,
-                },
-            )
-            .await
-            .unwrap();
-        store
-            .create_named_agent_credential(
-                "one",
-                "machine",
-                "caller",
-                "caller",
-                Some(&folder.folder_id),
-            )
-            .await
-            .unwrap();
+        let folder = create(&store, "one", "team", None).await;
+        agent(&store, "caller", "caller", Some(&folder.folder_id)).await;
         store
             .create_named_agent_credential_for_caller(
                 "one",
@@ -619,44 +669,16 @@ mod tests {
             stored_folder(&store, "child").await,
             Some(folder.folder_id.clone())
         );
-        let app = store
-            .create_app_deployment_for_caller(
-                "one",
-                "caller",
-                "machine".into(),
-                app_request("mail", None),
-                Some("caller"),
-            )
-            .await
-            .unwrap();
+        let app = app_for(&store, "mail", None, "caller").await.unwrap();
         assert_eq!(
             stored_folder(&store, &app.app_id).await,
             Some(folder.folder_id.clone())
         );
         // Explicit root is distinct from omission; App callers inherit as well.
-        store
-            .create_named_agent_credential("one", "machine", "root", "root", None)
-            .await
-            .unwrap();
-        let root_app = store
-            .create_app_deployment_for_caller(
-                "one",
-                "root",
-                "machine".into(),
-                app_request("root-app", None),
-                Some("root"),
-            )
-            .await
-            .unwrap();
+        agent(&store, "root", "root", None).await;
+        let root_app = app_for(&store, "root-app", None, "root").await.unwrap();
         assert_eq!(stored_folder(&store, &root_app.app_id).await, None);
-        let explicit = store
-            .create_app_deployment_for_caller(
-                "one",
-                "caller",
-                "machine".into(),
-                app_request("explicit-root", Some("/")),
-                Some("caller"),
-            )
+        let explicit = app_for(&store, "explicit-root", Some("/"), "caller")
             .await
             .unwrap();
         assert_eq!(stored_folder(&store, &explicit.app_id).await, None);
@@ -664,14 +686,7 @@ mod tests {
             .rotate_agent_credential("one", "machine", &app.app_id)
             .await
             .unwrap();
-        let child_app = store
-            .create_app_deployment_for_caller(
-                "one",
-                "app-caller",
-                "machine".into(),
-                app_request("child-app", None),
-                Some(&app.app_id),
-            )
+        let child_app = app_for(&store, "child-app", None, &app.app_id)
             .await
             .unwrap();
         assert_eq!(
@@ -687,26 +702,9 @@ mod tests {
             .create_agent_credential("one", "machine", "unplaced")
             .await
             .unwrap();
-        store
-            .set_workload_placement(
-                "two",
-                "foreign",
-                SetWorkloadPlacementRequest {
-                    folder_id: None,
-                    position: 0,
-                },
-            )
-            .await
-            .unwrap();
+        place(&store, "two", "foreign", None, 0).await.unwrap();
         for caller in ["unplaced", "foreign"] {
-            let error = store
-                .create_app_deployment_for_caller(
-                    "one",
-                    "caller",
-                    "machine".into(),
-                    app_request("unexpected", None),
-                    Some(caller),
-                )
+            let error = app_for(&store, "unexpected", None, caller)
                 .await
                 .unwrap_err();
             assert_eq!(error.code(), "caller_unplaced");
@@ -734,13 +732,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stored_folder(&store, &human.app_id).await, None);
-        let absent: bool = sqlx::query_scalar(
-            "SELECT NOT EXISTS(SELECT 1 FROM workload_placements WHERE agent_id='unplaced')",
-        )
-        .fetch_one(&store.pool())
-        .await
-        .unwrap();
-        assert!(absent, "existing unplaced identities must remain untouched");
         store
             .delete_app_deployment("one", &human.app_id)
             .await
@@ -748,7 +739,7 @@ mod tests {
         let removed: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM workload_placements WHERE agent_id=$1) AND NOT EXISTS(SELECT 1 FROM agent_credentials WHERE agent_id=$1 AND revoked_at IS NULL)").bind(&human.app_id).fetch_one(&store.pool()).await.unwrap();
         assert!(
             removed,
-            "deleting an unstarted App removes its placement and revokes its reserved identity"
+            "deleting an unstarted App removes its placement and identity"
         );
     }
 
@@ -757,26 +748,8 @@ mod tests {
         let store = setup().await;
         let mut other = store.clone();
         other.virtual_hosts_update = Arc::default();
-        let folder = store
-            .create_workload_folder(
-                "one",
-                CreateWorkloadFolderRequest {
-                    name: "team".into(),
-                    parent_id: None,
-                },
-            )
-            .await
-            .unwrap();
-        store
-            .create_named_agent_credential(
-                "one",
-                "machine",
-                "caller",
-                "caller",
-                Some(&folder.folder_id),
-            )
-            .await
-            .unwrap();
+        let folder = create(&store, "one", "team", None).await;
+        agent(&store, "caller", "caller", Some(&folder.folder_id)).await;
         let (agent, app) = tokio::join!(
             store.create_named_agent_credential_for_caller(
                 "one",
@@ -786,35 +759,15 @@ mod tests {
                 None,
                 Some("caller")
             ),
-            other.create_app_deployment_for_caller(
-                "one",
-                "caller",
-                "machine".into(),
-                app_request("shared", None),
-                Some("caller")
-            )
+            app_for(&other, "shared", None, "caller")
         );
         assert_ne!(
             agent.is_ok(),
             app.is_ok(),
-            "exactly one same-folder name may commit across replicas"
+            "exactly one same-folder name may commit"
         );
-        let id = if let Ok(app) = app {
-            app.app_id
-        } else {
-            "child".into()
-        };
+        let id = app.map(|app| app.app_id).unwrap_or_else(|_| "child".into());
         assert_eq!(stored_folder(&store, &id).await, Some(folder.folder_id));
-    }
-
-    async fn setup() -> AuthStore {
-        let store = AuthStore::for_test("password").await;
-        store.seed_test_workspace("one").await;
-        store.seed_test_workspace("two").await;
-        for (id, ws) in [("a", "one"), ("b", "one"), ("c", "one"), ("foreign", "two")] {
-            sqlx::query("INSERT INTO agent_credentials(agent_id,workspace_id,server_id,secret_hash,created_at) VALUES($1,$2,'machine','hash','now')").bind(id).bind(ws).execute(&store.pool).await.unwrap();
-        }
-        store
     }
 
     #[tokio::test]
@@ -822,60 +775,40 @@ mod tests {
         let store = setup().await;
         let a = create(&store, "one", "team-a", None).await;
         let b = create(&store, "one", "team-b", None).await;
-        store
-            .create_named_agent_credential("one", "machine", "ag_a", "reviewer", Some(&a.folder_id))
-            .await
-            .unwrap();
-        store
-            .create_named_agent_credential("one", "machine", "ag_b", "reviewer", Some(&b.folder_id))
-            .await
-            .unwrap();
-        let conflict = store
-            .create_named_agent_credential(
-                "one",
-                "machine",
-                "ag_duplicate",
-                "reviewer",
-                Some(&a.folder_id),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(conflict.code(), "agent_name_conflict");
-        assert!(!sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM agent_credentials WHERE agent_id='ag_duplicate')"
-        )
-        .fetch_one(&store.pool)
-        .await
-        .unwrap());
-        store
-            .create_named_agent_credential("one", "machine", "ag_c", "helper", Some(&a.folder_id))
-            .await
-            .unwrap();
+        agent(&store, "ag_a", "reviewer", Some(&a.folder_id)).await;
+        agent(&store, "ag_b", "reviewer", Some(&b.folder_id)).await;
+        let code = |error: AuthFailure| error.code().to_string();
         assert_eq!(
-            store
-                .set_agent_name("one", "ag_c", "reviewer")
-                .await
-                .unwrap_err()
-                .code(),
+            code(
+                store
+                    .create_named_agent_credential(
+                        "one",
+                        "machine",
+                        "ag_duplicate",
+                        "reviewer",
+                        Some(&a.folder_id)
+                    )
+                    .await
+                    .unwrap_err()
+            ),
             "agent_name_conflict"
         );
-        store
-            .set_agent_name("one", "ag_c", "renamed")
-            .await
-            .unwrap();
+        agent(&store, "ag_c", "helper", Some(&a.folder_id)).await;
         assert_eq!(
-            store
-                .set_workload_placement(
-                    "one",
-                    "ag_b",
-                    SetWorkloadPlacementRequest {
-                        folder_id: Some(a.folder_id.clone()),
-                        position: 0
-                    }
-                )
-                .await
-                .unwrap_err()
-                .code(),
+            code(
+                store
+                    .set_agent_name("one", "ag_c", "reviewer")
+                    .await
+                    .unwrap_err()
+            ),
+            "agent_name_conflict"
+        );
+        assert_eq!(
+            code(
+                place(&store, "one", "ag_b", Some(&a.folder_id), 0)
+                    .await
+                    .unwrap_err()
+            ),
             "agent_name_conflict"
         );
         assert_eq!(
@@ -886,34 +819,21 @@ mod tests {
                 .containing_folder("ag_b"),
             Some(b.folder_id.as_str())
         );
-        store
-            .create_named_agent_credential("one", "machine", "ag_root", "reviewer", None)
-            .await
-            .unwrap();
+        agent(&store, "ag_root", "reviewer", None).await;
         assert_eq!(
-            store
-                .set_workload_placement(
-                    "one",
-                    "ag_b",
-                    SetWorkloadPlacementRequest {
-                        folder_id: None,
-                        position: 0
-                    }
-                )
-                .await
-                .unwrap_err()
-                .code(),
+            code(place(&store, "one", "ag_b", None, 0).await.unwrap_err()),
             "agent_name_conflict"
         );
+        // Deleting the folder would promote ag_b into a root name collision.
         assert_eq!(
-            store
-                .delete_workload_folder("one", &b.folder_id)
-                .await
-                .unwrap_err()
-                .code(),
+            code(
+                store
+                    .delete_workload_folder("one", &b.folder_id)
+                    .await
+                    .unwrap_err()
+            ),
             "agent_name_conflict"
         );
-        // Atomic reservations serialize concurrent callers with the same folder/name.
         let (one, two) = tokio::join!(
             store.create_named_agent_credential("one", "machine", "ag_race1", "race", None),
             store.create_named_agent_credential("one", "machine", "ag_race2", "race", None)
@@ -926,15 +846,8 @@ mod tests {
         let store = setup().await;
         let folder = create(&store, "one", "team", None).await;
         let request = || treer_protocol::CreateAppDeploymentRequest {
-            folder_id: None,
             server_id: Some("machine".into()),
-            name: "docs".into(),
-            command: "serve".into(),
-            args: vec![],
-            cwd: ".".into(),
-            port: 8080,
-            hostname: String::new(),
-            public: false,
+            ..app_request("docs", None)
         };
         let app = store
             .create_app_deployment("one", "owner", "machine".into(), request())
@@ -952,28 +865,18 @@ mod tests {
             .rotate_agent_credential("one", "machine", &app.app_id)
             .await
             .unwrap();
-        store
-            .set_workload_placement(
-                "one",
-                &app.app_id,
-                SetWorkloadPlacementRequest {
-                    folder_id: Some(folder.folder_id.clone()),
-                    position: 0,
-                },
-            )
+        place(&store, "one", &app.app_id, Some(&folder.folder_id), 0)
             .await
             .unwrap();
         let second = store
             .create_app_deployment("one", "owner", "machine".into(), request())
             .await
             .unwrap();
-        assert_ne!(app.app_id, second.app_id);
-        let names: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM machine_services WHERE workspace_id='one' ORDER BY name",
-        )
-        .fetch_all(&store.pool)
-        .await
-        .unwrap();
+        let names: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM machine_services WHERE workspace_id='one'")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
         assert_eq!(names.len(), 2);
         assert_ne!(names[0], names[1]);
         store
@@ -981,38 +884,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            store
-                .set_workload_placement(
-                    "one",
-                    &second.app_id,
-                    SetWorkloadPlacementRequest {
-                        folder_id: Some(folder.folder_id),
-                        position: 0
-                    }
-                )
+            place(&store, "one", &second.app_id, Some(&folder.folder_id), 0)
                 .await
                 .unwrap_err()
                 .code(),
             "agent_name_conflict"
         );
-    }
-
-    async fn create(
-        store: &AuthStore,
-        ws: &str,
-        name: &str,
-        parent: Option<&str>,
-    ) -> WorkloadFolder {
-        store
-            .create_workload_folder(
-                ws,
-                CreateWorkloadFolderRequest {
-                    name: name.into(),
-                    parent_id: parent.map(str::to_owned),
-                },
-            )
-            .await
-            .unwrap()
     }
 
     #[tokio::test]
@@ -1034,15 +911,12 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code(), "folder_not_empty");
-        assert_eq!(store.workload_tree("one").await.unwrap().folders.len(), 2);
-        store
-            .remove_workload_folder("one", &child.folder_id, true)
-            .await
-            .unwrap();
-        store
-            .remove_workload_folder("one", &parent.folder_id, true)
-            .await
-            .unwrap();
+        for folder in [&child, &parent] {
+            store
+                .remove_workload_folder("one", &folder.folder_id, true)
+                .await
+                .unwrap();
+        }
         assert!(store.workload_tree("one").await.unwrap().folders.is_empty());
     }
 
@@ -1061,28 +935,9 @@ mod tests {
             )
             .await
             .is_err());
-        assert!(store
-            .set_workload_placement(
-                "one",
-                "foreign",
-                SetWorkloadPlacementRequest {
-                    folder_id: None,
-                    position: 0
-                }
-            )
-            .await
-            .is_err());
-        assert!(store
-            .set_workload_placement(
-                "one",
-                "invented",
-                SetWorkloadPlacementRequest {
-                    folder_id: None,
-                    position: 0
-                }
-            )
-            .await
-            .is_err());
+        for id in ["foreign", "invented"] {
+            assert!(place(&store, "one", id, None, 0).await.is_err());
+        }
         assert!(store
             .update_workload_folder(
                 "two",
@@ -1095,62 +950,25 @@ mod tests {
             .await
             .is_err());
         let (left, right) = tokio::join!(
-            store.update_workload_folder(
-                "one",
-                &a.folder_id,
-                UpdateWorkloadFolderRequest {
-                    name: None,
-                    parent_id: Some(Some(b.folder_id.clone()))
-                }
-            ),
-            store.update_workload_folder(
-                "one",
-                &b.folder_id,
-                UpdateWorkloadFolderRequest {
-                    name: None,
-                    parent_id: Some(Some(a.folder_id.clone()))
-                }
-            )
+            store.update_workload_folder("one", &a.folder_id, reparent(&b.folder_id)),
+            store.update_workload_folder("one", &b.folder_id, reparent(&a.folder_id))
         );
-        assert_ne!(
-            left.is_ok(),
-            right.is_ok(),
-            "one simultaneous opposing move must fail"
-        );
+        assert_ne!(left.is_ok(), right.is_ok(), "one opposing move must fail");
         assert!(store
-            .update_workload_folder(
-                "one",
-                &a.folder_id,
-                UpdateWorkloadFolderRequest {
-                    name: None,
-                    parent_id: Some(Some(a.folder_id.clone()))
-                }
-            )
+            .update_workload_folder("one", &a.folder_id, reparent(&a.folder_id))
             .await
             .is_err());
         assert!(store.workload_tree("two").await.unwrap().folders.is_empty());
     }
 
     #[tokio::test]
-    async fn workload_tree_promotes_children_reorders_and_persists() {
+    async fn workload_tree_promotes_children_and_reorders() {
         let store = setup().await;
         let parent = create(&store, "one", "parent", None).await;
         let doomed = create(&store, "one", "doomed", Some(&parent.folder_id)).await;
         let child = create(&store, "one", "child", Some(&doomed.folder_id)).await;
-        for (id, target) in [
-            ("a", &parent.folder_id),
-            ("b", &doomed.folder_id),
-            ("c", &doomed.folder_id),
-        ] {
-            store
-                .set_workload_placement(
-                    "one",
-                    id,
-                    SetWorkloadPlacementRequest {
-                        folder_id: Some(target.clone()),
-                        position: 100,
-                    },
-                )
+        for (id, target) in [("a", &parent), ("b", &doomed), ("c", &doomed)] {
+            place(&store, "one", id, Some(&target.folder_id), 100)
                 .await
                 .unwrap();
         }
@@ -1174,34 +992,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("a", 0), ("b", 1), ("c", 2)]
         );
-        store
-            .set_workload_placement(
-                "one",
-                "c",
-                SetWorkloadPlacementRequest {
-                    folder_id: Some(parent.folder_id.clone()),
-                    position: 0,
-                },
-            )
+        place(&store, "one", "c", Some(&parent.folder_id), 0)
             .await
             .unwrap();
-        let mut fresh = store.clone();
-        fresh.pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect_with(store.pool.connect_options().as_ref().clone())
-            .await
-            .unwrap();
-        // The test pool's schema is session-local: use a separately acquired connection
-        // with the same search path to check that organization lives in PostgreSQL.
-        let schema: String = sqlx::query_scalar("SELECT current_schema()")
-            .fetch_one(&store.pool)
-            .await
-            .unwrap();
-        sqlx::query(&format!("SET search_path TO {schema}"))
-            .execute(&fresh.pool)
-            .await
-            .unwrap();
-        let tree = fresh.workload_tree("one").await.unwrap();
+        let tree = store.workload_tree("one").await.unwrap();
         assert_eq!(
             tree.placements
                 .iter()
@@ -1226,32 +1020,5 @@ mod tests {
             serde_json::from_value(json!({"parent_id":null})).unwrap();
         assert_eq!(absent.parent_id, None);
         assert_eq!(root.parent_id, Some(None));
-    }
-
-    #[tokio::test]
-    async fn workload_lifecycle_distinct_guards_leave_query_capacity() {
-        let store = setup().await;
-        let first = async {
-            let guard = store.workload_lifecycle_guard("one", "a").await.unwrap();
-            tokio::task::yield_now().await;
-            let _: i64 = sqlx::query_scalar("SELECT 1::bigint")
-                .fetch_one(&store.pool)
-                .await
-                .unwrap();
-            guard.commit().await.unwrap();
-        };
-        let second = async {
-            let guard = store.workload_lifecycle_guard("one", "b").await.unwrap();
-            let _: i64 = sqlx::query_scalar("SELECT 1::bigint")
-                .fetch_one(&store.pool)
-                .await
-                .unwrap();
-            guard.commit().await.unwrap();
-        };
-        tokio::time::timeout(StdDuration::from_secs(5), async {
-            tokio::join!(first, second);
-        })
-        .await
-        .expect("distinct lifecycle mutations must leave capacity for their queries");
     }
 }

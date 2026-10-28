@@ -79,8 +79,8 @@ struct AgentLaunch {
 }
 
 enum StartupRestoreOutcome {
-    Started(AgentInfo),
-    Attached(AgentInfo),
+    Started(Box<AgentInfo>),
+    Attached,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1487,6 +1487,8 @@ impl ControllerRuntime {
         Ok(())
     }
 
+    /// Instances actually (re)spawned, plus failures. Already-running
+    /// instances are omitted: Apps are checked on every heartbeat.
     pub async fn restore_startup_agents(
         &self,
         active_agent_ids: &[String],
@@ -1494,14 +1496,10 @@ impl ControllerRuntime {
         self.restore_startup_outcomes(active_agent_ids)
             .await
             .into_iter()
-            .map(|(id, result)| {
-                (
-                    id,
-                    result.map(|outcome| match outcome {
-                        StartupRestoreOutcome::Started(info)
-                        | StartupRestoreOutcome::Attached(info) => info,
-                    }),
-                )
+            .filter_map(|(id, result)| match result {
+                Ok(StartupRestoreOutcome::Started(info)) => Some((id, Ok(*info))),
+                Ok(StartupRestoreOutcome::Attached) => None,
+                Err(error) => Some((id, Err(error))),
             })
             .collect()
     }
@@ -1527,6 +1525,16 @@ impl ControllerRuntime {
         {
             Ok(HostResponse::Synced { processes, .. }) => {
                 for process in processes {
+                    // Host keeps fenced (denied/deleted) identities in its
+                    // inventory; re-adopting them would fail on every pass.
+                    if self
+                        .inner
+                        .startup_store
+                        .is_denied(&process.process_id)
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
                     if process.running {
                         running_ids.insert(process.process_id.clone());
                         if self.get(&process.process_id).is_ok_and(|agent| {
@@ -1568,10 +1576,7 @@ impl ControllerRuntime {
                 if let Ok(agent) = self.get(&agent_id) {
                     if let Ok(agent) = agent.lock() {
                         if !agent.info.status.is_terminal() {
-                            results.push((
-                                agent_id,
-                                Ok(StartupRestoreOutcome::Attached(agent.info.clone())),
-                            ));
+                            results.push((agent_id, Ok(StartupRestoreOutcome::Attached)));
                             continue;
                         }
                     }
@@ -1591,7 +1596,7 @@ impl ControllerRuntime {
                     .update(&agent_id, |current| {
                         current.last_host_epoch.clone_from(&self.inner.host_epoch)
                     })
-                    .map(|()| StartupRestoreOutcome::Started(info))
+                    .map(|()| StartupRestoreOutcome::Started(Box::new(info)))
                     .map_err(startup_store_error),
                 Err(error) => Err(error),
             };
@@ -1668,7 +1673,7 @@ impl ControllerRuntime {
             .map(|(id, result)| {
                 let (state, message) = match result {
                     Ok(StartupRestoreOutcome::Started(_)) => (RuntimeRestoreState::Started, None),
-                    Ok(StartupRestoreOutcome::Attached(_)) => (RuntimeRestoreState::Attached, None),
+                    Ok(StartupRestoreOutcome::Attached) => (RuntimeRestoreState::Attached, None),
                     Err(error) => (
                         RuntimeRestoreState::Failed,
                         Some(format!("{}: {}", error.code, error.message)),

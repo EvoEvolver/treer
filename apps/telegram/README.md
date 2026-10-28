@@ -9,10 +9,6 @@ share one private state directory:
 - `telegram-settings.py`, the **settings App**, is a Managed App with a React page
   (token, pairing, POCs, users, audit) for operators and admin Agents.
 
-The same directory also holds a separate external-client HTTP channel; see
-[HTTP channel](http_app/README.md). It uses its own SQLite files and does not affect
-Telegram.
-
 Telegram admission, polling offsets, chat/topic bindings, retries and external ID
 mappings are App-owned SQLite state (`telegram-state.sqlite3` in
 `TREER_APP_STATE_DIR`). Back it up with its WAL files or SQLite's online backup API.

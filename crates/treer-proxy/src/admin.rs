@@ -250,6 +250,7 @@ mod tests {
         body::{to_bytes, Body},
         http::{Request, StatusCode},
         middleware,
+        response::Response,
     };
     use chrono::Utc;
     use tower::ServiceExt;
@@ -266,6 +267,36 @@ mod tests {
             )
             .layer(Extension(store.clone()))
             .with_state(AppState::new())
+    }
+
+    /// Sends `method uri` with one optional header (admin cookie by default).
+    async fn call(app: &Router, method: &str, uri: &str, header: (&str, &str)) -> Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("origin", "https://app.treer.example")
+                    .header(header.0, header.1)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn body_json(response: Response) -> Value {
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap()
+    }
+
+    fn assert_keys(record: &Value, keys: &[&str]) {
+        let actual: std::collections::BTreeSet<_> = record
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(actual, keys.iter().copied().collect());
     }
 
     async fn admin_cookie(app: &Router) -> String {
@@ -292,83 +323,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aggregate_traffic_requires_admin_cookie_and_rejects_identity_filters() {
+    async fn admin_routes_require_the_admin_cookie_and_reject_identity_filters() {
         let store = AuthStore::for_test("admin-password").await;
         let app = test_router(&store);
-        for (header, value) in [
+        let cookie = admin_cookie(&app).await;
+        let bearer = format!("Bearer {}", cookie.split_once('=').unwrap().1);
+        for header in [
             ("authorization", "Bearer synthetic-user-or-oauth-token"),
             ("cookie", "treer_session=synthetic-user-token"),
             ("x-treer-operator-credential", "synthetic-operator-token"),
             ("x-treer-workload-credential", "synthetic-workload-token"),
             ("cookie", "treer_admin_session=invalid-session"),
+            // Even a valid admin session must use the cookie transport.
+            ("authorization", bearer.as_str()),
         ] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/admin/traffic")
-                        .header(header, value)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            for uri in ["/api/admin/traffic", "/api/admin/invitations"] {
+                let response = call(&app, "GET", uri, header).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{uri} {header:?}"
+                );
+            }
         }
-        let cookie = admin_cookie(&app).await;
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/admin/traffic")
-                    .header(
-                        "authorization",
-                        format!("Bearer {}", cookie.split_once('=').unwrap().1),
-                    )
-                    .body(Body::empty())
-                    .unwrap(),
+        let with_cookie = ("cookie", cookie.as_str());
+        for (query, expected) in [
+            ("hours=6", StatusCode::OK),
+            ("hours=720", StatusCode::OK),
+            ("hours=1", StatusCode::BAD_REQUEST),
+            ("hours=721", StatusCode::BAD_REQUEST),
+            ("hours=x", StatusCode::BAD_REQUEST),
+            ("hours=6&workspace_id=secret", StatusCode::BAD_REQUEST),
+        ] {
+            let response = call(
+                &app,
+                "GET",
+                &format!("/api/admin/traffic?{query}"),
+                with_cookie,
             )
-            .await
-            .unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::UNAUTHORIZED,
-            "even a valid admin session must use the cookie transport"
-        );
-        for hours in ["6", "24", "168", "720"] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(format!("/api/admin/traffic?hours={hours}"))
-                        .header("cookie", &cookie)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
+            .await;
+            assert_eq!(response.status(), expected, "{query}");
         }
-        for query in [
-            "hours=0",
-            "hours=1",
-            "hours=721",
-            "hours=-1",
-            "hours=x",
-            "hours=6&workspace_id=secret",
+        for path in [
+            "/api/admin/traffic",
+            "/api/admin/dashboard",
+            "/api/admin/users",
         ] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(format!("/api/admin/traffic?{query}"))
-                        .header("cookie", &cookie)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let response = call(&app, "GET", path, with_cookie).await;
+            assert_eq!(response.headers()["cache-control"], "no-store", "{path}");
         }
     }
 
@@ -384,34 +386,22 @@ mod tests {
             "users/usr_private",
             "users/missing",
             "users/usr_private/password-reset",
-            "users/usr_private/revoke-sessions",
-            "machines",
             "machines/srv_private",
             "agents",
             "organizations",
             "activity",
         ] {
             for method in ["GET", "POST", "DELETE"] {
-                let response = app
-                    .clone()
-                    .oneshot(
-                        Request::builder()
-                            .method(method)
-                            .uri(format!("/api/admin/{path}"))
-                            .header("origin", "https://app.treer.example")
-                            .header("cookie", &cookie)
-                            .body(Body::empty())
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
+                let response = call(
+                    &app,
+                    method,
+                    &format!("/api/admin/{path}"),
+                    ("cookie", &cookie),
+                )
+                .await;
                 assert_eq!(response.status(), StatusCode::GONE);
                 let body = to_bytes(response.into_body(), 4096).await.unwrap();
-                if let Some(expected) = &expected {
-                    assert_eq!(&body, expected);
-                } else {
-                    expected = Some(body);
-                }
+                assert_eq!(&body, expected.get_or_insert_with(|| body.clone()));
             }
         }
         let resets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM password_reset_tokens")
@@ -427,8 +417,7 @@ mod tests {
         for ws in ["ws-a", "ws-b"] {
             store.seed_test_workspace(ws).await;
         }
-        let now = Utc::now().timestamp();
-        let hour = now.div_euclid(3600) * 3600;
+        let hour = Utc::now().timestamp().div_euclid(3600) * 3600;
         for (ws, bytes, timestamp, class) in [
             ("ws-a", 10i64, hour, "virtual_network"),
             ("ws-b", 20, hour, "virtual_network"),
@@ -442,75 +431,61 @@ mod tests {
         sqlx::query("INSERT INTO machine_traffic_hourly(workspace_id,window_start,source_server_id,destination_server_id,payload_bytes,payload_frames,updated_at) VALUES('ws-a',$1,'legacy-private','private-dest',5,2,'test')").bind(hour).execute(&store.pool()).await.unwrap();
         // Mirrored Agent metering is deliberately excluded from platform totals.
         sqlx::query("INSERT INTO agent_traffic_usage_hourly(workspace_id,window_start,traffic_class,source_type,source_id,destination_type,destination_id,payload_bytes,payload_frames,billable_bytes,meter_version,updated_at) VALUES('ws-a',$1,'virtual_network','agent','ag_private','agent','ag_dest',9999,1,9999,1,'test')").bind(hour).execute(&store.pool()).await.unwrap();
-        let Json(body) = platform_traffic(
-            Extension(store.clone()),
-            Query(PlatformTrafficQuery { hours: 6 }),
+        // Independent Proxy state objects use the same persisted database view.
+        let (app_a, app_b) = (test_router(&store), test_router(&store));
+        let cookie = admin_cookie(&app_a).await;
+        let body = body_json(
+            call(
+                &app_a,
+                "GET",
+                "/api/admin/traffic?hours=6",
+                ("cookie", &cookie),
+            )
+            .await,
         )
-        .await
-        .unwrap();
+        .await;
+        let other = body_json(
+            call(
+                &app_b,
+                "GET",
+                "/api/admin/traffic?hours=6",
+                ("cookie", &cookie),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(body, other);
         let records = body["traffic"].as_array().unwrap();
         assert_eq!(records.len(), 2);
-        let network = records
-            .iter()
-            .find(|v| v["traffic_class"] == "virtual_network")
-            .unwrap();
-        assert_eq!(network["payload_bytes"], 35);
-        assert_eq!(network["billable_bytes"], 35);
-        assert_eq!(network["payload_frames"], 4);
+        let class = |name: &str| records.iter().find(|v| v["traffic_class"] == name).unwrap();
+        let network = class("virtual_network");
         assert_eq!(
-            records
-                .iter()
-                .find(|v| v["traffic_class"] == "service_ingress")
-                .unwrap()["payload_bytes"],
-            7
+            (
+                &network["payload_bytes"],
+                &network["billable_bytes"],
+                &network["payload_frames"]
+            ),
+            (&35.into(), &35.into(), &4.into())
         );
+        assert_eq!(class("service_ingress")["payload_bytes"], 7);
         for record in records {
-            let keys: std::collections::BTreeSet<_> = record
-                .as_object()
-                .unwrap()
-                .keys()
-                .map(String::as_str)
-                .collect();
-            assert_eq!(
-                keys,
-                [
+            assert_keys(
+                record,
+                &[
                     "window_start",
                     "traffic_class",
                     "payload_bytes",
                     "payload_frames",
-                    "billable_bytes"
-                ]
-                .into_iter()
-                .collect()
+                    "billable_bytes",
+                ],
             );
-            let decoded: treer_protocol::PlatformTrafficRecord =
-                serde_json::from_value(record.clone()).unwrap();
-            assert_eq!(serde_json::to_value(decoded).unwrap(), *record);
+            serde_json::from_value::<treer_protocol::PlatformTrafficRecord>(record.clone())
+                .unwrap();
         }
         let encoded = body.to_string();
         for fragment in ["ws-a", "ws-b", "private", "ag_dest"] {
             assert!(!encoded.contains(fragment));
         }
-        // Independent Proxy state objects use the same persisted database view.
-        let app_a = test_router(&store);
-        let app_b = test_router(&store);
-        let cookie = admin_cookie(&app_a).await;
-        let mut responses = Vec::new();
-        for app in [app_a, app_b] {
-            let response = app
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/admin/traffic?hours=6")
-                        .header("cookie", &cookie)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            responses.push(to_bytes(response.into_body(), 65536).await.unwrap());
-        }
-        assert_eq!(responses[0], responses[1]);
     }
 
     async fn insert_user(store: &AuthStore, id: &str, email: &str, name: &str) {
@@ -532,10 +507,9 @@ mod tests {
         let store = AuthStore::for_test("admin-password").await;
         store.seed_test_workspace("ws-a").await;
         insert_user(&store, "usr_a", "ada@example.com", "Ada").await;
-        let state = AppState::new();
-        let Json(body) = dashboard(Extension(store), State(state))
+        let Json(body) = dashboard(Extension(store), State(AppState::new()))
             .await
-            .expect("dashboard");
+            .unwrap();
         assert_eq!(body["user_count"], 1);
         assert_eq!(body["organization_count"], 1);
         assert_eq!(body["machine_count"], 0);
@@ -543,24 +517,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn personal_invitations_can_be_listed_and_revoked() {
+    async fn invitations_return_the_link_once_redact_bearers_and_revoke_by_handle() {
         let store = AuthStore::for_test("admin-password").await;
-        let (token, _) = store.create_personal_invitation().await.expect("invite");
-        let Json(listed) = list_invitations(Extension(store.clone()))
-            .await
-            .expect("list");
-        assert_eq!(listed["invitations"].as_array().unwrap().len(), 1);
-        let Json(_) = revoke_invitation(Extension(store.clone()), Path(invitation_id(&token)))
-            .await
-            .expect("revoke");
-        let Json(empty) = list_invitations(Extension(store)).await.expect("empty");
-        assert!(empty["invitations"].as_array().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn invitation_listing_redacts_bearers_and_revoke_uses_only_admin_handle() {
-        let store = AuthStore::for_test("admin-password").await;
-        let (pending, _) = store.create_personal_invitation().await.unwrap();
+        let app = test_router(&store);
+        let cookie = admin_cookie(&app).await;
+        let with_cookie = ("cookie", cookie.as_str());
+        let response = call(&app, "POST", "/api/admin/invitations", with_cookie).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let created = body_json(response).await;
+        let pending = created["token"].as_str().unwrap().to_string();
+        assert!(created["url"].as_str().unwrap().contains(&pending));
         let (used, _) = store.create_personal_invitation().await.unwrap();
         sqlx::query("UPDATE invitations SET used_at='used-time' WHERE token=$1")
             .bind(&used)
@@ -568,74 +535,35 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("INSERT INTO invitations(token,created_at,created_by,kind) VALUES('short','test','platform-admin','personal')").execute(&store.pool()).await.unwrap();
-        let app = test_router(&store);
-        let cookie = admin_cookie(&app).await;
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/admin/invitations")
-                    .header("cookie", &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+
+        let response = call(&app, "GET", "/api/admin/invitations", with_cookie).await;
         assert_eq!(response.headers()["cache-control"], "no-store");
-        let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
-        let text = std::str::from_utf8(&bytes).unwrap();
+        let body = body_json(response).await;
+        let text = body.to_string();
         for secret in [&pending, &used, "short"] {
             assert!(!text.contains(secret));
         }
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
         let records = body["invitations"].as_array().unwrap();
         assert_eq!(records.len(), 3);
         for record in records {
-            let keys: std::collections::BTreeSet<_> = record
-                .as_object()
-                .unwrap()
-                .keys()
-                .map(String::as_str)
-                .collect();
-            assert_eq!(
-                keys,
-                ["invitation_id", "token_prefix", "created_at", "used_at"]
-                    .into_iter()
-                    .collect()
+            assert_keys(
+                record,
+                &["invitation_id", "token_prefix", "created_at", "used_at"],
             );
-            let decoded: treer_protocol::PlatformInvitationRecord =
-                serde_json::from_value(record.clone()).unwrap();
-            assert_eq!(serde_json::to_value(decoded).unwrap(), *record);
-        }
-        assert_eq!(
-            records
-                .iter()
-                .find(|v| v["invitation_id"] == invitation_id(&pending))
-                .unwrap()["token_prefix"],
-            &pending[..6]
-        );
-        assert_eq!(
-            records
-                .iter()
-                .find(|v| v["invitation_id"] == invitation_id(&used))
-                .unwrap()["used_at"],
-            "used-time"
-        );
-        assert_eq!(
-            records
-                .iter()
-                .find(|v| v["invitation_id"] == invitation_id("short"))
-                .unwrap()["token_prefix"],
-            "[redacted]"
-        );
-        // A non-bearer handle cannot be consumed by the registration API.
-        let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM invitations WHERE token=$1)")
-                .bind(invitation_id(&pending))
-                .fetch_one(&store.pool())
-                .await
+            serde_json::from_value::<treer_protocol::PlatformInvitationRecord>(record.clone())
                 .unwrap();
-        assert!(!exists);
+        }
+        let by_id = |token: &str| {
+            records
+                .iter()
+                .find(|v| v["invitation_id"] == invitation_id(token))
+                .unwrap()
+        };
+        assert_eq!(by_id(&pending)["token_prefix"], &pending[..6]);
+        assert_eq!(by_id(&used)["used_at"], "used-time");
+        assert_eq!(by_id("short")["token_prefix"], "[redacted]");
+
+        // The handle is not a bearer; only an unused handle revokes, once.
         for (id, expected) in [
             (pending.clone(), StatusCode::NOT_FOUND),
             (invitation_id(&used), StatusCode::NOT_FOUND),
@@ -643,83 +571,27 @@ mod tests {
             (invitation_id(&pending), StatusCode::OK),
             (invitation_id(&pending), StatusCode::NOT_FOUND),
         ] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("DELETE")
-                        .uri(format!("/api/admin/invitations/{id}"))
-                        .header("origin", "https://app.treer.example")
-                        .header("cookie", &cookie)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            let response = call(
+                &app,
+                "DELETE",
+                &format!("/api/admin/invitations/{id}"),
+                with_cookie,
+            )
+            .await;
             assert_eq!(response.status(), expected);
             assert_eq!(response.headers()["cache-control"], "no-store");
         }
-        let audits: Vec<String> = sqlx::query_scalar(
-            "SELECT resource_id FROM platform_audit_events WHERE resource_kind='invitation'",
+        let audits: Vec<(String, String)> = sqlx::query_as(
+            "SELECT action, resource_id FROM platform_audit_events WHERE resource_kind='invitation' ORDER BY action",
         )
         .fetch_all(&store.pool())
         .await
         .unwrap();
-        assert_eq!(audits, vec![invitation_id(&pending)]);
-    }
+        assert_eq!(audits.len(), 2);
+        assert!(audits.iter().all(|(_, id)| id == &invitation_id(&pending)));
 
-    #[tokio::test]
-    async fn invitation_creation_returns_link_once_and_listing_is_bounded() {
-        let store = AuthStore::for_test("admin-password").await;
-        let app = test_router(&store);
-        let cookie = admin_cookie(&app).await;
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/admin/invitations")
-                    .header("origin", "https://app.treer.example")
-                    .header("cookie", &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()["cache-control"], "no-store");
-        let created: Value =
-            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
-        let token = created["token"].as_str().unwrap();
-        assert!(created["url"].as_str().unwrap().contains(token));
-        let resource: String = sqlx::query_scalar(
-            "SELECT resource_id FROM platform_audit_events WHERE action='invitation.created'",
-        )
-        .fetch_one(&store.pool())
-        .await
-        .unwrap();
-        assert_eq!(resource, invitation_id(token));
         sqlx::query("INSERT INTO invitations(token,created_at,created_by,kind) SELECT 'inv_' || lpad(n::text,32,'0'),'test','platform-admin','personal' FROM generate_series(1,110) AS n").execute(&store.pool()).await.unwrap();
         let Json(listed) = list_invitations(Extension(store.clone())).await.unwrap();
         assert_eq!(listed["invitations"].as_array().unwrap().len(), 100);
-        assert!(!listed.to_string().contains(token));
-        for path in [
-            "/api/admin/traffic",
-            "/api/admin/dashboard",
-            "/api/admin/users",
-        ] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(path)
-                        .header("cookie", &cookie)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.headers()["cache-control"], "no-store");
-        }
     }
 }

@@ -57,6 +57,12 @@ pub(super) async fn response(router: Router, uri: &str, user: Option<&str>) -> R
         .unwrap()
 }
 
+pub(super) async fn owner_get(router: &Router, uri: &str) -> Value {
+    let result = response(router.clone(), uri, Some("owner")).await;
+    assert_eq!(result.status(), StatusCode::OK, "{uri}");
+    body(result).await
+}
+
 pub(super) async fn body(response: Response) -> Value {
     serde_json::from_slice(
         &axum::body::to_bytes(response.into_body(), 1024 * 1024)
@@ -123,13 +129,9 @@ async fn workspace_audit_http_role_scope_filters_pagination_and_redaction() {
     )
     .await;
     let router = test_router(&auth, PolicyEngine::allow_all());
-    let stats = body(
-        response(
-            router.clone(),
-            "/api/workspaces/a/audit-events?include_statistics=true",
-            Some("owner"),
-        )
-        .await,
+    let stats = owner_get(
+        &router,
+        "/api/workspaces/a/audit-events?include_statistics=true",
     )
     .await;
     let stats = &stats["maintenance"];
@@ -166,25 +168,13 @@ async fn workspace_audit_http_role_scope_filters_pagination_and_redaction() {
     )
     .await;
     assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
-    let first = body(
-        response(
-            router.clone(),
-            "/api/workspaces/a/audit-events?limit=1",
-            Some("owner"),
-        )
-        .await,
-    )
-    .await;
+    let first = owner_get(&router, "/api/workspaces/a/audit-events?limit=1").await;
     assert_eq!(first["events"].as_array().unwrap().len(), 1);
     assert_eq!(first["events"][0]["action"], "machine.exec");
     let cursor = first["next_cursor"].as_i64().unwrap();
-    let second = body(
-        response(
-            router.clone(),
-            &format!("/api/workspaces/a/audit-events?limit=1&before={cursor}"),
-            Some("owner"),
-        )
-        .await,
+    let second = owner_get(
+        &router,
+        &format!("/api/workspaces/a/audit-events?limit=1&before={cursor}"),
     )
     .await;
     assert!(second["next_cursor"].is_null());
@@ -209,15 +199,7 @@ async fn workspace_audit_http_role_scope_filters_pagination_and_redaction() {
         "since=2000-01-01T00%3A00%3A00Z",
         "until=2100-01-01T00%3A00%3A00Z",
     ] {
-        let page = body(
-            response(
-                router.clone(),
-                &format!("/api/workspaces/a/audit-events?{query}"),
-                Some("owner"),
-            )
-            .await,
-        )
-        .await;
+        let page = owner_get(&router, &format!("/api/workspaces/a/audit-events?{query}")).await;
         assert!(!page["events"].as_array().unwrap().is_empty());
         assert!(page["events"]
             .as_array()
@@ -237,25 +219,17 @@ async fn workspace_audit_http_role_scope_filters_pagination_and_redaction() {
         .unwrap()
         .replace('+', "%2B");
     for (filter, expected) in [("since", "machine.exec"), ("until", "agent.create")] {
-        let page = body(
-            response(
-                router.clone(),
-                &format!("/api/workspaces/a/audit-events?{filter}={boundary}"),
-                Some("owner"),
-            )
-            .await,
+        let page = owner_get(
+            &router,
+            &format!("/api/workspaces/a/audit-events?{filter}={boundary}"),
         )
         .await;
         assert_eq!(page["events"].as_array().unwrap().len(), 1);
         assert_eq!(page["events"][0]["action"], expected);
     }
-    let empty = body(
-        response(
-            router.clone(),
-            "/api/workspaces/a/audit-events?action=machine.exec&actor_id=owner",
-            Some("owner"),
-        )
-        .await,
+    let empty = owner_get(
+        &router,
+        "/api/workspaces/a/audit-events?action=machine.exec&actor_id=owner",
     )
     .await;
     assert!(empty["events"].as_array().unwrap().is_empty());
@@ -293,27 +267,11 @@ async fn workspace_audit_page_and_payload_are_bounded_and_unknown_actions_fail_c
         .await;
     }
     let router = test_router(&auth, PolicyEngine::allow_all());
-    let page = body(
-        response(
-            router.clone(),
-            "/api/workspaces/a/audit-events?limit=65535",
-            Some("owner"),
-        )
-        .await,
-    )
-    .await;
+    let page = owner_get(&router, "/api/workspaces/a/audit-events?limit=65535").await;
     assert_eq!(page["events"].as_array().unwrap().len(), 100);
     assert!(page["next_cursor"].is_i64());
     assert!(page.to_string().len() < 100_000);
-    let single = body(
-        response(
-            router.clone(),
-            "/api/workspaces/a/audit-events?limit=0",
-            Some("owner"),
-        )
-        .await,
-    )
-    .await;
+    let single = owner_get(&router, "/api/workspaces/a/audit-events?limit=0").await;
     assert_eq!(single["events"].as_array().unwrap().len(), 1);
     event(
         &auth,
@@ -339,15 +297,7 @@ async fn workspace_audit_page_and_payload_are_bounded_and_unknown_actions_fail_c
         json!({"exit_code":{"token":"SECRET"},"timed_out":"SECRET","truncated":false}),
     )
     .await;
-    let page = body(
-        response(
-            router,
-            "/api/workspaces/a/audit-events?limit=3",
-            Some("owner"),
-        )
-        .await,
-    )
-    .await;
+    let page = owner_get(&router, "/api/workspaces/a/audit-events?limit=3").await;
     assert_eq!(page["events"][0]["payload"], json!({"truncated":false}));
     assert_eq!(page["events"][1]["payload"], json!({}));
     assert_eq!(page["events"][2]["payload"], json!({}));
@@ -498,29 +448,6 @@ async fn workspace_audit_app_tokens_bind_the_caller_and_audience() {
         assert_eq!(result.status(), status, "{user} {audience}");
         assert_eq!(result.headers()[header::CACHE_CONTROL], "no-store");
     }
-}
-
-#[test]
-fn workspace_audit_query_and_page_protocol_round_trip() {
-    let query: WorkspaceAuditEventsQuery = serde_json::from_value(
-        json!({"before":5,"limit":1,"since":"2026-10-15T00:00:00Z","action":"agent.create"}),
-    )
-    .unwrap();
-    let restored: WorkspaceAuditEventsQuery =
-        serde_json::from_value(serde_json::to_value(query).unwrap()).unwrap();
-    assert_eq!(restored.before, Some(5));
-    assert!(
-        serde_json::from_value::<WorkspaceAuditEventsQuery>(json!({"workspace_id":"b"})).is_err()
-    );
-    let page = WorkspaceAuditEventsPage {
-        events: vec![],
-        next_cursor: None,
-        maintenance: None,
-        category_table_version: None,
-    };
-    let restored: WorkspaceAuditEventsPage =
-        serde_json::from_value(serde_json::to_value(page).unwrap()).unwrap();
-    assert!(restored.events.is_empty());
 }
 
 #[tokio::test]

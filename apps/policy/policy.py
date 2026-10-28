@@ -270,7 +270,7 @@ WRITE_ACTIONS = ['agent.prompt', 'agent.queue.cancel', 'agent.input', 'agent.sto
                  'machine.file.write', 'identity.token.issue', 'service.create',
                  'service.update', 'service.delete', 'service.probe', 'virtual_host.create',
                  'virtual_host.delete', 'ingress.create', 'ingress.update', 'ingress.delete',
-                 'email.send', 'message.send', 'message.import', 'app.use', 'network.connect']
+                 'message.send', 'message.import', 'app.use', 'network.connect']
 TEMPLATES = [
     {'id':'team-isolation', 'name':'Team isolation',
      'description':'Same-folder collaboration and parent-folder management. Cross-folder access needs explicit rules. Scoped to listed actions; unmatched actions remain Allow.'},

@@ -405,11 +405,6 @@ async fn serve_app(
     Ok(with_headers(response, "no-cache", csp))
 }
 
-#[cfg(test)]
-pub(super) fn with_headers_for_test(response: Response<Body>, csp: &str) -> Response<Body> {
-    with_headers(response, "no-cache", csp)
-}
-
 /// A request path becomes a file only when every component is a plain name and
 /// the physical file lies inside the canonical dist directory; symlinks that
 /// leave it, directories and anything else fall back to the SPA page.

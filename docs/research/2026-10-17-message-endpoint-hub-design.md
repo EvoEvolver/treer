@@ -19,7 +19,7 @@ No private config/database contents or real credentials read. Mail is out of sco
 | Current channel | State/secrets | Identities/processes and Core |
 | --- | --- | --- |
 | [Telegram](../../apps/telegram/README.md) | registry/offsets/mappings/chunk retries in SQLite; bot-token file | bridge Agent + private settings App, one Core receive loop |
-| [HTTP](../../apps/telegram/http_app/README.md) | data/admin SQLite, token/pair hashes, cursors/maps | bridge Agent + public data/private settings Apps, one Core receive loop |
+| HTTP (removed, #142) | data/admin SQLite, token/pair hashes, cursors/maps | bridge Agent + public data/private settings Apps, one Core receive loop |
 | Email (`apps/email-endpoint`, since removed) | contacts/thread IDs/digests/intents/OAuth sessions, private outbox; provider secrets stay Proxy-side | one private App, no receive loop; caller-authored Core messages/replies, App-runtime email |
 
 A (single public/admin process) rejected; B (three shared processes) saves memory

@@ -819,18 +819,6 @@ CREATE INDEX IF NOT EXISTS agent_traffic_usage_hourly_workspace_window
 CREATE INDEX IF NOT EXISTS virtual_network_hosts_service
     ON virtual_network_hosts(workspace_id, service_id);
 
--- Body-free email audit and durable idempotency/rate reservations across replicas.
-CREATE TABLE IF NOT EXISTS app_email_sends (
- workspace_id TEXT NOT NULL, app_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
- email_id TEXT UNIQUE NOT NULL, fingerprint TEXT NOT NULL, status TEXT NOT NULL,
- updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(workspace_id,app_id,idempotency_key)
-);
-CREATE TABLE IF NOT EXISTS app_email_attempts (
- attempt_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, app_id TEXT NOT NULL,
- recipient_hash TEXT NOT NULL, status TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS app_email_attempts_rate ON app_email_attempts(workspace_id,created_at);
-
 -- Policy Tree facts are read from a consistent primary-DB snapshot. Notifications
 -- are invalidation hints only; a missed notification never authorizes stale paths.
 CREATE OR REPLACE FUNCTION treer_tree_revision_changed() RETURNS trigger AS $$
@@ -978,3 +966,6 @@ CREATE INDEX IF NOT EXISTS machine_uploads_subject_state ON machine_uploads(subj
 DROP TABLE IF EXISTS controller_update_previews, controller_update_attempts,
     controller_update_operations, controller_update_catalog_floor,
     controller_update_catalog_entries;
+
+-- The former Managed App email route tables.
+DROP TABLE IF EXISTS app_email_sends, app_email_attempts;

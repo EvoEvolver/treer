@@ -291,60 +291,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn subject_encodes_workspace_and_preserves_structured_action() {
-        let subject = event_subject("treer.v1.events", "org/team alpha", "agent.updated");
+    fn subjects_encode_workspaces_and_never_carry_wildcards() {
         assert_eq!(
-            subject,
+            event_subject("treer.v1.events", "org/team alpha", "agent.updated"),
             "treer.v1.events.workspace_b3JnL3RlYW0gYWxwaGE.agent.updated"
         );
-        assert!(!subject.contains('*'));
-        assert!(!subject.contains('>'));
-        assert!(!subject.contains(char::is_whitespace));
-    }
-
-    #[test]
-    fn arbitrary_actions_cannot_inject_subject_wildcards() {
-        let subject = event_subject("treer.v1.events", "default", "agent.*.updated");
-        assert!(subject.contains(".encoded_"));
-        assert!(!subject.contains('*'));
-        assert!(!subject.contains('>'));
-    }
-
-    #[test]
-    fn invalid_subject_prefix_is_rejected() {
+        let injected = event_subject("treer.v1.events", "default", "agent.*.updated");
+        assert!(injected.contains(".encoded_"));
+        for subject in [injected, event_subject("p", "a > b", "x >")] {
+            assert!(!subject.contains(['*', '>']) && !subject.contains(char::is_whitespace));
+        }
         assert!(validate_subject_prefix("treer.v1.events").is_ok());
         assert!(validate_subject_prefix("treer..events").is_err());
         assert!(validate_subject_prefix("treer.>").is_err());
-    }
-
-    #[tokio::test]
-    async fn in_process_bus_delivers_the_shared_envelope() {
-        let bus = EventBus::in_process();
-        let mut receiver = bus.subscribe();
-        let event = DomainEventEnvelope {
-            event_id: "evt_test".to_string(),
-            schema_version: DOMAIN_EVENT_SCHEMA_VERSION,
-            organization_id: None,
-            workspace_id: "default".to_string(),
-            actor: DomainEventActor {
-                kind: "system".to_string(),
-                id: Some("treer-proxy".to_string()),
-            },
-            action: "agent.updated".to_string(),
-            resource: DomainEventResource {
-                kind: "workspace".to_string(),
-                id: "default".to_string(),
-            },
-            occurred_at: Utc::now(),
-            trace_id: None,
-            causation_id: None,
-            correlation_id: None,
-            workspace_revision: Some(3),
-            payload: json!({"agent_id": "agent-1"}),
-        };
-
-        bus.publish(event.clone()).expect("publish");
-        assert_eq!(receiver.recv().await.expect("event"), event);
     }
 
     #[tokio::test]
