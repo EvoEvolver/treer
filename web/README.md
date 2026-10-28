@@ -210,23 +210,6 @@ normal workspace cookie contract. Missing CORS, cookies, or browser permission
 is an unavailable check, never opaque `no-cors` success or an identity workaround.
 The Agent isolated/compatibility iframe paths are unchanged.
 
-Focused actual-HTTP regression entry (no managed process restart):
-`TREER_APP_UI_ERROR_FIXTURE=/absolute/path/error-response.json node e2e/run.mjs --config playwright.app-reconnect.config.ts --project chromium` from `web/`.
-First export the actual error HTML/status/nonce CSP for the fixture Console origin
-using the explicit ignored Core test (no runtime endpoint is added):
-`TREER_APP_UI_FIXTURE_CONSOLE_ORIGIN=http://127.0.0.1:19142 cargo test --locked -p treer-proxy api::app_ui::tests::export_navigation_error_browser_fixture -- --ignored --nocapture`.
-Save only the JSON following `TREER_APP_UI_ERROR_FIXTURE` as the named input;
-the browser gateway serves its status, headers and body unchanged.
-It uses production-origin configuration with the real WorkloadSurface component,
-a disposable HTTP gateway and an independently delayed listener. The gateway
-serves the actual production renderer's exported error response, not reconstructed
-JavaScript; this is not a claim of deployed Proxy execution.
-Core owns the real bridge's focused route tests. The local fixture owner cookie
-is synthetic and never represents a real human session. Historical old-version
-control: use the unchanged baseline component and `TREER_EXPECT_OLD=1` with the
-Playwright CLI in a sanitized environment; it must retain raw `stream_failed`
-after the five-second listener recovery.
-
 ## Live Managed App discovery
 
 The console refreshes its authoritative Core App list after App-like runtime
@@ -298,8 +281,7 @@ target. Below 768px every Tree sidebar control also has a 44px target: the
 organization/workspace switchers and settings buttons, **Add to tree**, the row
 "⋯" buttons, and every dropdown menu row (`max-md:` classes; desktop keeps the
 compact sizes). The phone top bar (Browse tree, page title, "⋯", tab count) and
-the Overview buttons and filter chips are 44px too; `e2e/touch-targets.spec.ts`
-covers both. It opens the existing Tree directly from Overview, Agent/App pages or
+the Overview buttons and filter chips are 44px too. It opens the existing Tree directly from Overview, Agent/App pages or
 settings, preserving selected workloads, retained tabs, terminals and iframe
 drafts. It does not require visiting Overview first. Desktop navigation is
 unchanged.
@@ -375,10 +357,10 @@ Browser tests mock the API and workspace events. The test runner creates a
 throwaway HOME and allows only basic process environment variables, excluding
 Agent identities, workload credentials, provider settings and HTTP proxies. It
 starts its own loopback Vite and local-only Wrangler processes under Playwright
-management and never reuses an existing server. Set `PW_PORT` (1–65534) to select
-a free consecutive port pair: Vite uses `PW_PORT`, the security Worker uses
-`PW_PORT + 1`. An occupied port fails startup explicitly, even if another service
-answers `/health` with HTTP 200. Both child processes are stopped by Playwright;
+management and never reuses an existing server. It picks a random free port
+triple (Vite, security Worker, Worker inspector) unless `PW_PORT` (1-65533)
+selects one: Vite uses `PW_PORT`, the Worker `PW_PORT + 1` and its inspector
+`PW_PORT + 2`. An occupied port fails startup explicitly. Both child processes are stopped by Playwright;
 Worker state stays inside the throwaway HOME. Playwright browser binaries must be installed;
 `PLAYWRIGHT_BROWSERS_PATH` may point to an existing installation.
 
@@ -434,16 +416,6 @@ callback, not popup messages; appearance messages target iframe windows.
 Third-party interfaces that rely on an opener to communicate with the Console
 must use independent navigation instead. Keep `noopener,noreferrer` on all
 Console and interface-owned external opens even with COOP.
-
-`node e2e/run.mjs coop.spec.ts --browser=all --workers=1` exercises Chromium,
-Firefox and WebKit against real loopback TLS responses and the built Console:
-enforced vs absent/report-only COOP, embedded Agent/App popups, origin-pinned
-theme messages, new Console tabs, incoming popup isolation, and synthetic
-GitHub/Google return/login/logout. These mocks do not verify a live provider's
-code exchange or deployed headers. Build first; install all three Playwright
-browsers for this focused matrix. `node scripts/check-nginx-headers.mjs` is an
-opt-in Docker smoke of the actual nginx template, including a generated HTML
-405 and non-HTML exclusions. The normal security suite verifies local Wrangler.
 
 Report-only COOP does not enforce isolation. No reporting endpoint or URL
 telemetry is configured. If an operator stages reporting, use a self-hosted
@@ -817,13 +789,6 @@ Installation results show the outcome and latest version check first, with recov
 Pin errors are announced with `role="alert"` and the existing error theme. Retry pins is a read-only
 refresh offered for network/server failures and transient HTTP 408/425/429, never for 403 permission denial or the 409 pin limit.
 
-Agent-origin browser coverage uses an exclusive loopback HTTPS server with a public test-only
-self-signed identity (`e2e/fixtures/synthetic-tls.ts`), ignored certificate errors only inside the
-disposable test browser, and a browser-only DNS mapping for the synthetic Agent host. It exercises
-actual native middle/modifier-click navigation without relying on interception of a popup's first
-request. That spec uses bundled full Chromium because the macOS headless shell crashes on this
-cross-site navigation in a minimal reproduction. No system trust or production settings change.
-
 Machine **Upload file** supports files up to 128 MiB when the Proxy and machine
 both advertise `machine.upload.v3`. The Console sends raw sequential parts,
 starting at 1 MiB and adapting to measured throughput (up to the server's 8 MiB
@@ -1024,12 +989,6 @@ recovery rather than retrying blindly. Success states process creation/startup
 saved only, while ordinary snapshots establish subsequent interface readiness.
 This mode is not an export/import wizard and does not advertise sessionTransfer.
 
-Focused synthetic UI verification: from `web/`,
-`node e2e/run.mjs --config playwright.prepared-claude.config.ts`. This covers the
-actual Console Create handler with synthetic API responses, fixed argv,
-acknowledgement invalidation, unknown-result refusal, desktop/390, en/zh,
-light/dark and keyboard close. It never launches a real managed Agent/provider.
-
 The prepared Claude Create mode can copy an idle Claude session through its
 normal authenticated interface tunnel. Select the source, a trusted absolute
 launcher entry, a new target working directory, and an existing owner-only
@@ -1054,10 +1013,6 @@ validation or preparation outcomes stop the page's flow, even across dialog
 close/reopen; no automatic resend, cleanup or rollback is attempted. Changing
 or closing the target before upload prevents late snapshot responses from
 submitting a stale upload. `sessionTransfer` capability remains null.
-
-Focused Console controls: `node node_modules/@playwright/test/cli.js test
---config playwright.session-copy.config.ts`. They use synthetic normal login
-and API responses; they do not prove an actual native cross-machine transfer.
 
 ### Controller update
 
@@ -1095,12 +1050,6 @@ owner-default allows the additional marker (1026 files). The UI shows these two
 publication locations. Partial/unknown results keep the existing no-retry latch
 and normal reservation recovery; Create success alone still does not mean ready.
 
-Focused `playwright.session-copy.config.ts` controls cover both auth modes,
-mode-bound acknowledgement refusal, desktop/390px, Chinese dark keyboard/Escape,
-receipt mode/environment/project/intent mismatches and unknown prepare. These are
-closed synthetic API controls, not real-provider authentication or live Create.
-Native validation and one combined Core review remain owned by Launcher/Core.
-
 Tree header **+ → Add machine** opens the existing workspace install/enrollment
 dialog through `openInstall`, just like Workspace settings. It remains available
 with zero or offline machines; Add folder and Add agent keep their existing
@@ -1129,11 +1078,4 @@ cached branches and conversations.
 Conversations use existing Core Message routes, filter owner plus full endpoint,
 show the parent and child sender identity, and retain an immutable body, recipient,
 context and idempotency key after an uncertain send. They do not create a second
-inbox or claim message acceptance is final delivery. The final #230 Web fixes and
-caller-owned `e2e/app-tree-direct.mjs` entry are retained from `27d67e30`.
-
-Focused local browser checks: `PW_PORT=19256 pnpm exec playwright test -c
-playwright.tree-integration.config.ts`. These use closed HTTP/WebSocket fixtures,
-not a deployed human session or a fresh native/Core acceptance. Historical #230
-real native acceptance remains historical evidence; this integration does not
-deploy, enroll, restart workloads or enable periodic inspection.
+inbox or claim message acceptance is final delivery.

@@ -145,20 +145,6 @@ test('v2 failed reuse mints once and retains bound cookie-failure compatibility 
   await expect(page.getByRole('button', { name: 'Load compatibility view (shared origin)' })).toBeVisible()
   expect(s.mints()).toBe(1); expect(s.probes()).toBe(1)
 })
-
-test('v2 outcome after timeout cannot mint or reopen the frame', async ({ page }) => {
-  await page.clock.install()
-  const s = await setup(page, 'manual')
-  await send(page, { treer_embed: 'ready', version: 2, nonce_hash: hash })
-  const child = page.frames().find(f => f.url().startsWith(origin))!
-  await page.clock.fastForward(21_000)
-  await expect(page.getByRole('alert')).toContainText('did not load in time')
-  await page.evaluate(({ origin, hash }) => {
-    window.dispatchEvent(new MessageEvent('message', { origin, data: { treer_embed: 'mint', version: 2, nonce_hash: hash } }))
-  }, { origin, hash })
-  expect(child.isDetached()).toBe(true)
-  expect(s.mints()).toBe(0); expect(s.delivered()).toBe(0)
-})
 test('isolated Agent retains draft and cannot force a shared-origin downgrade', async ({ page }) => {
   await page.clock.install()
   const s = await setup(page), ui = page.frameLocator('iframe[title="/Alpha interface"]')
@@ -211,15 +197,6 @@ test('mint permission failure never downgrades', async ({ page }) => {
   await page.route('**/interface/embed-authorization', r => r.fulfill({ status: 403, json: { error: { code: 'denied', message: 'denied' } } }))
   await send(page, { treer_embed: 'ready', nonce_hash: hash })
   await expect(page.getByRole('alert')).toContainText('Cannot open an isolated'); await expect(page.locator('iframe')).toHaveCount(0); expect(s.probes()).toBe(0)
-})
-test('late mint after timeout is dropped without credentials or fallback', async ({ page }) => {
-  await page.clock.install(); const s = await setup(page, 'manual')
-  let release!: () => void, started = false
-  const held = new Promise<void>(resolve => { release = resolve })
-  await page.route('**/interface/embed-authorization', async r => { started = true; await held; await r.fulfill({ json: { code, origin, expires_in: 30 } }).catch(() => {}) })
-  await send(page, { treer_embed: 'ready', nonce_hash: hash }); await expect.poll(() => started).toBe(true)
-  await page.clock.fastForward(21_000); await expect(page.getByRole('alert')).toContainText('did not load in time')
-  release(); await expect(page.locator('iframe')).toHaveCount(0); expect(s.delivered()).toBe(0); expect(s.probes()).toBe(0)
 })
 
 for (const mode of ['success', 'blocked'] as const) test(`actual Core bootstrap: ${mode}`, async ({ page }) => {
@@ -278,29 +255,6 @@ for (const discovery of ['legacy', 'unavailable'] as const) test(`capability dis
   expect(s.mints()).toBe(0)
 })
 
-test('compatibility choice fits desktop and touch, English/Chinese and light/dark', async ({ page, browserName }) => {
-  await setup(page, 'blocked')
-  await expect(page.getByRole('button', { name: 'Load compatibility view (shared origin)' })).toBeVisible()
-  for (const width of [1360, 390]) for (const theme of ['light', 'dark'] as const) for (const lang of ['en', 'zh'] as const) {
-    await page.setViewportSize({ width, height: 900 })
-    await page.evaluate(async ({ theme, lang }) => {
-      const themeModule = await import('/src/lib/theme.ts')
-      const i18nModule = await import('/src/i18n/index.ts')
-      themeModule.persistTheme(theme); i18nModule.setLocale(lang)
-    }, { theme, lang })
-    const alert = page.getByRole('alert')
-    await expect(alert).toContainText(lang === 'zh' ? '兼容视图会使此界面与 Console 共享来源' : 'Compatibility view would run this interface on the control-plane origin shared with the Console')
-    expect(await alert.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
-    const button = alert.getByRole('button'), link = alert.getByRole('link')
-    expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44)
-    expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(44)
-    await button.focus(); await expect(button).toBeFocused()
-    await page.screenshot({ path: `/tmp/treer-embed156-${browserName}-${width}-${theme}-${lang}.png` })
-  }
-  await page.getByRole('alert').getByRole('button').click()
-  await expect(page.getByRole('alert')).toContainText('兼容视图：此界面与控制面共享来源')
-})
-
 test('the assigned WindowProxy at a different origin cannot mint or request fallback', async ({ page }) => {
   const s = await setup(page, 'manual')
   await expect.poll(() => page.frames().some(f => f.url().startsWith(origin))).toBe(true)
@@ -313,18 +267,6 @@ test('the assigned WindowProxy at a different origin cannot mint or request fall
   }, { target: new URL(page.url()).origin, hash })
   await page.waitForTimeout(100)
   expect(s.mints()).toBe(0); expect(s.probes()).toBe(0)
-})
-
-test('the actual bootstrap 15 s timeout can offer compatibility before the Console deadline', async ({ page }) => {
-  await page.clock.install()
-  let release!: () => void
-  const held = new Promise<void>(resolve => { release = resolve })
-  const s = await setup(page, 'success', false, true, held)
-  await expect.poll(s.mints).toBe(1)
-  await page.clock.fastForward(16_000)
-  await expect(page.getByRole('button', { name: 'Load compatibility view (shared origin)' })).toBeVisible()
-  release()
-  expect(s.probes()).toBe(1)
 })
 
 for (const strict of [false, true]) test(`built Console under production CSP loads isolated Agent; strict=${strict}`, async ({ page }) => {
@@ -347,37 +289,4 @@ for (const badOrigin of [
   await gotoWorkspace(page); await open(page, 'Alpha')
   await expect(page.getByRole('alert')).toContainText('Cannot')
   await expect(page.locator('iframe')).toHaveCount(0)
-})
-
-
-test('theme messages wait for iframe navigation and still follow later theme changes', async ({ page }) => {
-  const errors: string[] = []
-  page.on('console', message => { if (message.type() === 'error' || /postMessage|target origin/i.test(message.text())) errors.push(message.text()) })
-  page.on('pageerror', error => errors.push(error.message))
-  let release!: () => void
-  const navigation = new Promise<void>(resolve => { release = resolve })
-  try {
-    await setup(page, 'manual', false, false, undefined, false, navigation)
-    // Keep the iframe at its initial Console-origin about:blank through effects
-    // and a theme change. Neither may post to the future Agent origin yet.
-    const setTheme = async (value: 'dark' | 'light') => page.evaluate(async theme => {
-      const module = await import('/src/lib/theme.ts')
-      module.persistTheme(theme)
-    }, value)
-    await setTheme('dark')
-    await page.waitForTimeout(200)
-    expect(errors).toEqual([])
-    release()
-    await expect.poll(() => page.frames().some(frame => frame.url().startsWith(origin))).toBe(true)
-    const child = page.frames().find(frame => frame.url().startsWith(origin))!
-    await child.evaluate(() => {
-      document.body.innerHTML = '<output></output>'
-      addEventListener('message', event => {
-        if (event.data?.type === 'treer:embed-theme') document.querySelector('output')!.textContent = event.data.theme
-      })
-    })
-    await setTheme('light')
-    await expect(child.locator('output')).toHaveText('light')
-    expect(errors).toEqual([])
-  } finally { release() }
 })

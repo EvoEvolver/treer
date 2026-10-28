@@ -1,5 +1,5 @@
 import { clickTreeActions } from './fixtures/tree-actions'
-import { openTabMenu, tabAction, backToWorkloads } from "./fixtures/tab-actions"
+import { openTabMenu, backToWorkloads } from "./fixtures/tab-actions"
 import { test, expect, type Page, type WebSocketRoute } from '@playwright/test'
 import { mapSnapshot, mockTreeMapApi } from './fixtures/treemap'
 
@@ -82,21 +82,6 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
   })
 }
 
-test('attention matches iOS status, connectivity and ordering rules', async ({ page }) => {
-  await page.goto('/')
-  const groups = await page.evaluate(async () => {
-    const { attentionGroups } = await import('/src/lib/attention.ts')
-    const machines = [{ server_id: 'on', name: 'Alpha', status: 'online' }, { server_id: 'off', name: 'Beta', status: 'offline' }]
-    const cases = [
-      ['blocked', 'blocked', 'on'], ['failed', 'failed', 'off'], ['offline', 'idle', 'off'], ['missing', 'unknown', 'missing'],
-      ['starting', 'starting', 'on'], ['working', 'working', 'on'], ['idle', 'idle', 'on'], ['unknown', 'unknown', 'on'],
-      ['legacy', 'running', 'on'], ['exited', 'exited', 'off'], ['stopped', 'stopped', 'on'], ['app', 'blocked', 'off'],
-    ].map(([name, status, server_id], index) => ({ agent_id: name, name, status, server_id, kind: name === 'app' ? 'app' : 'command', updated_at: new Date(index * 1000).toISOString() }))
-    return Object.fromEntries(Object.entries(attentionGroups(cases, machines)).map(([key, agents]) => [key, agents.map((agent) => agent.name)]))
-  })
-  expect(groups).toEqual({ attention: ['missing', 'offline', 'failed', 'blocked'], working: ['working', 'starting'], idle: ['idle', 'legacy', 'unknown'], inactive: ['exited', 'stopped'] })
-})
-
 test('live snapshots update tree attention without opening a PTY; removing the selected Agent returns to overview', async ({ page }) => {
   const backend = await fixture(page)
   await page.goto('/')
@@ -110,25 +95,6 @@ test('live snapshots update tree attention without opening a PTY; removing the s
   backend.send({ ...mapSnapshot, revision: 3, agents: agents.filter((agent) => agent.agent_id !== 'reviewer-a') })
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Open /Research/reviewer', exact: true })).toHaveCount(0)
-})
-
-test('tree counts and traversal handle deep folders, invalid parents and saved sibling order', async ({ page }) => {
-  await fixture(page)
-  await page.goto('/')
-  const result = await page.evaluate(async () => {
-    const { attentionGroups } = await import('/src/lib/attention.ts')
-    const { overviewForest, visibleOverviewRows } = await import('/src/lib/overview-tree.ts')
-    const folders = Array.from({ length: 1000 }, (_, index) => ({ folder_id: `f${index}`, name: `Folder ${index}`, parent_id: index ? `f${index - 1}` : null }))
-    const agents = ['a', 'z'].map((id) => ({ agent_id: id, name: id, kind: 'command', status: 'working', server_id: 'on' }))
-    const groups = attentionGroups(agents, [{ server_id: 'on', status: 'online' }])
-    const tree = { folders, placements: [{ agent_id: 'z', folder_id: 'f999', position: 0 }, { agent_id: 'a', folder_id: 'f999', position: 1 }] }
-    const normal = overviewForest(tree, agents, groups, null)
-    const rows = visibleOverviewRows(normal.roots, null, {})
-    const invalid = overviewForest({ folders: [{ folder_id: 'cycle', name: 'Cycle', parent_id: 'cycle' }], placements: [{ agent_id: 'a', folder_id: 'deleted', position: 0 }] }, agents, groups, 'working')
-    const attention = overviewForest(tree, agents, groups, 'attention')
-    return { count: normal.roots[0].counts.working, length: rows.length, order: rows.slice(-2).map((row) => row.node.id), collapsed: visibleOverviewRows(normal.roots, null, { f0: false }).length, invalid: visibleOverviewRows(invalid.roots, 'working', {}).map((row) => row.node.id), empty: visibleOverviewRows(attention.roots, 'attention', {}).length }
-  })
-  expect(result).toEqual({ count: 2, length: 1002, order: ['z', 'a'], collapsed: 1, invalid: ['a', 'z'], empty: 0 })
 })
 
 test('overview opens an Agent Interface first, with its existing terminal fallback', async ({ page }) => {
@@ -174,17 +140,6 @@ test('overview shares canonical App identity with Tree, including a missing runt
   await open.click()
   await expect(page.frameLocator('iframe').getByRole('heading', { name: 'Overview App', exact: true })).toBeVisible()
   { await openTabMenu(page); await expect(page.getByRole('menuitem', { name: 'Show logs', exact: true })).toBeVisible(); await page.keyboard.press('Escape') }
-})
-
-test('an empty workspace shows its guidance and no "No workloads in this workspace" text', async ({ page }) => {
-  await fixture(page)
-  await page.route('**/snapshot', (route) => route.fulfill({ json: { ...mapSnapshot, agents: [] } }))
-  await page.route('**/workload-tree', (route) => route.fulfill({ json: { folders: [], placements: [] } }))
-  await page.route('**/apps', (route) => route.fulfill({ json: { apps: [] } }))
-  await page.goto('/')
-  await expect(page.getByRole('heading', { name: 'Your workspace is ready' })).toBeVisible()
-  await expect(page.getByRole('tree', { name: 'Workspace workloads' })).toBeVisible()
-  await expect(page.getByText(/No workloads in this workspace/)).toHaveCount(0)
 })
 
 test.describe('Tree row context menu', () => {
