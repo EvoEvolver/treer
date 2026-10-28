@@ -100,7 +100,7 @@ jobs:
         run: npm --prefix launchers/agent test
       - name: Closed Codex, ACP and Claude Interface regression
         run: |
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
+          node --test scripts/ais-e2e.test.mjs
           node scripts/ais-e2e.mjs
       - name: Browser controls and screenshots
         run: npm --prefix launchers/agent run test:browser
@@ -132,4 +132,4 @@ jobs:
       - name: Documentation links and launcher test isolation
         run: |
           node scripts/check-docs.mjs
-          node --test scripts/ais-e2e.test.mjs scripts/machine-rollout.test.mjs
+          node --test scripts/ais-e2e.test.mjs

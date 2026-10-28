@@ -53,309 +53,6 @@ Windows defaults to a detached user Host. The Host owns a kill-on-close Job
 Object, and runtime workloads get nested jobs; Controller replacement leaves
 these handles with the stable Host. They manage lifecycle, not sandboxing.
 
-The internal Host `ObserveController` request is a bounded read from that
-supervisor's original live Controller Child. It returns the Host epoch, a fresh
-instance UUID assigned at each successful Controller spawn and the Child PID.
-It accepts no caller PID and does not open or adopt a process by PID. This
-point-in-time observation is not a credential, readiness proof or permission to
-restart. Reads bypass the mutation-result cache; a timeout closes only the
-observation reply and never enqueues a restart. Existing Host protocol v2
-command/response tags remain unchanged by append-only variants; an older Host
-rejects the unsupported request rather than falling back to a restart.
-
-The separate internal `RestartControllerIfCurrent` mutation compares the full
-expected epoch/instance/PID with the supervisor's original live Child before
-signalling that handle. It waits at most three seconds for exit and creates one
-replacement from the existing Host configuration, retaining it with a fresh
-instance UUID before acknowledging. The operation ID is bound to this command
-and expected identity in the bounded in-memory result cache. A stale identity
-cannot stop the replacement. An ambiguous stop or failed creation suppresses
-automatic Controller supervision and identity reads until explicit recovery;
-it never retries the conditional mutation. The stable Host and its workload
-handles remain in place. The existing explicit unconditional restart command
-remains separate. This internal primitive is not yet connected to the updater
-coordinator or exposed as a production update capability.
-
-The creator-side internal state method binds that conditional request to the
-retained selected runtime and operation. It marks a single attempt before any
-await, obtains a fresh observation through the same HostClient, and sends only
-the conditional command with that operation UUID. It checks the scope around
-each response and accepts only ACK; cancellation or failure leaves the attempt
-consumed. This is not a detached worker or public lifecycle entry. The creator
-Controller could stop before receiving its own reply, so ACK is not a required
-or sufficient proof of update completion.
-
-The Windows child-side creator connection retains a duplicate of the inherited
-query/synchronize-only process handle alongside its pipe stream. Admission
-compares that live original handle with the pipe server; it does not adopt a
-PID or reread stdin after construction. The connection forwards async byte I/O
-and can be consumed to close transport before a three-second read-only wait
-for the original creator's exit. This supplies process custody/observation,
-not selected-runtime authority, worker survival or an update transaction.
-
-The child binding helper can return that same retained connection after its
-single validated operation/context/challenge ACK. This permits a later internal
-worker to keep original-creator custody; it adds no second frame dispatch or
-transaction command. The existing terminal bootstrap explicitly drops the
-returned connection and exits as before. Failed, timed-out or cancelled ACK
-still closes the transport and its retained handle.
-
-The fixed Windows worker spawn also inherits a read-attributes/synchronize-only
-duplicate of the original installation lock file through its bootstrap-only
-stderr slot. This slot is not diagnostic output. The duplicate retains the same
-no-sharing kernel file object across creator-local lease release; it does not
-reopen a pathname or transmit a numeric handle. A child with a verified original
-creator connection may retain and compare that lock's physical identity. Its
-inherited standard handle remains held until child exit, even if the extra
-retained reference is dropped. This preserves only lock-file lifetime: ancestor,
-image and state pins, operation authorization and transaction ownership are not
-transferred by it. Normal Controller startup/stdio is unchanged.
-
-The separate internal lock-binding exchange uses an 88-byte request/ACK with
-distinct role/version magic, the existing full runtime/input context digest,
-operation/challenge and actual held lock volume/file identity. The selected
-creator derives identity from its reservation rather than a caller argument.
-The child compares its private bootstrap operation, verifies the live original
-creator and retains the matching inherited lock before ACK. Parent context-only
-and lock-binding exchanges share one latch; failure/cancellation cannot fall
-back to the other variant. Neither request is a transaction command. The legacy
-terminal bootstrap still uses its original 72-byte exchange and exits.
-
-The platform also provides independent physical pair re-pinning: open the same
-fixed root/Controller/CLI under existing sender pins, compare all physical
-identities, and retain new ancestor/image handles with independent read offsets.
-It never adopts the installation lock or claim. Public identity observations
-are not authenticated descriptors. The internal signed-input receiver instead
-uses a non-serializable descriptor minted only from the selected runtime's
-original reservation. It independently re-pins both old/target pairs, checks
-the separately trusted admission key and both signatures, seeks all four held
-readers to zero and compares their complete digests to the original binding.
-Both descriptor and successful receiver borrow the sender, retaining original
-pins/lease/claim/runtime state rather than granting a release permit. One
-receiver attempt excludes repeat admission, fixed worker spawn and parent pair
-publication. A consuming receiver-state stage independently pins the SAME
-runtime-derived configured directory and compares checked startup snapshots by
-file ID and complete raw digest, including v2 denial fences. Read-only inspection
-permanently invalidates the observation on any change/error; normal StartupStore
-writes remain possible. These are in-process source seams, not worker IPC,
-startup-write CAS, state restoration or lifecycle authority transfer.
-
-The separate child-side input receiver now accepts one bounded offer on the
-original creator pipe. The creator mints it from its confirmed local plan,
-selected loaded runtime, reserved four held images and raw startup snapshot;
-caller paths cannot replace that source. Shared protocol models carry only
-locator/identity observations, public signed metadata and startup raw digest,
-never the raw credential-bearing startup store or a trust key. The child
-retains the inherited lock, independently opens exact physical pairs/state root,
-verifies both signatures using an independently supplied trusted key, hashes
-all four complete files and checks the startup snapshot including denial fences.
-Only then does it send the distinct input-received receipt bound to the whole
-offer and fresh challenge, returning owned receiver handles and scope evidence.
-The creator keeps its original reservation after receipt or child exit. There
-is no release token, publication, restart, recovery or readiness conversion.
-The separate `--controller-update-receive-inputs` private terminal entry loads
-trust before opening the creator pipe or reading the offer. Its creator uses the
-normal release resolver: explicit key, existing local key, or the bundled key
-only for the exact official base when the local key is absent. Explicit/local
-errors never fall back. The child reloads the selected absolute key path or the
-fixed official bundle; no offer field selects a key. Public-key reads are bounded
-to 16 KiB. Creation preflight compares that key with the original admission key;
-failure returns the original reservation with its creation-attempt latch intact.
-The child receives signed inputs, rechecks its retained runtime-derived startup
-snapshot, then explicitly drops its read-only receiver custody and exits. This
-does not acknowledge sender release or set readiness/completion. The legacy
-terminal ACK entry is unchanged.
-
-The internal Windows coordinator preparation seam composes confirmed-plan
-admission, the selected loaded runtime, normal configured trust, and the original
-installation/target handles. Its separate `--controller-update-hold-inputs`
-entry keeps the independently verified receiver custody while serving ordered
-inspections on the same whole-offer context. The session permits at
-most 32 controls within 30 seconds; each creator exchange has a three-second
-budget. An explicit close reply plus the original Child's observed zero exit is
-required before moving the SAME sender reservation back to the coordinator's
-caller. No guards are dropped as a release permit, claim is not retired, and
-creation attempts are not reset. Errors/cancellation consume the session;
-unknown cannot reconnect or close by replay. While its owner remains alive the
-coordinator retains sender custody; destroying an unknown owner has the existing
-best-effort Child teardown limitation and does not prove child exit. The durable
-claim remains. Public dispatch/installation selection and capability remain
-unwired; signed private dev-image acceptance does not prove a complete
-transaction, independent child Policy, Job survival or runtime rollback.
-
-Windows installation preparation now resolves the existing local service
-configuration directory, reads bounded Controller/Host projections, and retains
-the actual private NTFS configuration files and their physical ancestors. Saved
-Host `controller_path` plus matching controller-config path/socket/root select
-the installed pair; neither current_exe, PATH nor a caller's staging directory
-selects it. Selection is exact workspace/server and matches the selected loaded
-runtime's machine root. Actual Controller/CLI file identities determine shared
-server IDs; the existing catalog's shared-installation permission and the exact
-confirmed affected-server list must both match. These local snapshots are not
-an OS process identity or independent Policy grant.
-
-`Preparation::local` uses normal local UpdateArgs and the normal official/local/
-explicit self-host trust resolver. Signed documents and complete artifact bytes
-are authenticated before staging. A new exclusive operation directory is
-derived only under the selected runtime's configured startup-state root. New
-files are flushed and reopened with strict physical pins, then the existing
-confirmed admission reauthenticates the SAME held whole inputs before claiming
-and starting the sustained coordinator. Failed/partial staging is retained and
-never adopted or overwritten. Config/catalog and installation pins accompany
-the original reservation when explicit close returns custody. The directory's
-enrollment-name set is checked at phase boundaries; changes permanently poison
-the preparation. This does not prevent a new enrollment appearing between
-observations and is not a global enrollment CAS. Retained config handles may
-temporarily refuse config writers, without fallback or service restarts.
-`Preparation::download` now obtains those inputs from normal local release
-settings through the existing bounded release fetch/signature/artifact verifier.
-It retains the exact channel, detached signature, manifest and detached signature
-HTTP bodies rather than reconstructing signed documents. Normal trust resolves
-before any request, is reloaded before preparation, and must authenticate the
-same bytes again. The no-proxy/no-redirect client has a 10-second connect limit;
-individual requests and the whole download have a 120-second limit. All six
-objects must authenticate before any staging/claim. `start_downloaded` sends the
-retained envelopes to the existing receiver while preserving sender custody.
-The existing Proxy command handler now owns a Windows `Consumer` alongside the
-selected runtime. Its public capability guard remains OFF. After an already
-confirmed command, one immutable operation/binding owns the detached download
-and preparation task; a lost command response does not cancel it. Exact repeats
-observe the same operation, while conflicting/new bindings are refused. The
-normal local catalog must explicitly supply `signed_release` settings; its old
-artifact base is never guessed to be a signed channel. The physical catalog and
-config-directory guards remain held across network IO and unknown outcomes.
-The receive-session success path downloads, starts, inspects and explicitly
-closes the receiver, retaining both Preparation and returned closed custody.
-ACK/child exit does not permit releasing sender guards. Its operation projection
-is Accepted then Unconfirmed, with unknown health and no phase/receipt: session
-closure is not a completed update. This in-process owner is not a durable
-restart/adoption ledger. Public Windows capability remains OFF.
-
-An internal `Preparation::prepare_worker_backup` continuation can now use the
-SAME still-Holding session. It borrows a non-wire permit from the original
-confirmed reservation and selected runtime, rechecks the fixed catalog, claim
-and normal configured trust, then sends a distinct one-use backup command. The
-receiver preserves its independently authenticated image/state pins and inherited
-lock while creating a fixed EXCL `worker-backup` directory under its pinned
-operation target. It copies and hashes the old image pair, backs up the exact raw
-startup snapshot including denial fences, seals read-only handles and publishes
-read-back-verified evidence. Those backup handles remain with the same receiver
-until explicit close or session exit. The existing 30-second session and
-three-second exchange budgets remain; synchronous filesystem calls are not
-forcibly interruptible. Partial/error/cancelled attempts are unknown and cannot
-replay. Sender pins/lease/claim remain held through success and failure.
-This backup-only mutation does not overwrite installed images or startup state,
-transfer lifetime across creator exit, authorize sender release, or reconnect a
-closed session. The finite public consumer still explicitly closes its read-only
-session; it does not silently request this new mutation. Durable transfer/outcome
-and the full publication/restart-health/rollback chain
-remain to be composed before any public Windows capability can be enabled.
-
-After explicit backup preparation, `Preparation::compare_write_startup` can
-continue that SAME Holding session. It obtains a non-wire one-operation token
-from the selected runtime's actual loaded `StartupStore` Arc. The same mutex
-used by normal Store writers covers revision/raw/physical snapshot comparison,
-scope and monotone denial-fence validation, the existing persistence routine,
-readback and memory commit without an await or unlock between them. Normal
-writes advance the instance revision, including logical ABA. A persistence or
-readback failure after potential effects fences further writes on that loaded
-instance; the operation remains unknown and cannot retry.
-
-The original connection then carries a bounded, sequenced old/new snapshot
-transition. The receiver checks its original backup fences and current pinned
-directory before accepting the new snapshot, retaining the original backup and
-all custody. The parent checks its committed revision again after acceptance.
-This synchronizes this loaded instance's writers, not arbitrary processes or
-separately loaded Stores, and does not freeze later writes. The worker never
-opens a new Store by path. ACK, snapshot acceptance and creator exit still grant
-no sender release, durable lifetime transfer or restart authority. See the
-[CAS boundary and validation](research/2026-10-26-windows-startup-cas.md).
-
-The explicit `compare_write_startup_fenced` mutation-preparation continuation
-shares that same compare/persist/readback implementation but records an
-operation-owned writer fence on the loaded Arc under its existing mutex before
-the first potential write. Ordinary writers, including other clones, refuse
-while the fence exists. The non-wire committed owner is stored in the original
-coordinator before worker acceptance awaits and rechecked during later work.
-The SAME Holding worker can accept this CAS and prepare all new/restore
-candidates while both sides retain their input/backup custody. Close, cancelled
-acceptance and owner Drop never unfreeze normal writers. A changed physical/raw
-snapshot permanently poisons this owner, even if bytes are restored later.
-The older ordinary CAS entry keeps its unfenced behavior. This is a
-loaded-instance fence, not durable ownership or an OS-wide lock: separate Store
-loads/processes and direct filesystem writers remain outside that mutex. There
-is no generic clear/recovery API; release requires the future reconciled durable
-outcome protocol. See [writer custody](research/2026-10-26-windows-mutation-writer-fence.md).
-
-The internal SAME Holding preparation now has an explicit bounded custody
-transfer after fenced CAS and verified backup/candidate preparation. The worker
-checks full binding, whole-offer challenge/digest, accepted startup state and
-deadline, then creates/flushed-readbacks one fixed `worker-transfer.bin` under
-the original independently held job. It keeps a reduced readonly handle to the
-same record object, job/installation lease, claim, state, target, backup and
-candidate handles before ACK; only its old installed image pins are consumed.
-An accepted transfer can retain that custody for up to 120 seconds despite pipe
-EOF or creator exit, with no reconnect/adoption or automatic mutation. Explicit
-close ends the session; expiry/error preserves durable denial records.
-
-Sender image release is a separate synchronous continuation requiring that
-original operation's retained Child, same loaded writer fence, normal configured
-Trust/confirmed plan and exact durable record. It consumes both the original
-reservation's old image handles and saved-inventory image pins, while retaining
-all physical parents/configuration snapshots and original job/lease/state.
-Transfer ACK/record/creator exit alone never triggers this continuation. Private
-worker creation preserves normal enclosing Job policy, including the stable
-Host's process-tree cleanup. The original Child must be live before/after exact
-record verification. This bounded custody contract neither escapes a Job nor
-guarantees survival of Job/Host/OS termination; such loss remains unknown.
-No image publication, restart/health, rollback, durable outcome or claim
-retirement is composed yet; public Windows capability stays OFF. See
-[bounded transfer](research/2026-10-27-windows-custody-transfer.md).
-
-The signed-input receiver now also retains the fixed installation-wide claim.
-After independently authenticating all signed inputs, it derives the canonical
-claim bytes from that full binding and opens an independent private, single-link,
-read-only claim handle without write/delete sharing, before the first receipt.
-The same handle and exact bytes are rechecked during Holding inspections,
-including backup/CAS continuations. Missing, partial or foreign claims cannot
-be repaired or adopted. This is an additional independent custody prerequisite,
-not durable ownership transfer, sender release or claim retirement. See the
-[claim custody scope](research/2026-10-26-windows-worker-claim-custody.md).
-
-Successful intent reservation retains the SAME exclusive job-store holder with
-ReservedInputs, including existing Holding owners. File publication and explicit
-pair restoration retain that holder too. Dropping a holder releases OS handles
-but never retires its durable intent or installation claim. This closes an
-original-owner lifetime gap; independent worker transfer and sender release
-remain separate. See [job holder scope](research/2026-10-26-windows-job-holder-lifetime.md).
-
-The same Holding worker also receives a reduced-rights reference to the original
-job lock through its original Child handle. Only the already scoped single-use
-input exchange mints the bounded job locator. After independent normal-trust
-whole-input verification, the receiver checks job directory/lock physical IDs,
-pins the exact full intent and keeps independent ancestors/lock/receipt guards.
-The whole-offer receipt binds this locator; later Holding checks reuse the same
-receipt handle. Sender custody remains held. A remote reference created before
-an uncertain exchange lasts until child exit and is never remotely closed by
-numeric value. This is custody, not a mutation/lifetime or sender-release grant;
-see [receiver job custody](research/2026-10-26-windows-worker-job-custody.md).
-
-After explicit backup, the SAME Holding coordinator can grant one fixed-pair
-candidate preparation. The non-wire grant reuses the original confirmed
-reservation, loaded runtime, catalog/claim and configured trust. The worker
-retains its original independently authenticated inputs, backup and state while
-reusing Platform's CREATE_NEW/seal mechanics for the four installed-directory
-new/restore candidates. It copies complete target and old-backup bytes, flushes
-and hashes every held candidate before acknowledgement, and retains candidate
-handles plus independent ancestors and a reduced installation-lock reference.
-Later inspections recheck all four complete hashes. Existing/partial files are
-never adopted or overwritten; error/cancellation is unknown and cannot replay.
-The old installed pair stays pinned and unchanged. No candidate-ready type can
-publish or release image pins; explicit close leaves the files and retains
-original sender custody. Durable mutation/lifetime transfer and sender release
-remain prerequisites for worker publication, not consequences of this ACK.
-See [candidate preparation](research/2026-10-26-windows-worker-candidates.md).
-
 Within `treer-proxy`, source modules follow the same boundaries: `api/` groups
 HTTP and WebSocket handlers by use case, `auth/` groups durable account and
 resource operations, and `state/` groups live connection, command, terminal,
@@ -1069,8 +766,8 @@ records `agent.reservation.cleanup` with human/Agent/machine metadata only.
 Repeated cleanup of one's own deleted reservation is idempotent. UI confirmation
 is explicit and never automatically retries creation. App identities and service
 audience human tokens cannot use this human-session API. The startup-store
-[rollback floor](../scripts/machine-rollout.md#startup-store-rollback-floor)
-applies after a fence is persisted, including when subsequent PG cleanup fails.
+rollback floor (a Controller older than the persisted store version refuses to
+load it) applies after a fence is persisted, including when subsequent PG cleanup fails.
 After a successful Create acknowledgement or validated inventory/event, the
 reservation is marked confirmed and no longer eligible (404), including after
 that workload stops. Confirmation ignores deleted IDs so late inventory cannot
@@ -1652,9 +1349,31 @@ Compose pulls immutable GHCR tags for Proxy, App, and the updater sidecar.
 those calls to the sidecar over HTTP with a shared token and never mounts
 `docker.sock`. Hosted Railway leaves `TREER_UPDATER_URL` unset.
 
-After the control plane moves, enrolled machines still run
-`treer-agent-server update` on each host. Remote machine rollout from the
-control plane is a follow-up.
+Enrolled machines are updated separately; see Controller updates below.
+
+### Controller updates
+
+`POST /api/workspaces/{workspace_id}/machines/{server_id}/controller-update`
+with `{"version":"vX.Y.Z"}` starts an update and `GET` on the same path returns
+one status: `idle`, `downloading`, `installing`, `restarting`, `failed` (with
+`reason`) or `done`. Both are authorized like machine exec (`machine.exec` on
+the machine, for humans and Agents). The Proxy sends `ControllerUpdateStart`
+/ `ControllerUpdateStatus` only to Controllers advertising
+`machine.controller-update.v2`, never replays them after a reconnect, and keeps
+only an in-memory record of the requested version.
+
+The Controller downloads `releases/V/manifest.json` and its detached signature
+from the signed release distributor, verifies them with the trusted Ed25519 key
+(see [Releases](releases.md)), downloads `treer-agent-server`, `treer` and
+`treer-agent-host` for its platform and checks size and SHA-256. It stages each
+binary next to the installed one and replaces it atomically (Unix rename;
+Windows renames the running image to `<name>.old` first), keeping one previous
+version as `<name>.old` for manual rollback. It then sends the Host the plain
+`RestartController` command. The completion signal is the new Controller's
+reported `controller_build.version` on reconnect. The Host binary is replaced on
+disk and takes effect on the next Host restart; there is no live Host handoff.
+`treer-agent-server update` uses the same install path locally. Same-user
+tampering is out of scope ([Security](security.md)).
 
 See [Self-hosted Compose](../deploy/README.md), [Security](security.md) for
 trust claims, and [Quality](quality.md) for the verification matrix.

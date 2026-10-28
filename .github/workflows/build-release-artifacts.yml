@@ -135,11 +135,6 @@ jobs:
       - name: Test Windows PowerShell installer compatibility
         shell: powershell
         run: ./scripts/test-windows-install.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
-      - name: Test Windows machine update transactions
-        run: ./scripts/test-windows-update.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
-      - name: Test Windows PowerShell machine update compatibility
-        shell: powershell
-        run: ./scripts/test-windows-update.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
       - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -185,16 +180,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $receipt = Get-Content -LiteralPath "$env:RUNNER_TEMP/treer-windows-launcher-smoke/windows-smoke.json" -Raw | ConvertFrom-Json
           if ($receipt.platform -ne 'win32' -or $receipt.embedded_controller -ne $true -or $receipt.portable_install -ne $true -or $receipt.windows_acl_and_long_paths -ne 'passed' -or $receipt.process_tree_cleanup -ne 'passed' -or $receipt.real_agents_touched -ne 0) { throw 'Native Windows launcher receipt is incomplete or not embedded-controller proof.' }
-      - name: Windows rollout script tests (must not skip)
-        timeout-minutes: 5
-        run: |
-          # The Windows-only rollout tests (CIM breakaway worker, fake updater,
-          # the real Assert-UpdateOutsideJob guard) skip silently on other
-          # platforms; here a skip would hide a missing proof, so fail on any.
-          $output = node --test scripts/machine-rollout.test.mjs 2>&1 | Out-String
-          Write-Host $output
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ($output -notmatch '(?m)^# skipped 0\s*$' -or $output -notmatch '(?m)^# fail 0\s*$' -or $output -match '(?m)^# pass 0\s*$') { throw 'Windows rollout script tests skipped or did not run.' }
       - name: Preserve Windows launcher smoke evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
