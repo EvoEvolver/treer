@@ -1,14 +1,27 @@
 //! Durable #222 intent, single-use confirmation and read-only reconciliation.
 //! A committed acceptance authorizes exactly one send by that caller. Neither
 //! reconnect nor a consumed-token lookup acquires dispatch authority again.
-use super::{sha256_hex, AuthFailure, AuthStore, ProviderCliScope};
+use super::{AuthFailure, AuthStore};
+use crate::audit::{self, NewAuditEvent};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::{Postgres, Row, Transaction};
 use treer_protocol::controller_update::{self as wire, Operation, State};
 use treer_protocol::controller_update_runtime::DispatchBinding;
 
-pub(crate) type ControllerUpdateScope<'a> = ProviderCliScope<'a>;
+/// Machine scope every update route shares after Policy passed.
+#[derive(Debug, Clone)]
+pub(crate) struct ControllerUpdateScope<'a> {
+    pub workspace_id: &'a str,
+    pub server_id: &'a str,
+    pub user_id: &'a str,
+    pub session_token: &'a str,
+}
+
+pub(crate) fn sha256_hex(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
 
 pub(crate) struct UpdateAcceptance {
     pub operation: Operation,
@@ -122,7 +135,7 @@ impl AuthStore {
         let expiry: i64 = sqlx::query_scalar("INSERT INTO controller_update_previews(token_hash,operation_id,workspace_id,server_id,created_by,session_hash,binding,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,CURRENT_TIMESTAMP + INTERVAL '120 seconds') RETURNING (EXTRACT(EPOCH FROM expires_at)*1000)::BIGINT")
             .bind(sha256_hex(&token)).bind(&binding.operation_id).bind(s.workspace_id).bind(s.server_id).bind(s.user_id).bind(sha256_hex(s.session_token)).bind(value(binding)?)
             .fetch_one(&mut *tx).await.map_err(AuthFailure::database)?;
-        self.provider_cli_audit_as(
+        self.machine_audit_as(
             &mut tx,
             s.workspace_id,
             s.server_id,
@@ -148,7 +161,7 @@ impl AuthStore {
         tx: &mut Transaction<'_, Postgres>,
         s: &ControllerUpdateScope<'_>,
     ) -> Result<(), AuthFailure> {
-        let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM controller_update_operations WHERE workspace_id=$1 AND server_id=$2 AND (holds_slot OR (operation->>'state' IN ('failed','rolled_back') AND finished_at > CURRENT_TIMESTAMP - INTERVAL '60 seconds'))) OR EXISTS(SELECT 1 FROM provider_cli_operations WHERE workspace_id=$1 AND server_id=$2 AND status IN ('queued','running','unknown'))")
+        let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM controller_update_operations WHERE workspace_id=$1 AND server_id=$2 AND (holds_slot OR (operation->>'state' IN ('failed','rolled_back') AND finished_at > CURRENT_TIMESTAMP - INTERVAL '60 seconds')))")
             .bind(s.workspace_id).bind(s.server_id).fetch_one(&mut **tx).await.map_err(AuthFailure::database)?;
         if busy {
             return Err(refusal("controller_update_busy"));
@@ -232,7 +245,7 @@ impl AuthStore {
         sqlx::query("INSERT INTO controller_update_operations(operation_id,workspace_id,server_id,created_by,binding,operation,created_at) VALUES($1,$2,$3,$4,$5,$6,to_timestamp($7::double precision/1000))")
             .bind(&op.operation_id).bind(s.workspace_id).bind(s.server_id).bind(s.user_id).bind(value(&binding)?).bind(value(&op)?).bind(op.created_at.timestamp_millis() as f64).execute(&mut *tx).await.map_err(AuthFailure::database)?;
         sqlx::query("UPDATE controller_update_previews SET consumed_at=CURRENT_TIMESTAMP WHERE token_hash=$1").bind(sha256_hex(token)).execute(&mut *tx).await.map_err(AuthFailure::database)?;
-        self.provider_cli_audit_as(
+        self.machine_audit_as(
             &mut tx,
             s.workspace_id,
             s.server_id,
@@ -266,7 +279,7 @@ impl AuthStore {
         // resolved rows. Unresolved can never disappear beneath newer history.
         let rows = sqlx::query("SELECT operation FROM (SELECT operation,created_at,operation_id FROM controller_update_operations WHERE workspace_id=$1 AND server_id=$2 AND created_by=$3 AND holds_slot UNION ALL SELECT operation,created_at,operation_id FROM (SELECT operation,created_at,operation_id FROM controller_update_operations WHERE workspace_id=$1 AND server_id=$2 AND created_by=$3 AND NOT holds_slot AND finished_at > CURRENT_TIMESTAMP - INTERVAL '7 days' ORDER BY created_at DESC,operation_id DESC LIMIT 15) recent) selected ORDER BY created_at DESC,operation_id DESC")
             .bind(s.workspace_id).bind(s.server_id).bind(s.user_id).fetch_all(&self.pool).await.map_err(AuthFailure::database)?;
-        let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM controller_update_operations WHERE workspace_id=$1 AND server_id=$2 AND holds_slot AND created_by<>$3) OR EXISTS(SELECT 1 FROM provider_cli_operations WHERE workspace_id=$1 AND server_id=$2 AND status IN ('queued','running','unknown'))")
+        let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM controller_update_operations WHERE workspace_id=$1 AND server_id=$2 AND holds_slot AND created_by<>$3)")
             .bind(s.workspace_id).bind(s.server_id).bind(s.user_id).fetch_one(&self.pool).await.map_err(AuthFailure::database)?;
         let discovery = wire::Discovery {
             operations: rows.iter().map(operation).collect::<Result<_, _>>()?,
@@ -311,7 +324,7 @@ impl AuthStore {
         sqlx::query("UPDATE controller_update_operations SET operation=$2,holds_slot=$3,finished_at=CASE WHEN $3 THEN NULL ELSE COALESCE(finished_at,CURRENT_TIMESTAMP) END,query_lease_until=NULL WHERE operation_id=$1")
             .bind(&incoming.operation_id).bind(value(incoming)?).bind(!resolved).execute(&mut *tx).await.map_err(AuthFailure::database)?;
         if incoming != &old {
-            self.provider_cli_audit_as(&mut tx,s.workspace_id,s.server_id,("system",None),"controller_update.observed",json!({"operation_id":incoming.operation_id,"state":incoming.state,"phase":incoming.phase,"receipt_revision":incoming.receipt_revision})).await?;
+            self.machine_audit_as(&mut tx,s.workspace_id,s.server_id,("system",None),"controller_update.observed",json!({"operation_id":incoming.operation_id,"state":incoming.state,"phase":incoming.phase,"receipt_revision":incoming.receipt_revision})).await?;
         }
         tx.commit().await.map_err(AuthFailure::database)?;
         Ok(incoming.clone())
@@ -480,7 +493,7 @@ impl AuthStore {
             .execute(&mut *tx)
             .await
             .map_err(AuthFailure::database)?;
-            self.provider_cli_audit_as(
+            self.machine_audit_as(
                 &mut tx,
                 s.workspace_id,
                 s.server_id,
@@ -500,7 +513,44 @@ impl AuthStore {
         &self,
         s: &ControllerUpdateScope<'_>,
     ) -> Result<bool, AuthFailure> {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM controller_update_operations WHERE workspace_id=$1 AND server_id=$2 AND (holds_slot OR (operation->>'state' IN ('failed','rolled_back') AND finished_at > CURRENT_TIMESTAMP - INTERVAL '60 seconds'))) OR EXISTS(SELECT 1 FROM provider_cli_operations WHERE workspace_id=$1 AND server_id=$2 AND status IN ('queued','running','unknown'))")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM controller_update_operations WHERE workspace_id=$1 AND server_id=$2 AND (holds_slot OR (operation->>'state' IN ('failed','rolled_back') AND finished_at > CURRENT_TIMESTAMP - INTERVAL '60 seconds')))")
             .bind(s.workspace_id).bind(s.server_id).fetch_one(&self.pool).await.map_err(AuthFailure::database)
+    }
+}
+
+impl AuthStore {
+    /// One machine-scoped audit row inside the caller's transaction.
+    async fn machine_audit_as(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        workspace_id: &str,
+        server_id: &str,
+        (actor_kind, actor_id): (&str, Option<&str>),
+        action: &str,
+        payload: Value,
+    ) -> Result<(), AuthFailure> {
+        let organization_id: String =
+            sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE workspace_id = $1")
+                .bind(workspace_id)
+                .fetch_one(&mut **transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+        audit::insert(
+            transaction,
+            NewAuditEvent {
+                organization_id: &organization_id,
+                workspace_id: Some(workspace_id),
+                actor_kind,
+                actor_id,
+                source: "runtime",
+                action,
+                resource_kind: "machine",
+                resource_id: server_id,
+                resource_name: None,
+                payload,
+            },
+        )
+        .await
+        .map_err(AuthFailure::database)
     }
 }

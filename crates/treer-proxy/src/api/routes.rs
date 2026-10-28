@@ -580,26 +580,6 @@ pub fn router(
             get(controller_update_operation).layer(middleware::map_response(controller_update_no_store)),
         )
         .registered_route(
-            "/api/workspaces/{workspace_id}/machines/{server_id}/provider-clis/recipes",
-            get(provider_cli_recipes),
-        )
-        .registered_route(
-            "/api/workspaces/{workspace_id}/machines/{server_id}/provider-clis/prepare",
-            post(provider_cli_prepare),
-        )
-        .registered_route(
-            "/api/workspaces/{workspace_id}/machines/{server_id}/provider-clis/install",
-            post(provider_cli_install),
-        )
-        .registered_route(
-            "/api/workspaces/{workspace_id}/machines/{server_id}/provider-clis/check",
-            post(provider_cli_check),
-        )
-        .registered_route(
-            "/api/workspaces/{workspace_id}/machines/{server_id}/provider-clis/operations/{operation_id}",
-            get(provider_cli_operation),
-        )
-        .registered_route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/files",
             post(upload_machine_file).layer(DefaultBodyLimit::max(MAX_MACHINE_UPLOAD_BODY_BYTES)),
         )
