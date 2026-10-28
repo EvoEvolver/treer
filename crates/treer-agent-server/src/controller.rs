@@ -122,44 +122,15 @@ impl ProxyLinkStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrivateStateStatus {
     Available(PathBuf),
-    /// A Treer level or ancestor failed its safety check; nothing is injected.
-    Unsafe,
     /// Missing (never started or purged) or an I/O failure.
     Unavailable,
-    /// The directory would be inside the workload cwd on a non-hidden path;
-    /// nothing is injected.
-    InsideCwd,
-    /// The directory would be inside the workload cwd within a version-
-    /// controlled tree (marker at the directory, the cwd, between them or at a
-    /// cwd ancestor); nothing is injected.
-    InsideVcsWorktree,
-    /// Windows: the Controller does not run under an Administrators-group
-    /// account; private state is not served at all (product rule).
-    RequiresAdministrator,
 }
 
 impl PrivateStateStatus {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Available(_) => "available",
-            Self::Unsafe => "agent_private_state_unsafe",
             Self::Unavailable => "agent_private_state_unavailable",
-            Self::InsideCwd => "agent_private_state_inside_cwd",
-            Self::InsideVcsWorktree => "agent_private_state_inside_vcs_worktree",
-            Self::RequiresAdministrator => crate::private_state::WINDOWS_REQUIRES_ADMINISTRATOR,
-        }
-    }
-
-    /// Fixed, actionable operator text; never an absolute path.
-    pub fn hint(&self) -> Option<&'static str> {
-        match self {
-            Self::InsideCwd => Some(
-                "The Agent's working directory contains the Treer private state directory on a non-hidden path; set the Agent's cwd to a project folder outside the Treer state directory.",
-            ),
-            Self::InsideVcsWorktree => Some(
-                "The Treer private state directory lies inside a version-controlled tree, so attachments could be committed; move the repository or the Treer state directory apart (for example do not keep the home directory itself as a repository), or use a state directory outside any repository.",
-            ),
-            _ => None,
         }
     }
 }
@@ -167,8 +138,6 @@ impl PrivateStateStatus {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PrivateStateReport {
     pub status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hint: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::private_state::AgentUsage>,
 }
@@ -349,7 +318,7 @@ impl ControllerRuntime {
         let (agent_events, _) = broadcast::channel(512);
         let (terminal_events, _) = broadcast::channel(2048);
         let (process_events, _) = broadcast::channel(512);
-        // Only an invalid server identity fails Controller start. An unsafe or
+        // Only an invalid server identity fails Controller start. An
         // unavailable root degrades private state to "unavailable" for every
         // Agent (variable omitted, quota refused) while recovery proceeds.
         let private_state = match PrivateStateRoot::open(
@@ -361,14 +330,8 @@ impl ControllerRuntime {
                 return Err(error)
             }
             Err(error) => {
-                warn!(code = %error.code, "Agent private state root is degraded; private state disabled");
-                Err(if error.code == "agent_private_state_unsafe" {
-                    "agent_private_state_unsafe"
-                } else if error.code == crate::private_state::WINDOWS_REQUIRES_ADMINISTRATOR {
-                    crate::private_state::WINDOWS_REQUIRES_ADMINISTRATOR
-                } else {
-                    "agent_private_state_unavailable"
-                })
+                warn!(code = %error.code, "Agent private state root is unavailable; private state disabled");
+                Err("agent_private_state_unavailable")
             }
         };
         // Crash/restart accounting: measure what is on disk now; in-flight
@@ -806,7 +769,7 @@ impl ControllerRuntime {
                 })
                 .map_err(startup_store_error)?;
         }
-        self.inject_private_state(&mut env, &agent_id, &request.cwd)?;
+        self.inject_private_state(&mut env, &agent_id)?;
         let proxy_port =
             self.inner
                 .workload_proxies
@@ -1753,7 +1716,7 @@ impl ControllerRuntime {
         let agent_id = &entry.spec.agent_id;
         let mut env = self.process_environment(Some((agent_id, &entry.workload_credential)));
         let command = resolve_agent_command(&entry.spec.command, &env)?;
-        self.inject_private_state(&mut env, agent_id, &entry.spec.cwd)?;
+        self.inject_private_state(&mut env, agent_id)?;
         let proxy_port =
             self.inner
                 .workload_proxies
@@ -2052,17 +2015,15 @@ impl ControllerRuntime {
     }
 
     /// Inject the Controller-owned private state directory. Only an invalid
-    /// identity fails the launch. An unsafe or unavailable directory, or one
-    /// that would sit inside the workload cwd, omits the variable with a fixed
-    /// code: the launcher then keeps private-state features disabled, and the
-    /// state stays visible through `private_state_status`.
+    /// identity fails the launch. An unavailable directory omits the variable
+    /// with a fixed code: the launcher then keeps private-state features
+    /// disabled, and the state stays visible through `private_state_status`.
     fn inject_private_state(
         &self,
         env: &mut BTreeMap<String, String>,
         agent_id: &str,
-        cwd: &str,
     ) -> Result<(), ProtocolError> {
-        match self.private_state_status(agent_id, cwd, true)? {
+        match self.private_state_status(agent_id, true)? {
             PrivateStateStatus::Available(directory) => {
                 // `private_state_status` only reports Unicode-representable
                 // paths as available, so this always succeeds.
@@ -2084,13 +2045,12 @@ impl ControllerRuntime {
         Ok(())
     }
 
-    /// Derive and check the Agent's private state. `create` prepares missing
-    /// Treer levels (process starts); otherwise an absent directory is reported
-    /// as unavailable so the local API never recreates a purged directory.
+    /// Derive the Agent's private state. `create` prepares missing Treer
+    /// levels (process starts); otherwise an absent directory is reported as
+    /// unavailable so the local API never recreates a purged directory.
     fn private_state_status(
         &self,
         agent_id: &str,
-        cwd: &str,
         create: bool,
     ) -> Result<PrivateStateStatus, ProtocolError> {
         let prepared = self.private_state_root().and_then(|root| {
@@ -2102,19 +2062,10 @@ impl ControllerRuntime {
         });
         let directory = match prepared {
             Ok(directory) => directory,
-            Err(error) if error.code == "agent_private_state_unsafe" => {
-                return Ok(PrivateStateStatus::Unsafe)
-            }
             Err(error) if error.code == "agent_private_state_unavailable" => {
                 return Ok(PrivateStateStatus::Unavailable)
             }
-            Err(error) if error.code == crate::private_state::WINDOWS_REQUIRES_ADMINISTRATOR => {
-                return Ok(PrivateStateStatus::RequiresAdministrator)
-            }
             Err(error) => return Err(error),
-        };
-        let Ok(resolved) = std::fs::canonicalize(&directory) else {
-            return Ok(PrivateStateStatus::Unavailable);
         };
         if directory.to_str().is_none() {
             // The environment carries UTF-8 only; a non-Unicode path is not
@@ -2124,20 +2075,6 @@ impl ControllerRuntime {
                 "Agent private state directory path is not valid Unicode"
             );
             return Ok(PrivateStateStatus::Unavailable);
-        }
-        if let Ok(workload_cwd) = std::fs::canonicalize(self.inner.root.join(cwd.trim())) {
-            // Evaluated afresh on every start/restart/report: a repository
-            // initialised later flips the verdict (#133).
-            match crate::private_state::private_directory_placement(&workload_cwd, &resolved) {
-                crate::private_state::Placement::Outside
-                | crate::private_state::Placement::HiddenOutsideVcs => {}
-                crate::private_state::Placement::InsideCwd => {
-                    return Ok(PrivateStateStatus::InsideCwd)
-                }
-                crate::private_state::Placement::InsideVcsWorktree => {
-                    return Ok(PrivateStateStatus::InsideVcsWorktree)
-                }
-            }
         }
         if create {
             // A fresh start re-admits an identity that was purged earlier.
@@ -2161,15 +2098,12 @@ impl ControllerRuntime {
         })
     }
 
-    fn workload_cwd(&self, agent_id: &str) -> Result<String, ProtocolError> {
-        if let Some(entry) = self.inner.startup_store.get(agent_id) {
-            return Ok(entry.spec.cwd);
+    /// Private state is reported only for workloads this Controller knows.
+    fn require_known_workload(&self, agent_id: &str) -> Result<(), ProtocolError> {
+        if self.inner.startup_store.get(agent_id).is_none() {
+            self.get(agent_id)?;
         }
-        let agent = self.get(agent_id)?;
-        let agent = agent
-            .lock()
-            .map_err(|_| ProtocolError::new("state_error", "agent lock poisoned"))?;
-        Ok(agent.info.cwd.clone())
+        Ok(())
     }
 
     fn private_state_ledger(
@@ -2233,12 +2167,11 @@ impl ControllerRuntime {
         if self.private_state_ledger()?.is_purged(agent_id) {
             return Ok(PrivateStateReport {
                 status: PrivateStateStatus::Unavailable.code(),
-                hint: None,
                 usage: None,
             });
         }
-        let cwd = self.workload_cwd(agent_id)?;
-        let status = self.private_state_status(agent_id, &cwd, false)?;
+        self.require_known_workload(agent_id)?;
+        let status = self.private_state_status(agent_id, false)?;
         let usage = if matches!(status, PrivateStateStatus::Available(_)) {
             self.refresh_private_state_measurement(agent_id)?;
             Some(self.private_state_ledger()?.usage(agent_id))
@@ -2247,7 +2180,6 @@ impl ControllerRuntime {
         };
         Ok(PrivateStateReport {
             status: status.code(),
-            hint: status.hint(),
             usage,
         })
     }
@@ -2259,8 +2191,8 @@ impl ControllerRuntime {
                 "Agent private state was removed after deletion",
             ));
         }
-        let cwd = self.workload_cwd(agent_id)?;
-        match self.private_state_status(agent_id, &cwd, false)? {
+        self.require_known_workload(agent_id)?;
+        match self.private_state_status(agent_id, false)? {
             PrivateStateStatus::Available(directory) => Ok(directory),
             status => Err(ProtocolError::new(
                 status.code(),
