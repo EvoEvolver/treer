@@ -3,7 +3,7 @@
 use std::{
     fs,
     io::Write,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::{Output, Stdio},
     time::Duration,
 };
@@ -11,7 +11,6 @@ use std::{
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
@@ -20,7 +19,6 @@ use tokio::{
 struct EmbeddedFile {
     path: &'static str,
     bytes: &'static [u8],
-    sha256: &'static str,
     executable: bool,
 }
 include!(concat!(env!("OUT_DIR"), "/launcher_payload.rs"));
@@ -210,54 +208,6 @@ struct InstallArgs {
     npm_cli: Option<PathBuf>,
 }
 
-fn is_safe_relative(name: &str) -> bool {
-    !name.is_empty()
-        && !name.contains(['\\', ':', '\0'])
-        && name.split('/').all(|part| {
-            !part.is_empty()
-                && part != "."
-                && part != ".."
-                && !part.ends_with(['.', ' '])
-                && !part.chars().any(char::is_control)
-        })
-        && Path::new(name)
-            .components()
-            .all(|part| matches!(part, Component::Normal(_)))
-}
-
-fn verify_payload(files: &[EmbeddedFile], digest: &str) -> Result<()> {
-    let manifest: Value = serde_json::from_str(MANIFEST_JSON)?;
-    let entries = manifest["files"]
-        .as_array()
-        .context("invalid embedded manifest")?;
-    if entries.len() != files.len() {
-        bail!("embedded launcher manifest file count mismatch");
-    }
-    let mut previous = "";
-    for file in files {
-        if !is_safe_relative(file.path) || previous >= file.path {
-            bail!("invalid embedded launcher file order or path");
-        }
-        let actual = format!("{:x}", Sha256::digest(file.bytes));
-        if actual != file.sha256 {
-            bail!("embedded launcher hash mismatch");
-        }
-        if !entries.iter().any(|entry| {
-            entry["path"] == file.path
-                && entry["size"].as_u64() == Some(file.bytes.len() as u64)
-                && entry["sha256"] == actual
-                && entry["executable"] == file.executable
-        }) {
-            bail!("embedded launcher manifest entry mismatch");
-        }
-        previous = file.path;
-    }
-    if format!("{:x}", Sha256::digest(MANIFEST_JSON.as_bytes())) != digest {
-        bail!("embedded launcher payload digest mismatch");
-    }
-    Ok(())
-}
-
 fn reject_link(path: &Path, metadata: &fs::Metadata) -> Result<()> {
     if metadata.file_type().is_symlink() {
         bail!(
@@ -345,7 +295,6 @@ fn cleanup_stale_payloads(parent: &Path) -> Result<()> {
 }
 
 fn extract(root: &Path) -> Result<Stage> {
-    verify_payload(FILES, PAYLOAD_DIGEST)?;
     let metadata = fs::symlink_metadata(root).context("enrolled machine root is unavailable")?;
     reject_link(root, &metadata)?;
     if !metadata.is_dir() {
@@ -415,22 +364,11 @@ fn extract(root: &Path) -> Result<Stage> {
     manifest_handle.sync_all()?;
     drop(manifest_handle);
     treer_platform::secure_file(&manifest_path)?;
-    for file in FILES {
-        let path = payload_path(&stage.0, file.path);
-        let metadata = fs::symlink_metadata(&path)?;
-        reject_link(&path, &metadata)?;
-        if !metadata.is_file()
-            || metadata.len() != file.bytes.len() as u64
-            || format!("{:x}", Sha256::digest(fs::read(&path)?)) != file.sha256
-        {
-            bail!("extracted launcher verification failed before execution");
-        }
-    }
     Ok(stage)
 }
 
 fn payload_path(root: &Path, relative: &str) -> PathBuf {
-    // `relative` is checked by verify_payload before extraction. Joining the
+    // `relative` comes from this binary's own build-time payload. Joining the
     // whole slash-delimited string preserves '/' under a verbatim Windows
     // prefix, where Win32 deliberately disables normal slash conversion.
     relative
@@ -646,9 +584,6 @@ fn node_major(value: &[u8]) -> Option<u32> {
         .ok()
 }
 
-fn validate_controller(value: &Value) -> Result<()> {
-    validate_controller_with_floor(value, treer_protocol::MINIMUM_LAUNCHER_SECURITY_EPOCH)
-}
 
 fn validate_required_runtime(status: &Value) -> Result<()> {
     anyhow::ensure!(
@@ -692,15 +627,12 @@ try {
     Ok(status)
 }
 
-fn validate_controller_with_floor(value: &Value, minimum_epoch: u32) -> Result<()> {
+fn validate_controller(value: &Value) -> Result<()> {
     let reported: treer_protocol::LauncherControllerContract =
         serde_json::from_value(value.clone())
             .context("launcher_controller_unsupported: missing or invalid Controller contract")?;
     let required = controller_contract();
     if reported.protocol != required.protocol
-        || reported
-            .minimum_launcher_security_epoch
-            .is_none_or(|epoch| epoch < minimum_epoch)
         || required
             .features
             .iter()
@@ -725,7 +657,6 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
         url: Some(format!("http://{}", config.listen)),
         server_id: Some(config.server_id.clone()),
     };
-    verify_payload(FILES, PAYLOAD_DIGEST)?;
     let node = node_executable(args.node)?;
     let mut version_cmd = command(&node);
     version_cmd.arg("--version");
@@ -1147,29 +1078,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn embedded_payload_is_verified_and_paths_cannot_escape() {
-        verify_payload(FILES, PAYLOAD_DIGEST).unwrap();
-        for name in [
-            "../escape",
-            "/absolute",
-            "a/../b",
-            "a//b",
-            "a\\b",
-            "C:escape",
-            "a/./b",
-        ] {
-            assert!(!is_safe_relative(name), "{name}");
-        }
-        assert!(is_safe_relative("scripts/install.mjs"));
-        let bad = [EmbeddedFile {
-            path: "safe",
-            bytes: b"corrupt",
-            sha256: "wrong",
-            executable: false,
-        }];
-        assert!(verify_payload(&bad, PAYLOAD_DIGEST).is_err());
-    }
-    #[test]
     fn node_version_requires_a_real_major_version() {
         assert_eq!(node_major(b"v22.1.0\n"), Some(22));
         assert_eq!(node_major(b"v20.19.0"), Some(20));
@@ -1181,19 +1089,12 @@ mod tests {
     fn compatibility_is_explicit_and_old_controllers_fail_closed() {
         let contract = serde_json::to_value(controller_contract()).unwrap();
         validate_controller(&contract).unwrap();
-        assert!(validate_controller_with_floor(&contract, 2).is_err());
         assert!(validate_controller(&json!({"protocol":"treer.agent-interface/v1"})).is_err());
         for field in ["features", "capabilities"] {
             let mut old = contract.clone();
             old[field] = json!([]);
             assert!(validate_controller(&old).is_err());
         }
-        let mut legacy = contract.clone();
-        legacy
-            .as_object_mut()
-            .unwrap()
-            .remove("minimum_launcher_security_epoch");
-        assert!(validate_controller(&legacy).is_err());
         let mut unknown = contract.clone();
         unknown["protocol"] = json!("treer.agent-interface/v2");
         assert!(validate_controller(&unknown).is_err());

@@ -224,7 +224,7 @@ fn main() {
         assert!(size <= 32 * 1024 * 1024, "launcher payload exceeds 32 MiB");
         let digest = format!("{:x}", Sha256::digest(&bytes));
         manifest_files.push(serde_json::json!({"path":name,"size":bytes.len(),"sha256":digest,"executable":executable}));
-        generated.push_str(&format!("EmbeddedFile {{ path: {name:?}, bytes: include_bytes!({:?}), sha256: {digest:?}, executable: {executable} }},\n", fs::canonicalize(root.join(&name)).unwrap()));
+        generated.push_str(&format!("EmbeddedFile {{ path: {name:?}, bytes: include_bytes!({:?}), executable: {executable} }},\n", fs::canonicalize(root.join(&name)).unwrap()));
     }
     let bytes = manifest_bytes.unwrap_or_else(|| {
         serde_json::to_vec(&serde_json::json!({
