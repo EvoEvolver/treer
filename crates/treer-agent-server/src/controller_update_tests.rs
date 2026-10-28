@@ -190,3 +190,19 @@ async fn start_rejects_a_malformed_version_without_starting() {
     }
     assert!(commands.lock().unwrap().is_empty());
 }
+
+#[test]
+fn launcher_goes_next_to_this_installations_cli_regardless_of_environment() {
+    let installation = Installation::new();
+    let controller = installation.0.join("treer-agent-server");
+    assert_eq!(launcher_path(&controller), installation.0.join(format!("treer-launch{}", std::env::consts::EXE_SUFFIX)));
+    // `<prefix>/libexec/treer/treer-agent-server` with `<prefix>/bin/treer`.
+    let libexec = installation.0.join("libexec/treer");
+    fs::create_dir_all(&libexec).unwrap();
+    fs::create_dir_all(installation.0.join("bin")).unwrap();
+    fs::write(installation.0.join(format!("bin/treer{}", std::env::consts::EXE_SUFFIX)), "cli").unwrap();
+    assert_eq!(
+        launcher_path(&libexec.join("treer-agent-server")),
+        installation.0.join(format!("bin/treer-launch{}", std::env::consts::EXE_SUFFIX))
+    );
+}

@@ -167,13 +167,25 @@ pub(crate) const LAUNCHER: &str = "treer-launch";
 /// Deprecated command name still used by profiles saved before the rename.
 pub(crate) const LEGACY_LAUNCHER: &str = "treer-agent";
 
-/// Where `treer-launch` belongs: next to the installed `treer` CLI (which the
-/// install puts on PATH and Agents receive first on PATH), else next to `controller`.
+/// Where `treer-launch` belongs: next to the `treer` CLI of this installation
+/// (beside the Controller, or `<prefix>/bin` for a `<prefix>/libexec/treer`
+/// Controller), which the install puts on PATH; else beside the Controller.
+/// Derived from the Controller's location only, never from TREER_BIN or PATH.
 pub(crate) fn launcher_path(controller: &Path) -> PathBuf {
-    let directory = crate::service::installed_treer_binary(controller)
-        .and_then(|cli| cli.parent().map(Path::to_path_buf))
-        .or_else(|| controller.parent().map(Path::to_path_buf))
-        .unwrap_or_default();
+    let cli = format!("treer{}", std::env::consts::EXE_SUFFIX);
+    let beside = controller.parent().map(Path::to_path_buf).unwrap_or_default();
+    let conventional = controller
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(|prefix| prefix.join("bin"));
+    let directory = if beside.join(&cli).is_file() {
+        beside
+    } else {
+        conventional
+            .filter(|bin| bin.join(&cli).is_file())
+            .unwrap_or(beside)
+    };
     directory.join(format!("{LAUNCHER}{}", std::env::consts::EXE_SUFFIX))
 }
 

@@ -35,6 +35,10 @@ pub(crate) fn prepare(args: &[String]) -> Result<Next> {
             println!("{USAGE}");
             return Ok(Next::Exit(0));
         }
+        Some(first) if first.starts_with("--") && args.iter().any(|arg| arg == "--help" || arg == "-h") => {
+            println!("{USAGE}");
+            return Ok(Next::Exit(0));
+        }
         Some("--version" | "-V") if args.len() == 1 => {
             println!("treer-launch {}", treer_build_info::DISPLAY);
             return Ok(Next::Exit(0));
@@ -156,6 +160,7 @@ mod tests {
         assert!(prepare(&args(&["--harness"])).is_err());
         assert!(matches!(prepare(&[]), Ok(Next::Run)));
         assert!(matches!(prepare(&args(&["--version"])), Ok(Next::Exit(0))));
+        assert!(matches!(prepare(&args(&["--harness", "codex", "--help"])), Ok(Next::Exit(0))));
         assert!(matches!(prepare(&args(&["session", "--help"])), Ok(Next::Run)));
         for name in ["AGENT_UI_HARNESS", "AGENT_UI_SESSION_ID", "AGENT_UI_CWD", "RUST_SPIKE_REGISTER", "CODEX_UI_CWD"] {
             std::env::remove_var(name);
