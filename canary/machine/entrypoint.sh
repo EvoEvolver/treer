@@ -26,11 +26,13 @@ case "$(uname -m)" in
     *) echo "unsupported machine architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
-for binary in treer-agent-host treer-agent-server treer; do
+for binary in treer-agent-host treer-agent-server treer treer-launch; do
     curl -fsSL --retry 5 --retry-all-errors \
         "$proxy_url/artifacts/$platform/$binary" -o "$bin_dir/$binary"
     chmod 755 "$bin_dir/$binary"
 done
+# Deprecated alias for profiles saved before the rename.
+ln -sf treer-launch "$bin_dir/treer-agent"
 
 if [ ! -s "$identity_path" ]; then
     : "${TREER_ENROLLMENT_KEY:?TREER_ENROLLMENT_KEY is required for first provisioning}"

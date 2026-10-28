@@ -23,8 +23,16 @@ TREER_SIGNED_BOOTSTRAP_JS
 mkdir -p "$install_dir" "$server_dir"
 install_dir=$(CDPATH= cd -- "$install_dir" && pwd)
 server_dir=$(CDPATH= cd -- "$server_dir" && pwd)
-chmod 755 "$tmp_dir/treer" "$tmp_dir/treer-agent-host" "$tmp_dir/treer-agent-server"
+chmod 755 "$tmp_dir/treer" "$tmp_dir/treer-launch" "$tmp_dir/treer-agent-host" "$tmp_dir/treer-agent-server"
 mv "$tmp_dir/treer" "$install_dir/treer"
+mv "$tmp_dir/treer-launch" "$install_dir/treer-launch"
+# Deprecated alias: profiles saved before the rename call treer-agent. Replace an
+# earlier alias or the Node-era shim, never an unrelated command of that name.
+if [ -L "$install_dir/treer-agent" ] || [ ! -e "$install_dir/treer-agent" ] ||
+    grep -q 'treer-agent-shim/v1' "$install_dir/treer-agent" 2>/dev/null; then
+    rm -f "$install_dir/treer-agent" "$install_dir/treer-agent.json"
+    ln -s treer-launch "$install_dir/treer-agent"
+fi
 mv "$tmp_dir/treer-agent-host" "$server_dir/treer-agent-host"
 mv "$tmp_dir/treer-agent-server" "$server_dir/treer-agent-server"
 ln -sf "$server_dir/treer-agent-server" "$install_dir/treer-agent-server"

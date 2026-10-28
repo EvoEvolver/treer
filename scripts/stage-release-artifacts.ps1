@@ -8,7 +8,7 @@ if ($commit -notmatch '^[0-9a-fA-F]{7,64}$') { throw 'Invalid build commit.' }
 [IO.Directory]::CreateDirectory($Destination) | Out-Null
 $version = $null
 $checksums = @()
-foreach ($binary in @('treer', 'treer-agent-host', 'treer-agent-server')) {
+foreach ($binary in @('treer', 'treer-launch', 'treer-agent-host', 'treer-agent-server')) {
     $source = "target\release\$binary.exe"
     $identity = & $source --version
     if ($LASTEXITCODE -ne 0 -or $identity -notmatch "^\S+ (\S+) \($commit\)$") { throw "Invalid build identity for $binary." }

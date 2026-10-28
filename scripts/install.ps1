@@ -49,12 +49,12 @@ if ($artifactUri.Scheme -eq 'http' -and !$loopbackOrigin) {
 if ($artifactUri.UserInfo) { throw 'ArtifactBase must not contain credentials.' }
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $InstallDir = [IO.Path]::GetFullPath($InstallDir)
-$binaries = @('treer', 'treer-agent-host', 'treer-agent-server')
+$binaries = @('treer', 'treer-launch', 'treer-agent-host', 'treer-agent-server')
 foreach ($process in Get-Process) {
     # Only block binaries installed in this directory, including Agent-inherited
     # CLI instances; do not stop unrelated users or another Treer installation.
     try { $path = $process.Path } catch { continue }
-    if ($path -and $binaries.Where({ $path -eq (Join-Path $InstallDir "$_.exe") }).Count) {
+    if ($path -and ($binaries + 'treer-agent').Where({ $path -eq (Join-Path $InstallDir "$_.exe") }).Count) {
         throw 'Treer is still running. Stop its workspaces before reinstalling, then restore them afterwards.'
     }
 }
@@ -67,11 +67,11 @@ try {
     $hashes = @{}
     foreach ($line in ($checksums -split '\r?\n')) {
         if (!$line.Trim()) { continue }
-        if ($line -notmatch '^([0-9a-fA-F]{64})  (treer|treer-agent-host|treer-agent-server)$' -or
+        if ($line -notmatch '^([0-9a-fA-F]{64})  (treer|treer-launch|treer-agent-host|treer-agent-server)$' -or
             $hashes.ContainsKey($Matches[2])) { throw 'Invalid or duplicate artifact checksum entry.' }
         $hashes[$Matches[2]] = $Matches[1]
     }
-    if ($hashes.Count -ne 3) { throw 'Incomplete artifact checksum manifest.' }
+    if ($hashes.Count -ne $binaries.Count) { throw 'Incomplete artifact checksum manifest.' }
     $identity = $null
     foreach ($binary in $binaries) {
         $file = Join-Path $temporary "$binary.exe"
@@ -91,12 +91,15 @@ try {
     foreach ($binary in $binaries) {
         Copy-Item -LiteralPath (Join-Path $temporary "$binary.exe") -Destination (Join-Path $InstallDir "$binary.exe") -Force
     }
+    # Deprecated alias for profiles saved before the rename; replaces the old Node-era shim.
+    Copy-Item -LiteralPath (Join-Path $temporary 'treer-launch.exe') -Destination (Join-Path $InstallDir 'treer-agent.exe') -Force
+    Remove-Item -LiteralPath (Join-Path $InstallDir 'treer-agent.exe.json') -Force -ErrorAction SilentlyContinue
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     if (($userPath -split ';') -notcontains $InstallDir) {
         [Environment]::SetEnvironmentVariable('Path', (($userPath, $InstallDir) | Where-Object { $_ }) -join ';', 'User')
     }
     if (($env:Path -split ';') -notcontains $InstallDir) { $env:Path += ";$InstallDir" }
-    Write-Host "Installed Treer $identity in $InstallDir. This shell and newly opened shells can use all three commands."
+    Write-Host "Installed Treer $identity in $InstallDir. This shell and newly opened shells can use the Treer commands."
     Write-Host 'For a new machine, create a user-owned workspace directory:'
     Write-Host 'New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\Treer\workspace" | Out-Null'
     Write-Host 'Next: treer-agent-server connect --root "$env:LOCALAPPDATA\Treer\workspace" --key ENROLLMENT_KEY --proxy PROXY_URL'

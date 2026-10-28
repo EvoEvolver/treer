@@ -6,7 +6,7 @@ import { join } from 'node:path';
 const BASE = 'https://releases.treer.ai/';
 const PEM = `__TREER_OFFICIAL_RELEASE_PEM__`;
 const FINGERPRINT = '634761ff47a6a113b4b8925f0db0e030d8bfce07f2fa228fdc0a4904874dc41f';
-const names = ['treer', 'treer-agent-host', 'treer-agent-server'];
+const names = ['treer', 'treer-launch', 'treer-agent-host', 'treer-agent-server'];
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const requireThat = (condition, code) => { if (!condition) throw new Error(code); };
 

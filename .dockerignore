@@ -7,3 +7,4 @@ dist
 web/node_modules
 web/dist
 launchers/agent/target
+launchers/agent/node_modules
