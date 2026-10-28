@@ -157,7 +157,7 @@ test('persistent installed dispatcher registers only initialized target and igno
   assert.equal(await readFile(env.AGENT_UI_PORT_FILE,'utf8'),'parent-owned-observation');
   const calls=(await readFile(env.LAUNCH_CALLS,'utf8')).trim().split('\n').map(JSON.parse);assert.equal(calls.filter(e=>e.spawn).length,2);assert.equal(calls.filter(e=>e.text).length,0);await f.checkSource();
 });
-test('persistent checkpoint recovery keeps uncertain receipt fenced and AIS reachable without replay',async t=>{
+test('persistent checkpoint recovery settles a legacy uncertain receipt without pausing or replay',async t=>{
   const f=await source(t),p=await f.target('persistent-unknown'),args=[...p.args];args[1]='run';
   const first=await f.running(args,p.env);
   assert.equal((await fetch(first.base+'/api/prompt',{method:'POST',body:JSON.stringify({prompt:'owned uncertain-state control',mode:'queue'})})).status,200);
@@ -169,7 +169,7 @@ test('persistent checkpoint recovery keeps uncertain receipt fenced and AIS reac
   saved.records[0].submission.state='failed';saved.records[0].submission.error='dispatch outcome uncertain; synthetic persisted-state control';saved.dispatchBlocked=true;
   await writeFile(path,JSON.stringify(saved),{mode:0o600});
   const recovered=await f.running(args,{...p.env,AGENT_UI_PORT_FILE:join(f.root,'unknown-recovered-port')});
-  const state=await recovered.state();assert.equal(state.runtime.state,'blocked');assert.equal(recovered.child.exitCode,null);
-  const retained=JSON.parse(await readFile(path,'utf8'));assert.equal(retained.records[0].submission.id,saved.records[0].submission.id);assert.match(retained.records[0].submission.error,/dispatch outcome uncertain/);
+  const state=await recovered.state();assert.equal(state.runtime.state,'idle');assert.equal(recovered.child.exitCode,null);
+  const retained=JSON.parse(await readFile(path,'utf8'));assert.equal(retained.records[0].submission.id,saved.records[0].submission.id);assert.equal(retained.dispatchBlocked,false);assert.doesNotMatch(String(retained.records[0].submission.error),/dispatch outcome uncertain/);
   const calls=(await readFile(p.env.LAUNCH_CALLS,'utf8')).trim().split('\n').map(JSON.parse);assert.deepEqual(calls.filter(e=>e.text).map(e=>e.text),['owned uncertain-state control']);await f.checkSource();
 });

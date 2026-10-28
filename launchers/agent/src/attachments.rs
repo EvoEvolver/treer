@@ -132,7 +132,6 @@ impl Attachments {
             .ok_or_else(|| anyhow::anyhow!("attachment_not_found"))
     }
     pub fn read(&self, id: &str, session: &str) -> Result<(Value, Vec<u8>)> {
-        self.store.recheck()?;
         let e = self.entry(id, session)?;
         let mut file = OpenOptions::new()
             .read(true)
@@ -219,7 +218,6 @@ impl Attachments {
             .map(|e| (e.id.clone(), e.session.clone()))
             .collect::<Vec<_>>();
         for (id, session) in expired {
-            self.store.recheck()?;
             let entry = self.entry(&id, &session)?.clone();
             match fs::symlink_metadata(self.path(&entry)) {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -267,7 +265,6 @@ impl Attachments {
         let path = self.path(&entry);
         let mut created = false;
         let result: Result<Value> = async {
-            self.store.recheck()?;
             let mut file = OpenOptions::new()
                 .create_new(true)
                 .write(true)

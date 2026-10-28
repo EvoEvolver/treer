@@ -11,7 +11,7 @@ const MAX_TURNS: usize = 50;
 pub struct HistoryLimit;
 impl fmt::Display for HistoryLimit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Conversation history limit reached; queue paused")
+        f.write_str("Conversation history limit reached; restarting the provider")
     }
 }
 impl std::error::Error for HistoryLimit {}
@@ -20,7 +20,7 @@ impl std::error::Error for HistoryLimit {}
 pub struct InvalidTurnIdentity;
 impl fmt::Display for InvalidTurnIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Invalid provider turn identity; queue paused")
+        f.write_str("Invalid provider turn identity; restarting the provider")
     }
 }
 impl std::error::Error for InvalidTurnIdentity {}
@@ -110,7 +110,7 @@ mod tests {
             assert!(error.is::<InvalidTurnIdentity>());
             assert_eq!(
                 error.to_string(),
-                "Invalid provider turn identity; queue paused"
+                "Invalid provider turn identity; restarting the provider"
             );
             assert_eq!(history.len(), 1);
             assert_eq!(history[0]["id"], "accepted");

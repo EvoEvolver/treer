@@ -46,47 +46,21 @@ impl Lease {
     }
 }
 impl Store {
+    /// Checked once when opened. Same-user processes are trusted; the owner
+    /// and mode checks keep other OS users out of the private journal.
     pub fn open(root: &Path, cwd: &Path) -> Result<Self> {
         if !root.is_absolute() || !root.exists() {
             bail!("private root must already exist");
         }
-        // Inspect the lexical chain before canonicalization (do not erase links).
-        for ancestor in root.ancestors() {
-            if fs::symlink_metadata(ancestor)?.file_type().is_symlink() {
-                bail!("linked private ancestor")
-            }
-        }
         let root = fs::canonicalize(root)?;
         let cwd = fs::canonicalize(cwd)?;
-        // Match Controller private_directory_placement: HOME cwd may contain
-        // hidden OS state, but never ordinary cwd data or cwd itself. The
-        // ancestor VCS/no-follow/owner/mode checks below still apply, including
-        // on every save and to nested history/image stores.
-        if let Ok(relative) = root.strip_prefix(&cwd) {
-            let hidden_first = relative.components().next()
-                .and_then(|part| part.as_os_str().to_str())
-                .is_some_and(|name| name.starts_with('.') && name != "." && name != "..");
-            if !hidden_first {
-                bail!("private state inside non-hidden cwd path");
-            }
-        }
+        #[cfg(unix)]
         for ancestor in root.ancestors() {
-            let metadata = fs::symlink_metadata(ancestor)?;
-            if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                bail!("unsafe private ancestor");
-            }
-            #[cfg(unix)]
+            let metadata = fs::metadata(ancestor)?;
             if (metadata.uid() != rustix::process::geteuid().as_raw() && metadata.uid() != 0)
                 || (metadata.mode() & 0o022 != 0 && metadata.mode() & 0o1000 == 0)
             {
                 bail!("private ancestor owner/mode");
-            }
-            for marker in [".git", ".hg", ".jj", ".svn", ".bzr", ".sl"] {
-                match fs::symlink_metadata(ancestor.join(marker)) {
-                    Ok(_) => bail!("private state in VCS"),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e.into()),
-                }
             }
         }
         #[cfg(unix)]
@@ -99,7 +73,6 @@ impl Store {
         Ok(Self { root, cwd })
     }
     pub fn load(&self) -> Result<Option<Value>> {
-        self.recheck()?;
         let path = self.root.join("rust-spike.json");
         let mut options = OpenOptions::new();
         options.read(true);
@@ -131,12 +104,7 @@ impl Store {
         Ok(Some(crate::bounded_json::decode(&data)
             .map_err(|_| anyhow::anyhow!("private_state_invalid"))?))
     }
-    pub fn recheck(&self) -> Result<()> {
-        Self::open(&self.root, &self.cwd)?;
-        Ok(())
-    }
     pub fn save_stderr(&self, bytes: &[u8]) -> Result<()> {
-        self.recheck()?;
         if bytes.len() > 8192 { bail!("stderr_tail_too_large"); }
         let temp = self.root.join(format!(".rust-stderr-{}.tmp", uuid::Uuid::new_v4()));
         let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600)
@@ -152,8 +120,6 @@ impl Store {
         result
     }
     pub fn save(&self, state: &Value) -> Result<()> {
-        // Re-evaluate placement on each journal update; git init disables writes.
-        Self::open(&self.root, &self.cwd)?;
         crate::bounded_json::admit(state)
             .map_err(|_| anyhow::anyhow!("private_state_invalid"))?;
         #[cfg(feature = "fixture-harness")]
@@ -227,44 +193,18 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn controller_hidden_non_vcs_placement_and_write_recheck() {
+    fn placement_inside_cwd_or_vcs_is_allowed_but_unsafe_modes_are_refused() {
         let home = fs::canonicalize(std::env::temp_dir()).unwrap()
             .join(format!("rust-home-placement-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&home).unwrap();
         fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
-        let root = home.join(".local/state/agent-private/ag_synthetic");
+        fs::create_dir(home.join(".git")).unwrap();
+        let root = home.join("ordinary/private");
         fs::create_dir_all(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let store = Store::open(&root, &home).unwrap();
         store.save(&serde_json::json!({"records":[]})).unwrap();
-        let original = fs::read(root.join("rust-spike.json")).unwrap();
-        assert!(Store::open(&home, &home).is_err());
-        let visible = home.join("ordinary/private");
-        fs::create_dir_all(&visible).unwrap();
-        fs::set_permissions(&visible, fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(Store::open(&visible, &home).is_err());
-        for marker in [".git", ".hg", ".jj", ".svn", ".bzr", ".sl"] {
-            fs::write(home.join(marker), b"synthetic marker").unwrap();
-            assert!(Store::open(&root, &home).is_err(), "{marker}");
-            assert!(store.save(&serde_json::json!({"changed":true})).is_err());
-            assert_eq!(fs::read(root.join("rust-spike.json")).unwrap(), original);
-            fs::remove_file(home.join(marker)).unwrap();
-        }
-        store.save(&serde_json::json!({"restored":true})).unwrap();
-        fs::remove_dir_all(home).unwrap();
-    }
-
-    #[test]
-    fn hidden_placement_does_not_admit_links_or_unsafe_private_modes() {
-        use std::os::unix::fs::symlink;
-        let home = fs::canonicalize(std::env::temp_dir()).unwrap()
-            .join(format!("rust-home-unsafe-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&home).unwrap();
-        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
-        let root = home.join(".private");fs::create_dir(&root).unwrap();
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
-        let alias = home.join(".linked");symlink(&root, &alias).unwrap();
-        assert!(Store::open(&alias, &home).is_err());
+        assert_eq!(store.load().unwrap(), Some(serde_json::json!({"records":[]})));
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(Store::open(&root, &home).is_err());
         fs::remove_dir_all(home).unwrap();

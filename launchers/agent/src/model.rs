@@ -99,7 +99,7 @@ pub fn turn(raw: &Value) -> Value {
 pub struct InvalidFinalSnapshot;
 impl std::fmt::Display for InvalidFinalSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Conflicting provider final snapshot; queue paused")
+        f.write_str("Conflicting provider final snapshot; restarting the provider")
     }
 }
 impl std::error::Error for InvalidFinalSnapshot {}

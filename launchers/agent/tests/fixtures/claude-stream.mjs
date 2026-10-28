@@ -61,6 +61,7 @@ createInterface({input:process.stdin}).on('line',async line=>{
     if(event.request.subtype==='interrupt'){clearTimeout(timer);finish();}
     return;
   }
+  if(event.type==='control_response'){appendFileSync(process.env.CLAUDE_FIXTURE_LOG+'.replies',JSON.stringify(event)+'\n');return;}
   if(event.type!=='user'||active&&!process.env.CLAUDE_FIXTURE_STEER)process.exit(71);
   const text=typeof event.message.content==='string'?event.message.content:event.message.content.filter(b=>b.type==='text').map(b=>b.text).join('\n');
   const images=Array.isArray(event.message.content)?event.message.content.filter(b=>b.type==='image').map(b=>{
@@ -106,6 +107,13 @@ createInterface({input:process.stdin}).on('line',async line=>{
     }
   }
   while(process.env.CLAUDE_FIXTURE_INPUT_GATE&&!existsSync(process.env.CLAUDE_FIXTURE_INPUT_GATE))await new Promise(r=>setTimeout(r,20));
+  if(process.env.CLAUDE_FIXTURE_ODDITIES){
+    emit({type:'frame_type_from_a_newer_claude',detail:{nested:true}});
+    emit({type:'control_request',request_id:'perm-1',request:{subtype:'can_use_tool',tool_name:'Bash',input:{command:'synthetic'}}});
+  }
+  if(process.env.CLAUDE_FIXTURE_CRASH_ONCE&&!existsSync(process.env.CLAUDE_FIXTURE_CRASH_ONCE)){
+    appendFileSync(process.env.CLAUDE_FIXTURE_CRASH_ONCE,'crashed');process.exit(9);
+  }
   emit({type:'system',subtype:'init',...(process.env.CLAUDE_FIXTURE_MODELS?{model}:{})});
   const id='message-'+Date.now();
   emit({type:'stream_event',event:{type:'message_start',message:{id}}});

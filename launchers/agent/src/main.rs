@@ -149,8 +149,11 @@ async fn main() -> Result<()> {
         })
         .ok_or_else(|| anyhow::anyhow!("explicit private state root required"))?,
     );
+    // Checked once at startup. A Controller restart later must not refuse
+    // prompts; a failure here exits non-zero so the Host restarts us.
     if !agent.is_empty() {
         private_status(&agent).await?;
+        set_git_identity(&agent).await;
     }
     let _state_lease = store::Lease::acquire(&private_root, &cwd, &agent)?;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -256,7 +259,7 @@ async fn main() -> Result<()> {
         }).await;
         if !matches!(started,Ok(Ok(()))) {
             handle.shutdown().await?;
-            bail!("explicit_launch_failed_intent_retained_no_retry");
+            bail!("explicit_launch_failed");
         }
     }
     let publication=(|| -> Result<()> {
@@ -365,9 +368,13 @@ async fn main() -> Result<()> {
     };
     // A WebSocket or a client that keeps a response open cannot prevent exit.
     // Provider cleanup happens before the bounded HTTP drain begins.
+    // A runtime that stops on its own (provider startup failure, unusable
+    // private storage) exits non-zero so the Host restarts the launcher.
+    let runtime_stopped = final_shutdown.clone();
     let result = tokio::select! {
         result = async { tokio::try_join!(register, serve).map(|_| ()) } => result,
         _ = async { draining.notified().await; tokio::time::sleep(std::time::Duration::from_secs(2)).await; } => Ok(()),
+        _ = runtime_stopped.stopped_unrequested() => Err(anyhow::anyhow!("runtime_stopped; exiting for restart")),
     };
     final_shutdown.shutdown().await?;
     result?;
@@ -464,7 +471,7 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
             },
             Err(error)=>{
                 let reason=error.to_string();
-                let code=if matches!(reason.as_str(),"snapshot_thread_unavailable"|"snapshot_requires_idle_without_obligations"|"snapshot_explicit_config_required"|"snapshot_platform_unsupported"|"snapshot_provider_changed"|"snapshot_transport_unavailable"|"snapshot_deadline"|"snapshot_storage_changed"|"snapshot_reader_busy") {reason.as_str()}else{"snapshot_source_refused"};
+                let code=if matches!(reason.as_str(),"snapshot_thread_unavailable"|"snapshot_requires_idle_without_obligations"|"snapshot_explicit_config_required"|"snapshot_platform_unsupported"|"snapshot_provider_changed"|"snapshot_transport_unavailable"|"snapshot_deadline"|"snapshot_reader_busy") {reason.as_str()}else{"snapshot_source_refused"};
                 failure(StatusCode::CONFLICT,code)
             },
         };
@@ -645,9 +652,6 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
             ui_call(&app, "goal_retry", body, limit).await
         }
         "/v1/prompts" | "/api/prompt" => {
-            if !app.agent.is_empty() && private_status(&app.agent).await.is_err() {
-                return failure(StatusCode::SERVICE_UNAVAILABLE, "private_state_unavailable");
-            }
             if path == "/api/prompt" {
                 // Legacy UI prompts never accept caller-supplied attestation,
                 // including when forwarded by the Controller (Node parity).
@@ -726,12 +730,6 @@ async fn attachment_route(app: &App, request: Request<Body>, path: &str, method:
         return json_response(
             StatusCode::CONFLICT,
             json!({"error":"attachment_session_required"}),
-        );
-    }
-    if private_status(&app.agent).await.is_err() {
-        return json_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"error":"agent_private_state_unavailable"}),
         );
     }
     if method == "POST" && path == "/api/attachments" {
@@ -980,6 +978,24 @@ fn submission_segment(encoded: &str) -> Option<String> {
         return None;
     }
     Some(decoded.into_owned())
+}
+
+/// Commits made by the harness are attributed to this Agent unless the
+/// profile already chose an identity. Set before any child process starts.
+async fn set_git_identity(agent: &str) {
+    let name = async {
+        let output = tokio::process::Command::new(treer_binary()).arg("whoami")
+            .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .kill_on_drop(true).output();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(5), output).await.ok()?.ok()?;
+        let value: Value = serde_json::from_slice(&output.stdout).ok()?;
+        let agent = &value["agent"];
+        agent["path"].as_str().or(agent["name"].as_str()).filter(|s| !s.is_empty()).map(str::to_owned)
+    }.await.unwrap_or_else(|| agent.to_owned());
+    for (key, value) in [("GIT_AUTHOR_NAME", &name), ("GIT_COMMITTER_NAME", &name),
+        ("GIT_AUTHOR_EMAIL", &format!("{agent}@agents.treer.local")), ("GIT_COMMITTER_EMAIL", &format!("{agent}@agents.treer.local"))] {
+        if std::env::var_os(key).is_none() { std::env::set_var(key, value); }
+    }
 }
 
 async fn private_status(agent: &str) -> Result<()> {

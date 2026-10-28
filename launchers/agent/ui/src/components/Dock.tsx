@@ -177,7 +177,7 @@ export function Dock() {
             </div>
           </div>
           <p className="hint shortcut-hint" id="hint">{hint}</p>
-          {snapshot?.attachmentsAvailable === false && <p className="hint image-storage-status" role="status">{t(snapshot.attachmentStorageStatus === "windows_requires_administrator" ? "images.storageAdministrator" : snapshot.attachmentStorageStatus === "agent_private_state_inside_cwd" ? "images.storageInside" : snapshot.attachmentStorageStatus === "agent_private_state_inside_vcs_worktree" ? "images.storageVcs" : snapshot.attachmentStorageStatus === "agent_private_state_unsafe" ? "images.storageUnsafe" : "images.storageUnavailable")}</p>}
+          {snapshot?.attachmentsAvailable === false && <p className="hint image-storage-status" role="status">{t("images.storageUnavailable")}</p>}
         </div>
       </div>
       <GoalEditor open={editor} onBack={back} onClose={closeEditor} onSaved={closeEditor} />
