@@ -1,322 +1,276 @@
-//! Human-only #222 adapter. The install-CLI scope/Policy gate is reused; typed
-//! Controller commands never pass through Exec or a replayable mutation outbox.
+//! "Update machine M to release V". The Controller downloads and verifies the
+//! signed release, replaces its binaries and asks its Host for a restart; the
+//! replacement reporting V on reconnect completes the update. The Proxy only
+//! remembers the requested version per machine, in memory.
 use super::*;
-use crate::auth::{update_not_found, ControllerUpdateScope};
-use axum::body::Bytes;
-use chrono::Utc;
-use serde::de::DeserializeOwned;
-use treer_protocol::controller_update as wire;
-use treer_protocol::controller_update_runtime::{DispatchBinding, Inspection};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use treer_protocol::controller_update::{
+    binary_version, valid_version, UpdateRequest, UpdateState, UpdateStatus, CAPABILITY,
+};
 
-fn scope<'a>(
-    session: &'a CurrentSession,
-    ws: &'a str,
-    machine: &'a str,
-) -> ControllerUpdateScope<'a> {
-    ControllerUpdateScope {
-        workspace_id: ws,
-        server_id: machine,
-        user_id: &session.user_id,
-        session_token: &session.token,
-    }
+static REQUESTED: LazyLock<Mutex<HashMap<(String, String), String>>> =
+    LazyLock::new(Default::default);
+
+fn requested(workspace_id: &str, server_id: &str) -> Option<String> {
+    REQUESTED
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(&(workspace_id.to_string(), server_id.to_string()))
+        .cloned()
 }
-fn failure(code: &str) -> ApiFailure {
-    ApiFailure {status:StatusCode::CONFLICT,error:ProtocolError::new(code,"Controller update is unavailable; refresh the operation state before taking another action")}
-}
-fn unsupported() -> ApiFailure {
+
+fn failure(status: StatusCode, code: &str, message: &str) -> ApiFailure {
     ApiFailure {
-        status: StatusCode::NOT_IMPLEMENTED,
-        error: ProtocolError::new(
-            "controller_update_unsupported",
-            "This machine requires a manual Controller update",
-        ),
+        status,
+        error: ProtocolError::new(code, message),
     }
 }
-fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ApiFailure> {
-    if bytes.len() > 1024 {
-        return Err(failure("controller_update_request_invalid"));
-    }
-    serde_json::from_slice(bytes).map_err(|_| failure("controller_update_request_invalid"))
-}
-fn response<T: serde::Serialize>(body: T) -> Response {
-    ([(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
-}
-fn report<T: DeserializeOwned>(data: serde_json::Value) -> Result<T, ApiFailure> {
-    if serde_json::to_vec(&data)
-        .map_err(|_| failure("controller_update_receipt_invalid"))?
-        .len()
-        > 64 * 1024
-    {
-        return Err(failure("controller_update_receipt_invalid"));
-    }
-    serde_json::from_value(data).map_err(|_| failure("controller_update_receipt_invalid"))
-}
+
 async fn authorize(
     state: &AppState,
-    auth: &AuthStore,
     policy: &PolicyEngine,
-    session: &CurrentSession,
-    ws: &str,
-    machine: &str,
-) -> Result<(), ApiFailure> {
-    state.resolve_server(ws, machine).await?;
-    auth.require_workspace_member(ws, &session.user_id).await?;
+    machine: Option<&MachineSession>,
+    headers: &HeaderMap,
+    workspace_id: &str,
+    server_id: &str,
+) -> Result<Option<PolicySubject>, ApiFailure> {
+    // Replacing Controller binaries is code execution on the machine.
+    let subject = control_policy_subject(state, machine, headers, workspace_id).await?;
+    require_machine_target(subject.as_ref(), server_id)?;
     authorize_control(
         policy,
-        ws,
-        Some(&PolicySubject::Human {
-            user_id: session.user_id.clone(),
-        }),
+        workspace_id,
+        subject.as_ref(),
         ACTION_MACHINE_EXEC,
-        PolicyResource::new(RESOURCE_MACHINE, machine),
+        PolicyResource::new(RESOURCE_MACHINE, server_id),
     )
     .await?;
-    // A machine name is not a stable update scope or Policy resource identity.
-    if state.resolve_server(ws, machine).await?.server_id != machine {
-        return Err(failure("controller_update_request_invalid"));
-    }
-    Ok(())
+    Ok(subject)
 }
-async fn inspection(state: &AppState, ws: &str, machine: &str) -> Result<Inspection, ApiFailure> {
-    let caps = state
-        .server_capabilities(ws, machine)
-        .await
-        .map_err(|_| failure("controller_update_offline"))?;
-    if !caps.contains(wire::CAPABILITY) {
-        return Err(unsupported());
+
+async fn controller_status(
+    state: &AppState,
+    workspace_id: &str,
+    server_id: &str,
+) -> Option<UpdateStatus> {
+    let data = tokio::time::timeout(
+        Duration::from_secs(5),
+        state.send_command(
+            workspace_id,
+            server_id,
+            AgentCommand::ControllerUpdateStatus {},
+        ),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    serde_json::from_value(data).ok()
+}
+
+/// Combine the Controller's in-memory progress with the requested version.
+fn combine(
+    target: Option<String>,
+    online: bool,
+    controller_version: &str,
+    reported: Option<UpdateStatus>,
+) -> UpdateStatus {
+    let state = match (reported.map(|status| status.state), &target) {
+        (Some(state), _) if state != UpdateState::Idle => state,
+        (_, None) => UpdateState::Idle,
+        (_, Some(_)) if !online => UpdateState::Restarting,
+        (_, Some(target)) if binary_version(target) == controller_version => UpdateState::Done,
+        (_, Some(target)) => UpdateState::Failed {
+            reason: format!(
+                "Controller is running {controller_version} after the update, not {target}"
+            ),
+        },
+    };
+    UpdateStatus {
+        state,
+        target_version: target,
+        controller_version: Some(controller_version.to_string()),
+    }
+}
+
+async fn current_status(
+    state: &AppState,
+    workspace_id: &str,
+    server_id: &str,
+) -> Result<UpdateStatus, ApiFailure> {
+    let server = state.resolve_server(workspace_id, server_id).await?;
+    let online = server.status == ServerStatus::Online;
+    let reported = if online {
+        controller_status(state, workspace_id, server_id).await
+    } else {
+        None
+    };
+    Ok(combine(
+        requested(workspace_id, server_id),
+        online,
+        &server.controller_build.version,
+        reported,
+    ))
+}
+
+pub(crate) async fn controller_update_status(
+    State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, server_id)): Path<(String, String)>,
+) -> Result<Json<UpdateStatus>, ApiFailure> {
+    let server_id = state
+        .resolve_server(&workspace_id, &server_id)
+        .await?
+        .server_id;
+    let machine = machine.as_ref().map(|value| &value.0);
+    authorize(
+        &state,
+        &policy,
+        machine,
+        &headers,
+        &workspace_id,
+        &server_id,
+    )
+    .await?;
+    Ok(Json(
+        current_status(&state, &workspace_id, &server_id).await?,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn controller_update_start(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, server_id)): Path<(String, String)>,
+    Json(request): Json<UpdateRequest>,
+) -> Result<(StatusCode, Json<UpdateStatus>), ApiFailure> {
+    let server_id = state
+        .resolve_server(&workspace_id, &server_id)
+        .await?
+        .server_id;
+    let machine = machine.as_ref().map(|value| &value.0);
+    let subject = authorize(
+        &state,
+        &policy,
+        machine,
+        &headers,
+        &workspace_id,
+        &server_id,
+    )
+    .await?;
+    if !valid_version(&request.version) {
+        return Err(failure(
+            StatusCode::BAD_REQUEST,
+            "controller_update_invalid_version",
+            "version must be a release tag such as v1.2.3",
+        ));
+    }
+    let capabilities = state.server_capabilities(&workspace_id, &server_id).await?;
+    if !capabilities.contains(CAPABILITY) {
+        return Err(failure(
+            StatusCode::CONFLICT,
+            "controller_update_unsupported",
+            "This Controller predates remote updates; run `treer-agent-server update` on the machine once",
+        ));
     }
     let data = tokio::time::timeout(
         Duration::from_secs(10),
-        state.send_command(ws, machine, AgentCommand::ControllerUpdateInspect {}),
+        state.send_command(
+            &workspace_id,
+            &server_id,
+            AgentCommand::ControllerUpdateStart {
+                version: request.version.clone(),
+            },
+        ),
     )
     .await
-    .map_err(|_| failure("controller_update_offline"))?
-    .map_err(|_| unsupported())?;
-    let report: Inspection = report(data)?;
-    if report.current.validate().is_err()
-        || report.observed_at > Utc::now() + chrono::Duration::seconds(30)
-        || report.observed_at < Utc::now() - chrono::Duration::seconds(30)
-    {
-        return Err(failure("controller_update_receipt_invalid"));
-    }
-    Ok(report)
-}
-async fn catalog(
-    state: &AppState,
-    auth: &AuthStore,
-    s: &ControllerUpdateScope<'_>,
-) -> Result<wire::Catalog, ApiFailure> {
-    let report = inspection(state, s.workspace_id, s.server_id).await?;
-    let (revision, targets) = auth
-        .controller_update_targets(report.platform, &report.current)
-        .await?;
-    let busy = auth.controller_update_busy(s).await?;
-    let support = if report.native_ready {
-        wire::Support::Supported
-    } else {
-        wire::Support::ManualUpdateRequired
-    };
-    let availability = if busy {
-        wire::Availability::Busy
-    } else {
-        wire::Availability::Ready
-    };
-    let result = wire::Catalog {
-        support,
-        availability: if !report.native_ready {
-            wire::Availability::CatalogUnavailable
-        } else {
-            availability
-        },
-        current: Some(report.current),
-        observed_at: Some(report.observed_at),
-        platform: report.platform,
-        catalog_revision: revision,
-        targets: if busy || !report.native_ready {
-            vec![]
-        } else {
-            targets
-        },
-    };
-    result
-        .validate()
-        .map_err(|_| failure("controller_update_catalog_unavailable"))?;
-    Ok(result)
-}
-
-pub(crate) async fn controller_update_catalog(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(session): Extension<CurrentSession>,
-    Path((ws, machine)): Path<(String, String)>,
-) -> Result<Response, ApiFailure> {
-    authorize(&state, &auth, &policy, &session, &ws, &machine).await?;
-    Ok(response(
-        catalog(&state, &auth, &scope(&session, &ws, &machine)).await?,
-    ))
-}
-pub(crate) async fn controller_update_prepare(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(session): Extension<CurrentSession>,
-    Path((ws, machine)): Path<(String, String)>,
-    body: Bytes,
-) -> Result<Response, ApiFailure> {
-    authorize(&state, &auth, &policy, &session, &ws, &machine).await?;
-    let request: wire::PrepareRequest = decode(&body)?;
-    request
-        .validate()
-        .map_err(|_| failure("controller_update_request_invalid"))?;
-    let s = scope(&session, &ws, &machine);
-    auth.controller_update_prepare_begin(&s).await?;
-    let catalog = catalog(&state, &auth, &s).await?;
-    if catalog.availability != wire::Availability::Ready
-        || catalog.support != wire::Support::Supported
-    {
-        return Err(failure("controller_update_busy"));
-    }
-    let target = catalog
-        .targets
-        .into_iter()
-        .find(|t| t.target_id == request.target_id)
-        .ok_or_else(|| failure("controller_update_target_unavailable"))?;
-    let current = catalog
-        .current
-        .ok_or_else(|| failure("controller_update_preview_changed"))?;
-    let digest = crate::auth::sha256_hex(
-        &serde_json::to_string(&(
-            &current,
-            &target,
-            catalog.catalog_revision,
-            wire::PLAN_STEPS,
-        ))
-        .map_err(|_| failure("controller_update_preview_changed"))?,
-    );
-    let binding = DispatchBinding {
-        operation_id: Uuid::new_v4().to_string(),
-        workspace_id: ws.clone(),
-        server_id: machine.clone(),
-        current,
-        target,
-        catalog_revision: catalog.catalog_revision,
-        plan_digest: digest,
-        created_at: chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
-            .ok_or_else(|| failure("controller_update_preview_changed"))?,
-    };
-    Ok(response(
-        auth.controller_update_preview(&s, &binding).await?,
-    ))
-}
-pub(crate) async fn controller_update_confirm(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(session): Extension<CurrentSession>,
-    Path((ws, machine)): Path<(String, String)>,
-    body: Bytes,
-) -> Result<Response, ApiFailure> {
-    authorize(&state, &auth, &policy, &session, &ws, &machine).await?;
-    let request: wire::ConfirmRequest = decode(&body)?;
-    request
-        .validate()
-        .map_err(|_| failure("controller_update_request_invalid"))?;
-    let s = scope(&session, &ws, &machine);
-    let binding = auth
-        .controller_update_confirmation(&s, &request.confirmation_token)
-        .await?;
-    // Consumed-token lookup must work offline and while the slot is held.
-    match auth
-        .controller_update_operation(&s, &binding.operation_id)
+    .map_err(|_| {
+        failure(
+            StatusCode::GATEWAY_TIMEOUT,
+            "controller_update_unconfirmed",
+            "The Controller did not answer; read the update status before retrying",
+        )
+    })??;
+    REQUESTED
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(
+            (workspace_id.clone(), server_id.clone()),
+            request.version.clone(),
+        );
+    let (actor_kind, actor_id) = control_audit_actor(session.as_deref(), subject.as_ref());
+    if let Err(error) = auth
+        .record_workspace_audit(NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind,
+            actor_id,
+            action: "machine.update",
+            resource_kind: "machine",
+            resource_id: &server_id,
+            resource_name: None,
+            payload: json!({ "controller_update_version": request.version }),
+        })
         .await
     {
-        Ok(existing) => return Ok(response(existing)),
-        Err(e) if e.code() == "controller_update_operation_not_found" => {}
-        Err(e) => return Err(e.into()),
+        tracing::warn!(?error, %workspace_id, %server_id, "failed to record Controller update audit event");
     }
-    let fresh = catalog(&state, &auth, &s).await?;
-    if fresh.support != wire::Support::Supported
-        || fresh.availability != wire::Availability::Ready
-        || fresh.current.as_ref() != Some(&binding.current)
-        || fresh.catalog_revision != binding.catalog_revision
-        || !fresh.targets.contains(&binding.target)
-    {
-        return Err(failure("controller_update_preview_changed"));
-    }
-    // Catalog inspection can wait on a remote Controller. Recheck membership
-    // and machine.exec after that wait, immediately before consuming authority.
-    authorize(&state, &auth, &policy, &session, &ws, &machine).await?;
-    let accepted = auth
-        .controller_update_accept(&s, &request.confirmation_token, &binding)
-        .await?;
-    if let Some(binding) = accepted.dispatch {
-        // Exactly one call after durable acceptance. A timeout/drop/connection
-        // replacement leaves the slot held and is reconciled only by job GET.
-        let _ = tokio::time::timeout(
-            Duration::from_secs(10),
-            state.send_command(
-                &ws,
-                &machine,
-                AgentCommand::ControllerUpdateDispatch { binding },
-            ),
+    let mut status: UpdateStatus = serde_json::from_value(data).map_err(|_| {
+        failure(
+            StatusCode::BAD_GATEWAY,
+            "controller_update_unconfirmed",
+            "The Controller returned an invalid update status",
         )
-        .await;
-    }
-    Ok(response(accepted.operation))
-}
-pub(crate) async fn controller_update_operations(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(session): Extension<CurrentSession>,
-    Path((ws, machine)): Path<(String, String)>,
-) -> Result<Response, ApiFailure> {
-    authorize(&state, &auth, &policy, &session, &ws, &machine).await?;
-    Ok(response(
-        auth.controller_update_discovery(&scope(&session, &ws, &machine))
-            .await?,
-    ))
-}
-pub(crate) async fn controller_update_operation(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(session): Extension<CurrentSession>,
-    Path((ws, machine, id)): Path<(String, String, String)>,
-) -> Result<Response, ApiFailure> {
-    authorize(&state, &auth, &policy, &session, &ws, &machine).await?;
-    if Uuid::parse_str(&id).is_err()
-        || Uuid::parse_str(&id)
-            .ok()
-            .is_none_or(|v| v.to_string() != id || v.get_version_num() != 4)
-    {
-        return Err(update_not_found().into());
-    }
-    let s = scope(&session, &ws, &machine);
-    let mut op = auth.controller_update_note_silence(&s, &id).await?;
-    if auth.controller_update_query_lease(&s, &id).await? {
-        if let Ok(Ok(data)) = tokio::time::timeout(
-            Duration::from_secs(10),
-            state.send_command(
-                &ws,
-                &machine,
-                AgentCommand::ControllerUpdateOperation { operation_id: id },
-            ),
-        )
-        .await
-        {
-            let report: wire::Operation = report(data)?;
-            op = auth.controller_update_observe(&s, &report).await?;
-        }
-    }
-    Ok(response(op))
+    })?;
+    status.target_version = Some(request.version);
+    Ok((StatusCode::ACCEPTED, Json(status)))
 }
 
-// Applied to all route outcomes, including body-limit and handler refusals.
-pub(crate) async fn controller_update_no_store(mut response: Response) -> Response {
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reported(state: UpdateState) -> Option<UpdateStatus> {
+        Some(UpdateStatus {
+            state,
+            target_version: None,
+            controller_version: None,
+        })
+    }
+
+    #[test]
+    fn status_follows_controller_progress_then_reconnect_version() {
+        let target = || Some("v0.2.0".to_string());
+        assert_eq!(combine(None, true, "0.1.0", None).state, UpdateState::Idle);
+        assert_eq!(
+            combine(target(), true, "0.1.0", reported(UpdateState::Installing)).state,
+            UpdateState::Installing
+        );
+        // Offline between the old Controller exiting and the new one registering.
+        assert_eq!(
+            combine(target(), false, "0.1.0", None).state,
+            UpdateState::Restarting
+        );
+        // A fresh Controller process reports idle; its version decides.
+        assert_eq!(
+            combine(target(), true, "0.2.0", reported(UpdateState::Idle)).state,
+            UpdateState::Done
+        );
+        assert!(matches!(
+            combine(target(), true, "0.1.0", reported(UpdateState::Idle)).state,
+            UpdateState::Failed { .. }
+        ));
+        let failed = UpdateState::Failed {
+            reason: "release signature verification failed".into(),
+        };
+        assert_eq!(
+            combine(target(), true, "0.1.0", reported(failed.clone())).state,
+            failed
+        );
+    }
 }

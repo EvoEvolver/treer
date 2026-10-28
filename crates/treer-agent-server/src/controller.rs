@@ -38,14 +38,6 @@ use launch::*;
 mod output;
 use output::*;
 
-#[cfg(any(windows, test))]
-#[path = "controller_update_state.rs"]
-mod update_state;
-#[cfg(windows)]
-pub(crate) use update_state::{
-    ControllerStateEvidence, ControllerUpdateChild, ControllerUpdateState,
-};
-
 const OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 const OUTPUT_TRIM_SLACK_BYTES: usize = 64 * 1024;
 const STATUS_SCAN_LIMIT_BYTES: usize = 16 * 1024;
@@ -265,8 +257,6 @@ pub struct ControllerConfig {
 }
 
 struct ControllerInner {
-    #[cfg(any(windows, test))]
-    update_instance_id: uuid::Uuid,
     // No field, setter, wire/config option or read of this value in production.
     // Only isolated Windows exec unit-test fixtures opt in (never real Hosts).
     #[cfg(all(test, windows))]
@@ -328,6 +318,10 @@ pub struct TerminalSnapshot {
 }
 
 impl ControllerRuntime {
+    pub(crate) fn host(&self) -> HostClient {
+        self.inner.host.clone()
+    }
+
     pub(crate) fn machine_root(&self) -> &Path {
         &self.inner.root
     }
@@ -411,8 +405,6 @@ impl ControllerRuntime {
         .collect();
         let runtime_result = Self {
             inner: Arc::new(ControllerInner {
-                #[cfg(any(windows, test))]
-                update_instance_id: uuid::Uuid::new_v4(),
                 #[cfg(all(test, windows))]
                 hosted_test_module_cache: Mutex::new(None),
                 uploads: crate::machine_upload::Uploads::new(

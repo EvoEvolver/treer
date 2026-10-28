@@ -881,17 +881,12 @@ impl AuthStore {
 }
 mod accounts;
 mod apps;
-mod controller_update;
-mod controller_update_catalog;
-#[cfg(test)]
-mod controller_update_tests;
 mod email;
 mod handlers;
 mod machines;
 mod network;
 mod organizations;
 mod pins;
-pub(crate) use controller_update::*;
 mod workload_tree;
 
 pub(crate) use handlers::*;

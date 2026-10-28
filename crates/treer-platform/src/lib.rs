@@ -5,25 +5,8 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-#[allow(unsafe_code)]
-pub mod birth_lock;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-pub mod bounded_child;
 mod environment;
-#[cfg(unix)]
-pub mod installation_directory;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-pub mod local_filesystem;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-pub mod lock_transfer;
 pub mod machine_file;
-#[cfg(unix)]
-pub mod private_directory;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-pub mod process_image;
-#[cfg(unix)]
-pub mod retained_executable;
 pub use environment::{
     clean_process_environment_before_threads, inherited_environment, inherited_variable_allowed,
     machine_exec_environment, machine_exec_variable_allowed,
@@ -33,27 +16,8 @@ pub use environment::{
 #[allow(unsafe_code)]
 mod windows;
 #[cfg(windows)]
-pub mod windows_update_backup;
-#[cfg(any(windows, test))]
-pub mod windows_update_catalog;
-#[cfg(windows)]
-pub mod windows_update_inputs;
-#[cfg(windows)]
-pub mod windows_update_pair;
-#[cfg(windows)]
-#[allow(unsafe_code)]
-pub mod windows_update_pipe;
-#[cfg(windows)]
-pub mod windows_update_preparation;
-#[cfg(windows)]
-#[allow(unsafe_code)]
-pub mod windows_update_process;
-#[cfg(windows)]
-pub mod windows_update_store;
-#[cfg(windows)]
 pub use windows::{
-    current_user_sid, process_created_at, terminate_process, transfer_file_identity, LocalLock,
-    ProcessTreeGuard,
+    current_user_sid, process_created_at, terminate_process, LocalLock, ProcessTreeGuard,
 };
 
 pub trait LocalIo: AsyncRead + AsyncWrite + Unpin + Send {}

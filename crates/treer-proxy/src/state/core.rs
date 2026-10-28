@@ -46,8 +46,6 @@ impl AppState {
         let (events, _) = broadcast::channel(512);
         Self {
             inner: std::sync::Arc::new(Inner {
-                #[cfg(test)]
-                controller_update_dispatch_attempts: std::sync::atomic::AtomicUsize::new(0),
                 workspaces: RwLock::new(HashMap::new()),
                 connections: RwLock::new(HashMap::new()),
                 cluster_snapshot_revisions: Mutex::new(HashMap::new()),
@@ -832,17 +830,6 @@ impl AppState {
         })
         .await?;
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn close_fixture_server_connection(&self, workspace: &str, server: &str) {
-        self.release_server_runtime(
-            workspace,
-            server,
-            "fixture disconnect",
-            "fixture_disconnect",
-        )
-        .await;
     }
 
     pub(super) async fn release_server_runtime(

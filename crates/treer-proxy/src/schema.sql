@@ -974,58 +974,7 @@ CREATE INDEX IF NOT EXISTS machine_uploads_workspace_state ON machine_uploads(wo
 CREATE INDEX IF NOT EXISTS machine_uploads_server_state ON machine_uploads(server_id, state);
 CREATE INDEX IF NOT EXISTS machine_uploads_subject_state ON machine_uploads(subject_kind, subject_id, state);
 
--- #222: dispatch intent and native receipt projection survive Proxy/Controller
--- restarts. No token plaintext, commands, paths or artifact URLs are stored.
-CREATE TABLE IF NOT EXISTS controller_update_previews (
-    token_hash TEXT PRIMARY KEY,
-    operation_id TEXT NOT NULL UNIQUE,
-    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
-    server_id TEXT NOT NULL,
-    created_by TEXT NOT NULL,
-    session_hash TEXT NOT NULL,
-    binding JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMPTZ NOT NULL,
-    consumed_at TIMESTAMPTZ
-);
-CREATE INDEX IF NOT EXISTS controller_update_previews_scope
-    ON controller_update_previews(workspace_id, server_id, created_by, created_at);
-CREATE TABLE IF NOT EXISTS controller_update_attempts (
-    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
-    server_id TEXT NOT NULL,
-    created_by TEXT NOT NULL,
-    attempted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS controller_update_attempts_scope
-    ON controller_update_attempts(workspace_id, server_id, created_by, attempted_at);
-CREATE TABLE IF NOT EXISTS controller_update_operations (
-    operation_id TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
-    server_id TEXT NOT NULL,
-    created_by TEXT NOT NULL,
-    binding JSONB NOT NULL,
-    operation JSONB NOT NULL,
-    holds_slot BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    finished_at TIMESTAMPTZ,
-    queried_at TIMESTAMPTZ,
-    query_lease_until TIMESTAMPTZ
-);
-CREATE UNIQUE INDEX IF NOT EXISTS controller_update_active_machine
-    ON controller_update_operations(workspace_id, server_id) WHERE holds_slot;
-CREATE INDEX IF NOT EXISTS controller_update_operations_creator
-    ON controller_update_operations(workspace_id, server_id, created_by, created_at DESC);
-CREATE TABLE IF NOT EXISTS controller_update_catalog_floor (
-    platform TEXT PRIMARY KEY,
-    revision BIGINT NOT NULL CHECK(revision > 0)
-);
-
--- Provisioned only by reviewed server-side release tooling, never the browser.
--- Sequence is an explicit ordering authority; SHA labels cannot order releases.
-CREATE TABLE IF NOT EXISTS controller_update_catalog_entries (
-    platform TEXT NOT NULL,
-    revision BIGINT NOT NULL CHECK(revision > 0),
-    release_sequence BIGINT NOT NULL CHECK(release_sequence > 0),
-    target JSONB NOT NULL,
-    PRIMARY KEY(platform, revision, release_sequence)
-);
+-- The former #222 Controller update tables; updates now keep no Proxy state.
+DROP TABLE IF EXISTS controller_update_previews, controller_update_attempts,
+    controller_update_operations, controller_update_catalog_floor,
+    controller_update_catalog_entries;

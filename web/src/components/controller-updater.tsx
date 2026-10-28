@@ -1,171 +1,74 @@
-import { useEffect, useRef, useState } from 'react'
-import { createControllerUpdateClient, CONTROLLER_UPDATE_CAPABILITY } from '@/lib/controller-update-client'
-import type { Machine } from '@/lib/api'
-import { useT } from '@/i18n'
-import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { controllerUpdateActive, controllerUpdateCanPrepare, controllerUpdateStatus, sameControllerIdentity, type ControllerUpdateClient, type ControllerUpdatePreview, type ControllerUpdateSnapshot } from '@/lib/controller-update'
+import { useCallback, useEffect, useState } from "react"
+import { api, ApiError, type Machine } from "@/lib/api"
+import { t } from "@/i18n"
+import { Button } from "@/components/ui/button"
 
-// Authenticated scope keys contain only user ID and an in-memory auth epoch.
-export function ControllerUpdateEntry({ workspaceId, machine, scopeKey }: { workspaceId: string; machine: Machine; scopeKey: string }) {
+export const CONTROLLER_UPDATE_CAPABILITY = "machine.controller-update.v2"
+
+export type ControllerUpdateState = "idle" | "downloading" | "installing" | "restarting" | "failed" | "done"
+export type ControllerUpdateStatus = { state: ControllerUpdateState; reason?: string; target_version?: string; controller_version?: string }
+
+const ACTIVE: ControllerUpdateState[] = ["downloading", "installing", "restarting"]
+const RELEASE_TAG = /^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/
+
+// "Update machine M to release V". The Controller downloads and verifies the
+// signed release, replaces its binaries and restarts through its Host; the
+// Proxy reports done once the machine reconnects with that version.
+export function ControllerUpdater({ workspaceId, machine }: { workspaceId: string; machine: Machine }) {
   const supported = machine.capabilities?.includes(CONTROLLER_UPDATE_CAPABILITY) ?? false
-  const key = JSON.stringify([workspaceId, machine.server_id, scopeKey, supported])
-  const [binding, setBinding] = useState<{ key: string; client: ControllerUpdateClient } | null>(null)
-  useEffect(() => {
-    const lifetime = new AbortController()
-    const client = createControllerUpdateClient(workspaceId, { server_id: machine.server_id, capabilities: supported ? [CONTROLLER_UPDATE_CAPABILITY] : [] }, lifetime.signal)
-    setBinding({ key, client })
-    return () => lifetime.abort()
-  }, [workspaceId, machine.server_id, scopeKey, supported, key])
-  if (!binding || binding.key !== key) return null
-  return <ControllerUpdater machineId={machine.server_id} client={binding.client} scopeKey={key} />
-}
-
-// Same prepare/one-use-confirm/read-only-observe interaction as the CLI installer.
-// Scope by workspace/machine/session at the call site; nothing is persisted.
-// Runtime mutation remains gated by both Proxy and Controller capabilities.
-export function ControllerUpdater({ machineId, client, scopeKey }: { machineId: string; client: ControllerUpdateClient; scopeKey: string }) {
-  // Caller changes this opaque epoch on user/session changes; never use a token.
-  return <ScopedControllerUpdater key={JSON.stringify([scopeKey, machineId])} machineId={machineId} client={client} />
-}
-function ScopedControllerUpdater({ machineId, client }: { machineId: string; client: ControllerUpdateClient }) {
-  const t = useT()
-  const [open, setOpen] = useState(false)
-  const [snapshot, setSnapshot] = useState<ControllerUpdateSnapshot | null>(null)
-  const [preview, setPreview] = useState<Omit<ControllerUpdatePreview, 'confirmationToken'> | null>(null)
+  const base = `/api/workspaces/${encodeURIComponent(workspaceId)}/machines/${encodeURIComponent(machine.server_id)}/controller-update`
+  const [version, setVersion] = useState("")
+  const [status, setStatus] = useState<ControllerUpdateStatus | null>(null)
+  const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
-  const [uncertain, setUncertain] = useState(false)
-  const [error, setError] = useState(false)
-  const [expired, setExpired] = useState(false)
-  const [paused, setPaused] = useState(false)
-  const token = useRef<string | null>(null)
-  const expiry = useRef(0)
-  const pending = useRef(false)
-  const attempted = useRef(false)
-  const expectedOperationId = useRef<string | null>(null)
-  const generation = useRef(0)
-  const mounted = useRef(true)
-  const read = useRef<AbortController | null>(null)
-  const trigger = useRef<HTMLButtonElement>(null)
-  const heading = useRef<HTMLHeadingElement>(null)
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; generation.current++; token.current = null; read.current?.abort() } }, [])
+  const active = status ? ACTIVE.includes(status.state) : false
 
-  async function inspect(signal: AbortSignal) {
-    const next = await client.inspect(signal, expectedOperationId.current ?? undefined)
-    if (signal.aborted || !mounted.current) return
-    if (next.machineId !== machineId || next.operation && (next.operation.machineId !== machineId || expectedOperationId.current && next.operation.id !== expectedOperationId.current)) throw Error('invalid_response')
-    if (next.operation && controllerUpdateCanPrepare(next)) {
-      attempted.current = false
-      expectedOperationId.current = null
-    }
-    setSnapshot(next)
-    // After an attempted dispatch, absence is not proof that nothing happened.
-    setUncertain(attempted.current && !next.operation)
-    return next
-  }
-  useEffect(() => {
-    if (!open || busy || preview) return
-    const controller = new AbortController(); read.current = controller
-    let timer: number | undefined, polls = 0
-    async function poll() {
-      try {
-        const result = await inspect(controller.signal)
-        if (result && (!result.operation || !controllerUpdateActive(result.operation)) && !(attempted.current && !result.operation)) return
-      }
-      catch { if (!controller.signal.aborted && mounted.current) { setUncertain(true); setError(true) } }
-      if (!controller.signal.aborted && ++polls < 300) timer = window.setTimeout(() => void poll(), 2000)
-      else if (!controller.signal.aborted) setPaused(true)
-    }
-    void poll()
-    return () => { controller.abort(); if (timer) window.clearTimeout(timer) }
-  }, [open, client, machineId, busy, preview])
-  useEffect(() => {
-    if (!preview) return
-    heading.current?.focus()
-    const timer = window.setTimeout(() => { token.current = null; setExpired(true) }, Math.max(0, expiry.current - performance.now()))
-    return () => window.clearTimeout(timer)
-  }, [preview])
-  function changeOpen(next: boolean) {
-    generation.current++; token.current = null; setPreview(null); setExpired(false); setOpen(next)
-  }
-  async function prepare(targetId: string) {
-    if (pending.current || attempted.current || uncertain || !snapshot || !controllerUpdateCanPrepare(snapshot) || !snapshot.current) return
-    pending.current = true; setBusy(true); setError(false); token.current = null; setPreview(null)
-    const epoch = ++generation.current, controller = new AbortController(); read.current?.abort(); read.current = controller
+  const load = useCallback(async (signal?: AbortSignal) => {
     try {
-      const next = await client.prepare(targetId, controller.signal)
-      if (!mounted.current || epoch !== generation.current) return
-      const target = snapshot.targets.find(v => v.id === targetId)
-      if (!target || next.machineId !== machineId || next.current.id !== snapshot.current.id || !sameControllerIdentity(next.current.identity, snapshot.current.identity) || next.target.id !== target.id || !sameControllerIdentity(next.target.identity, target.identity) || next.target.version !== target.version || next.target.platform !== target.platform || !next.confirmationToken || !Number.isFinite(next.expiresInMs) || next.expiresInMs <= 0 || next.expiresInMs > 120000) throw Error('invalid_response')
-      const { confirmationToken, ...display } = next
-      token.current = confirmationToken; expiry.current = performance.now() + next.expiresInMs; setExpired(false); setPreview(display)
-    } catch { if (mounted.current && epoch === generation.current) setError(true) }
-    finally { pending.current = false; if (mounted.current) setBusy(false) }
-  }
-  async function dispatch() {
-    if (pending.current || !preview || !token.current || performance.now() >= expiry.current || attempted.current) return
-    const confirmation = token.current
-    expectedOperationId.current = preview.operationId
-    token.current = null; attempted.current = true; pending.current = true; setBusy(true); setPreview(null); setUncertain(true)
-    try { await client.dispatch(confirmation) }
-    catch { /* Ambiguous refusal or delivery: recover by GET, never resend. */ }
-    finally {
-      pending.current = false
-      if (mounted.current) { setBusy(false); await refresh() }
+      setStatus(await api<ControllerUpdateStatus>(base, { signal, cache: "no-store" }))
+    } catch (reason) {
+      if (!signal?.aborted) setError(reason instanceof Error ? reason.message : t("controller_update.failed"))
+    }
+  }, [base])
+
+  useEffect(() => {
+    if (!supported) return
+    const controller = new AbortController()
+    void load(controller.signal)
+    return () => controller.abort()
+  }, [supported, load])
+
+  useEffect(() => {
+    if (!active) return
+    const controller = new AbortController()
+    const timer = window.setInterval(() => void load(controller.signal), 2000)
+    return () => { window.clearInterval(timer); controller.abort() }
+  }, [active, load])
+
+  if (!supported) return <p className="max-w-xs text-xs text-muted-foreground">{t("controller_update.manual")}</p>
+
+  const submit = async () => {
+    setBusy(true)
+    setError("")
+    try {
+      setStatus(await api<ControllerUpdateStatus>(base, { method: "POST", body: JSON.stringify({ version: version.trim() }) }))
+    } catch (reason) {
+      setError(reason instanceof ApiError || reason instanceof Error ? reason.message : t("controller_update.failed"))
+    } finally {
+      setBusy(false)
     }
   }
-  async function refresh() {
-    if (pending.current) return
-    pending.current = true; setBusy(true); setError(false); setPaused(false)
-    const controller = new AbortController(); read.current?.abort(); read.current = controller
-    try { await inspect(controller.signal) }
-    catch { if (mounted.current) { setUncertain(true); setError(true) } }
-    finally { pending.current = false; if (mounted.current) setBusy(false) }
-  }
-  const operation = snapshot?.operation
-  const state = operation ? controllerUpdateStatus(operation) : null
-  return <>
-    <Button ref={trigger} type="button" variant="outline" className="max-md:min-h-11" onClick={() => changeOpen(true)}>{t('controller_update.title')}</Button>
-    {!open && (operation || uncertain) && <p className="mt-2 text-sm" role="status">{operation ? t(`controller_update.${state!}`) : t('controller_update.unconfirmed')}</p>}
-    <Dialog open={open} onOpenChange={changeOpen}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] max-w-xl overflow-y-auto max-md:[&>button:last-child]:min-h-11 max-md:[&>button:last-child]:min-w-11" onCloseAutoFocus={event => { if (trigger.current) { event.preventDefault(); trigger.current.focus() } }}>
-        <DialogHeader><DialogTitle>{t('controller_update.title')}</DialogTitle><DialogDescription>{t('controller_update.disconnect')}</DialogDescription></DialogHeader>
-        <div className="min-w-0 space-y-4 text-sm [overflow-wrap:anywhere] [&_p]:[unicode-bidi:plaintext]">
-          {error && <p role="alert">{t('controller_update.unavailable')}</p>}
-          <p className="break-all font-mono text-xs">{machineId}</p>
-          {snapshot && <p className="break-words">{t('controller_update.current', { version: snapshot.current?.version ?? t('machine.unknown') })}</p>}
-          {snapshot?.blockedByOtherOperation && <p role="status">{t('controller_update.busy')}</p>}
-          {snapshot && !snapshot.supported && <p role="status">{t(snapshot.unavailableReason === 'offline' ? 'controller_update.offline' : snapshot.unavailableReason === 'forbidden' ? 'controller_update.forbidden' : snapshot.unavailableReason === 'unavailable' ? 'controller_update.unavailable' : 'controller_update.manual')}</p>}
-          {uncertain && <p role="status">{t(operation ? 'controller_update.observation_unavailable' : 'controller_update.unconfirmed')}</p>}
-          {paused && <p role="status">{t('controller_update.paused')}</p>}
-          {operation && <div className="space-y-2 rounded-md border bg-muted/30 p-3">
-            <p role="status">{t(`controller_update.${state!}`)}</p>
-            <p className="break-words">{t('controller_update.target', { version: operation.target.version })}</p>
-            <p className="break-all font-mono text-xs">{operation.id}</p>
-            {operation.phase && <p>{t(`controller_update.phase_${operation.phase}`)}</p>}
-            {operation.observation !== 'available' && <p>{t(operation.observation === 'waiting_for_reconnect' ? 'controller_update.waiting_for_reconnect' : 'controller_update.observation_unavailable')}</p>}
-            <p>{t('controller_update.observed', { time: operation.observedAt ?? t('machine.unknown') })}</p>
-            {state === 'rolled_back' && <p>{t('controller_update.restored', { version: operation.restored?.version ?? t('machine.unknown') })}</p>}
-          </div>}
-          {preview ? <>
-            <h3 ref={heading} tabIndex={-1} className="font-semibold outline-none">{t('controller_update.preview')}</h3>
-            <p>{t('controller_update.current', { version: preview.current.version })}</p>
-            <p>{t('controller_update.target', { version: preview.target.version })}</p>
-            <details><summary className="min-h-11 cursor-pointer py-3">{t('controller_update.build_details')}</summary>{[preview.current, preview.target].map((release, i) => <div key={i} className="space-y-1 py-2"><p>{t(i ? 'controller_update.target' : 'controller_update.current', { version: release.version })}</p>{Object.entries(release.identity).map(([field, value]) => <p key={field} className="break-all font-mono text-xs">{t(`controller_update.identity_${field as keyof typeof release.identity}`)}: {value}</p>)}</div>)}</details>
-            <p className="break-words">{preview.target.platform}</p>
-            <ol className="list-inside list-decimal space-y-2">{preview.steps.map(step => <li key={step}>{t(`controller_update.step_${step}`)}</li>)}</ol>
-            {expired && <p role="alert">{t('controller_update.expired')}</p>}
-            <div className="flex flex-wrap justify-end gap-2"><Button variant="outline" className="max-md:min-h-11" onClick={() => changeOpen(false)}>{t('common.cancel')}</Button><Button className="max-md:min-h-11" disabled={busy || expired} onClick={() => void dispatch()}>{t('controller_update.title')}</Button></div>
-          </> : <>
-            {snapshot && controllerUpdateCanPrepare(snapshot) && !uncertain && !attempted.current && <div className="space-y-2">
-              <p>{t('controller_update.trusted')}</p>
-              {snapshot.targets.length === 0 && <p>{t('controller_update.no_targets')}</p>}
-              {snapshot.targets.map(target => <Button key={target.id} variant="outline" className="mr-2 max-w-full whitespace-normal break-words max-md:min-h-11" disabled={busy} onClick={() => void prepare(target.id)}>{t('controller_update.choose', { version: target.version })}</Button>)}
-            </div>}
-            <Button variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void refresh()}>{t('controller_update.refresh')}</Button>
-          </>}
-        </div>
-      </DialogContent>
-    </Dialog>
-  </>
+
+  const valid = RELEASE_TAG.test(version.trim())
+  const state = status?.state ?? "idle"
+  return <form className="flex flex-col gap-2" aria-label={t("controller_update.title")} onSubmit={(event) => { event.preventDefault(); if (valid && !active) void submit() }}>
+    <div className="flex flex-wrap items-center gap-2">
+      <input className="h-9 w-32 rounded-md border bg-background px-2 font-mono text-sm max-md:min-h-11" placeholder="v1.2.3" aria-label={t("controller_update.version")} value={version} onChange={(event) => setVersion(event.target.value)} disabled={busy || active} />
+      <Button type="submit" variant="outline" className="max-md:min-h-11" disabled={!valid || busy || active || machine.status !== "online"}>{t("controller_update.title")}</Button>
+    </div>
+    {state !== "idle" && <p role="status" className={`text-xs ${state === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
+      {t(`controller_update.state_${state}`, { version: status?.target_version ?? "" })}{state === "failed" && status?.reason ? ` ${status.reason}` : ""}
+    </p>}
+    {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+  </form>
 }

@@ -395,15 +395,11 @@ pub enum AgentCommand {
         request: ReplaceAgentStartupRequest,
         revision: u64,
     },
-    /// Controller update (#222): inspect readiness, dispatch an exact prepared
-    /// binding once, and recover the durable operation by ID.
-    ControllerUpdateInspect {},
-    ControllerUpdateDispatch {
-        binding: crate::controller_update_runtime::DispatchBinding,
+    /// Download, verify and install release `version`, then restart via the Host.
+    ControllerUpdateStart {
+        version: String,
     },
-    ControllerUpdateOperation {
-        operation_id: String,
-    },
+    ControllerUpdateStatus {},
     StartupAdminGet {
         agent_id: String,
     },
@@ -592,13 +588,9 @@ impl AgentCommand {
                 Some(CAPABILITY_AGENT_STARTUP)
             }
             Self::Exec { .. } => Some(CAPABILITY_MACHINE_EXEC),
-            Self::ControllerUpdateInspect {} | Self::ControllerUpdateDispatch { .. } => {
+            Self::ControllerUpdateStart { .. } | Self::ControllerUpdateStatus {} => {
                 Some(crate::controller_update::CAPABILITY)
             }
-            // Reading an existing, workspace/server-bound receipt must survive
-            // replacement by an ordinary capOFF image. This never admits an
-            // update; the authenticated Proxy route owns the durable operation.
-            Self::ControllerUpdateOperation { .. } => None,
             Self::FileTransfer { .. } | Self::FileTransferInfo {} => {
                 Some(CAPABILITY_MACHINE_FILE_TRANSFER)
             }

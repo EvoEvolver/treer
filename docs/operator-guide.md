@@ -369,7 +369,7 @@ is rejected. Uploads use Wrangler v4 and its authenticated account. Override
 `TREER_WRANGLER` when publishing to another R2 environment.
 
 The installed Controller updater consumes these signed channels and manifests.
-Trust is resolved before update locks, staging, or service activation. An explicit
+Trust is resolved before any download, staging, or service activation. An explicit
 `--public-key` / `TREER_RELEASE_PUBLIC_KEY` is authoritative. Otherwise an existing
 `~/.config/treer/release-signing-key.pub.pem` (under `XDG_CONFIG_HOME` when set)
 remains authoritative; an unreadable or malformed configured key is an error,
@@ -632,39 +632,35 @@ treer-agent-server connect \
 
 ### Controller hot updates
 
-Pull and hot-activate the latest Controller and agent-facing CLI with one command:
+Install a signed release and hot-activate the Controller with one command:
 
 ```bash
 treer-agent-server update
+treer-agent-server update --version v0.1.16
 treer-agent-server update --channel canary --public-key /trusted/release-key.pub.pem
 # Self-hosted signed distributor:
 treer-agent-server update --release-base-url https://releases.example/ --public-key /trusted/release-key.pub.pem
 ```
 
-`update` defaults to the `stable` channel at `https://releases.treer.ai/`.
+`update` defaults to the `stable` channel at `https://releases.treer.ai/`; the
+channel's signed document selects the version unless `--version` is given.
 `--channel` / `TREER_RELEASE_CHANNEL` and `--release-base-url` /
 `TREER_RELEASE_BASE_URL` select another signed release channel and distributor.
-`--proxy` remains an alias for `--release-base-url`; the old unsigned Proxy
-`/artifacts/` endpoints are no longer accepted as an update source. HTTPS is
-required except for loopback test distributors, and redirects are rejected.
-The updater verifies the channel and manifest Ed25519 signatures using the
-local trust key, checks the manifest digest bound by the channel, and verifies
-both platform binaries' byte lengths and SHA256 against the signed manifest.
-Only after both pass does it execute their `--help` checks and atomically replace
-the installed files. Verification failures leave installed binaries and running
-services untouched. A valid signature authenticates a release, but does not yet
-prevent replay of an older signed channel or enforce a minimum version.
-From a normal host shell it asks every installed stable Host to restart its
-Controller. From a managed Agent context it restarts only that Agent's
-Controller and checks the new epoch through `TREER_AGENT_SERVER_URL`; the shared
-binary is still available to other Controllers on their next restart. If
-activation fails, both binaries are restored and the affected Controller set is
-restarted. Hosts, existing agents, PTYs, and buffered terminal output remain
-alive while browsers reconnect.
+HTTPS is required except for loopback test distributors, and redirects are
+rejected. The updater verifies the manifest's Ed25519 signature using the local
+trust key and each binary's byte length and SHA256 against it before staging.
+Verification failures leave installed binaries and running services untouched.
+A valid signature authenticates a release but does not prevent installing an
+older signed version.
 
-The long-lived `treer-agent-host` is deliberately not part of this hot update.
-Installing a newer Host still requires a full service restart, which terminates
-the agents and PTYs owned by that Host.
+It replaces `treer-agent-server`, `treer` and `treer-agent-host` next to their
+installed paths, keeping one `<name>.old` each, then asks every installed Host
+(or only the managed Agent's own Host from an Agent context) to restart its
+Controller. Hosts, existing agents, PTYs, and buffered terminal output remain
+alive while browsers reconnect. The new Host binary takes effect only on the
+next full `service restart`, which terminates the agents and PTYs owned by that
+Host. The same install runs remotely from the Console; see
+[Machine updates](#machine-updates).
 
 The enrollment key can be used once and contains a versioned encoding of its
 workspace ID. The Proxy verifies that embedded workspace against its enrollment
@@ -718,8 +714,8 @@ treer-agent-host --version
 The Controller's loopback `/api/health` response and each machine in the web
 application show separate Controller and Host build identities. They can differ
 after a hot Controller update because `update` deliberately leaves the stable
-Host running. A full reinstall and service restart is required to activate a
-new Host binary.
+Host running. `update` replaces the Host binary on disk; `service restart`
+activates it.
 
 `restart-controller` activates a Controller binary installed manually and
 preserves running agents. `restart` restarts the long-lived Host itself and
@@ -2062,10 +2058,9 @@ Running `service restart-controller` inside that exec can lose its reply when
 the Controller is replaced, even if restart succeeded. Run activation from a
 host terminal or a Host-owned managed command instead; inspect its output after
 reconnecting. `Start-Process` alone is not a Windows Job-detachment guarantee.
-Host updates are cold replacements and terminate all workloads; the Rust
-in-place updater remains unsupported on Windows. See the
-[Windows update and acceptance plan](research/2026-10-13-windows-runtime-readiness.md)
-for staging, whole-set rollback and native test requirements.
+Host updates are cold replacements and terminate all workloads. Controller
+updates on Windows rename the running image to `<name>.old` before moving the
+new file in.
 
 An Agent may register a `treer.agent-interface/v1` server on its private
 loopback. The Controller verifies its manifest and automatically sends semantic
@@ -2388,460 +2383,91 @@ older Controller yields a clear upgrade error; the client does not upgrade or
 restart it automatically. See the [design notes](research/2026-10-12-agent-path-targets.md)
 for compatibility and atomic creation decisions.
 
-### Machine updates with a reviewed Canary artifact set
+### Machine updates
 
-The [Rust updater platform delivery record](research/2026-10-26-rust-update-platform-delivery.md)
-separates signed five-platform distribution from native update-transaction
-support and acceptance. Windows still refuses the signed CLI activation path;
-ordinary native browser capability remains off on every platform.
-
-For a full-SHA, `canary_passed` machine train including launcher installation and
-an isolated smoke Agent, use the [manual rollout coordinator](../scripts/machine-rollout.md).
-
-`scripts/update-machine.py` automates the manual machine update workflow on Unix
-machines with Python 3.11+, `nohup`, and an installed Controller. It is separate
-from the signed release-channel updater above: the manual workflow pins binary
-SHA256 values to the current Canary Proxy's HTTPS `SHA256SUMS`. This checksum
-comparison does not replace signed release metadata or a locally trusted key.
-Use the signed updater for normal distributed releases. Do not pass credentials
-in arguments, artifact URLs, or job configuration.
-
-Plan without changing or contacting a machine:
-
-```sh
-python3 scripts/update-machine.py --machine local
-python3 scripts/update-machine.py --machine mariana --workspace ws_…
-```
-
-After the coordinator has approved the Controller reconnect, apply the plan:
-
-```sh
-python3 scripts/update-machine.py --machine local --workspace ws_… --apply
-python3 scripts/update-machine.py --machine mariana --workspace ws_… --apply
-python3 scripts/update-machine.py --machine mariana --artifacts dist --apply
-```
-
-`本机` is an alias for `local`. Remote machines use `treer exec` only for short
-commands with no stdin, a 25-second timeout and bounded output. Long work runs
-under `nohup env -i` in its own Unix session (`setsid` via `start_new_session`),
-then the caller polls a small result document. No launchd or cron restart task
-is created. Local artifact directories may contain platform subdirectories;
-remote copies use bounded chunks and must still match the online Canary
-checksum manifest. Redirects and non-HTTPS artifact authorities are rejected
-except loopback test servers. Inherited workload credentials, UI settings and
-proxy variables are absent from the detached worker and service commands.
-For Linux user-service control, the worker derives the target user's private
-`/run/user/UID` and bus socket locally; it does not inherit a caller's DBus
-address. An explicit configuration directory is mapped to `XDG_CONFIG_HOME`.
-
-The worker checks and stages binaries, executes `--version`, backs up installed
-files under `~/.local/share/treer-backups/<old-commit>-<timestamp>-<job>/`, then
-atomically replaces **Controller first** and runs
-`service --workspace WS restart-controller`. It requires a fresh Controller
-epoch, matching build/workspace/server identity, `proxy_connected`, path-target
-capability, and unchanged Agent IDs/PIDs/generations before replacing CLI.
-It verifies installed hashes and versions afterward. The Host is untouched;
-different Controller/Host versions, including an older locally built Host, are
-normal while the protocol remains compatible. With multiple local installs,
-`--workspace` is required and ambiguous selection fails with candidate commands.
-Candidate commands contain only workspace/machine/config-directory selection,
-never `--apply` or `--accept-shared-binaries`, and are never executed automatically.
-After selecting a workspace, applying still requires the operator to add those
-flags explicitly; printing a command or supplying `--apply` is not confirmation
-of shared-binary impact.
-Replacing the shared binaries affects other workspaces on their next start;
-the tool warns and requires `--accept-shared-binaries` before staging or
-activation. Only the selected Controller is activated. Coordinate compatibility
-and any later activation of the other Controllers; this flag does not update
-them as a group or promise cross-version CLI compatibility. The worker repeats
-selection/confirmation under its binary lock to detect newly added installs.
-The guard is conservative: multiple local enrollments require confirmation even
-when an operator has arranged separate binary directories.
-
-```sh
-python3 scripts/update-machine.py --machine local --workspace ws_… \
-  --accept-shared-binaries --apply
-```
-
-This Python workflow remains Unix-only. Native Windows configurations use
-per-server filenames but often share `%LOCALAPPDATA%\Treer\bin` and a default
-root. An occupied shared `.exe` cannot be treated like a replaceable Unix inode;
-the Windows installer refuses replacement of running binaries. Use an explicitly
-coordinated Windows installation procedure; the Python tool rejects Windows
-before creating an update job or replacing files.
-
-Failure after activation restores the saved binaries and reactivates the old
-Controller. `result.json` distinguishes `rolled_back` from `rollback_failed`;
-`rollback_failed` carries `rollback_error.code`/`message` for the restore,
-reactivation or live-Agent verification step that failed, and a verified rollback
-includes `verification` (live Agents preserved, exited records not relisted,
-Agents that appeared). Retain the backup and investigate any rollback failure.
-The Agent check covers Agents that had a process before the update, plus stopped
-Agents persisted in the selected startup store (they must still be listed): a
-Controller restart, new or old build, does not relist exited Agents it only held
-in memory, so those are reported in `inventory`/`verification` with a top-level
-`warnings` entry (`exited_records_not_relisted`), never a failure. Receipts
-carry fixed codes, hashes, counts and at most 32 Agent IDs per list: only the
-updater's own fixed messages reach a receipt, every other exception is reduced
-to its class name and a fixed placeholder, and the full text stays in the
-private job directory's `error.log`. An unreadable startup store never disables
-the persisted-Agent check: every stopped Agent is then protected and the receipt
-warns `startup_store_unreadable`. On Windows an inventory read that fails after
-the rollback restart is `rollback_failed` (`rollback_verification_unconfirmed`),
-never a silent success. The Windows
-updater applies the same live-row rule and warnings but has no startup-store
-persistence check. An interrupted caller
-can resume polling with the printed job path:
-
-```sh
-python3 scripts/update-machine.py --machine mariana --resume /home/USER/.local/share/treer-updates/job-ID
-```
-
-Job and backup receipts contain only versions, paths, workspace/server
-identifiers and process metadata; existing operator credentials are read only
-in memory for the loopback inventory request. A leftover
-`.treer-machine-update.lock` after a power failure is not removed automatically:
-first verify that no updater is running, then resolve it under operator control.
-
-**Host update terminates every Agent and PTY owned by that Host**, including a
-managed caller on that machine. Obtain explicit approval for that impact first:
-
-```sh
-python3 scripts/update-machine.py --machine mariana --workspace ws_… \
-  --host --acknowledge-agent-interruption --apply
-```
-
-The Host path remains detached and uses the same clean environment. Cold
-recovery checks stable Agent IDs and new PIDs/generations for previously live
-Agents. Binary rollback can restore the prior software, but cannot undo the
-interruption or restore original process PIDs. No machine update is performed
-by repository tests; run `python3 -m unittest discover -s scripts/tests -p
- 'test_update_machine.py'` for fake Controller/CLI, checksum, transport,
-activation-order, detachment and rollback checks.
-
-### Windows split-step manual machine update
-
-For a reviewed Canary set, use `scripts/update-machine.ps1` from a trusted local
-copy. This is separate from signed release-channel updates: same-origin
-`SHA256SUMS` is pinned to the file's SHA-256 copied from the independently
-delivered, trusted release receipt (`-SumsSha256`), before parsing or executing
-any downloaded binary. It still does not provide a publisher signature. It uses
-PowerShell 5.1/7 and .NET; no git, Python or shell launcher is required. It never
-updates or restarts the Host, changes the enrolled root, or restarts Agents.
-Only one local detached workspace install may share the binary directory.
-
-Use the machine account's real `LOCALAPPDATA`, `SystemRoot`, `windir`,
-`USERPROFILE`, `USERNAME`, `APPDATA`, `ProgramData`, `HOMEDRIVE`/`HOMEPATH`,
-`ComSpec`, `PATHEXT`, `PATH`, `TEMP` and `TMP`. The fixed exec environment
-preserves this Windows baseline while excluding workload credentials, provider
-settings and loader hooks. Updating an old Controller does not itself repair a
-polluted invocation environment: stage from an ordinary trusted user PowerShell
-terminal if the old exec path lacks these values. Do not forward Agent secrets
-or invent user directories. Node, PowerShell crypto and tasklist failures can
-indicate a missing baseline rather than a broken application. Node's trusted
-absolute executable path may be needed when it is absent from PATH.
-
-```powershell
-# Read-only plan; no network or process changes.
-.\update-machine.ps1
-# Fill these from the reviewed release and this machine's installed service.
-$commit = 'FULL_40_CHARACTER_SOURCE_SHA'
-$sums = 'WINDOWS_SHA256SUMS_FILE_SHA256_FROM_TRUSTED_RELEASE_RECEIPT'
-$config = "$env:LOCALAPPDATA\Treer\agent-servers\SERVER-controller.json"
-$bin = "$env:LOCALAPPDATA\Treer\bin"
-$stage = "$env:LOCALAPPDATA\Treer\stage-$commit"
-New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\Treer" | Out-Null
-.\update-machine.ps1 -Action Prepare -Commit $commit -SumsSha256 $sums -ConfigPath $config -BinDirectory $bin
-.\update-machine.ps1 -Action Download -StageDirectory $stage -Binary treer-agent-server
-.\update-machine.ps1 -Action Download -StageDirectory $stage -Binary treer
-# Run Apply in an independent local user terminal, NEVER through treer exec.
-.\update-machine.ps1 -Action Apply -StageDirectory $stage -LocalTerminal
-# Query in a new invocation after the Controller reconnects.
-.\update-machine.ps1 -Action Status -StageDirectory $stage
-```
-
-Each download is separate and deadline-bounded for the 30-second exec limit.
-Prepare, Download and Status may run through exec. Apply must run from an
-independent local user terminal with `-LocalTerminal`; it verifies that the
-process is outside every Windows Job and otherwise refuses activation. Neither
-Start-Process nor DETACHED_PROCESS proves escape from a Controller/Host Job.
-Apply submits a clean-environment PowerShell worker with a process-scoped
-`-ExecutionPolicy Bypass` for its private script copy (no machine policy change);
-do not synchronously wait
-on `restart-controller` through the Controller being replaced. `submitted` is not success. The private stage holds progress
-and an atomic `result.json`; poll until `complete`, `rolled_back`,
-`rollback_failed` or `failed`. Never retry activation blindly after a lost reply.
-If a worker disappears, inspect the receipt, running Controller build and backup
-locally before taking further action. A machine sleep, power loss or worker
-termination is not an automatically recoverable transaction.
-
-The worker checks staged hashes and source commits before mutation, saves both
-old executables in a private `backup-<oldsha>-<unique-id>` directory, renames
-running exe files to unique `.old` names and installs the replacement. It replaces
-Controller first, requests only `service --workspace ... restart-controller`,
-then requires a fresh Controller epoch, matching machine/workspace/build,
-Proxy connection, path-aware capability and preserved live Agents (identical
-PID/generation for every Agent that had a process; exited in-memory records are
-not relisted and are reported in the receipt). Only then does it replace CLI. Failure restores saved binaries and verifies the
-old Controller's readiness and Agent inventory; `rollback_failed` requires local
-operator repair. Preserve backups and `.old` images until verified and no
-process uses them. No automatic cleanup or root migration occurs. In particular,
-existing `C:\Windows\System32` roots remain unchanged; new enrollment must use
-an explicit user-owned `--root` as described above.
-
-Receipts contain only status, commit, preserved Host commit, backup path and
-preservation flags. Record the old Host/new Controller compatibility result in
-the release receipt; leaving the Host unchanged depends on that protocol
-compatibility. After the rollback window, an operator may remove only inspected
-`.old` files whose processes have exited and backups no longer needed; these
-images can contain old vulnerabilities. Never remove a running image or the only
-verified recovery copy. Local
-operator credentials are read only in memory for loopback inventory and are
-never passed in argv or written to progress/error logs. The worker strips
-inherited Treer, HTTP proxy and Node/loader variables from child processes.
-This protects accidental disclosure; the same Windows user can still alter
-scripts, files and processes and is not an isolation boundary.
-
-## Controller updates from the Console (integration in progress)
-
-The Controller-update HTTP adapter reuses the human-session membership and
-`machine.exec` Policy boundary used by **Install agent CLIs**. Its machine-scoped
-routes are `GET controller-update`, `POST controller-update/prepare`,
-`POST controller-update/confirm`, `GET controller-update/operations`, and
-`GET controller-update/operations/{job_uuid}` under
-`/api/workspaces/{workspace_id}/machines/{server_id}/`. Bodies contain only a
-reviewed target ID or confirmation token. Commands, paths, download URLs and
-trust overrides are not accepted. All responses disable caching.
-
-A preview binds a short-lived token to the user session, machine, installed
-identity, reviewed catalog revision and exact target/plan. Confirmation commits
-the hashed token consumption, exclusive machine claim, operation intent and
-audit before sending one typed Controller command. Repeated confirmation only
-recovers the existing operation; it never dispatches again. Install CLI and
-Controller-update acceptance share the same database transaction lock. An
-unconfirmed/partial/rollback-failed update keeps its claim across restarts;
-refresh and reconnect are read-only recovery, never an automatic retry. A
-terminal success requires the complete native receipt projection, matching
-Controller and CLI identity, and correlated health. A reconnect alone proves
-none of those things. Resolved operations remain discoverable for seven days.
-
-Provision a reviewed local release catalog with Proxy startup option
-`--controller-update-catalog /absolute/path/catalog.json` (or
-`TREER_CONTROLLER_UPDATE_CATALOG`). This is an operator trust decision, not
-signature verification or a browser catalog-write route. The file is bounded
-to 64 KiB and has this shape:
-
-```json
-{"schema_version":1,"catalogs":[{"platform":"linux-x86_64","revision":1,"entries":[{"release_sequence":1,"target":{"target_id":"reviewed-release-id","identity":{"release_sha":"<40 lowercase hex>","artifact_source_sha":"<40 lowercase hex>","controller_sha256":"<64 lowercase hex>","cli_sha256":"<64 lowercase hex>"},"platform":"linux-x86_64","version_label":"reviewed version"}}]}]}
-```
-
-Replace the illustrative digest placeholders with reviewed release identities.
-Include the installed identity and at most sixteen newer targets per platform;
-`release_sequence` explicitly defines upgrade order. There are at most five
-platform catalogs, with unique positive revision/sequence values below 2^53.
-Import is atomic, repeated identical revisions are safe, and a revision cannot
-be reinterpreted or decreased. An absent or invalid catalog disables preview;
-there is no remote `latest` lookup. Explicit ordering and a persisted per-platform
-revision floor reject unknown ordering, same-release updates and rollback of
-catalog metadata. Provisioning records alone does not enable machine updates.
-
-The Proxy advertises its typed API; the Controller update capability remains
-source-gated off until whole worker/launcher native acceptance is reviewed for
-that platform. Both capabilities are required; a browser or environment flag
-cannot bypass this gate. Discovery of already persisted operations remains
-available. The adapter never substitutes machine Exec, the legacy updater,
-PowerShell or Python for the typed native path. Local PostgreSQL and owned-child
-tests do not demonstrate a real machine upgrade. The focused
-`authenticated_http_db_update_survives_proxy_restart_without_redispatch` test
-uses a real loopback HTTP listener, the production Router/session/Origin
-middleware and a fresh PostgreSQL schema. It covers session-bound confirmation,
-durable claim-before-dispatch, repeated confirmation, loss/recreation of Proxy
-transport state, offline discovery, query-only reconnect and terminal slot
-release. Its Controller receipt producer is synthetic: it does not establish
-artifact download, native publication or platform acceptance. Run it against
-an owned private PostgreSQL instance, never a shared/production database:
+Update a machine to a published signed release version `V` (for example
+`v0.1.16`) from the machine's Console view, or through the API with any
+principal that may run `machine.exec` on that machine (humans and Agents alike):
 
 ```bash
-TREER_TEST_DATABASE_URL=postgres://USER@127.0.0.1:PRIVATE_PORT/PRIVATE_DB \
-  cargo test --locked -p treer-proxy \
-  authenticated_http_db_update_survives_proxy_restart_without_redispatch
+curl -X POST "$PROXY/api/workspaces/$WS/machines/$SERVER/controller-update" \
+  -H 'content-type: application/json' -d '{"version":"v0.1.16"}'
+curl "$PROXY/api/workspaces/$WS/machines/$SERVER/controller-update"
 ```
 
-See the
-[reviewed wire contract](research/2026-10-20-controller-update-web-contract.md).
+`GET` returns `{state, reason?, target_version?, controller_version?}` where
+`state` is `idle`, `downloading`, `installing`, `restarting`, `failed` or
+`done`. The Controller (capability `machine.controller-update.v2`) downloads
+`releases/V/manifest.json` and its signature from `TREER_RELEASE_BASE_URL`
+(default `https://releases.treer.ai/`), verifies them with the trusted release
+key described above, downloads `treer-agent-server`, `treer` and
+`treer-agent-host` for its platform, checks size and SHA-256, stages each next
+to the installed binary and replaces it atomically. It then asks the Host for a
+plain Controller restart. The update is `done` when the Controller reconnects
+reporting version `V`. The Proxy keeps only an in-memory record of the
+requested version, so a Proxy restart during an update shows `idle`.
 
-The Unix native reader opens only the fixed service jobs directory and canonical
-job UUID. It requires a matching durable submission binding and native receipt,
-including original and target image digests. Old unbound jobs are not adopted.
-A raw `complete` or `rolled_back` receipt alone cannot produce success. A private
-whole-health outcome and durable release of the matching native active claim
-must also match; observation refuses an incomplete final-evidence write rather
-than publishing a conflicting result at the same receipt revision.
+The Host binary is replaced on disk but stays running; the new Host takes
+effect on the next `treer-agent-server service restart` (which terminates
+running Agents). Controllers older than this design do not advertise the
+capability: upgrade them once by hand (below) before using the Console.
 
-The Controller-side native adapter also requires a private, locally provisioned
-`controller-update-catalog.json` in its service configuration directory. Its
-schema is `{schema_version:1, revision, accept_shared_binaries, entries}`. Each
-entry contains `release_sequence`, the same complete `target` as the Proxy
-catalog, a pinned `sums_sha256`, a fixed HTTPS `artifact_base` ending in `/`,
-`allow_pinned:true` and explicit `allow_artifact_origin`. These are local operator
-choices; the browser cannot supply them. Only a strictly increasing sequence is
-eligible. Same-release and downgrade overrides are absent. Explicit checksum
-pins are transition acknowledgments, not publisher signatures or freshness.
+On the machine itself, `treer-agent-server update` performs the same install
+for the channel's current version (`--channel`, default `stable`) or an exact
+`--version vX.Y.Z`, then restarts every installed Controller via its Host.
 
-Provision this file as the service account in its existing private configuration
-directory (0700), with catalog mode 0600. Publish reviewed replacement bytes by
-atomic rename within that same private directory; do not use a shared writable
-directory or weaken permissions. For catalog rotation, increase the revision in
-both the Proxy and Controller catalogs and preserve the exact release identities
-and pins required by outstanding operations. Never reuse a revision for changed
-bytes or decrease it. Rotation changes future admission; it does not resume,
-rebind, or authorize retry of an outstanding operation.
-The private job also saves the exact catalog byte digest, revision, original and
-target identities and sequences, SUMS pin and consent flags before downloading.
-After SAME-lock handoff, the original worker reopens the local catalog and
-rechecks this evidence and the installed pair before Core activation. Any byte
-change, including a same-revision edit or rotation during preparation, refuses
-activation and retains the unresolved claim. Finish or explicitly reconcile an
-outstanding operation before rotating; a missing proof in an older job cannot
-be adopted as authorization. These private records contain no download URL,
-filesystem path, credential or child output and are not public receipts.
+Each replaced binary keeps exactly one previous version beside it as
+`<name>.old` (Windows renames the running `.exe` to `.old` before moving the
+new file in). To roll back manually, rename `<name>.old` back over `<name>` and
+run `treer-agent-server service restart-controller`.
 
-The Controller owns submission independently of its Proxy websocket. Update
-commands do not block heartbeat or operation queries. Disconnect drops response
-waiting only; the original task continues without resubmission. A Controller
-process exit can leave preparation unresolved, and discovery never restarts it.
+## Voice APIs (opt-in)
 
-Native preparation revalidates the installed Controller/CLI against those local
-pins and holds installation and enrollment locks. Before downloading it writes
-an exclusive private active claim and the complete operation binding, then
-verifies both artifacts, saves startup/Host/Controller baseline evidence, stages
-both replacements and the original-image activator, and probes the authenticated
-staged pair. It does not replace installed names, restart services, or launch an
-installer. An existing job or active claim is never resumed by another POST;
-owner death and elapsed time do not clear it. Read-only operation lookup works
-from its fixed journal after restart. Capability remains disabled until the
-complete worker/launcher execution and whole-health reconciliation pass native
-acceptance; preparation tests alone do not enable Console updates.
-After the report grace period (600 seconds without receipt progress), a
-nonterminal native receipt is no longer accepted as a fresh Updating observation.
-Proxy discovery retains an unconfirmed result and the active claim. This age
-bound does not prove worker death, release a lock, or authorize another attempt.
-Distinct partial and rollback-failed recovery results remain readable.
+The native iOS/Android clients were retired on 2026-10-16. Core Voice ASR and
+command routes remain available to authenticated clients; this configuration
+does not install a Voice UI. Native-client Bearer/session compatibility also
+remains; browser sessions and CSRF checks are unchanged.
 
-The native handoff copies the original installed Controller into the private
-job, starts only that fixed worker with its UUID, and authenticates the running
-image, OS parent and exact socket peer before transferring the same lock file
-descriptions once. Lost acknowledgment never starts another worker. Its private
-entry runs before normal Controller startup, metrics helpers or runtime threads;
-it cannot be reused as a metrics GPU probe or an ordinary Controller fallback.
-Before enabling this path alongside metrics, verify that helper re-exec
-compares the running OS image to the installed Controller inode and refuses a
-stale replaced image or job-local activator. Never execute the newly replaced
-path as an old Controller helper, and never run ordinary metrics startup in
-the private worker. This integration check is part of native acceptance.
-The worker uses the existing Rust image publication, Host restart, workload
-health and verified rollback transaction; it never restarts the Host.
-Native acceptance must also demonstrate that this worker survives replacement
-of the old Controller under the actual service manager in a disposable OS
-account or VM on Linux and macOS. A separate session/process group alone does
-not establish survival under systemd control-group termination or launchd
-cleanup. The exact `c56b8920` disposable Linux transient user-manager run
-`39709601135` passed with the real Host as MainPID, authenticated same-cgroup
-worker, zero restarts and empty stopped cgroup cleanup. This is same-source
-physical replacement evidence; later canonical exact ActiveState/SubState
-assertions were only focused-tested and are not attributed to that old run.
-Do not repeat that passed manager fixture merely to reconcile documentation.
-Capability remains off: the following are separate remaining delivery leaves,
-not requirements to rerun every accepted layer:
+### Voice ASR
 
-| Boundary | Current evidence / next deliverable |
-| --- | --- |
-| HTTP + PostgreSQL operation routing | Focused real HTTP/session/DB chain; initial synthetic receipts remain separately scoped |
-| Native Linux manager ownership | Exact c56 actual PASS; retain original predicate scope |
-| Real browser / WebSocket / native worker / Proxy DB | Exact `ad23f3bf`, run `40197073704` SUCCESS: normal human login, prepare/confirm 1/1, full same-operation equality, duplicate writes 0 and typed dispatch/reconnect 1/0; same-source isolated artifacts, not ordinary publication/activation |
-| Canonical source and CI | Main `f4691cba`, automatic CI `40205366352` four jobs and Docs `40205366388` SUCCESS; does not relabel the ad23 actual run or build an ordinary release package |
-| Production Linux enablement | Ordinary artifact/publisher/catalog/bootstrap and Linux-only source decision remain pending; see the [single-target preparation proposal](research/2026-10-25-controller-update-linux-release-plan.md); capability stays disabled |
-| macOS manager / Windows native activation | Not accepted by the Linux run; unsupported until their own implementation/acceptance leaf closes |
-| Enrolled rollout | Separate Release-owned target and activation; no installed mutation authorized by the isolated test |
+ASR is enabled when the **Proxy process** has
+`TREER_VOICE_ASR_PROVIDER=qwen` and `TREER_VOICE_ASR_API_KEY` or
+`DASHSCOPE_API_KEY` (shell env, Compose `.env`, or the process supervisor). Do
+not put these in client code or browser storage.
+`GET /api/workspaces/{workspace_id}/voice/asr` reports configuration/status;
+stream 16 kHz PCM16 audio over
+`GET WS /api/workspaces/{workspace_id}/voice/asr/stream`
 
-The completed download-only HTTPS slice is not a reason to repeat accepted
-network, native, PG or manager matrices during release preparation. The explicit
-entry below remains available for a separately required new publisher-input
-check; it is not a production activation command or an outstanding default gate:
+(`Authorization: Bearer`). Audio is forwarded to Qwen
+`qwen3-asr-flash-realtime` and is not stored in Core. Optional
+`TREER_VOICE_ASR_URL` (default Singapore
+`wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime`) and
+`TREER_VOICE_ASR_MODEL`. Unconfigured deployments report that ASR is unavailable.
+Use a Beijing key only with `wss://dashscope.aliyuncs.com/api-ws/v1/realtime`;
+keys are region-specific.
 
-```bash
-TREER_UPDATE_NETWORK_INPUT='{"schema_version":1,"source_commit":"<40 hex>","platform":"linux-x86_64","artifact_base":"https://<approved origin>/artifacts/linux-x86_64/","enrollment_origin":"https://<approved proxy>/","allow_artifact_origin":false,"sums_sha256":"<64 hex>","controller":{"sha256":"<64 hex>","size":123},"cli":{"sha256":"<64 hex>","size":123}}' \
-CARGO_TARGET_DIR=/absolute/task-owned/target \
-cargo test --locked -p treer-agent-server --bin treer-agent-server \
-  self_update::artifacts::network_acceptance::approved_https_distributor_stages_exact_controller_and_cli_without_activation \
-  -- --ignored --exact --nocapture
-```
+### Voice command
 
-Replace every placeholder with Release-authenticated checksum and artifact metadata;
-cross-origin sources require the explicit `allow_artifact_origin` consent.
-For this download-only check a mutable URL is permitted: the supplied SUMS digest
-and independent image hashes/sizes must still match, so changed contents fail
-closed. A pass does not establish immutable or signed release publication and
-does not authorize product activation.
-This entry enforces production HTTPS URL validation even in a unit build and
-uses the unchanged Distributor client/TLS roots, no redirects or ambient proxy.
-It checks the SUMS document pin, agrees independent Controller/CLI pins before
-fetching binary bodies, stages both as private non-executable files, rehashes
-their returned handles, and witnesses cleanup. It never downloads the Host,
-executes either image, discovers an installation, or enables native capability.
-The reported source is publication metadata, **not** a measured version probe.
-The later isolated browser/native/ProxyDB composition has the exact result in
-the table above; that result does not establish an ordinary immutable publisher
-or production upgrade. Passing this first slice alone does not imply update or
-recovery acceptance. Missing
-approved network inputs are reported as NOT_RUN, not substituted by loopback
-HTTP, arbitrary artifacts or a trust-store override. Windows native activation
-and macOS manager acceptance remain independently unsupported/unaccepted.
+ASR text is turned into Treer actions on the **Proxy**, not the client. Enable
+with `TREER_VOICE_LLM_API_KEY`. Optional:
 
-For the owned systemd/launchd topology procedure and exact
-disposable-account commands, see the
-[owned-child acceptance procedure](research/2026-10-21-controller-update-owned-child.md#resumed-terminal-death-coverage-and-manager-fixture).
-Preparing that fixture alone neither registers a service nor proves native
-update survival; do not execute its manager commands on an enrolled machine.
+- `TREER_VOICE_LLM_BASE_URL` (default `https://sub.lnz-study.com`)
+- `TREER_VOICE_LLM_WIRE_API` (`responses` or `completions`, default `responses`)
+- `TREER_VOICE_LLM_MODEL` (default `gpt-5.6-luna`)
 
-After Core health, the original owned worker directly owns each fixed launcher
-install/status child. It persists exclusive start intent before each spawn,
-retains authenticated Controller/CLI and Node handles, clears inherited
-environment and uses bounded output and process-group quiescence. This lifecycle
-assumes trusted cooperating installers whose descendants retain the group and
-remain signalable; it is not a sandbox. A timeout, cancellation, failed result
-or unproven quiescence remains unresolved/partial and never authorizes retry or
-rollback over a possibly running installer. Only strict launcher result matching
-and a final Controller/CLI/Host/workload health check permit whole completion.
-No permit/EOF fixture or reconstructed supervisor marker supplies authority.
-Immediately after spawn, the worker authenticates the owned child's running
-Controller image and records its PID, creation identity, parent identity and
-intent digest through the original journal directory. This exclusive record is
-synced and read back; empty, changed or replaced records refuse completion.
-The interval between durable intent and recorded completion always means an
-installer may have run, including when the child identity record is missing.
-On Linux the child starts a private session and sets `PR_SET_PDEATHSIG(SIGKILL)`
-before exec, checking that its original parent still exists. The private worker
-uses a single-thread runtime because Linux ties this signal to the spawning
-thread. This kills the direct child on worker death; it proves neither descendant
-quiescence nor that an installer made no changes. macOS has no equivalent wired
-here and remains unaccepted. Neither platform may clear its claim on this basis.
+`GET /api/workspaces/{workspace_id}/voice/command` reports availability.
+An authenticated client submits the utterance with
+`POST /api/workspaces/{workspace_id}/voice/command`
 
-An unresolved launcher attempt requires explicit audited local operator
-reconciliation; no automatic recovery or claim-clearing command is provided.
-Preserve the private job, intent, child identity and active claim, and keep new
-updates blocked. Establish the exact recorded process identity using creation
-identity and checked image identity as well as PID; never signal a saved numeric
-PID that may have been reused. Independently prove that identity is gone and
-its process group is quiescent, then verify launcher state with the fixed
-authenticated status recipe and independently recheck Controller/CLI image,
-Host and workload health. A missing or partial child identity requires broader
-independent process inventory or isolated-machine investigation; it is not proof
-that spawn never happened. Record the evidence and obtain an explicit local
-operator disposition before any future claim reconciliation. Do not delete the
-claim, replay install, adopt a copied receipt, or infer success from elapsed time,
-a free lock, exit status or a status response alone. These investigation steps
-do not manufacture the original worker's terminal-success authority.
-The legacy CLI updater now holds the same local installation locks and refuses
-an unresolved native active claim, including corrupt or empty claims. It also
-refuses an ambient CLI path that differs from its saved installed sibling.
+`{"text":"...","history":[{"role":"user","text":"..."},{"role":"assistant","text":"..."}]}`
+→ `{"reply":"...","utterance":"...","tools":[...]}`. `history` is optional and
+is the prior spoken turns in the client, not including the current
+`text`. The Proxy keeps at most the last 12 user/assistant turns.
+
+The LLM receives the bundled voice skill (`skills/treer-voice/SKILL.md`) plus a
+live workspace roster and that spoken history. It may call a `treer` tool whose argv matches
+`status`, `whoami`, `machine list`, and `agent ls|show|prompt|read`. Those
+commands run in-process under the signed-in user. Clients choose how to present
+the returned `reply`; no native TTS client is shipped in this repository.
+Vendor LLM keys stay in the Proxy process. This is not the later Voice Live
+confirm-card protocol.

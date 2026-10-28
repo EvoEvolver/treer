@@ -4,10 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-# Disposable native acceptance only; never a shipping release default.
-native-update-acceptance = []
-
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true

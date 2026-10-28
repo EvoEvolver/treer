@@ -102,9 +102,7 @@ B's authenticated loopback API without credentials (`401`). No credential
 contents are printed. These expected results document absence of same-OS-user
 isolation; they are not claims that workspace credentials or 0600 provide a
 sandbox. Windows/Linux multi-enrollment OS-service-manager execution remains a
-separate native validation task. Python fake-machine tests cover confirmed
-multi-install update ordering/rollback and rejection before activation without
-confirmation; native Windows update is explicitly unsupported by that script.
+separate native validation task.
 
 Machine file-transfer coverage includes a bounded multi-chunk CLI round trip,
 checksum rejection without publication, destination preservation/explicit force,
@@ -134,13 +132,12 @@ blocking the Tokio timer. Space checks are advisory, not capacity reservations;
 aggregate staging is bounded by active-handle count times the per-file limit.
 The Proxy limits in-flight transfer calls globally, not fairly per caller.
 
-Updater executable staging closes and syncs the writable file before executing
-validation. Unix validation retries only transient `ETXTBSY` within the existing
-ten-second validation budget; permission and format errors fail immediately.
-Linux regression coverage holds a real writable descriptor, confirms `ETXTBSY`,
-then closes it and verifies validation succeeds. Isolated subprocess tests cover
-both umask 022 and 077 without changing the Rust test runner's process-wide umask;
-installation preserves restrictive user permissions rather than forcing 0755.
+Controller update tests (`controller_update::tests`, `release_update::tests`)
+serve a signed fixture release over loopback HTTP: a good release replaces all
+three binaries, keeps exactly one `.old` each, leaves nothing staged and sends
+one plain `RestartController` to a fake Host. An untrusted signature, tampered
+manifest or wrong version is rejected before any executable is fetched, a
+corrupt binary fails its SHA-256 check, and a rejected release changes no file. Windows rename-to-`.old` replacement has no native CI run.
 
 Unix cold-activation tests create stale Host sockets in an isolated child and
 wait for its exit before probing. Dropping a listener in a parallel test runner
@@ -311,7 +308,7 @@ Controller replacement, plus native installer checksums/PATH. A cross-target
 `cargo check` or Clippy run on macOS only establishes compilation. Real Windows
 enrollment, HTTP service routing, App deployment, reboot recovery, and descendant
 cleanup under failure still require native acceptance before announcing support.
-Windows in-place binary update, automatic login tasks, and system services are
+Automatic login tasks and system services on Windows are
 outside the initial implementation.
 
 | Change | Minimum focused evidence |
@@ -328,7 +325,7 @@ outside the initial implementation.
 | Agent Interface adapter | Adapter unit tests plus `just ais-e2e` when a live Treer and vendor binary are available |
 | Documentation | `node scripts/check-docs.mjs` |
 | Release publishing | `just machine-artifacts-test`, `node --test scripts/release-r2.test.mjs`; hosted downloads must match all twelve binaries without redirects; isolated R2 verification when publishing signed manifests |
-| Installed Controller updates | Node/Rust signature compatibility, tampered/missing metadata, trusted-key binding, channel/manifest/path binding, duplicate/missing artifacts, size limits, binary SHA256 failures before execution, and existing staging/recovery tests |
+| Installed Controller updates | Node/Rust signature compatibility, tampered/missing metadata, trusted-key binding, manifest/path binding, duplicate/missing artifacts, size limits, bad-signature rejection, and the download→verify→replace→restart-request test |
 | Self-host GHCR or updater | `just updater-test`, Proxy admin update tests, and `/admin` e2e |
 
 Documentation describes the current source, not future intent. Dated research

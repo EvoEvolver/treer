@@ -13,9 +13,6 @@ pub use workload_tree::*;
 mod policy_path;
 pub use policy_path::*;
 pub mod controller_update;
-pub mod controller_update_runtime;
-pub mod controller_update_worker;
-pub mod controller_update_worker_inputs;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

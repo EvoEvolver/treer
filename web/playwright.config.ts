@@ -9,7 +9,6 @@ const WEB_SERVER_URL = `http://127.0.0.1:${PORT}`
 
 export default defineConfig({
   testDir: "./e2e",
-  testIgnore: "**/controller-update-native.spec.ts",
   timeout: 20_000,
   use: {
     baseURL: WEB_SERVER_URL,
