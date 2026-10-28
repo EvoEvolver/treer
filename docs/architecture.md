@@ -306,6 +306,8 @@ its own machine, evaluate `email.send` on its `machine.service` (status lookup
 only), and share one
 store: `app_email_sends` holds per-App idempotency keys, request fingerprints
 and state; `app_email_attempts` is the body-free audit and hourly rate history.
+The recipient is `to` (any address) or `to_member` (a workspace member's user
+ID, resolved by Core to that member's verified account email).
 Email is not Core Message and wakes no Agent; the App owns any thread mapping.
 
 ## Policy

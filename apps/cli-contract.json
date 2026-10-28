@@ -282,7 +282,8 @@
       "--body": "value",
       "--idempotency-key": "value",
       "--subject": "value",
-      "--to": "value"
+      "--to": "value",
+      "--to-member": "value"
     },
     "positionals": 0,
     "variadic": false

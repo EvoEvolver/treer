@@ -22,8 +22,21 @@ impl AuthStore {
         app: &str,
         request: &SendAppEmailRequest,
     ) -> Result<SendAppEmailResponse, ApiFailure> {
-        let to = request.to.to_ascii_lowercase();
-        if !valid_address(&to)
+        let to = match (&request.to, &request.to_member) {
+            (Some(to), None) => to.to_ascii_lowercase(),
+            (None, Some(_)) => String::new(),
+            _ => {
+                return Err(ApiFailure::bad_request(
+                    "email_recipient_invalid",
+                    "exactly one of to or to_member is required",
+                ))
+            }
+        };
+        if (request.to.is_some() && !valid_address(&to))
+            || request
+                .to_member
+                .as_ref()
+                .is_some_and(|member| member.is_empty() || member.len() > 256)
             || request.subject.is_empty()
             || request.subject.len() > 200
             || request.subject.chars().any(char::is_control)
@@ -37,6 +50,10 @@ impl AuthStore {
                 "invalid email fields (subject 1-200 bytes, text 1-4096 bytes, key 1-128 bytes)",
             ));
         }
+        let to = match &request.to_member {
+            Some(member) => self.member_email(workspace, member).await?,
+            None => to,
+        };
         let sender = self.email_sender.as_ref().ok_or_else(|| {
             ApiFailure::service_unavailable(
                 "email_not_configured",
@@ -144,6 +161,42 @@ impl AuthStore {
     }
 }
 impl AuthStore {
+    /// The verified account email of a current workspace member (`to_member`).
+    async fn member_email(&self, workspace: &str, user_id: &str) -> Result<String, ApiFailure> {
+        if self
+            .workspace_member_role(workspace, user_id)
+            .await
+            .is_err()
+        {
+            return Err(ApiFailure::not_found(
+                "email_member_not_found",
+                "to_member is not a member of this workspace",
+            ));
+        }
+        let row = sqlx::query("SELECT email, email_verified FROM users WHERE id=$1")
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(email_storage)?
+            .ok_or_else(|| {
+                ApiFailure::not_found(
+                    "email_member_not_found",
+                    "to_member is not a member of this workspace",
+                )
+            })?;
+        let email = row.get::<String, _>("email").to_ascii_lowercase();
+        if !row.get::<bool, _>("email_verified") || !valid_address(&email) {
+            return Err(ApiFailure {
+                status: StatusCode::CONFLICT,
+                error: ProtocolError::new(
+                    "email_member_unverified",
+                    "that member has no verified account email",
+                ),
+            });
+        }
+        Ok(email)
+    }
+
     /// Resolves an uncertain send without resending. `sending` is reported as
     /// `pending`: a dispatch may be in flight or its outcome was never recorded.
     pub(crate) async fn app_email_status(
@@ -192,5 +245,14 @@ mod tests {
             "idempotency_key":"k", "from":"forged@example.test"
         }))
         .is_err());
+        // The fingerprint of an address request is unchanged by `to_member`.
+        let request: SendAppEmailRequest = serde_json::from_value(json!({
+            "to":"a@example.test", "subject":"s", "text":"t", "idempotency_key":"k"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"to":"a@example.test","subject":"s","text":"t","idempotency_key":"k"}"#
+        );
     }
 }

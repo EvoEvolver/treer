@@ -400,10 +400,15 @@ database is their whole state.
 Apps send email through the Proxy's Cloudflare sender (the variables above),
 so the token never reaches an App. A Managed App runtime calls
 `treer email send --to ADDRESS --subject TEXT --idempotency-key KEY` (body on
-stdin or `--body`) or `POST /api/apps/{service_id}/email` with its service token;
-ordinary Agents and humans get `email_app_required`. Policy action `email.send`
-is evaluated for the App runtime on its `machine.service`. Any valid recipient
-is accepted; the sender, Reply-To and HTML are fixed by the Proxy. Each
+stdin or `--body`) or `POST /api/apps/{service_id}/email` with its service token
+and `{to, subject, text, idempotency_key}`; ordinary Agents and humans get
+`email_app_required`. Policy action `email.send` is evaluated for the App
+runtime on its `machine.service`. `to` accepts any valid address. Instead of
+`to`, `to_member` (`--to-member USER_ID`) names a workspace member and Core
+sends to that member's verified account email; exactly one of the two is
+required (`email_recipient_invalid`, 400). A non-member is `email_member_not_found`
+(404), a member without a verified email `email_member_unverified` (409). The
+sender, Reply-To and HTML are fixed by the Proxy. Each
 workspace allows 20 attempts per App and 5 per recipient per hour, failures
 included. Errors: `email_invalid` (400), `email_idempotency_conflict` (400),
 `email_rate_limited` (429), `email_delivery_failed` (502),

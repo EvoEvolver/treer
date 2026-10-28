@@ -2252,10 +2252,11 @@ async fn app_email_any_recipient_delivery_idempotency_rates_and_body_free_audit(
         .execute(&store.pool).await.unwrap();
     sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES('org_email','u','member','now'),('org_email','unverified','member','now')").execute(&store.pool).await.unwrap();
     let mut request = treer_protocol::SendAppEmailRequest {
-        to: "outside@external.test".into(),
+        to: Some("outside@external.test".into()),
         subject: "Test".into(),
         text: "PRIVATE BODY <script>bad()</script>".into(),
         idempotency_key: "first".into(),
+        to_member: None,
     };
     let error = store
         .send_app_email("email", "app-a", &request)
@@ -2355,7 +2356,7 @@ async fn app_email_any_recipient_delivery_idempotency_rates_and_body_free_audit(
     );
     // An unverified member is also a legal recipient; membership/verification
     // must not decide outbound admission.
-    request.to = "unverified@example.test".into();
+    request.to = Some("unverified@example.test".into());
     request.idempotency_key = "unverified".into();
     assert!(store
         .send_app_email("email", "app-a", &request)
@@ -2365,7 +2366,7 @@ async fn app_email_any_recipient_delivery_idempotency_rates_and_body_free_audit(
         captured.lock().await.last().unwrap()["to"],
         "unverified@example.test"
     );
-    request.to = "malformed@@external.test".into();
+    request.to = Some("malformed@@external.test".into());
     request.idempotency_key = "malformed".into();
     let attempts_before = captured.lock().await.len();
     assert_eq!(
@@ -2379,14 +2380,14 @@ async fn app_email_any_recipient_delivery_idempotency_rates_and_body_free_audit(
     );
     assert_eq!(captured.lock().await.len(), attempts_before);
     for i in 0..14 {
-        request.to = format!("p{i}@allowed.test");
+        request.to = Some(format!("p{i}@allowed.test"));
         request.idempotency_key = format!("app-limit-{i}");
         store
             .send_app_email("email", "app-a", &request)
             .await
             .unwrap();
     }
-    request.to = "last@allowed.test".into();
+    request.to = Some("last@allowed.test".into());
     request.idempotency_key = "app-limited".into();
     assert_eq!(
         store
@@ -2410,6 +2411,119 @@ async fn app_email_any_recipient_delivery_idempotency_rates_and_body_free_audit(
 }
 
 #[tokio::test]
+async fn app_email_to_member_resolves_the_verified_account_email() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let captured = Arc::new(tokio::sync::Mutex::new(Vec::<Value>::new()));
+    let capture = captured.clone();
+    let fake = Router::new().route(
+        "/send",
+        post(move |Json(body): Json<Value>| {
+            let capture = capture.clone();
+            async move {
+                capture.lock().await.push(body);
+                Json(json!({"success":true}))
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, fake).await });
+    let mut store = AuthStore::for_test("password").await;
+    store.seed_test_workspace("email").await;
+    store.seed_test_workspace("other").await;
+    sqlx::query("INSERT INTO users(id,email,preferred_name,password_hash,email_verified,created_at) VALUES('u','Member@Example.test','M','unused',TRUE,'now'),('unverified','unverified@example.test','U','unused',FALSE,'now'),('outsider','outsider@example.test','O','unused',TRUE,'now')")
+        .execute(&store.pool).await.unwrap();
+    sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES('org_email','u','member','now'),('org_email','unverified','member','now'),('org_other','outsider','member','now')").execute(&store.pool).await.unwrap();
+    store.email_sender = Some(CloudflareEmailSender {
+        client: reqwest::Client::new(),
+        endpoint: Url::parse(&format!("http://{address}/send")).unwrap(),
+        api_token: "fake-token".into(),
+        from: "fixed@example.test".into(),
+    });
+    let request =
+        |to: Option<&str>, member: Option<&str>, key: &str| treer_protocol::SendAppEmailRequest {
+            to: to.map(Into::into),
+            subject: "Reply needed".into(),
+            text: "Open the link".into(),
+            idempotency_key: key.into(),
+            to_member: member.map(Into::into),
+        };
+    let code = |result: Result<treer_protocol::SendAppEmailResponse, crate::api::ApiFailure>| {
+        let error = result.unwrap_err();
+        (error.status, error.error.code)
+    };
+    let sent = store
+        .send_app_email("email", "app", &request(None, Some("u"), "member"))
+        .await
+        .unwrap();
+    assert_eq!(sent.status, "sent");
+    assert_eq!(captured.lock().await[0]["to"], "member@example.test");
+    // Same key and content replays; the address request shape is distinct.
+    assert_eq!(
+        store
+            .send_app_email("email", "app", &request(None, Some("u"), "member"))
+            .await
+            .unwrap()
+            .email_id,
+        sent.email_id
+    );
+    assert_eq!(captured.lock().await.len(), 1);
+    for (to, member, status, expected) in [
+        (
+            None,
+            Some("outsider"),
+            StatusCode::NOT_FOUND,
+            "email_member_not_found",
+        ),
+        (
+            None,
+            Some("nobody"),
+            StatusCode::NOT_FOUND,
+            "email_member_not_found",
+        ),
+        (
+            None,
+            Some("unverified"),
+            StatusCode::CONFLICT,
+            "email_member_unverified",
+        ),
+        (None, Some(""), StatusCode::BAD_REQUEST, "email_invalid"),
+        (
+            None,
+            None,
+            StatusCode::BAD_REQUEST,
+            "email_recipient_invalid",
+        ),
+        (
+            Some("a@example.test"),
+            Some("u"),
+            StatusCode::BAD_REQUEST,
+            "email_recipient_invalid",
+        ),
+    ] {
+        assert_eq!(
+            code(
+                store
+                    .send_app_email("email", "app", &request(to, member, "bad"))
+                    .await
+            ),
+            (status, expected.to_string())
+        );
+    }
+    assert_eq!(captured.lock().await.len(), 1);
+    // `to` still reaches any address, member or not.
+    store
+        .send_app_email(
+            "email",
+            "app",
+            &request(Some("anyone@external.test"), None, "any"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(captured.lock().await[1]["to"], "anyone@external.test");
+    server.abort();
+}
+
+#[tokio::test]
 async fn app_email_provider_failure_is_sanitized_and_retryable() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -2429,10 +2543,11 @@ async fn app_email_provider_failure_is_sanitized_and_retryable() {
         from: "fixed@example.test".into(),
     });
     let r = treer_protocol::SendAppEmailRequest {
-        to: "allowed@example.test".into(),
+        to: Some("allowed@example.test".into()),
         subject: "test".into(),
         text: "private".into(),
         idempotency_key: "k".into(),
+        to_member: None,
     };
     for _ in 0..2 {
         let error = store.send_app_email("email", "app", &r).await.unwrap_err();

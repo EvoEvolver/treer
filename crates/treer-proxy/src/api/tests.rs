@@ -2945,10 +2945,11 @@ async fn app_email_requires_owned_managed_app_identity_and_policy() {
         )
         .unwrap();
     let request = treer_protocol::SendAppEmailRequest {
-        to: "person@example.test".into(),
+        to: Some("person@example.test".into()),
         subject: "test".into(),
         text: "private".into(),
         idempotency_key: "k".into(),
+        to_member: None,
     };
     let mut headers = HeaderMap::new();
     assert_eq!(

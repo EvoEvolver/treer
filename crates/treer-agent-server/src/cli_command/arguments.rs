@@ -655,8 +655,18 @@ fn parse_file_mode(value: &str) -> Result<u32, String> {
 pub(super) enum EmailCommand {
     #[command(about = "Send one plain-text email; only a Managed App runtime may send")]
     Send {
-        #[arg(long)]
-        to: String,
+        #[arg(
+            long,
+            required_unless_present = "to_member",
+            conflicts_with = "to_member"
+        )]
+        to: Option<String>,
+        #[arg(
+            long,
+            value_name = "USER_ID",
+            help = "Workspace member; Core resolves their verified account email"
+        )]
+        to_member: Option<String>,
         #[arg(long)]
         subject: String,
         #[arg(long, help = "Plain-text body; omit to read it from piped stdin")]

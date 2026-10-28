@@ -130,10 +130,11 @@ async fn send_email_as_app(
 ) -> Result<Json<SendAppEmailResponse>, ApiFailure> {
     let app = owned_app(auth, &caller, service_id).await?;
     let workspace_id = caller.workspace_id.as_str();
-    let recipient_hash = format!(
-        "{:x}",
-        Sha256::digest(request.to.to_ascii_lowercase().as_bytes())
-    );
+    let recipient_hash = request
+        .to
+        .as_ref()
+        .map(|to| format!("{:x}", Sha256::digest(to.to_ascii_lowercase().as_bytes())));
+    let recipient_member = request.to_member.as_deref();
     let result = async {
         authorize_control(
             policy,
@@ -156,7 +157,8 @@ async fn send_email_as_app(
         Err(error) => error.error.code.as_str(),
     };
     tracing::info!(workspace_id = %workspace_id, app_id = %app.app_id,
-        recipient_hash = %recipient_hash, outcome, "App email request outcome");
+        recipient_hash = recipient_hash.as_deref(), recipient_member, outcome,
+        "App email request outcome");
     result
 }
 

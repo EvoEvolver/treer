@@ -563,6 +563,7 @@ async fn run_cli() -> anyhow::Result<()> {
             command:
                 EmailCommand::Send {
                     to,
+                    to_member,
                     subject,
                     body,
                     idempotency_key,
@@ -573,6 +574,7 @@ async fn run_cli() -> anyhow::Result<()> {
                 subject,
                 text: read_message_body(body, None)?,
                 idempotency_key,
+                to_member,
             };
             client
                 .value(
