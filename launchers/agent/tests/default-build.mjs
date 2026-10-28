@@ -17,7 +17,7 @@ test('default release artifact excludes fixture hooks and refuses provider overr
   }
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rust158-release-')));
   t.after(() => rm(root, { recursive: true, force: true }));
-  for (const override of [{ CODEX_BIN: '/synthetic-do-not-start' }, { RUST_SPIKE_CODEX_ARGS: '[]' }]) {
+  for (const override of [{ RUST_SPIKE_CODEX_ARGS: '["/synthetic-do-not-start"]' }]) {
     const result = spawnSync(binary, [], {
       cwd: root,
       env: hermeticEnv({ HOME: root, CODEX_HOME: join(root, 'codex'), AGENT_UI_CWD: root, ...override }),

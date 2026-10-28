@@ -77,9 +77,10 @@ try {
         !$instructions.Contains('Existing enrolled machines keep their configured root')) {
         throw 'New enrollment must explicitly use a user-owned root without migrating existing machines.'
     }
-    foreach ($binary in @('treer', 'treer-agent-host', 'treer-agent-server')) {
+    foreach ($binary in @('treer', 'treer-launch', 'treer-agent-host', 'treer-agent-server')) {
         if ((Get-Command "$binary.exe").Source -ne (Join-Path $installation "$binary.exe")) { throw "PATH failed for $binary." }
     }
+    if ((Get-FileHash (Join-Path $installation 'treer-agent.exe')).Hash -ne (Get-FileHash (Join-Path $installation 'treer-launch.exe')).Hash) { throw 'Deprecated treer-agent alias was not installed.' }
     $entries = ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';') | Where-Object { $_ -eq $installation }
     if (@($entries).Count -ne 1) { throw 'Installer duplicated the PATH entry.' }
     $before = (Get-FileHash (Join-Path $installation 'treer.exe')).Hash

@@ -14,7 +14,7 @@ import sys
 
 
 PLATFORMS = {"linux-x86_64": 62, "linux-aarch64": 183}
-MACHINE_FILES = {"treer", "treer-agent-host", "treer-agent-server"}
+MACHINE_FILES = {"treer", "treer-launch", "treer-agent-host", "treer-agent-server"}
 
 
 def require(condition, message):

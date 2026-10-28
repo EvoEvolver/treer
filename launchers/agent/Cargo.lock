@@ -1171,9 +1171,14 @@ dependencies = [
  "sha2",
  "tokio",
  "tokio-util",
+ "treer-build-info",
  "treer-platform",
  "uuid",
 ]
+
+[[package]]
+name = "treer-build-info"
+version = "0.1.15"
 
 [[package]]
 name = "treer-platform"

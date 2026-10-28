@@ -158,7 +158,7 @@ const recipeProfile = {
   name: "Codex Agent UI",
   description: "Codex app-server plus the thread UI iframe",
   cwd: "codex-agent-ui",
-  command: "./scripts/treer-agent.sh",
+  command: "treer-launch",
   args: [] as string[],
   created_at: NOW,
   created_by: "u1",
@@ -1105,7 +1105,7 @@ test("create agent dialog lists an installed recipe launch profile", async ({ pa
   await expect(page.getByRole("dialog")).toBeVisible()
   await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
   await page.getByRole("option", { name: "Codex Agent UI" }).click()
-  await expect(page.getByText("./scripts/treer-agent.sh")).toBeVisible()
+  await expect(page.getByText("treer-launch")).toBeVisible()
   await expect(page.getByRole("dialog").getByRole("textbox")).toHaveValue(/codex-agent-ui-\d{4}-/)
   await expect(page.getByRole("button", { name: "Create agent" })).toBeVisible()
 })

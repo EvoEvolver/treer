@@ -27,7 +27,7 @@ const DEFAULT_PLATFORMS = [
   "darwin-aarch64",
   "windows-x86_64",
 ];
-const BINARIES = ["treer", "treer-agent-server", "treer-agent-host"];
+const BINARIES = ["treer", "treer-agent-server", "treer-agent-host", "treer-launch"];
 const MAX_ARTIFACT_BYTES = 128 * 1024 * 1024;
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const CHANNEL_CACHE_CONTROL = "no-store";

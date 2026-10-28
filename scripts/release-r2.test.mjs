@@ -19,7 +19,7 @@ function fixture(gitCommit = "a".repeat(40), version = "1.2.3") {
   const distDir = join(directory, "dist");
   const platform = "linux-x86_64";
   mkdirSync(join(distDir, platform), { recursive: true });
-  for (const binary of ["treer", "treer-agent-server", "treer-agent-host"]) {
+  for (const binary of ["treer", "treer-agent-server", "treer-agent-host", "treer-launch"]) {
     const path = join(distDir, platform, binary);
     writeFileSync(path, `fixture ${binary}\n`);
     chmodSync(path, 0o755);
@@ -57,12 +57,12 @@ test("Windows artifacts use logical manifest names and require PE files", (t) =>
   t.after(() => rmSync(data.directory, { recursive: true, force: true }));
   const platform = "windows-x86_64";
   mkdirSync(join(data.distDir, platform));
-  for (const binary of ["treer", "treer-agent-server", "treer-agent-host"]) {
+  for (const binary of ["treer", "treer-agent-server", "treer-agent-host", "treer-launch"]) {
     writeFileSync(join(data.distDir, platform, binary), `MZ fixture ${binary}`, { mode: 0o644 });
   }
   const options = { distDir: data.distDir, platforms: [platform], version: "v1.2.3" };
   const records = buildArtifactRecords(options);
-  assert.equal(records.length, 3);
+  assert.equal(records.length, 4);
   assert.equal(records[0].path, "releases/v1.2.3/windows-x86_64/treer");
   writeFileSync(join(data.distDir, platform, "treer"), "ELF");
   assert.throws(() => buildArtifactRecords(options), /not a Windows executable/);
@@ -88,10 +88,10 @@ test("manifest contains sorted immutable artifact records and a valid signature"
       git_commit: "a".repeat(40),
       rustc: "rustc 1.90.0 (fixture)",
     }]);
-    assert.equal(prepared.manifest.artifacts.length, 3);
+    assert.equal(prepared.manifest.artifacts.length, 4);
     assert.deepEqual(
       prepared.manifest.artifacts.map((artifact) => artifact.binary),
-      ["treer", "treer-agent-host", "treer-agent-server"],
+      ["treer", "treer-agent-host", "treer-agent-server", "treer-launch"],
     );
     assert.ok(prepared.manifest.artifacts.every((artifact) => !Object.hasOwn(artifact, "source")));
     const signature = JSON.parse(readFileSync(prepared.signaturePath, "utf8"));

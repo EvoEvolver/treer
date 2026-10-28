@@ -55,6 +55,8 @@ pub(crate) struct VerifiedRelease {
     pub(crate) cli: Vec<u8>,
     /// Absent only in manifests that predate shipping the Host.
     pub(crate) host: Option<Vec<u8>>,
+    /// The `treer-launch` Agent launcher; absent in manifests that predate it.
+    pub(crate) launcher: Option<Vec<u8>>,
 }
 
 /// Trust for the Controller's own updates: explicit key, else the local
@@ -290,22 +292,18 @@ pub(crate) async fn channel_version(
     Ok(channel.version)
 }
 
-/// Fetch the signed manifest of exactly `version`, then this platform's
-/// executables. No executable byte is fetched before the manifest verifies.
-pub(crate) async fn download(
+async fn signed_manifest(
     client: &reqwest::Client,
-    base: Url,
+    base: &Url,
     version: &str,
     key: &VerifyingKey,
-    platform: &str,
-) -> Result<VerifiedRelease> {
+) -> Result<Manifest> {
     if !treer_protocol::controller_update::valid_version(version) {
         bail!("invalid release version {version:?}; expected vMAJOR.MINOR.PATCH[-PRERELEASE]");
     }
-    let base = normalize_base_url(base)?;
     let bytes = fetch_signed(
         client,
-        &base,
+        base,
         &format!("releases/{version}/manifest.json"),
         key,
     )
@@ -318,6 +316,31 @@ pub(crate) async fn download(
     {
         bail!("signed release manifest does not describe {version} under the trusted key");
     }
+    Ok(manifest)
+}
+
+async fn fetch_optional(
+    client: &reqwest::Client,
+    base: &Url,
+    artifact: Option<&Artifact>,
+) -> Result<Option<Vec<u8>>> {
+    match artifact {
+        Some(artifact) => fetch_binary(client, base, artifact).await.map(Some),
+        None => Ok(None),
+    }
+}
+
+/// Fetch the signed manifest of exactly `version`, then this platform's
+/// executables. No executable byte is fetched before the manifest verifies.
+pub(crate) async fn download(
+    client: &reqwest::Client,
+    base: Url,
+    version: &str,
+    key: &VerifyingKey,
+    platform: &str,
+) -> Result<VerifiedRelease> {
+    let base = normalize_base_url(base)?;
+    let manifest = signed_manifest(client, &base, version, key).await?;
     let required = |binary| {
         select_artifact(&manifest, version, platform, binary)?
             .with_context(|| format!("signed manifest does not contain {platform}/{binary}"))
@@ -325,21 +348,37 @@ pub(crate) async fn download(
     let controller = required("treer-agent-server")?;
     let cli = required("treer")?;
     let host = select_artifact(&manifest, version, platform, "treer-agent-host")?;
-    let (controller, cli, host) = tokio::try_join!(
+    let launcher = select_artifact(&manifest, version, platform, LAUNCHER_ARTIFACT)?;
+    let (controller, cli, host, launcher) = tokio::try_join!(
         fetch_binary(client, &base, controller),
         fetch_binary(client, &base, cli),
-        async {
-            match host {
-                Some(host) => fetch_binary(client, &base, host).await.map(Some),
-                None => Ok(None),
-            }
-        }
+        fetch_optional(client, &base, host),
+        fetch_optional(client, &base, launcher),
     )?;
     Ok(VerifiedRelease {
         controller,
         cli,
         host,
+        launcher,
     })
+}
+
+/// Release artifact name of the Agent launcher.
+pub(crate) const LAUNCHER_ARTIFACT: &str = "treer-launch";
+
+/// Only the launcher executable of the signed release `version`.
+pub(crate) async fn download_launcher(
+    client: &reqwest::Client,
+    base: Url,
+    version: &str,
+    key: &VerifyingKey,
+    platform: &str,
+) -> Result<Vec<u8>> {
+    let base = normalize_base_url(base)?;
+    let manifest = signed_manifest(client, &base, version, key).await?;
+    let artifact = select_artifact(&manifest, version, platform, LAUNCHER_ARTIFACT)?
+        .with_context(|| format!("signed {version} manifest does not contain {platform}/{LAUNCHER_ARTIFACT}"))?;
+    fetch_binary(client, &base, artifact).await
 }
 
 #[cfg(test)]

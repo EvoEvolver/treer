@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {createHash, generateKeyPairSync, sign} from 'node:crypto';
-import {mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, mkdirSync, existsSync} from 'node:fs';
+import {mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync, mkdirSync, existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {spawn} from 'node:child_process';
@@ -10,7 +10,7 @@ const shell=readFileSync(new URL('../crates/treer-proxy/src/install-official.sh'
 const key=generateKeyPairSync('ed25519');const pem=key.publicKey.export({type:'spki',format:'pem'});const digest=b=>createHash('sha256').update(b).digest('hex');const fp=digest(key.publicKey.export({type:'spki',format:'der'}));
 const rendered=code.replace('__TREER_OFFICIAL_RELEASE_PEM__',pem).replace('634761ff47a6a113b4b8925f0db0e030d8bfce07f2fa228fdc0a4904874dc41f',fp);
 const {downloadOfficial}=await import('data:text/javascript;base64,'+Buffer.from(rendered).toString('base64'));
-const names=['treer','treer-agent-host','treer-agent-server'];
+const names=['treer','treer-launch','treer-agent-host','treer-agent-server'];
 async function fixture(t,platform='linux-x86_64',mutate=()=>{}){
  const dir=mkdtempSync(join(tmpdir(),'treer-signed-install-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));const objects=new Map(),requests=[];
  const manifest={schema_version:2,version:'v0.1.16',git_commit:'f'.repeat(40),signing_key_id:fp.slice(0,16),artifacts:[]};
@@ -21,7 +21,7 @@ async function fixture(t,platform='linux-x86_64',mutate=()=>{}){
  const transport=async (url,options)=>{assert.equal(url.origin,'https://releases.treer.ai');assert.equal(options.redirect,'error');assert.ok(options.signal);const path=url.pathname.slice(1);requests.push(path);return new Response(objects.get(path),{status:objects.has(path)?200:404});};
  return {dir,objects,requests,transport};
 }
-for(const p of ['linux-x86_64','linux-aarch64','darwin-x86_64','darwin-aarch64'])test(`signed stable stages exact ${p} without execution`,async t=>{const f=await fixture(t,p);const r=await downloadOfficial(p,f.dir,{transport:f.transport});assert.equal(r.version,'v0.1.16');assert.deepEqual(readdirSync(f.dir).sort(),[...names].sort());assert.equal(f.requests.length,7);for(const n of names)assert.match(readFileSync(join(f.dir,n),'utf8'),/should-never-execute/);});
+for(const p of ['linux-x86_64','linux-aarch64','darwin-x86_64','darwin-aarch64'])test(`signed stable stages exact ${p} without execution`,async t=>{const f=await fixture(t,p);const r=await downloadOfficial(p,f.dir,{transport:f.transport});assert.equal(r.version,'v0.1.16');assert.deepEqual(readdirSync(f.dir).sort(),[...names].sort());assert.equal(f.requests.length,8);for(const n of names)assert.match(readFileSync(join(f.dir,n),'utf8'),/should-never-execute/);});
 for(const where of ['channels/stable.json','releases/v0.1.16/manifest.json'])test(`tampered ${where} refuses before binaries`,async t=>{const f=await fixture(t);f.objects.set(where,Buffer.from('{}'));await assert.rejects(downloadOfficial('linux-x86_64',f.dir,{transport:f.transport}));assert.deepEqual(readdirSync(f.dir),[]);});
 for(const [name,mutate] of [
  ['duplicate artifact',({manifest:m})=>m.artifacts.push(m.artifacts[0])],
@@ -47,7 +47,8 @@ test('rendered signed shell installs only the verified set into isolated paths, 
  const js=rendered.replace("if (process.argv[1] === '-') {", "if (process.argv[1] === '-') {\n"+bridge);
  const script=shell.replace('__TREER_OFFICIAL_DOWNLOAD_JS__',js).replace('__TREER_PATH_SETUP__','');
  const p=spawn('sh',['-eu'],{env:{...process.env,HOME:home,TMPDIR:home,TREER_INSTALL_DIR:bins,TREER_AGENT_SERVER_INSTALL_DIR:servers},stdio:['pipe','pipe','pipe']});let stderr='',stdout='';p.stderr.on('data',b=>stderr+=b);p.stdout.on('data',b=>stdout+=b);const status=new Promise((resolve,reject)=>{p.on('exit',resolve);p.on('error',reject);});p.stdin.end(script);assert.equal(await status,0,stderr);assert.match(stdout,/verified official stable v0.1.16/);
- for(const name of names)assert.match(readFileSync(join(name==='treer'?bins:servers,name),'utf8'),/should-never-execute/);
+ for(const name of names)assert.match(readFileSync(join(['treer','treer-launch'].includes(name)?bins:servers,name),'utf8'),/should-never-execute/);
+ assert.equal(readlinkSync(join(bins,'treer-agent')),'treer-launch');
  assert.equal(existsSync(join(home,'should-never-execute')),false);
 });
 

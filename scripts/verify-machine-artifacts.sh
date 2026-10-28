@@ -20,11 +20,11 @@ for platform in linux-x86_64 linux-aarch64 darwin-x86_64 darwin-aarch64 windows-
     # Reject partial manifests and unexpected paths before trusting checksum tools.
     awk '
         length($1) != 64 || $1 ~ /[^0-9a-f]/ || NF != 2 { exit 1 }
-        $2 != "treer" && $2 != "treer-agent-host" && $2 != "treer-agent-server" { exit 1 }
+        $2 != "treer" && $2 != "treer-launch" && $2 != "treer-agent-host" && $2 != "treer-agent-server" { exit 1 }
         seen[$2]++ { exit 1 }
-        END { if (NR != 3) exit 1 }
+        END { if (NR != 4) exit 1 }
     ' "$source/SHA256SUMS" || { echo "invalid $platform checksum manifest" >&2; exit 1; }
-    for binary in treer treer-agent-host treer-agent-server; do
+    for binary in treer treer-launch treer-agent-host treer-agent-server; do
         [ -f "$source/$binary" ] && [ ! -L "$source/$binary" ] || {
             echo "missing executable $platform/$binary" >&2; exit 1;
         }

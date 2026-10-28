@@ -215,29 +215,3 @@ test('actual entry: concurrent importers publish exactly one complete new direct
   await f.noStages();
 }));
 
-test('actual installed-dispatcher entry: session goes to verified native image without provider', async () => fixture(async f => {
-  const bundleRoot = path.join(f.root, 'bound-launcher'), scripts = path.join(bundleRoot, 'scripts'), publicDir = path.join(bundleRoot, 'public');
-  await fs.mkdir(scripts, { recursive: true, mode: 0o700 }); await fs.mkdir(publicDir);
-  for (const name of ['treer-agent.mjs', 'native-runtime.mjs', 'process.mjs']) {
-    await fs.copyFile(fileURLToPath(new URL(`../scripts/${name}`, import.meta.url)), path.join(scripts, name));
-  }
-  const image = path.join(bundleRoot, 'native'); await fs.copyFile(binary, image); await fs.chmod(image, 0o700);
-  const bind = async name => { const bytes = await fs.readFile(name); return { path: name, bytes: bytes.length, sha256: digest(bytes) }; };
-  const assets = [];
-  for (const name of ['index.html', 'boot.js', 'ui.js', 'ui.css']) { const file = path.join(publicDir, name); await fs.writeFile(file, 'synthetic'); assets.push(await bind(file)); }
-  const imageBinding = await bind(image);
-  await fs.writeFile(path.join(bundleRoot, 'native-runtime.json'), JSON.stringify({ schema: 'treer.native-launcher/v1', platform: process.platform, arch: process.arch, source_commit: '1'.repeat(40), executable: imageBinding, public_dir: publicDir, assets, tools: { treer: { ...imageBinding, version: 'synthetic-not-invoked' } } }));
-  const result = spawnSync(process.execPath, [path.join(scripts, 'treer-agent.mjs'), 'session', ...f.exportArgs], { env: f.env, encoding: 'utf8', timeout: 30_000, maxBuffer: 2 * 1024 * 1024 });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).sessionId, f.id);
-  // Exercise the ordinary (pre-offline CLI) main path with the dispatcher's
-  // fail-closed environment: it must refuse before runtime/provider startup.
-  const runtimeFallback = spawnSync(image, [], { env: { ...f.env, AGENT_UI_CWD: image, AGENT_UI_HARNESS: 'offline-session' }, encoding: 'utf8', timeout: 5000 });
-  assert.notEqual(runtimeFallback.status, 0); assert.equal(runtimeFallback.error, undefined);
-  assert.match(runtimeFallback.stderr, /workspace_file_root_unavailable/);
-  // A changed image must refuse, never take the explicit Node launcher path.
-  await fs.appendFile(image, 'changed');
-  const changed = spawnSync(process.execPath, [path.join(scripts, 'treer-agent.mjs'), 'session', '--help'], { env: f.env, encoding: 'utf8', timeout: 30_000 });
-  assert.notEqual(changed.status, 0); assert.match(changed.stderr, /Native launcher binding/);
-}));
-
