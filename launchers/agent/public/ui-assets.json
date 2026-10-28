@@ -13,8 +13,8 @@
     },
     {
       "path": "ui.js",
-      "bytes": 283448,
-      "sha256": "f795037f3241951b7f0428ee7aa01207c2387f42b6ec92258befe59d6f95a4a5"
+      "bytes": 283488,
+      "sha256": "bb7061827eaa14e7e0f30b9ca07caba034d699217763392401f62d98a8fd55a9"
     },
     {
       "path": "MarkdownPreview-ZLKRU2QB.js",
@@ -53,8 +53,8 @@
     },
     {
       "path": "ui.css",
-      "bytes": 28430,
-      "sha256": "a9dafb11ef70cb5a70b79060b63957df03e7e2dd3acfffb4041c997bc38d5e33"
+      "bytes": 28429,
+      "sha256": "720e4c080f61b9ff849f4da858928ca1462ae14d293b9e2a3a98afc6fe74eab6"
     },
     {
       "path": "pdf-worker-9536359f1b836785.js",

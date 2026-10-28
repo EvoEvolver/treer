@@ -379,7 +379,7 @@ progress.meter::-moz-progress-bar{background:var(--accent)}
   .tool-t{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
   .chip{max-width:150px}
   .live{flex-basis:100%}
-  .banner{position:static}
+  .banner .banner-detail{display:none}
   .seg .seg-t{display:none}
   .stop{margin-left:auto}
   .composer textarea,.field select,.field textarea,.field input,.filter input{font-size:16px}

@@ -29,10 +29,10 @@ function RecoveryBanner({ snapshot }: { snapshot: Snapshot }) {
       <Icon name="warn" />
       <div>
         <b>{blocked ? t("recovery.blocked") : t("recovery.restarting")}</b>
-        {detail && <p>{detail}</p>}
+        {detail && <p className="banner-detail">{detail}</p>}
         <p className="banner-meta">{[recovery?.restarts ? t("recovery.restarts", { count: recovery.restarts }) : "", next != null && next > 0 ? t("recovery.next", { time: duration(next) }) : ""].filter(Boolean).join(" · ")}</p>
         {unresolved > 0 && <p>{t("recovery.unresolved", { count: unresolved })}</p>}
-        <p className="banner-meta">{t("recovery.kept")}</p>
+        <p className="banner-meta banner-detail">{t("recovery.kept")}</p>
       </div>
     </section>
   );
