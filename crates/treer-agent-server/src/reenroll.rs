@@ -25,18 +25,13 @@ pub(crate) fn replacement_reasons(
 ) -> Vec<String> {
     let mut reasons = Vec::new();
     if let Some(root) = requested_root {
-        let same = match (
-            std::fs::canonicalize(root),
-            std::fs::canonicalize(&installed.root),
-        ) {
-            (Ok(requested), Ok(current)) => requested == current,
-            _ => false,
-        };
+        let requested = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let same = std::fs::canonicalize(&installed.root).is_ok_and(|current| current == requested);
         if !same {
             reasons.push(format!(
                 "the root changes from {} to {}",
                 installed.root.display(),
-                root.display()
+                requested.display()
             ));
         }
     }
