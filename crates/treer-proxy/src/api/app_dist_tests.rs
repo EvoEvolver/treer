@@ -66,7 +66,6 @@ async fn app_router(dist: &Dist, app_url: &str, proxy_url: &str) -> Router {
         messages,
         CapabilityRollout::all_enabled(),
         crate::updater::UpdaterClient::disabled(),
-        crate::voice::VoiceServices::disabled(),
     )
 }
 

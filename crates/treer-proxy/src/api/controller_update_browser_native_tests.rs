@@ -120,7 +120,6 @@ async fn browser_proxy(
         messages,
         CapabilityRollout::all_enabled(),
         crate::updater::UpdaterClient::disabled(),
-        crate::voice::VoiceServices::disabled(),
     )
     .layer(axum::middleware::from_fn(
         move |request: axum::http::Request<Body>, next: axum::middleware::Next| {

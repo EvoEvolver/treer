@@ -181,7 +181,6 @@ async fn machine_restore_route_authenticates_scopes_and_reports_waiting_endpoint
             messages.clone(),
             CapabilityRollout::all_enabled(),
             crate::updater::UpdaterClient::disabled(),
-            crate::voice::VoiceServices::disabled(),
         )
     };
     let app = make_router(PolicyEngine::allow_all());

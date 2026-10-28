@@ -664,7 +664,6 @@ async fn agent_ui_frame_policy_real_router_preserves_launcher_headers_and_strips
             messages,
             CapabilityRollout::all_enabled(),
             crate::updater::UpdaterClient::disabled(),
-            crate::voice::VoiceServices::disabled(),
         );
         let path = match kind {
             "agent-root" => "/api/workspaces/default/agents/agent-ui/interface/ui".into(),
