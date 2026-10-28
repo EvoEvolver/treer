@@ -61,6 +61,22 @@ jobs:
         run: |
           cargo test --locked -p treer-agent-server --bin treer-agent-server service::tests::machine_
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test the Agent launcher natively
+        # The launcher's store, lease, history, file browser, attachments and provider
+        # lookup are one implementation on every platform; run its unit tests and the
+        # real-PE text queue / restart / single-writer / directory-listing entry here.
+        run: |
+          $env:TREER_TEST_NODE = (Get-Command node.exe).Source
+          cargo test --locked --features fixture-harness --manifest-path launchers/agent/Cargo.toml --target-dir target
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --features fixture-harness --manifest-path launchers/agent/Cargo.toml --target-dir target
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:RUST_SPIKE_BIN = (Resolve-Path target/debug/treer-launch.exe).Path
+          Push-Location launchers/agent
+          node --test tests/windows-native-entry.mjs
+          $code = $LASTEXITCODE
+          Pop-Location
+          if ($code -ne 0) { exit $code }
       - name: Test private-state placement rule (must run both tests)
         # The placement predicate walks to the drive root and the Controller matrix
         # decides whether image uploads stay enabled; the windows_ filter above does
