@@ -86,7 +86,7 @@ Update or repair only the launcher:
 ```sh
 treer-launch update                      # the installed Controller's version
 treer-launch update --channel stable     # newest signed release on a channel
-treer-launch update --version v0.2.0
+treer-launch update --version v0.2.1
 treer-agent-server launcher install --from ./target/release/treer-launch  # local build
 treer-agent-server launcher status
 ```

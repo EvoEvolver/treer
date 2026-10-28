@@ -202,8 +202,15 @@ manifest without `treer-launch` as predating it.
 
 ## Release notes
 
-### Unreleased
+### 0.2.1
 
+Additive release: no breaking changes and no schema contraction. Update
+machines from the Console or with `treer-agent-server update --version v0.2.1`.
+
+- **Machine metrics** (`machine.metrics.v1`): Controllers sample whole-machine
+  CPU, RAM and NVIDIA GPU load; the machine page shows them live and
+  `treer machine metrics <machine> [--window 15m]` returns a window. Machines
+  on older Controllers report `machine_metrics_unsupported`.
 - **App email restored** (`app.email.v1`): Managed Apps send through the
   Proxy's Cloudflare sender with `treer email send` or
   `POST /api/apps/{service_id}/email`, governed by `email.send`, and look up an
@@ -220,6 +227,8 @@ manifest without `treer-launch` as predating it.
 - **Per-endpoint App inbox** (`message.endpoint-inbox.v1`): `app_endpoint` and
   `after` on Message receive/ack (`treer message receive|ack --endpoint KEY`).
   Additive; needs a Proxy and Controller that both advertise it.
+- **Apps:** Issues without process machinery (open edits, hide/restore, Agent
+  wake-ups) and the External Agent App (one CLI path, generic endpoint inbox).
 
 ### 0.2.0
 
