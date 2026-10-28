@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 PLATFORMS = ("linux-x86_64", "linux-aarch64")
-MACHINE_FILES = {"treer", "treer-agent-host", "treer-agent-server", "SHA256SUMS", "build-metadata.json"}
+MACHINE_FILES = {"treer", "treer-launch", "treer-agent-host", "treer-agent-server", "SHA256SUMS", "build-metadata.json"}
 PROXY_FILES = {"treer-proxy", "SHA256SUMS", "build-metadata.json"}
 
 

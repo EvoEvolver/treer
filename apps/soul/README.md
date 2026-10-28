@@ -70,15 +70,16 @@ credential files are never exported or executed. Source sessions are not
 modified.
 
 Native session transfer is delegated to the Agent launcher: Soul runs
-`treer-agent session export|import` (export passes `--config-dir`, which is
+`treer-launch session export|import` (export passes `--config-dir`, which is
 `CLAUDE_CONFIG_DIR` or `~/.claude`), validates the bundle and scans the actual
 bytes before import. The launcher is found through `TREER_AGENT_LAUNCHER`, else
-`treer-agent` on `PATH`, else `~/.local/bin/treer-agent`; install it on both the
+`treer-launch` on `PATH`, else `~/.local/bin/treer-launch`, else the deprecated
+`treer-launch` alias in those places; install it on both the
 source and the target machine.
 
 `incarnate` resolves the version, then uses read-only `treer exec --machine` to
 check the Claude executable/version (minimum 2.0.0), presence of login material,
-the launcher (`treer-agent session --help`) and free disk, without reading
+the launcher (`treer-launch session --help`) and free disk, without reading
 credential contents. Missing requirements refuse unless `--force` is given. It
 then runs `treer agent admin create` as the caller (`--folder F` and `--name`
 optional). A private Soul cannot be handed to a new identity; save a
@@ -89,7 +90,7 @@ size/hash and restores into `~/.local/state/treer-soul/AGENT_ID/workspace`
 (`TREER_SOUL_STATE_DIR` overrides) with a new native session UUID. Each restored
 Claude Agent gets its own Claude home inside that directory (the launcher's
 `native/.harness/claude`); unrelated external config paths are rejected. It
-starts with `treer-agent --harness claude --session-id ID --cwd DIR`. After a
+starts with `treer-launch --harness claude --session-id ID --cwd DIR`. After a
 completed restore, restarts never re-import or overwrite later work.
 `TREER_SOUL_URL` overrides the server URL (default `http://soul.treer`);
 `TREER_SOUL_SERVICE` (default `soul`) names the service for `treer token create`.
@@ -148,11 +149,11 @@ python3 apps/soul/tests/test_soul.py
 python3 apps/soul/tests/test_client.py
 SOUL_PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node --test apps/soul/tests/browser.mjs
 cargo build --locked --features fixture-harness --manifest-path launchers/agent/Cargo.toml
-SOUL_TEST_LAUNCHER=$PWD/launchers/agent/target/debug/treer-agent-launcher \
+SOUL_TEST_LAUNCHER=$PWD/launchers/agent/target/debug/treer-launch \
   python3 apps/soul/tests/test_launcher_integration.py
 ```
 
 Tests use temporary HOME/state, a fake Treer and a local identity Proxy; they
 never create a real Agent or contact a real machine. The launcher integration
 test drives the real launcher session CLI with fake Claude files
-(`SOUL_TEST_LAUNCHER` may also be an installed `treer-agent`).
+(`SOUL_TEST_LAUNCHER` may also be an installed `treer-launch`).

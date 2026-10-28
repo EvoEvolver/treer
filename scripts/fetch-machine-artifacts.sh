@@ -71,7 +71,7 @@ gh run download "$run_id" --repo "$repository" --dir "$temporary"
 mkdir "$temporary/dist"
 for platform in $platforms; do
     [ -d "$temporary/treer-$platform" ] || { echo "run $run_id is missing treer-$platform" >&2; exit 1; }
-    chmod 755 "$temporary/treer-$platform/treer" "$temporary/treer-$platform/treer-agent-host" \
+    chmod 755 "$temporary/treer-$platform/treer" "$temporary/treer-$platform/treer-launch" "$temporary/treer-$platform/treer-agent-host" \
         "$temporary/treer-$platform/treer-agent-server"
     mv "$temporary/treer-$platform" "$temporary/dist/$platform"
 done

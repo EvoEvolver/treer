@@ -814,7 +814,7 @@ fn agent_admin_commands_parse() {
         "--publish",
         "4173",
         "--",
-        "/opt/codex-agent-ui/scripts/treer-agent.sh",
+        "/opt/codex-agent-ui/bin/treer-launch",
     ])
     .expect("agent admin create --publish should parse");
     assert!(matches!(

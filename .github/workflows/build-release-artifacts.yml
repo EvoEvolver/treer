@@ -36,15 +36,6 @@ jobs:
           ref: ${{ inputs.revision || github.sha }}
       - name: Record source commit
         run: '"TREER_BUILD_COMMIT=$(git rev-parse HEAD)" >> $env:GITHUB_ENV'
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22'
-      - name: Prepare verified launcher payload
-        run: |
-          npm --prefix launchers/agent ci --ignore-scripts
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/prepare-launcher-release.mjs --output "$env:RUNNER_TEMP/treer-launcher-payload" --source-commit "$env:TREER_BUILD_COMMIT"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Select MSVC Rust
         run: |
@@ -86,7 +77,11 @@ jobs:
         # on the same pinned image links to the same bytes. It is the only link argument.
         env:
           RUSTFLAGS: -C link-arg=/Brepro
-        run: cargo build --locked --release -p treer-cli -p treer-agent-host -p treer-agent-server
+        run: |
+          cargo build --locked --release -p treer-cli -p treer-agent-host -p treer-agent-server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release --manifest-path launchers/agent/Cargo.toml --target-dir target
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Windows administrator requirement (standard user, disposable runner)
         # Creates a temporary standard local user: the script itself refuses to run
         # unless this is a GitHub-hosted runner. Never enable it on self-hosted machines.
@@ -116,15 +111,17 @@ jobs:
           RUSTFLAGS: -C link-arg=/Brepro
         run: |
           $staged = @{}
-          foreach ($binary in @('treer', 'treer-agent-host', 'treer-agent-server')) {
+          foreach ($binary in @('treer', 'treer-launch', 'treer-agent-host', 'treer-agent-server')) {
             $staged[$binary] = (Get-FileHash -Algorithm SHA256 "release-artifacts/windows-x86_64/$binary").Hash.ToLowerInvariant()
           }
           cargo clean --release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release -p treer-cli -p treer-agent-host -p treer-agent-server
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release --manifest-path launchers/agent/Cargo.toml --target-dir target
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $different = @()
-          foreach ($binary in @('treer', 'treer-agent-host', 'treer-agent-server')) {
+          foreach ($binary in @('treer', 'treer-launch', 'treer-agent-host', 'treer-agent-server')) {
             $rebuilt = (Get-FileHash -Algorithm SHA256 "target/release/$binary.exe").Hash.ToLowerInvariant()
             Write-Host "$binary staged $($staged[$binary]) rebuilt $rebuilt"
             if ($staged[$binary] -ne $rebuilt) { $different += $binary }
@@ -182,17 +179,6 @@ jobs:
         shell: bash
         run: echo "TREER_BUILD_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22'
-
-      - name: Prepare verified launcher payload
-        shell: bash
-        run: |
-          set -euo pipefail
-          npm --prefix launchers/agent ci --ignore-scripts
-          node scripts/prepare-launcher-release.mjs --output "$RUNNER_TEMP/treer-launcher-payload" --source-commit "$TREER_BUILD_COMMIT"
-
       - name: Cache Rust build
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
@@ -214,7 +200,7 @@ jobs:
           rustup default "$RUST_VERSION"
           rustc --version --verbose
 
-      - name: Build agent binaries
+      - name: Build machine binaries and the Agent launcher
         shell: bash
         run: |
           set -euo pipefail
@@ -222,6 +208,7 @@ jobs:
             -p treer-cli \
             -p treer-agent-host \
             -p treer-agent-server
+          cargo build --locked --release --manifest-path launchers/agent/Cargo.toml --target-dir target
 
       - name: Stage and verify artifacts
         shell: bash

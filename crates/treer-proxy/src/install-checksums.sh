@@ -8,7 +8,7 @@ else
     echo "treer: sha256sum or shasum is required" >&2
     exit 1
 fi
-for binary in treer treer-agent-host treer-agent-server; do
+for binary in treer treer-launch treer-agent-host treer-agent-server; do
     expected=$(awk -v binary="$binary" '
         $2 == binary || $2 == "*" binary {
             if (NF != 2 || length($1) != 64 || $1 !~ /^[[:xdigit:]]+$/) exit 1

@@ -272,7 +272,7 @@ else:
             logged_in = logged_in or subprocess.run(['security','find-generic-password','-s','Claude Code-credentials'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5).returncode==0
         except Exception: pass
 override=os.environ.get('TREER_AGENT_LAUNCHER')
-candidates=[Path(override).expanduser()] if override else [Path(p) for p in [shutil.which('treer-agent')] if p]+[home/'.local/bin/treer-agent']
+candidates=[Path(override).expanduser()] if override else [Path(p) for name in ('treer-launch','treer-agent') for p in [shutil.which(name),home/'.local/bin'/name] if p]
 launcher=next((str(p.resolve()) for p in candidates if p.is_file() and os.access(p,os.X_OK)),None)
 session_transfer=False
 if launcher and harness!='generic':
@@ -289,8 +289,8 @@ def preflight(machine,harness,size):
     problems=[]
     if not probe.get('executable'): problems.append('Install '+harness)
     if not probe.get('logged_in'): problems.append('Log in to '+harness+' on target machine')
-    if harness!='generic' and not probe.get('launcher'): problems.append('Install unified treer-agent launcher on target machine')
-    if harness!='generic' and not probe.get('session_transfer'): problems.append('Update treer-agent launcher to include the session transfer CLI')
+    if harness!='generic' and not probe.get('launcher'): problems.append('Install the treer-launch Agent launcher on target machine (it ships with Treer)')
+    if harness!='generic' and not probe.get('session_transfer'): problems.append('Update treer-launch (treer-launch update) to include the session transfer CLI')
     version=probe.get('version','')
     try:
         parsed=tuple(int(p) for p in version.split('.'))
@@ -321,7 +321,7 @@ def command_incarnate(args):
     adapter=record.get('manifest',{}).get('adapter',{})
     harness=adapter.get('name','generic')
     if harness not in ('claude','generic'):
-        # Archived Codex Souls stay readable, but treer-agent cannot import them.
+        # Archived Codex Souls stay readable, but treer-launch cannot import them.
         raise RuntimeError('Unsupported harness adapter for restore: '+str(harness))
     if harness == 'generic' and not args.command:
         raise RuntimeError('Generic Soul needs an explicit command after --')

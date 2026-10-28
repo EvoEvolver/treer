@@ -27,7 +27,7 @@ only. The server rejects detected secrets unless --allow-secrets is explicit;
 transcripts remain sensitive even when scanning finds nothing. Generic upload
 supports --manifest and --file ARCHIVE_PATH=LOCAL_PATH.
 
-Only Claude sessions can be saved/restored (`treer-agent session` is
+Only Claude sessions can be saved/restored (`treer-launch session` is
 Claude-only). Archived Codex Souls stay readable but cannot be incarnated.
 `--allow-secrets` does not expand the launcher's export allowlist.
 

@@ -22,6 +22,9 @@ mod runtime;
 #[cfg(unix)] mod store;
 #[cfg(windows)] #[path="windows_store.rs"] mod store;
 mod transcript;
+mod cli;
+mod tools;
+mod ui_assets;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod session_transfer;
 
@@ -52,11 +55,7 @@ const CAPABILITIES: &[&str] = &[
     "prompt.queue.read",
 ];
 fn treer_binary() -> String {
-    if cfg!(feature = "fixture-harness") {
-        "treer".into()
-    } else {
-        env!("SPIKE_TREER_PATH").into()
-    }
+    tools::treer()
 }
 #[derive(Clone)]
 struct App {
@@ -64,7 +63,8 @@ struct App {
     port: u16,
     agent: String,
     instance: String,
-    public: PathBuf,
+    /// Development override (`AGENT_UI_PUBLIC_DIR`); otherwise the embedded UI.
+    public: Option<PathBuf>,
     files: files::Files,
     task_output: task_output::Output,
     attachments: Option<Arc<tokio::sync::Mutex<attachments::Attachments>>>,
@@ -78,6 +78,10 @@ fn env(name: &str) -> Option<String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    match cli::prepare(&std::env::args().skip(1).collect::<Vec<_>>())? {
+        cli::Next::Run => {}
+        cli::Next::Exit(code) => std::process::exit(code),
+    }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let mut launch = if std::env::args().nth(1).as_deref()==Some("session") && matches!(std::env::args().nth(2).as_deref(),Some("launch"|"run")) {
         Some(session_transfer::launch(&std::env::args().skip(3).collect::<Vec<_>>(),std::env::args().nth(2).as_deref()==Some("run"))?)
@@ -137,7 +141,7 @@ async fn main() -> Result<()> {
         bail!("invalid agent id")
     }
     if !cfg!(feature = "fixture-harness")
-        && (env("CODEX_BIN").is_some() || env("RUST_SPIKE_CODEX_ARGS").is_some() || env("CLAUDE_BIN").is_some() || env("RUST_SPIKE_CLAUDE_ARGS").is_some())
+        && (env("RUST_SPIKE_CODEX_ARGS").is_some() || env("RUST_SPIKE_CLAUDE_ARGS").is_some())
     {
         bail!("harness overrides require the fixture-harness test feature")
     }
@@ -192,11 +196,9 @@ async fn main() -> Result<()> {
     } else {
         None
     };
-    let public = std::fs::canonicalize(
-        env("AGENT_UI_PUBLIC_DIR")
-            .map(PathBuf::from)
-            .unwrap_or(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("public")),
-    )?;
+    let public = env("AGENT_UI_PUBLIC_DIR")
+        .map(std::fs::canonicalize)
+        .transpose()?;
     let listener = TcpListener::bind((
         "127.0.0.1",
         env("AGENT_UI_PORT").unwrap_or("0".into()).parse::<u16>()?,
@@ -229,14 +231,7 @@ async fn main() -> Result<()> {
         } else {None},
         cwd,
         private_root,
-        codex: if harness=="claude" {
-            let command=if cfg!(feature="fixture-harness"){env("CLAUDE_BIN").unwrap_or(env!("SPIKE_CLAUDE_PATH").into())}else{env!("SPIKE_CLAUDE_PATH").into()};
-            if command.is_empty(){bail!("Claude native tool was not pinned at build time");}command
-        } else if cfg!(feature = "fixture-harness") {
-            env("CODEX_BIN").unwrap_or(env!("SPIKE_CODEX_PATH").into())
-        } else {
-            env!("SPIKE_CODEX_PATH").into()
-        },
+        codex: tools::provider(&harness)?,
         codex_args,
         session: env("AGENT_UI_SESSION_ID"),
         attachments: attachments.clone(),
@@ -904,42 +899,54 @@ fn static_cache_control(path: &str) -> &'static str {
     if hashed { "private, max-age=31536000, immutable" } else { "no-store" }
 }
 
-async fn static_file(app: &App, path: &str) -> Response {
-    if path.split('/').any(|p| p == "..") || path.contains('%') || path.contains('\\') {
-        return failure(StatusCode::FORBIDDEN, "invalid_asset_path");
-    }
-    let candidate = app.public.join(if path == "/" {
-        "index.html"
-    } else {
-        path.trim_start_matches('/')
-    });
-    for ancestor in candidate
-        .ancestors()
-        .take_while(|p| p.starts_with(&app.public))
-    {
+/// Read `name` from a development `AGENT_UI_PUBLIC_DIR`, refusing links and escapes.
+async fn public_file(public: &std::path::Path, name: &str) -> Result<Vec<u8>, Response> {
+    let candidate = public.join(name);
+    for ancestor in candidate.ancestors().take_while(|p| p.starts_with(public)) {
         if tokio::fs::symlink_metadata(ancestor)
             .await
             .is_ok_and(|m| m.file_type().is_symlink())
         {
-            return failure(StatusCode::FORBIDDEN, "linked_asset");
+            return Err(failure(StatusCode::FORBIDDEN, "linked_asset"));
         }
     }
     let Ok(file) = tokio::fs::canonicalize(&candidate).await else {
-        return failure(StatusCode::NOT_FOUND, "not_found");
+        return Err(failure(StatusCode::NOT_FOUND, "not_found"));
     };
-    if !file.starts_with(&app.public) {
-        return failure(StatusCode::FORBIDDEN, "invalid_asset_path");
+    if !file.starts_with(public) {
+        return Err(failure(StatusCode::FORBIDDEN, "invalid_asset_path"));
     }
     if !tokio::fs::metadata(&file)
         .await
         .is_ok_and(|m| m.is_file() && m.len() <= 8 * 1024 * 1024)
     {
-        return failure(StatusCode::NOT_FOUND, "not_found");
+        return Err(failure(StatusCode::NOT_FOUND, "not_found"));
     }
-    let Ok(data) = tokio::fs::read(&file).await else {
-        return failure(StatusCode::NOT_FOUND, "not_found");
+    tokio::fs::read(&file)
+        .await
+        .map_err(|_| failure(StatusCode::NOT_FOUND, "not_found"))
+}
+
+async fn static_file(app: &App, path: &str) -> Response {
+    if path.split('/').any(|p| p == "..") || path.contains('%') || path.contains('\\') {
+        return failure(StatusCode::FORBIDDEN, "invalid_asset_path");
+    }
+    let name = if path == "/" {
+        "index.html"
+    } else {
+        path.trim_start_matches('/')
     };
-    let mime = match file.extension().and_then(|s| s.to_str()).unwrap_or("") {
+    let data = match &app.public {
+        Some(public) => match public_file(public, name).await {
+            Ok(data) => data,
+            Err(response) => return response,
+        },
+        None => match ui_assets::get(name) {
+            Some(bytes) => bytes.to_vec(),
+            None => return failure(StatusCode::NOT_FOUND, "not_found"),
+        },
+    };
+    let mime = match name.rsplit_once('.').map_or("", |(_, extension)| extension) {
         "html" => "text/html; charset=utf-8",
         "js" => "text/javascript; charset=utf-8",
         "css" => "text/css; charset=utf-8",

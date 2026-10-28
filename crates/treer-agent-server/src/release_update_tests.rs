@@ -19,6 +19,7 @@ const MANIFEST: &str = "releases/v0.1.13/manifest.json";
 const CONTROLLER: &str = "releases/v0.1.13/darwin-aarch64/treer-agent-server";
 const CLI: &str = "releases/v0.1.13/darwin-aarch64/treer";
 const HOST: &str = "releases/v0.1.13/darwin-aarch64/treer-agent-host";
+const LAUNCHER: &str = "releases/v0.1.13/darwin-aarch64/treer-launch";
 pub(crate) const BINARY: &[u8] = b"a verified binary";
 
 pub(crate) fn signing_key() -> SigningKey {
@@ -51,6 +52,7 @@ pub(crate) fn fixture() -> Objects {
             { "binary": "treer-agent-server", "platform": PLATFORM, "path": CONTROLLER, "size": BINARY.len(), "sha256": digest(BINARY) },
             { "binary": "treer", "platform": PLATFORM, "path": CLI, "size": BINARY.len(), "sha256": digest(BINARY) },
             { "binary": "treer-agent-host", "platform": PLATFORM, "path": HOST, "size": BINARY.len(), "sha256": digest(BINARY) },
+            { "binary": "treer-launch", "platform": PLATFORM, "path": LAUNCHER, "size": BINARY.len(), "sha256": digest(BINARY) },
         ],
     });
     put_signed(
@@ -62,6 +64,7 @@ pub(crate) fn fixture() -> Objects {
     objects.insert(CONTROLLER.into(), BINARY.to_vec());
     objects.insert(CLI.into(), BINARY.to_vec());
     objects.insert(HOST.into(), BINARY.to_vec());
+    objects.insert(LAUNCHER.into(), BINARY.to_vec());
     objects
 }
 
@@ -257,16 +260,37 @@ async fn signed_release_download_verifies_all_binaries() {
     // An exact version never consults a channel.
     assert!(!requests.iter().any(|path| path.starts_with("channels/")));
 
-    let mut without_host = fixture();
-    change_manifest(&mut without_host, |m| {
+    assert_eq!(release.launcher.as_deref(), Some(BINARY));
+
+    // Manifests that predate the launcher, then the Host, still verify.
+    let mut older = fixture();
+    change_manifest(&mut older, |m| {
         m["artifacts"].as_array_mut().unwrap().pop();
     });
-    assert!(fetch_release(without_host, VERSION)
+    let release = fetch_release(older.clone(), VERSION).await.0.unwrap();
+    assert!(release.launcher.is_none() && release.host.is_some());
+    change_manifest(&mut older, |m| {
+        m["artifacts"].as_array_mut().unwrap().pop();
+    });
+    assert!(fetch_release(older, VERSION).await.0.unwrap().host.is_none());
+}
+
+#[tokio::test]
+async fn launcher_only_download_fetches_just_the_launcher() {
+    let (base, requests, task) = server(fixture()).await;
+    let key = signing_key().verifying_key();
+    let bytes = download_launcher(&client(), base.clone(), VERSION, &key, PLATFORM)
         .await
-        .0
-        .unwrap()
-        .host
-        .is_none());
+        .unwrap();
+    assert_eq!(bytes, BINARY);
+    let fetched = requests.lock().unwrap().clone();
+    assert!(fetched.contains(&LAUNCHER.to_owned()));
+    assert!(!fetched.iter().any(|path| path == CONTROLLER || path == CLI || path == HOST));
+    let untrusted = SigningKey::from_bytes(&[9; 32]).verifying_key();
+    assert!(download_launcher(&client(), base, VERSION, &untrusted, PLATFORM)
+        .await
+        .is_err());
+    task.abort();
 }
 
 #[tokio::test]

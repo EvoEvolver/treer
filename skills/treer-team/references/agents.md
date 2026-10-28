@@ -22,35 +22,33 @@ does not transfer history or credentials.
 
 ## Install on the destination machine
 
-An enrolled, online Controller/Host, trusted Node.js 22+, and the selected
-provider CLI are prerequisites. The user authenticates the provider separately.
-Do not inspect/copy login files or put API keys in argv. From a terminal on the
-destination machine, with authority to install:
+An enrolled, online Controller/Host and the selected provider CLI are
+prerequisites. The user authenticates the provider separately. Do not
+inspect/copy login files or put API keys in argv. The launcher, `treer-launch`,
+is installed with Treer next to `treer` (no Node.js). Check it on the
+destination machine:
 
 ```sh
-treer-agent-server launcher --node /absolute/trusted/path/to/node install
-treer-agent-server launcher --node /absolute/trusted/path/to/node status
+treer-launch --version
+treer-agent-server launcher status
+treer-agent-server launcher install   # only if missing or broken
 ```
 
-On Windows, select the trusted absolute `node.exe` path instead; no `sh` is
-needed. The official Controller installs its verified embedded payload and a
-machine-local `treer-agent` shim, and saves the shared Codex and Claude workspace profiles. It
-does not install/login provider CLIs, create Agents, or restart anything. Install
-on **each** destination machine before using a shared profile there. Missing
+The shared Codex and Claude profiles are workspace defaults. Nothing here
+installs/logs in provider CLIs, creates Agents, or restarts anything. Missing
 provider executables are runtime errors, not an invitation to use another
 provider or conversation.
 
-The Controller resolves bare `treer-agent` only through absolute directories in
+The Controller resolves bare `treer-launch` only through absolute directories in
 the Agent's final PATH, never its working directory. If it reports
 `command_not_found`, check launcher install/status; do not bypass discovery with
-a relative path such as `./treer-agent`.
+a relative path such as `./treer-launch`.
 
-The shim pins Node and the local launcher; do not paste another machine's
-absolute launcher path into a profile. Provider executables are bound into the
-machine's native runtime image at build time and verified by its
-`native-runtime.json`; a missing provider is reported as unavailable. On Windows
-the Controller's bare executable lookup accepts `.exe`/`.com`, not an arbitrary
-`.cmd` as the Agent/profile command. See the [launcher installation guide](../../../launchers/agent/README.md).
+Do not paste another machine's absolute launcher path into a profile. The
+launcher finds `codex`/`claude` on PATH, or `CODEX_BIN`/`CLAUDE_BIN`. On
+Windows the provider must be a native `.exe`, and the Controller's bare
+executable lookup accepts `.exe`/`.com`, not an arbitrary `.cmd` as the
+Agent/profile command. See the [launcher installation guide](../../../launchers/agent/README.md).
 
 ## Resume a native session, or start a new one
 
@@ -62,7 +60,7 @@ root; `--folder` is a workspace Tree path. They are independent. Omitting
 ```sh
 treer agent admin create --kind command --name reviewer --machine build-box \
   --cwd projects/example --folder /team -- \
-  treer-agent --harness codex --session-id SESSION_ID
+  treer-launch --harness codex --session-id SESSION_ID
 ```
 
 For Claude, use `--harness claude` and that provider's session ID. Omit
@@ -70,7 +68,7 @@ For Claude, use `--harness claude` and that provider's session ID. Omit
 the Agent's Controller-provided private state directory; retain that state and
 the same working directory for later recovery. `--session-id` is not a Treer Agent ID.
 Do not reuse a saved Codex session as a Claude session or edit another Agent's
-state file. Offline Claude session export/import (`treer-agent session ...`) is available
+state file. Offline Claude session export/import (`treer-launch session ...`) is available
 for deliberate transfers. Exports can contain sensitive conversation
 content even though auth/config files are excluded.
 Keep `.treer/` in the project's `.gitignore`: its session state, queues and
@@ -125,7 +123,7 @@ these protections.
 
 ## Preset Agent UIs
 
-Both profiles use **one** embedded React UI and machine-local `treer-agent`:
+Both profiles use **one** embedded React UI and machine-local `treer-launch`:
 
 | Workspace profile | Provider executable/mode |
 | --- | --- |

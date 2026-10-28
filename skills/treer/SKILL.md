@@ -130,7 +130,7 @@ are retired (`agent_kind_retired`). Native arguments go after `--`, and `--cwd` 
 
 ```bash
 treer agent admin create --machine <server-id> --kind command --name reviewer --cwd . -- codex
-treer agent admin create --machine <server-id> --kind command --name codex-ui --cwd . -- treer-agent --harness codex
+treer agent admin create --machine <server-id> --kind command --name codex-ui --cwd . -- treer-launch --harness codex
 treer agent admin create --kind command --name helper --folder /research --cwd repo -- /bin/sh
 ```
 
@@ -404,17 +404,15 @@ The single launcher at `launchers/agent` implements this protocol, serves the
 shared browser UI and drives Codex app-server or Claude stream-json
 (`--harness codex|claude`). Each Agent owns one thread/session. New harnesses
 are adapters inside that runtime, not new UIs or AIS Apps. The launcher is
-installed with the local Controller binary, not the `treer` CLI:
+the `treer-launch` command, installed and updated with Treer itself (no
+Node.js); `treer-launch` is its deprecated alias for older saved profiles:
 
 ```bash
-treer-agent-server launcher install    # or: update | status | rollback
+treer-launch --version
+treer-launch update                      # launcher only; never restarts Agents
+treer-agent-server launcher install      # repair from the signed release
 treer agent admin profile list
 ```
-
-`launcher install` needs a trusted Node.js 22+ (`--node /abs/path` if not in a
-standard location), saves profiles, and never creates or restarts Agents or
-the Host. With several local enrollments pass `--workspace WORKSPACE_ID` (and
-optionally `--url http://127.0.0.1:PORT`).
 
 ## Durable Messages
 

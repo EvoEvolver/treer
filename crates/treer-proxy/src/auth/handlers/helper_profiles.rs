@@ -113,7 +113,7 @@ fn default_agent_launch_profiles() -> Result<Vec<DefaultLaunchProfile>, AuthFail
         ));
     }
     for profile in &mut bundle.profiles {
-        profile.command = "treer-agent".into();
+        profile.command = "treer-launch".into();
     }
     for (name, description, command) in [
         (
@@ -212,7 +212,7 @@ mod default_profile_tests {
             assert_eq!(actual.name, expected["name"]);
             assert_eq!(actual.description, expected["description"]);
             assert_eq!(json!(actual.args), expected["args"]);
-            assert_eq!(actual.command, "treer-agent");
+            assert_eq!(actual.command, "treer-launch");
         }
         assert_eq!(
             defaults

@@ -6,7 +6,7 @@ temporary=$(mktemp -d "${TMPDIR:-/tmp}/treer-served-artifacts.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 for platform in linux-x86_64 linux-aarch64 darwin-x86_64 darwin-aarch64 windows-x86_64; do
     mkdir -p "$temporary/$platform"
-    for binary in treer treer-agent-host treer-agent-server; do
+    for binary in treer treer-launch treer-agent-host treer-agent-server; do
         # No redirects: an old GitHub Release must never satisfy hosted acceptance.
         status=$(curl -sS --fail --retry 3 --retry-all-errors \
             -o "$temporary/$platform/$binary" -w '%{http_code}' \

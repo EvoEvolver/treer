@@ -103,10 +103,9 @@ no traffic from `app.canary.treer.ai`; they are frontend build evidence only.
 
 `Build release artifacts` (`.github/workflows/build-release-artifacts.yml`) runs
 for `v*` tags or by manual dispatch with a `revision`. Native runners build the
-CLI, Host and Controller for `linux-x86_64`, `linux-aarch64`, `darwin-x86_64`,
-`darwin-aarch64` and `windows-x86_64`, after preparing the launcher payload with
-`scripts/prepare-launcher-release.mjs` (lockfile-pinned `npm ci --ignore-scripts`;
-the build fails without a valid payload). `scripts/stage-release-artifacts.sh`
+CLI, Host, Controller and the `treer-launch` Agent launcher (its own Cargo
+workspace, built with `--target-dir target`) for `linux-x86_64`,
+`linux-aarch64`, `darwin-x86_64`, `darwin-aarch64` and `windows-x86_64`. `scripts/stage-release-artifacts.sh`
 (`.ps1` on Windows) stages each platform with `SHA256SUMS` and
 `build-metadata.json`. Windows also runs ConPTY/Controller/CLI tests, the
 standard-user and installer checks and a byte-identical clean rebuild (`/Brepro`).
@@ -193,12 +192,10 @@ For an existing installation without the key,
 `node scripts/install-release-trust.mjs [--config-dir ABS]` installs only the
 shipped public key (exclusive create; refuses a different or unsafe existing key).
 
-## Launcher channel
+## Launcher
 
-`treer-agent update --latest` reads the launcher-only pointer
-`launcher-stable/launcher-latest.json` on GitHub Releases; version objects live
-under `launcher-<full-source-SHA>` and are never overwritten. Stage with
-`node scripts/launcher-release.mjs stage --payload ABS --native ABS --binding ABS
---build ABS --source FULL_SHA --platform PLATFORM --output ABS` and publish once
-with `node scripts/launcher-release.mjs publish ABS_OUTPUT ABS_STAGE_JSON...`.
-Trust is the repository publisher over HTTPS plus pinned SHA256.
+`treer-launch` is an ordinary artifact of every signed release, listed in the
+manifest beside the other executables; there is no separate launcher channel.
+`treer-launch update` (`treer-agent-server launcher update`) installs only that
+artifact, by default at the installed Controller's version. Consumers treat a
+manifest without `treer-launch` as predating it.
