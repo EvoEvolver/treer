@@ -1,7 +1,7 @@
 """Many-to-many parent/child relations between issues (a DAG), kept in `issue_parents`.
 
 An issue can have several parents and a parent several children; the relation never changes the child's own
-behaviour (reminders, leases, dependencies and permissions never look at it). `parent_id` in API output is a read-only
+behaviour (its dependencies and status never look at it). `parent_id` in API output is a read-only
 value derived from the relation (the earliest parent); it is not a second source of truth.
 """
 import json

@@ -165,7 +165,7 @@ def clean_snippet(text, terms):
     return ('…' if begin > 0 else '') + piece.strip() + ('…' if begin + SNIPPET_CHARS < len(flat) else '')
 
 
-def search(db, items, params, limit):
+def search(db, items, params, limit, skip_events=frozenset()):
     """Ranked matches for `params` (already validated): [{issue, match, snippet}]. `items` is {id: issue}."""
     q = params['q']
     terms = q.split()
@@ -207,7 +207,7 @@ def search(db, items, params, limit):
     out, seen = [], set()
     for row in rows:
         issue = items.get(row['issue_id'])
-        if issue is None or issue['id'] in seen:      # one result per issue: its best-ranked matching text
+        if issue is None or issue['id'] in seen or (row['event_id'] and row['event_id'] in skip_events):      # one result per issue: its best-ranked matching text
             continue
         seen.add(issue['id'])
         out.append({'issue': {'id': issue['id'], 'title': issue['title'], 'status': issue['status'], 'assignee': issue['assignee']},

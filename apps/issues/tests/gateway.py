@@ -87,6 +87,7 @@ class Ingress(BaseHTTPRequestHandler):
     def do_GET(self): forward(self, self.path, False)
     def do_POST(self): forward(self, self.path, False)
     def do_PATCH(self): forward(self, self.path, False)
+    def do_DELETE(self): forward(self, self.path, False)
 
 
 class ControlPlane(BaseHTTPRequestHandler):

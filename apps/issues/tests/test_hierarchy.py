@@ -117,13 +117,11 @@ class LinkTest(Base):
         for bad in ([0], ['x'], [e1, e1], 'nope', [999999]):
             self.assertIn(self.code(self.edit, child, {'parent_ids': bad})[0], (400, 404), bad)
 
-    def test_permissions(self):
+    def test_anyone_may_link_and_unlink(self):
         mine, theirs = self.issue(A), self.issue(B)
         child = self.issue(C, assignee='ag_c')
-        self.assertEqual(self.code(self.link, theirs, [child], A)[0], 403, 'adding needs edit rights on the PARENT')
-        self.link(mine, [child], A)                      # A may: it is A's own summary issue; no edit right on the child is needed
-        self.assertEqual(self.code(self.unlink, mine, [child], B)[0], 403, 'someone with neither right cannot remove it')
-        self.unlink(mine, [child], C)                    # the child's owner can always take the link out
+        self.link(theirs, [child], A)                    # no ownership: any principal arranges any hierarchy
+        self.unlink(theirs, [child], B)
         self.link(mine, [child], A); self.unlink(mine, [child], H)
         self.assertEqual(self.parents(child), [])
         for body in ({}, {'add': []}, {'add': ['x']}, {'add': [0]}, {'bogus': 1}, {'add': list(range(1, 60))}):
@@ -131,15 +129,12 @@ class LinkTest(Base):
         self.assertEqual(self.code(self.link, 99999, [child], A)[0], 404)
         self.assertEqual(self.code(self.link, mine, [99999], A)[0], 404)
 
-    def test_other_peoples_fields_are_untouched_by_relations(self):
-        """Reminders, leases and dependencies never look at the hierarchy."""
+    def test_relations_leave_other_fields_alone(self):
         a = self.issue(A, assignee='ag_a')
         epic = self.issue(B, assignee='ag_b')
-        candidates = self.store.reminder_candidates()
         self.link(epic, [a], B)
-        self.assertEqual(self.store.reminder_candidates(), candidates, 'a parent does not change who is reminded')
-        self.store.mutate(a, 'claim', {'action': 'acquire'}, A, PEOPLE)
-        self.assertEqual(self.store.show(a)['issue']['blocked_by'], [])
+        shown = self.store.show(a)['issue']
+        self.assertEqual((shown['assignee'], shown['blocked_by'], shown['status']), ('ag_a', [], 'open'))
         dep = self.issue(A)
         self.edit(a, {'blocked_by': [dep]}, A)
         self.assertEqual(self.store.show(a)['issue']['blocked_by'], [dep])

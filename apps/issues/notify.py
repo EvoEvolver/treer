@@ -1,35 +1,26 @@
-"""Issue-change notifications: @mentions, recipient rules and the coalescing digest.
+"""Issue-change notifications: @mentions, recipients, the Message text and the Agent wake-up.
 
-The first event for a (recipient, issue) in a five minute window is sent immediately by `Application.mutation`
-with the actor's own token (Core applies the actor's Message Policy). Later events in the window are only
-recorded in SQLite; when the window ends this module sends ONE digest through `treer message send` under the
-App's identity and opens a new quiet window. Digest keys are stable per (recipient, issue, window start), a failed
-digest is retried at most three times, and Messages carry only issue IDs, short fixed summaries and a reference
-(a CLI command for Agents, a link for people) - plus, for a comment that has one, its sanitized title (`clean_title`);
-never issue titles, descriptions or comment bodies. No credential is read, logged or placed on a command line.
+Every create/update/comment that concerns someone sends ONE Core Message per recipient kind with the ACTOR's own
+token (Core applies the actor's Message Policy). A Message never wakes an idle Agent, so an Agent that was just
+assigned an issue or @mentioned is also prompted with `treer agent prompt` under the App's own identity (its
+Policy needs `agent.prompt`). The prompt is a short fixed pointer: issue number, reason, actor label, Message ID
+and how to open it; never titles, descriptions or comment bodies. At most one wake per (Agent, issue) per
+ISSUES_WAKE_MINUTES (default 10). Only Agents whose Message Core accepted are woken, so the App's grant cannot
+reach anyone the actor may not message. Humans get the Message only.
 """
 import json
 import os
 import re
-import unicodedata
+import subprocess
 import sys
 import threading
-import time
+import unicodedata
+import urllib.parse
 
-from reminders import run_cli, safe_link
-
-WINDOW = 300
-FLUSH_EVERY = 30
-MAX_ATTEMPTS = 3
 MAX_MENTIONS = 10
-HOURLY = '~hourly'            # pseudo-actor of the per-(recipient, issue) hourly digest for filtered updates
-HOURLY_WINDOW = 3600
-HOURLY_ISSUES = 10            # open hourly digests per recipient before the rest fold into the overflow digest
-ASK_PER_AUTHOR = 5            # ask-type pushes per author per recipient per hour
-POLICY_MODES = ('all', 'asks')
-DEFAULT_HOURLY = 20
 MENTION = re.compile(r'(?<![\w@/.\-])@(/[\w./\-]+|\w[\w.\-]*)')
 SAFE_PATH = re.compile(r'[A-Za-z0-9 ._/\-]{1,120}')
+TIMEOUT = 15
 
 
 def enabled(environ=None):
@@ -38,7 +29,7 @@ def enabled(environ=None):
     return value not in ('0', 'off', 'false', 'no', 'disabled')
 
 
-TITLE_LIMIT, DIGEST_TITLE_LIMIT, TITLE_BYTES = 120, 60, 400
+TITLE_LIMIT, TITLE_BYTES = 120, 400
 TITLE_MARK = ', title (untrusted): "'
 _WHITESPACE_CONTROLS = '\t\n\r\x0b\x0c\x85\u2028\u2029'
 _QUOTES = dict.fromkeys('"`\u201c\u201d\u201e\u201f\u00ab\u00bb\u2039\u203a\u300c\u300d\u300e\u300f\u301d\u301e\u301f\uff02\u2018\u2019\u201a\u201b\\', "'")
@@ -79,42 +70,6 @@ def clean_title(raw, limit=TITLE_LIMIT):
     return text
 
 
-def digest_form(notice, limit=DIGEST_TITLE_LIMIT):
-    """The same notice with its quoted title cut to the digest length (a sanitized title contains no double quote)."""
-    head, mark, rest = notice.partition(TITLE_MARK)
-    if not mark:
-        return notice
-    title, quote, tail = rest.partition('"')
-    if len(title) > limit:
-        title = title[:limit - 1].rstrip() + '\u2026'
-    return head + mark + title + quote + tail
-
-
-INTENT = re.compile(r'\[(decision|blocker|incident|action-([a-z0-9._\-]{1,24}))\](?:\s|$)')
-ASK_INTENTS = ('decision', 'blocker', 'incident')
-
-
-def parse_intent(title, directory):
-    """(intent, target, note) of a comment from the FIRST token of its title: [decision] [blocker] [incident] or
-    [action-<agent>], case-insensitive, after NFKC and trimming, followed by a space or the end ('[decision]x',
-    '(decision)' and a prefix after other text do not count). action-<name> must match exactly one Agent in the
-    directory (unique name or stable ID), else the comment is plain `fyi` and `note` says why. The vocabulary is fixed:
-    nothing the author wrote is executed or stored beyond the matched word."""
-    if not isinstance(title, str):
-        return 'fyi', None, None
-    match = INTENT.match(unicodedata.normalize('NFKC', title).strip().lower())
-    if not match:
-        return 'fyi', None, None
-    if not match.group(2):
-        return match.group(1), None, None
-    name = match.group(2)
-    agents = [p for p in directory if p.get('kind') == 'agent']
-    hits = [p for p in agents if p['id'].lower() == name] or [p for p in agents if str(p.get('name', '')).lower() == name]
-    if len(hits) == 1:
-        return 'action', hits[0]['id'], None
-    return 'fyi', None, 'action_unknown' if not hits else 'action_ambiguous'
-
-
 SAFE_NAME = re.compile(r'[A-Za-z0-9 ._/\-]{1,24}')
 
 
@@ -124,16 +79,6 @@ def label(name, fallback):
     a restricted token - names are attacker-influenced text and are never forwarded verbatim."""
     name = str(name)
     return ' '.join(name.split()) if SAFE_NAME.fullmatch(name) and name.strip() else str(fallback)
-
-
-def hourly_limit(environ=None):
-    """ISSUES_NOTIFY_HOURLY_LIMIT: immediate Messages per recipient per hour before updates are folded into one
-    per-recipient digest (default 20, 1..1000)."""
-    try:
-        value = int((os.environ if environ is None else environ).get('ISSUES_NOTIFY_HOURLY_LIMIT', DEFAULT_HOURLY))
-    except ValueError:
-        return DEFAULT_HOURLY
-    return value if 1 <= value <= 1000 else DEFAULT_HOURLY
 
 
 def path_tokens(text):
@@ -248,60 +193,109 @@ def issue_ref(issue_id, agent):
     return f'issues show {int(issue_id)} --titles' if agent else ''
 
 
-def digest_body(issue_id, summaries, link, agent=False, period='5 minutes'):
-    unique = list(dict.fromkeys(summaries))
-    shown = '; '.join(unique[:4]) + (f'; +{len(unique) - 4} more' if len(unique) > 4 else '')
-    noun = f'update{"s" if len(summaries) != 1 else ""}'
-    if issue_id == 0:   # the per-recipient overflow digest: updates over the hourly limit, across issues
-        text = f'Issues \u00b7 {len(summaries)} more {noun} (over the hourly limit) in the last {period}: {shown}'
-        tail = 'issues list --assignee me --unresolved' if agent else link
-    else:
-        text = f'Issue #{issue_id} \u00b7 {len(summaries)} more {noun} in the last {period}: {shown}'
-        tail = issue_ref(issue_id, True) if agent else (f'{link}#issue={issue_id}' if link else '')
-    return text + (f'\n{tail}' if tail else '')
+def wake_window(environ=None):
+    """ISSUES_WAKE_MINUTES: at most one wake per (Agent, issue) in this many minutes (default 10, 0..1440; 0 = no dedupe)."""
+    raw = (os.environ if environ is None else environ).get('ISSUES_WAKE_MINUTES', '10')
+    try:
+        minutes = float(raw)
+    except ValueError:
+        raise ValueError('ISSUES_WAKE_MINUTES must be a number of minutes between 0 and 1440') from None
+    if not 0 <= minutes <= 1440:
+        raise ValueError('ISSUES_WAKE_MINUTES must be a number of minutes between 0 and 1440')
+    return minutes * 60
 
 
-class Digest:
-    """Sends one coalesced Message per (recipient, issue) when a window with pending updates ends."""
-    def __init__(self, store, base_url, treer_bin='treer', clock=time.time, runner=None, log=None):
-        self.store, self.base_url, self.treer_bin, self.clock = store, base_url, treer_bin, clock
-        self.runner = runner or (lambda args: run_cli(self.treer_bin, args))
-        self.log = log or (lambda message: print(message, file=sys.stderr, flush=True))
-        self.stop = threading.Event()
+def wake_enabled(environ=None):
+    """ISSUES_WAKE=0|off|false|no|disabled stops prompting Agents (Messages still go out)."""
+    value = (os.environ if environ is None else environ).get('ISSUES_WAKE', 'on').strip().lower()
+    return value not in ('0', 'off', 'false', 'no', 'disabled')
 
-    def flush(self):
-        now = self.clock()
-        sent = 0
-        link = None
-        for row in self.store.due_digests(now):
-            link = link if link is not None else safe_link(self.base_url)
-            agent = not row['recipient'].startswith('usr_')   # an unknown kind gets the Agent form (no link)
-            status, _ = self.runner(['message', 'send', '--to', row['recipient'], '--body', digest_body(row['issue_id'], row['pending'], link, agent, 'hour' if row['actor'] == HOURLY else '5 minutes'),
-                                     '--idempotency-key', f"issues-digest-{row['recipient']}-{row['issue_id']}-{row['actor'] or 'any'}-{int(row['start'])}"])
-            if status == 0:
-                self.store.digest_done(row['recipient'], row['issue_id'], row['actor'], now)
-                sent += 1
-            else:
-                self.log(f"Issues digest not delivered to {row['recipient']} for #{row['issue_id']} (treer exit {status})")
-                self.store.digest_failed(row['recipient'], row['issue_id'], row['actor'], MAX_ATTEMPTS)
-        self.store.prune_windows(now)
-        return sent
 
-    def guarded(self):
+def safe_link(value):
+    """The App link for a prompt; anything that is not a plain http(s) URL is dropped."""
+    value = str(value or '')
+    parts = urllib.parse.urlsplit(value)
+    if parts.scheme not in ('http', 'https') or not parts.netloc or parts.username or parts.password or any(c.isspace() for c in value):
+        return ''
+    return value
+
+
+def run_cli(treer_bin, args):
+    """Run the Treer CLI: (exit status, error code or None). Output is never logged."""
+    try:
+        result = subprocess.run([treer_bin, *args], capture_output=True, text=True, timeout=TIMEOUT, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return 127, 'treer_unavailable'
+    if result.returncode == 0:
+        return 0, None
+    for stream in (result.stderr, result.stdout):
         try:
-            self.flush()
-        except Exception as exc:  # a failed pass must never kill the worker
-            self.log(f'Issues digest pass failed: {type(exc).__name__}')
+            code = json.loads(stream.strip().splitlines()[-1])['error']['code']
+            if isinstance(code, str) and re.fullmatch(r'[a-z0-9_.\-]{1,64}', code):
+                return result.returncode, code
+        except (ValueError, KeyError, TypeError, IndexError):
+            continue
+    return result.returncode, 'prompt_failed'
 
-    def loop(self, wait=None):
-        wait = wait or self.stop.wait
-        while not wait(FLUSH_EVERY):
-            self.guarded()
 
-    def start(self):
-        thread = threading.Thread(target=self.loop, name='issues-digest', daemon=True)
-        thread.start()
-        return thread
+DENIED = ('policy_denied', 'forbidden', 'permission_denied', 'agent_prompt_denied')
 
-    def close(self):
-        self.stop.set()
+
+def wake_text(issue_id, reason, actor_label, message_id, link):
+    reasons = {'assigned': 'assigned to you', 'mentioned': 'you were mentioned'}
+    text = f"Issues #{int(issue_id)}: {reasons[reason]} by {actor_label}."
+    if message_id and re.fullmatch(r'[A-Za-z0-9_\-]{1,80}', message_id):
+        text += f' Message {message_id}.'
+    text += f' Read it: issues show {int(issue_id)} --titles'
+    if link:
+        text += f' (or {link}#issue={int(issue_id)})'
+    return text
+
+
+class Waker:
+    """Prompts Agents about an issue event and records the outcome on the activity entry.
+    Outcome per Agent: `prompted`, `deduped` (woken about this issue within the window), `denied` (Policy refused
+    `agent.prompt`; the Message still stands) or `failed:<code>` (retried by the next event)."""
+    def __init__(self, store, treer_bin='treer', window=600, link=lambda: '', runner=None, background=True, log=None):
+        self.store, self.window, self.link, self.background = store, window, link, background
+        self.runner = runner or (lambda args: run_cli(treer_bin, args))
+        self.log = log or (lambda message: print(message, file=sys.stderr, flush=True))
+
+    def wake(self, event_id, issue_id, targets, actor_label, message_id):
+        """targets: {agent ID: 'assigned' | 'mentioned'}. Returns the initial outcome map ('pending' while running)."""
+        if not targets:
+            return {}
+        if self.background:
+            threading.Thread(target=self.run, args=(event_id, issue_id, dict(targets), actor_label, message_id),
+                             name='issues-wake', daemon=True).start()
+            return {t: 'pending' for t in targets}
+        return self.run(event_id, issue_id, targets, actor_label, message_id)
+
+    def run(self, event_id, issue_id, targets, actor_label, message_id):
+        outcome = {}
+        try:
+            link = safe_link(self.link())
+        except Exception:
+            link = ''
+        for target, reason in sorted(targets.items()):
+            try:
+                if not self.store.wake_claim(target, issue_id, self.store.clock(), self.window):
+                    outcome[target] = 'deduped'
+                    continue
+                status, code = self.runner(['agent', 'prompt', target, wake_text(issue_id, reason, actor_label, message_id, link)])
+                if status == 0:
+                    outcome[target] = 'prompted'
+                elif code in DENIED:
+                    outcome[target] = 'denied'
+                else:
+                    self.store.wake_release(target, issue_id)
+                    outcome[target] = f'failed:{code}'
+                    self.log(f'Issues wake of {target} for #{issue_id} failed ({code})')
+            except Exception as exc:          # a failed wake never breaks the request or the worker
+                outcome[target] = 'failed:internal'
+                self.log(f'Issues wake of {target} for #{issue_id} failed ({type(exc).__name__})')
+        try:
+            self.store.record_wake(event_id, outcome)
+        except Exception as exc:
+            self.log(f'Issues wake result not recorded ({type(exc).__name__})')
+        return outcome

@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from auth import Auth
 from store import Store
 from issues import Application, Server
+from notify import Waker
 from gateway import PREFIX, Ingress, ControlPlane, forward, issue_human_token, verify_human_token, FORWARDED
 
 PEOPLE = [{'kind':'agent','id':'ag_a','name':'Builder','path':'/engineering/backend/Builder'}, {'kind':'agent','id':'ag_b','name':'Reviewer','path':'/engineering/review/Reviewer'},
@@ -25,10 +26,13 @@ TOKENS = {'agent-a':PEOPLE[0], 'agent-b':PEOPLE[1], 'human':PEOPLE[2], 'admin':P
 class Proxy(BaseHTTPRequestHandler):
     disabled = True
     messages = []
+    prompts = []
+    prompt_answer = (0, None)        # what `treer agent prompt` answers: (exit status, error code)
     def log_message(self, *_): pass
     def do_GET(self): self.dispatch()
     def do_POST(self): self.dispatch()
     def do_PATCH(self): self.dispatch()
+    def do_DELETE(self): self.dispatch()
     def dispatch(self):
         parsed = urllib.parse.urlsplit(self.path)
         if parsed.path.startswith(PREFIX):
@@ -72,6 +76,10 @@ class Proxy(BaseHTTPRequestHandler):
             result={'access_token':issue_human_token(query.get('audience',['svc_issues'])[0], int(query.get('seconds',['60'])[0]))}
         elif parsed.path == '/test/forwarded': result={'requests':FORWARDED}
         elif parsed.path == '/test/messages': result={'messages':self.messages}
+        elif parsed.path == '/test/prompts': result={'prompts':Proxy.prompts}
+        elif parsed.path == '/test/prompt-answer':
+            query=urllib.parse.parse_qs(parsed.query); code=query.get('code',[''])[0]
+            Proxy.prompt_answer=(0,None) if not code else (1,code)
         elif parsed.path == '/test/enable': Proxy.disabled=False
         elif parsed.path == '/test/disable': Proxy.disabled=True
         else: status,result=404,{'error':{'code':'not_found'}}
@@ -84,7 +92,10 @@ def main():
         proxy = ThreadingHTTPServer(('127.0.0.1',0), Proxy)
         threading.Thread(target=proxy.serve_forever,daemon=True).start()
         store = Store(Path(directory)/'issues.sqlite3')
-        app = Application(store)
+        def prompt(args):                      # stands in for `treer agent prompt TARGET TEXT` under the App identity
+            Proxy.prompts.append(args)
+            return Proxy.prompt_answer
+        app = Application(store, waker=Waker(store, window=600, runner=prompt, background=False))
         server = Server(('127.0.0.1',0),app)
         base=f'http://127.0.0.1:{server.server_port}/';proxy_url=f'http://127.0.0.1:{proxy.server_port}/'
         ingress=ThreadingHTTPServer(('127.0.0.1',0),Ingress);ingress.app_url=base;proxy.app_url=base

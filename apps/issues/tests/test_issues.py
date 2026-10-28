@@ -68,39 +68,6 @@ class IssuesTest(unittest.TestCase):
         self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'title':'t'})[0],400,'a title never replaces the text')
         self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'title':'标题'*30,'body':'b'})[0],200,'200 bytes, not characters')
 
-    def test_notify_policy_permissions_audit_and_validation(self):
-        put=lambda body,token:self.req('v1/notify-policy','PUT',body,token)
-        self.assertEqual(put({'mode':'asks'},'agent-a')[0],200,'an agent changes its own policy')
-        status,result=self.req('v1/notify-policy');self.assertEqual((status,result['policies'],result['default']),(200,{'ag_a':'asks'},'all'))
-        self.assertEqual(put({'mode':'asks','agent':'ag_a'},'agent-b')[0],403,'an agent can never change another principal')
-        self.assertEqual(put({'mode':'all','agent':'ag_a'},'human')[0],403,'a plain member cannot either')
-        self.assertEqual(put({'mode':'all','agent':'ag_a'},'admin')[0],200,'a human admin can')
-        self.assertEqual(self.req('v1/notify-policy')[1]['policies'],{'ag_a':'all'})
-        for body in ({'mode':'maybe'},{},{'mode':'asks','agent':'usr_a'},{'mode':'asks','agent':'ag_missing'},{'mode':'asks','role':'admin'},{'mode':5}):
-            self.assertEqual(put(body,'admin')[0],400,body)
-        self.assertEqual(put({'mode':'asks'},'admin')[0],400,'admin is a human: policies are for Agents')
-        self.assertEqual(self.req('v1/notify-policy','PUT',{'mode':'asks'},None)[0],401)
-        audit=self.req('v1/notify-policy?audit=1')[1]['audit']
-        self.assertEqual([(e['actor'],e['subject'],e['old'],e['new']) for e in audit],[('usr_admin','ag_a','asks','all'),('ag_a','ag_a','all','asks')])
-    def test_comment_intent_is_stored_and_reported(self):
-        id=self.create()
-        status,result=self.req(f'v1/issues/{id}/comment','POST',{'title':'[Decision] pick one','body':'b'});self.assertEqual(status,200)
-        self.assertEqual(next(e for e in result['activity'] if e['kind']=='comment')['intent'],'decision')
-        status,result=self.req(f'v1/issues/{id}/comment','POST',{'title':'[action-nobody] x','body':'b'});self.assertEqual(status,200)
-        self.assertEqual(result['notification'].get('intent_note'),'action_unknown')
-    def test_waiting_on_and_the_stale_view_over_http(self):
-        id=self.create(assignee='ag_a')
-        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'waiting_on':'ag_b'})[0],400,'waiting_on needs status blocked')
-        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'status':'blocked','waiting_on':'leader'})[0],400,'no leader Agent configured here')
-        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'status':'blocked','waiting_on':'ag_nobody'})[0],400)
-        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'status':'blocked','waiting_on':'ag_b'},'agent-b')[0],403,'only people who may edit the issue can set it')
-        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'status':'blocked','waiting_on':'ag_b'})[0],200,'the creator/assignee may')
-        issue=self.req(f'v1/issues/{id}')[1]['issue'];self.assertEqual((issue['waiting_on'],issue['waiting_by'],issue['status']),('ag_b','ag_a','blocked'))
-        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'status':'in_progress'})[1]['issue']['waiting_on'],None)
-        status,result=self.req('v1/stale');self.assertEqual((status,result['hours'],result['total']),(200,4,0),'nothing is stale yet')
-        for query in ('hours=0','hours=721','hours=x','limit=0','limit=101','offset=-1','bogus=1'):
-            self.assertEqual(self.req('v1/stale?'+query)[0],400,query)
-        self.assertEqual(self.req('v1/stale',token=None)[0],401)
     def test_note_status_is_memory_not_work(self):
         status,result=self.req('v1/issues','POST',{'title':'Decision record','status':'note'});self.assertEqual(status,201,result)
         note=result['issue']['id'];self.assertEqual(result['issue']['status'],'note')
@@ -114,7 +81,6 @@ class IssuesTest(unittest.TestCase):
         self.assertIn(note,listed('status=note'));self.assertNotIn(note,listed('unresolved=1'));self.assertIn(task,listed('unresolved=1'))
         blocked=self.create(blocked_by=[note])
         self.assertEqual(self.req(f'v1/issues/{blocked}','PATCH',{'status':'in_progress'})[0],200,'a note is never an unresolved dependency')
-        self.assertEqual(self.req(f'v1/issues/{note}/claim','POST',{'action':'acquire'})[0],409,'nothing to claim on a note')
         for to in ('open','note','in_progress','note','closed','note'):          # any status <-> note, no extra rules
             self.assertEqual(self.req(f'v1/issues/{task}','PATCH',{'status':to})[0],200,to)
         changes=[e['changes'] for e in self.req(f'v1/issues/{task}')[1]['activity'] if e['kind']=='update']
@@ -146,7 +112,10 @@ class IssuesTest(unittest.TestCase):
         for token in (None,'forged','wrong-audience','wrong-workspace','removed-agent'):
             status,_=self.req('v1/issues',token=token);self.assertIn(status,(401,403))
         id=self.create()
-        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'title':'Attack'},'agent-b')[0],403)
+        status,result=self.req(f'v1/issues/{id}','PATCH',{'title':'Edited by another Agent'},'agent-b')
+        self.assertEqual(status,200,'any workspace principal may edit any issue')
+        self.assertEqual(next(e for e in result['activity'] if e['kind']=='update')['actor'],'ag_b','the change is attributed in activity')
+        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'status':'closed'},'human')[0],200,'a plain human member too')
         self.assertEqual(self.req('v1/issues','POST',{'title':'Forged','creator':'ag_b'})[0],400)
         self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'body':'Collaborative'},'agent-b')[0],200)
         self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'assignee':'made-up'})[0],400)
@@ -155,35 +124,98 @@ class IssuesTest(unittest.TestCase):
         # Forged identity headers never override the verified principal.
         _,result=self.req('v1/issues','POST',{'title':'Verified creator'},extra={'X-Treer-Agent-Id':'ag_b'})
         self.assertEqual(result['issue']['creator'],'ag_a')
-    def test_claim_concurrency_expiry_and_ownership(self):
+    def prompts(self):
+        return self.req('test/prompts',base=self.proxy)[1]['prompts']
+    def wake_of(self,issue,target):
+        events=self.req(f'v1/issues/{issue}')[1]['activity']
+        return [e['notification'].get('wake',{}).get(target) for e in events if e['notification'].get('wake',{}).get(target)]
+    def test_assignment_and_mentions_message_and_wake_agents(self):
+        self.req('test/enable',base=self.proxy)
+        try:
+            before=len(self.prompts())
+            status,result=self.req('v1/issues','POST',{'title':'Wake test','assignee':'ag_b','description':'SECRET DESCRIPTION'})
+            self.assertEqual(status,201,result);id=result['issue']['id']
+            self.assertEqual(result['notification']['wake'],{'ag_b':'prompted'})
+            prompt=self.prompts()[before]
+            self.assertEqual(prompt[:3],['agent','prompt','ag_b'])
+            self.assertIn(f'Issues #{id}: assigned to you by Builder.',prompt[3]);self.assertIn('Message msg_',prompt[3])
+            self.assertIn(f'issues show {id} --titles',prompt[3]);self.assertNotIn('SECRET',prompt[3]);self.assertNotIn('Wake test',prompt[3],'no author text in a prompt')
+            self.assertEqual(self.wake_of(id,'ag_b'),['prompted'],'the outcome is recorded on the activity entry')
+            # a second event about the same issue inside the window is deduplicated; the Message still goes out
+            status,result=self.req(f'v1/issues/{id}/comment','POST',{'body':'more for @Builder and @/engineering/review/Reviewer'},'admin')
+            self.assertEqual(status,200,result);self.assertEqual(result['notification']['status'],'sent')
+            self.assertEqual(result['notification']['wake'],{'ag_a':'prompted','ag_b':'deduped'})
+            # humans get a Message, never a prompt
+            count=len(self.prompts())
+            status,result=self.req(f'v1/issues/{id}','PATCH',{'assignee':'usr_a'});self.assertEqual(status,200)
+            self.assertNotIn('wake',result['notification']);self.assertEqual(len(self.prompts()),count)
+            self.assertIn('usr_a',self.req('test/messages',base=self.proxy)[1]['messages'][-1]['recipients'])
+            # the actor is never woken by their own action
+            other=self.create(assignee='ag_a');self.assertNotIn('wake',self.req(f'v1/issues/{other}')[1]['activity'][0]['notification'])
+            # a Policy denial is recorded and the Message stands
+            self.req('test/prompt-answer?code=policy_denied',base=self.proxy)
+            status,result=self.req('v1/issues','POST',{'title':'Denied wake','assignee':'ag_c'})
+            self.assertEqual((result['notification']['status'],result['notification']['wake']),('sent',{'ag_c':'denied'}))
+            # a transient failure does not hold the dedupe slot: the next event tries again
+            self.req('test/prompt-answer?code=agent_unreachable',base=self.proxy)
+            denied=result['issue']['id'];third=self.create(assignee='ag_no_path')
+            self.assertEqual(self.req(f'v1/issues/{third}')[1]['activity'][0]['notification']['wake'],{'ag_no_path':'failed:agent_unreachable'})
+            self.req('test/prompt-answer',base=self.proxy)
+            status,result=self.req(f'v1/issues/{third}/comment','POST',{'body':'retry @ag_no_path'})
+            self.assertEqual(result['notification']['wake'],{'ag_no_path':'prompted'})
+        finally:
+            self.req('test/prompt-answer',base=self.proxy);self.req('test/disable',base=self.proxy)
+    def test_no_wake_without_an_accepted_message(self):
+        self.req('test/disable',base=self.proxy)
+        count=len(self.prompts())
+        status,result=self.req('v1/issues','POST',{'title':'Messages off','assignee':'ag_b'})
+        self.assertEqual(result['notification']['status'],'disabled');self.assertNotIn('wake',result['notification'])
+        self.assertEqual(len(self.prompts()),count,'the App never prompts someone the actor could not message')
+    def test_hide_and_restore_issues_and_comments(self):
+        id=self.create(labels=['hide-test']);self.req(f'v1/issues/{id}/comment','POST',{'title':'Visible','body':'keep me'})
+        status,result=self.req(f'v1/issues/{id}/comment','POST',{'title':'Oops','body':'zebracorn secret'},'agent-b');comment=result['activity'][0]['id']
+        self.assertEqual(self.req('v1/search?q=zebracorn')[1]['count'],1)
+        status,result=self.req(f'v1/issues/{id}/activity/{comment}','DELETE',token='human');self.assertEqual(status,200,result)
+        listed=self.req(f'v1/issues/{id}')[1]['activity']
+        stub=next(e for e in listed if e['id']==comment);self.assertEqual(stub['hidden']['by'],'usr_a');self.assertNotIn('body',stub);self.assertNotIn('title',stub)
+        self.assertEqual(next(e for e in listed if e['kind']=='hide')['changes'],{'comment':comment},'hiding is itself history')
+        full=next(e for e in self.req(f'v1/issues/{id}?hidden=1')[1]['activity'] if e['id']==comment);self.assertEqual(full['body'],'zebracorn secret')
+        self.assertEqual(self.req(f'v1/issues/{id}/activity/{comment}')[1]['event']['body'],'zebracorn secret','nothing is deleted')
+        self.assertEqual(self.req('v1/search?q=zebracorn')[1]['count'],0,'hidden comments are not searched')
+        self.assertEqual(self.req(f'v1/issues/{id}/activity/{comment}/restore','POST')[0],200)
+        self.assertEqual(next(e for e in self.req(f'v1/issues/{id}')[1]['activity'] if e['id']==comment)['body'],'zebracorn secret')
+        created=self.req(f'v1/issues/{id}?events=all')[1]['activity'][-1]['id']
+        self.assertEqual(self.req(f'v1/issues/{id}/activity/{created}','DELETE')[0],409,'only comments can be hidden')
+        comments=self.req(f'v1/issues/{id}?events=comments')[1]['activity'];self.assertTrue(comments and all(e['kind']=='comment' for e in comments))
+        self.assertEqual(self.req(f'v1/issues/{id}?events=bogus')[0],400)
+        # issues
+        ids=lambda q:[i['id'] for i in self.req('v1/issues?label=hide-test'+q)[1]['issues']]
+        self.assertEqual(self.req(f'v1/issues/{id}','DELETE',token='agent-b')[0],200,'any principal may hide')
+        self.assertEqual((ids(''),ids('&hidden=1'),ids('&hidden=only')),([],[id],[id]))
+        self.assertEqual(self.req(f'v1/issues/{id}')[1]['issue']['hidden']['by'],'ag_b','a hidden issue is still readable')
+        self.assertEqual(self.req('v1/search?q=keep')[1]['count'],0)
+        self.assertEqual(self.req(f'v1/issues/{id}/restore','POST')[0],200);self.assertEqual(ids(''),[id])
+        self.assertIsNone(self.req(f'v1/issues/{id}')[1]['issue']['hidden'])
+        kinds=[e['kind'] for e in self.req(f'v1/issues/{id}')[1]['activity']][:2];self.assertEqual(kinds,['restore','hide'])
+        self.assertEqual(self.req('v1/issues?hidden=maybe')[0],400)
+        self.assertEqual(self.req(f'v1/issues/{id}/activity/999999','DELETE')[0],404)
+        parent=self.create();child=self.create(parent_id=parent);self.req(f'v1/issues/{child}','DELETE')
+        shown=self.req(f'v1/issues/{parent}')[1];self.assertEqual((shown['children_total'],shown['issue']['progress']['total']),(0,0),'hidden children leave rollups')
+    def test_retired_routes_and_fields_are_gone(self):
         id=self.create()
-        with concurrent.futures.ThreadPoolExecutor(2) as pool:
-            results=list(pool.map(lambda token:self.req(f'v1/issues/{id}/claim','POST',{'seconds':1},token), ['agent-a','agent-b']))
-        self.assertEqual(sorted(r[0] for r in results),[200,409])
-        holder=next(r[1]['issue']['claim']['holder'] for r in results if r[0]==200)
-        token='agent-a' if holder=='ag_a' else 'agent-b';other='agent-b' if token=='agent-a' else 'agent-a'
-        self.assertEqual(self.req(f'v1/issues/{id}/claim','POST',{'action':'renew','seconds':1},token)[0],200)
-        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'status':'in_progress'},other)[0],409)
-        self.assertEqual(self.req(f'v1/issues/{id}/claim','POST',{'action':'release'},other)[0],409)
-        time.sleep(1.1)
-        self.assertIsNone(self.req(f'v1/issues/{id}')[1]['issue']['claim'])
-        self.assertEqual(self.req(f'v1/issues/{id}/claim','POST',{},other)[0],200)
-        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'status':'in_progress'},other)[0],200)
-        self.assertEqual(self.req(f'v1/issues/{id}/claim','POST',{'action':'release'},other)[0],200)
-        self.assertEqual(self.req(f'v1/issues/{id}/claim','POST',{'action':'renew'},other)[0],409)
-        assigned=self.create(assignee='ag_a')
-        self.assertEqual(self.req(f'v1/issues/{assigned}/claim','POST',{},'agent-b')[0],409)
+        for path,method,body in (('v1/stale','GET',None),('v1/notify-policy','GET',None),(f'v1/issues/{id}/claim','POST',{})):
+            self.assertEqual(self.req(path,method,body)[0],404,path)
+        self.assertEqual(self.req(f'v1/issues/{id}','PATCH',{'status':'blocked','waiting_on':'ag_b'})[0],400)
     def test_hierarchy_and_dependencies(self):
         parent=self.create();child=self.create(parent_id=parent);leaf=self.create(parent_id=child,status='done')
         progress=self.req(f'v1/issues/{parent}')[1]['issue']['progress']
         self.assertEqual((progress['total'],progress['completed']),(2,1))
         self.assertEqual(self.req(f'v1/issues/{parent}','PATCH',{'parent_id':leaf})[0],400)
         dependent=self.create(blocked_by=[child])
-        self.assertEqual(self.req(f'v1/issues/{dependent}/claim','POST',{})[0],409)
         self.assertEqual(self.req(f'v1/issues/{dependent}','PATCH',{'status':'done'})[0],409)
         self.assertEqual(self.req(f'v1/issues/{child}','PATCH',{'blocked_by':[dependent]})[0],400)
         self.req(f'v1/issues/{child}','PATCH',{'status':'done'})
-        self.assertEqual(self.req(f'v1/issues/{dependent}/claim','POST',{})[0],200)
+        self.assertEqual(self.req(f'v1/issues/{dependent}','PATCH',{'status':'in_progress'})[0],200)
         self.assertEqual(self.req(f'v1/issues/{parent}/children')[1]['issues'][0]['id'],child)
     def test_notification_degradation_and_summary(self):
         self.req('test/disable',base=self.proxy)
@@ -224,6 +256,7 @@ class IssuesTest(unittest.TestCase):
             def do_GET(self): self.forward()
             def do_POST(self):self.forward()
             def do_PATCH(self):self.forward()
+            def do_DELETE(self):self.forward()
             def forward(self):
                 path=urllib.parse.urlsplit(self.path).path
                 query=urllib.parse.urlsplit(self.path).query
@@ -236,7 +269,7 @@ class IssuesTest(unittest.TestCase):
         proxy=http.server.ThreadingHTTPServer(('127.0.0.1',0),Inject);threading.Thread(target=proxy.serve_forever,daemon=True).start()
         try:
             env=hermetic_env({'http_proxy':f'http://127.0.0.1:{proxy.server_port}'})
-            for command in (['list','--label',label],['list','--assignee','me','--unresolved','--label',label],['show',str(id)],['children',str(id)],['comment',str(id),'CLI comment'],['assign',str(id),'ag_a'],['status',str(id),'in_progress'],['claim',str(id),'--seconds','10'],['claim',str(id),'--action','release'],['create','CLI issue','--label','cli'],['create','CLI note','--status','note'],['wait',str(id),'ag_b'],['wait',str(id),'none'],['stale','--hours','4'],['policy'],['search','pelican','--limit','3']):
+            for command in (['list','--label',label],['list','--assignee','me','--unresolved','--label',label],['show',str(id)],['children',str(id)],['comment',str(id),'CLI comment'],['assign',str(id),'ag_a'],['status',str(id),'in_progress'],['create','CLI issue','--label','cli'],['create','CLI note','--status','note'],['show',str(id),'--comments-only','--hidden'],['hide',str(id)],['list','--hidden','only'],['restore',str(id)],['status',str(id),'blocked'],['search','pelican','--limit','3']):
                 r=subprocess.run([sys.executable,str(ROOT/'issues'),*command],env=env,capture_output=True,text=True,timeout=10)
                 self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertIsInstance(json.loads(r.stdout),dict)
             cli=lambda *a,stdin=None:subprocess.run([sys.executable,str(ROOT/'issues'),*a],env=env,input=stdin,capture_output=True,text=True,timeout=10)
