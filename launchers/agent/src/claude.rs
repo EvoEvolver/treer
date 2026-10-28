@@ -49,10 +49,8 @@ fn image_source(source: &Value) -> Result<usize> {
     let data=source["data"].as_str().ok_or_else(||anyhow::anyhow!("claude_image_input_invalid"))?;
     if source["type"]!="base64" || data.is_empty() || data.len()>crate::image_format::FILE_LIMIT.div_ceil(3)*4 {bail!("claude_image_input_invalid");}
     let bytes=base64::engine::general_purpose::STANDARD.decode(data).map_err(|_|anyhow::anyhow!("claude_image_input_invalid"))?;
-    #[cfg(any(unix,test))]
-    {if crate::image_format::format(&bytes)?.0!=source["media_type"] {bail!("claude_image_input_invalid");} Ok(bytes.len())}
-    #[cfg(all(windows,not(test)))]
-    {let _=bytes;bail!("claude_images_unsupported");}
+    if crate::image_format::format(&bytes)?.0!=source["media_type"] {bail!("claude_image_input_invalid");}
+    Ok(bytes.len())
 }
 impl Adapter {
     // Only fixed adapter codes and counts cross into public diagnostics. Never

@@ -217,15 +217,15 @@ Host and no Origin header; it is a guard, not authentication.
 
 ## Native Windows
 
-The Windows build runs the same Codex and Claude adapters in a native PE with
-separate platform backends for private state and workspace reads. Existing
-private directories must already carry the current user's private DACL; the
-runtime checks them without repairing permissions, rejects reparse points and
-hardlinks, and holds a share-mode-zero lease against a second writer. Each
-provider is assigned a nested kill-on-close Job Object. Directory enumeration
-returns HTTP 501 and images are unavailable on Windows; text sessions, queue,
-receipts and restart checkpoints are supported. `treer-launch.exe` is the
-Windows release artifact; `install.ps1` installs it next to `treer.exe`.
+The Windows build is the same launcher: the same journal, history, recovery,
+file browser (including directory listing), task output and image attachments.
+Only the platform mechanics differ: private files and directories are created
+with the current user's protected DACL instead of mode 0600/0700, the
+single-writer lease is a `LockFileEx` file lock, journal replacement is a
+write-through `MoveFileEx`, and each provider runs in a nested kill-on-close
+Job Object instead of a process group. Offline session transfer is
+macOS/Linux only. `treer-launch.exe` is the Windows release artifact;
+`install.ps1` installs it next to `treer.exe`.
 
 ## Add a harness adapter
 

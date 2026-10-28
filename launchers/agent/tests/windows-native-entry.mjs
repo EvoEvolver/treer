@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
-import {mkdtemp, mkdir, readFile, realpath, rm} from 'node:fs/promises';
+import {mkdtemp, mkdir, readFile, realpath, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {localFetch as fetch} from './hermetic.mjs';
@@ -43,6 +43,7 @@ for(const harness of ['codex','claude'])test(`Windows native ${harness}: text qu
   const snapshot=()=>fetch(base+'/api/state').then(r=>r.json());
   const initial=await until(snapshot,s=>s.ready);
   assert.equal(initial.harness.id,harness);assert.equal(initial.attachmentsAvailable,false);
+  await writeFile(join(cwd,'listed.txt'),'listed');const tree=await fetch(base+'/v1/files/tree?path=');assert.equal(tree.status,200);assert.ok((await tree.json()).entries.some(e=>e.name==='listed.txt'&&e.kind==='file'));
   const contender=launch();await once(contender.child,'exit');assert.notEqual(contender.child.exitCode,0);assert.match(contender.error(),/private_state_in_use/);
   for(const prompt of ['first Windows text','second Windows text']){
     const response=await fetch(base+'/api/prompt',{method:'POST',body:JSON.stringify({prompt})});assert.equal(response.status,200);

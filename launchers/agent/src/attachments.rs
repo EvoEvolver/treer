@@ -1,13 +1,12 @@
-use crate::{image_format, store::Store};
+use crate::{fs_util, image_format, store::Store};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
-    fs::{self, OpenOptions},
+    fs,
     io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 
@@ -71,11 +70,7 @@ impl Attachments {
             bail!("agent_private_state_unavailable");
         }
         let images = root.join("rust-images");
-        match fs::DirBuilder::new().mode(0o700).create(&images) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e.into()),
-        }
+        fs_util::create_dir(&images)?;
         let store = Store::open(&images, cwd)?;
         let journal: Journal = match store.load()? {
             Some(v) => serde_json::from_value(v)
@@ -133,17 +128,9 @@ impl Attachments {
     }
     pub fn read(&self, id: &str, session: &str) -> Result<(Value, Vec<u8>)> {
         let e = self.entry(id, session)?;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(self.path(e))?;
+        let mut file = fs_util::open_read(&self.path(e))?;
         let m = file.metadata()?;
-        if !m.is_file()
-            || m.len() != e.size as u64
-            || m.uid() != rustix::process::geteuid().as_raw()
-            || m.mode() & 0o077 != 0
-            || m.nlink() != 1
-        {
+        if !fs_util::is_private_file(&m) || m.len() != e.size as u64 {
             bail!("attachment_unsafe_storage");
         }
         let mut bytes = Vec::new();
@@ -265,12 +252,7 @@ impl Attachments {
         let path = self.path(&entry);
         let mut created = false;
         let result: Result<Value> = async {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&path)?;
+            let mut file = fs_util::create_new(&path)?;
             created = true;
             file.write_all(bytes)?;
             file.sync_all()?;

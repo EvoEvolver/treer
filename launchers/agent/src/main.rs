@@ -1,5 +1,4 @@
-#[cfg(unix)] mod attachments;
-#[cfg(windows)] #[path="windows_attachments.rs"] mod attachments;
+mod attachments;
 use treer_agent_launcher::bounded_json;
 mod files;
 mod fs_util;
@@ -152,7 +151,7 @@ async fn main() -> Result<()> {
         session_transfer::claim_launch(launch,&private_root,&agent)?;
     }
     disk_history::prepare(&private_root, &cwd)?;
-    let attachments = if !agent.is_empty() && !cfg!(windows) {
+    let attachments = if !agent.is_empty() {
         Some(Arc::new(tokio::sync::Mutex::new(
             attachments::Attachments::open(
                 &private_root,
@@ -228,18 +227,7 @@ async fn main() -> Result<()> {
     let publication=(|| -> Result<()> {
       if let Some(file) = env("AGENT_UI_PORT_FILE") {
         use std::io::Write;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)] {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        #[cfg(windows)] {
-            use std::os::windows::fs::OpenOptionsExt;
-            options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
-        }
-        let mut output = options.open(&file)?;
-        #[cfg(windows)] treer_platform::secure_file(std::path::Path::new(&file))?;
+        let mut output = fs_util::create_new(std::path::Path::new(&file))?;
         output.write_all(port.to_string().as_bytes())?;
         output.sync_all()?;
       }
