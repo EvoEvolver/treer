@@ -53,7 +53,7 @@ struct Args {
 #[derive(Debug, Subcommand)]
 enum Command {
     #[command(
-        about = "Install, update, inspect or roll back the version-bound default Agent launcher"
+        about = "Install, update or inspect the treer-launch Agent launcher"
     )]
     Launcher(launcher::LauncherArgs),
     #[command(about = "Start or reconnect the enrolled machine and restore its workloads")]

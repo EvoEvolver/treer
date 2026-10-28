@@ -153,11 +153,78 @@ pub(crate) fn http_client() -> Result<reqwest::Client> {
 }
 
 /// Installed executables updated together. The Host is replaced on disk only;
-/// it runs the new image after its own next restart.
+/// it runs the new image after its own next restart. Running Agents keep the
+/// launcher image they started with.
 pub(crate) struct InstalledBinaries {
     pub(crate) controller: PathBuf,
     pub(crate) cli: Option<PathBuf>,
     pub(crate) host: Option<PathBuf>,
+    /// `treer-launch`, installed next to `treer` even when not yet present.
+    pub(crate) launcher: Option<PathBuf>,
+}
+
+pub(crate) const LAUNCHER: &str = "treer-launch";
+/// Deprecated command name still used by profiles saved before the rename.
+pub(crate) const LEGACY_LAUNCHER: &str = "treer-agent";
+
+/// Where `treer-launch` belongs: next to the installed `treer` CLI (which the
+/// install puts on PATH and Agents receive first on PATH), else next to `controller`.
+pub(crate) fn launcher_path(controller: &Path) -> PathBuf {
+    let directory = crate::service::installed_treer_binary(controller)
+        .and_then(|cli| cli.parent().map(Path::to_path_buf))
+        .or_else(|| controller.parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    directory.join(format!("{LAUNCHER}{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// Provide the deprecated `treer-agent` command next to `launcher`: a relative
+/// symlink on Unix, a copy on Windows. A user's own unrelated script of that
+/// name is left alone (reported as `Ok(false)`).
+pub(crate) fn link_legacy_launcher(launcher: &Path) -> Result<bool> {
+    let alias = launcher.with_file_name(format!("{LEGACY_LAUNCHER}{}", std::env::consts::EXE_SUFFIX));
+    if let Ok(metadata) = fs::symlink_metadata(&alias) {
+        if metadata.is_file() {
+            let mut head = Vec::new();
+            use std::io::Read;
+            fs::File::open(&alias)?.take(256).read_to_end(&mut head)?;
+            let script = head.starts_with(b"#!");
+            // The pre-Rust installer wrote a marked `#!/bin/sh` shim to Node.
+            if script && !String::from_utf8_lossy(&head).contains("treer-agent-shim/v1") {
+                return Ok(false);
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        if fs::read_link(&alias).is_ok_and(|target| target == Path::new(LAUNCHER)) {
+            return Ok(true);
+        }
+        let temporary = alias.with_file_name(format!(".{LEGACY_LAUNCHER}.new-{}", Uuid::new_v4().simple()));
+        std::os::unix::fs::symlink(LAUNCHER, &temporary)
+            .with_context(|| format!("failed to create {}", alias.display()))?;
+        if let Err(error) = fs::rename(&temporary, &alias) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error).with_context(|| format!("failed to replace {}", alias.display()));
+        }
+        // Receipt of the pre-Rust shim.
+        let _ = fs::remove_file(alias.with_file_name(format!("{LEGACY_LAUNCHER}.json")));
+    }
+    #[cfg(not(unix))]
+    {
+        let bytes = fs::read(launcher)?;
+        replace_executable(&alias, &bytes)?;
+    }
+    Ok(true)
+}
+
+/// Atomically write `bytes` to `destination` (keeping `<name>.old` when it
+/// existed). Returns whether anything changed.
+pub(crate) fn replace_executable(destination: &Path, bytes: &[u8]) -> Result<bool> {
+    if fs::read(destination).is_ok_and(|current| current == bytes) {
+        return Ok(false);
+    }
+    Staged::write(destination, bytes)?.replace(destination)?;
+    Ok(true)
 }
 
 impl InstalledBinaries {
@@ -170,6 +237,7 @@ impl InstalledBinaries {
         Ok(Self {
             cli: crate::service::installed_treer_binary(&controller),
             host: host.is_file().then_some(host),
+            launcher: Some(launcher_path(&controller)),
             controller,
         })
     }
@@ -184,6 +252,9 @@ impl InstalledBinaries {
         }
         if let (Some(host), Some(bytes)) = (&self.host, &release.host) {
             planned.push((host, bytes.as_slice()));
+        }
+        if let (Some(launcher), Some(bytes)) = (&self.launcher, &release.launcher) {
+            planned.push((launcher, bytes.as_slice()));
         }
         // Last: the running image is the one most worth keeping on failure.
         planned.push((&self.controller, release.controller.as_slice()));
@@ -204,6 +275,11 @@ impl InstalledBinaries {
             }
             replaced.push(destination.to_path_buf());
         }
+        if let Some(launcher) = self.launcher.as_ref().filter(|path| path.is_file()) {
+            if let Err(error) = link_legacy_launcher(launcher) {
+                tracing::warn!(error = %format!("{error:#}"), "could not provide the treer-agent alias");
+            }
+        }
         Ok(replaced)
     }
 }
@@ -214,9 +290,15 @@ pub(crate) fn previous_path(destination: &Path) -> PathBuf {
     destination.with_file_name(name)
 }
 
-/// Move `<name>.old` back over `<name>` (manual rollback does the same).
+/// Move `<name>.old` back over `<name>` (manual rollback does the same). A
+/// file this update installed for the first time has no `.old`; remove it.
 pub(crate) fn restore_previous(destination: &Path) -> Result<()> {
-    fs::rename(previous_path(destination), destination)
+    let previous = previous_path(destination);
+    if fs::symlink_metadata(&previous).is_err() && destination.is_file() {
+        return fs::remove_file(destination)
+            .with_context(|| format!("failed to remove {}", destination.display()));
+    }
+    fs::rename(previous, destination)
         .with_context(|| format!("failed to restore {}", destination.display()))
 }
 
@@ -251,6 +333,12 @@ impl Staged {
     fn replace(self, destination: &Path) -> Result<()> {
         let previous = previous_path(destination);
         discard(&previous)?;
+        if fs::symlink_metadata(destination).is_err() {
+            // First installation (e.g. the launcher on an older machine).
+            fs::rename(&self.0, destination)
+                .with_context(|| format!("failed to install {}", destination.display()))?;
+            return Ok(());
+        }
         #[cfg(unix)]
         {
             fs::hard_link(destination, &previous)

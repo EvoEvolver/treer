@@ -46,6 +46,7 @@ impl Installation {
             controller: self.0.join("treer-agent-server"),
             cli: Some(self.0.join("treer")),
             host: Some(self.0.join("treer-agent-host")),
+            launcher: Some(self.0.join("treer-launch")),
         }
     }
 
@@ -95,17 +96,28 @@ async fn update_downloads_verifies_replaces_and_requests_restart() {
             format!("old {name}")
         );
     }
+    // The launcher is installed even where it was absent, with the
+    // deprecated alias for profiles saved before the rename.
+    assert_eq!(fs::read(installation.0.join("treer-launch")).unwrap(), BINARY);
+    let alias = format!("treer-agent{}", std::env::consts::EXE_SUFFIX);
     // Exactly one previous version is kept and nothing is left staged.
     assert_eq!(
         installation.entries(),
         [
             "treer",
+            alias.as_str(),
             "treer-agent-host",
             "treer-agent-host.old",
             "treer-agent-server",
             "treer-agent-server.old",
+            "treer-launch",
             "treer.old"
         ]
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        fs::read_link(installation.0.join("treer-agent")).unwrap(),
+        Path::new("treer-launch")
     );
     #[cfg(unix)]
     {
@@ -160,6 +172,7 @@ fn unchanged_binaries_are_not_replaced() {
         controller: current("treer-agent-server"),
         cli: b"new cli".to_vec(),
         host: None,
+        launcher: None,
     };
     let replaced = installation.binaries().install(&release).unwrap();
     assert_eq!(replaced, [installation.0.join("treer")]);
