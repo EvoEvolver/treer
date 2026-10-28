@@ -46,17 +46,13 @@ elif args[:3]==['agent','admin','create']: print(json.dumps({'agent_id':'ag_new'
 else: sys.exit(2)
 ''')
         fake.chmod(0o755)
-        launcher=self.root/'treer-agent.sh'
-        launcher.write_text('''#!/usr/bin/env python3
-import json,os,sys
-print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.get('CODEX_HOME'),'claude_config':os.environ.get('CLAUDE_CONFIG_DIR')}))
-''')
+        # Fake installed `treer-launch` command (start and `session` subcommand).
+        launcher=self.root/'treer-launch'
+        launcher.write_text((APP/'tests/fake_session.py').read_text())
         launcher.chmod(0o755)
-        session_cli=self.root/'session.sh'
-        session_cli.write_text((APP/'tests/fake_session.py').read_text())
-        session_cli.chmod(0o755)
+        self.session_log=self.root/'session.log'
         self.env=sealed_environment({'HOME':str(self.home),'PATH':os.defpath,'TMPDIR':str(self.tmp),'TREER_BIN':str(fake),
-                    'FAKE_LOG':str(self.log),'FAKE_PROBE':json.dumps(dict(executable=True,version='2.1.0',logged_in=True,launcher=str(launcher),session_transfer=True,free_bytes=1024**3)),
+                    'FAKE_LOG':str(self.log),'FAKE_SESSION_LOG':str(self.session_log),'FAKE_PROBE':json.dumps(dict(executable=True,version='2.1.0',logged_in=True,launcher=str(launcher),session_transfer=True,free_bytes=1024**3)),
                     'TREER_AGENT_LAUNCHER':str(launcher),'TREER_AGENT_ID':'ag_restore','FAKE_SESSION_SOURCE':str(self.root/'session-source.json')})
         self.server,self.proxy=servers(self.root/'server')
         self.url=f'http://127.0.0.1:{self.server.server_port}'
@@ -98,20 +94,6 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
                               dict(scope='project',path='CLAUDE.md',source=str(self.cwd/'CLAUDE.md'))])
         return session
 
-    def codex(self):
-        self.saved_self()
-        config=self.home/'.codex'
-        folder=config/'sessions/2026/10/12'
-        folder.mkdir(parents=True)
-        session=folder/('rollout-'+SID+'.jsonl')
-        session.write_text(json.dumps({'type':'session_meta','payload':{'id':SID,'cwd':str(self.cwd)}})+'\n'+
-                           json.dumps({'type':'event_msg','payload':{'text':'wlc_'+ 'a'*64}})+'\n')
-        (config/'shell_snapshots').mkdir()
-        (config/'shell_snapshots'/(SID+'.sh')).write_text('export api_key=abcdef\n')
-        (config/'auth.json').write_text('DO NOT READ OR COPY')
-        self.source('codex',[dict(scope='session',path='session.jsonl',source=str(session))])
-        return session
-
     def save(self,harness='claude',*extra):
         return json.loads(self.call('save','--harness',harness,'--visibility','workspace',*extra).stdout)
 
@@ -138,20 +120,49 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         self.assertTrue(record['contains_secrets'])
         self.assertEqual(list(self.tmp.iterdir()),[])
 
-    def test_codex_save_excludes_shell_and_requires_authoritative_self(self):
-        original=self.codex()
-        record=self.save('codex')
-        self.assertEqual(record['harness'],'codex')
-        self.assertEqual(record['omitted'],['shell_snapshot'])
-        denied=self.call('capture-codex','--include-shell-snapshot',success=False)
-        self.assertIn('unrecognized arguments',denied.stderr)
-        allowed=self.save('codex','--allow-secrets')
-        self.assertEqual(allowed['omitted'],['shell_snapshot'])
-        self.assertFalse(any(f['path'].endswith('.sh') for f in allowed['manifest']['adapter']['transfer_files']))
-        self.assertFalse(any(f['path'].endswith('.sh') for f in record['manifest']['adapter']['transfer_files']))
-        self.assertIn('api_key=abcdef',(self.home/'.codex/shell_snapshots'/(SID+'.sh')).read_text())
-        self.assertFalse(record['contains_secrets'])
-        self.assertIn('wlc_',original.read_text())
+    def test_save_and_restore_invoke_installed_treer_launch_session_cli(self):
+        self.claude()
+        # No override: Soul finds the per-user installed shim, as on a bundle install.
+        installed=self.home/'.local/bin/treer-launch'
+        installed.parent.mkdir(parents=True)
+        installed.write_bytes((self.root/'treer-launch').read_bytes()); installed.chmod(0o755)
+        env={k:v for k,v in self.env.items() if k!='TREER_AGENT_LAUNCHER'}
+        record=json.loads(self.call('save','--harness','claude','--visibility','workspace',env=env).stdout)
+        result=json.loads(self.call('run',record['soul_id'],env=env).stdout)
+        calls=[json.loads(line) for line in self.session_log.read_text().splitlines()]
+        self.assertEqual([c[:2] for c in calls],[['session','export'],['session','import']])
+        export=calls[0]
+        self.assertEqual(export[export.index('--config-dir')+1],str((self.home/'.claude').resolve()))
+        self.assertEqual(export[export.index('--harness')+1],'claude')
+        self.assertEqual(result['argv'][:2],['--harness','claude'])
+        self.assertEqual(result['argv'][result['argv'].index('--session-id')+1],calls[1][calls[1].index('--session-id')+1])
+
+    def test_preflight_probe_detects_installed_session_cli(self):
+        import client
+        installed=self.home/'.local/bin/treer-launch'
+        installed.parent.mkdir(parents=True)
+        installed.write_bytes((self.root/'treer-launch').read_bytes()); installed.chmod(0o755)
+        env={k:v for k,v in self.env.items() if k!='TREER_AGENT_LAUNCHER'}
+        probe=json.loads(subprocess.check_output([sys.executable,'-c',client.PREFLIGHT,'claude'],env=env,timeout=30))
+        self.assertEqual((probe['launcher'],probe['session_transfer']),(str(installed.resolve()),True))
+        old=self.root/'old-treer-launch'
+        old.write_text('#!/bin/sh\nexit 1\n'); old.chmod(0o755)
+        probe=json.loads(subprocess.check_output([sys.executable,'-c',client.PREFLIGHT,'claude'],env=dict(env,TREER_AGENT_LAUNCHER=str(old)),timeout=30))
+        self.assertEqual((probe['launcher'],probe['session_transfer']),(str(old.resolve()),False))
+
+    def test_preflight_falls_back_to_deprecated_treer_agent_alias(self):
+        import client
+        legacy=self.home/'.local/bin/treer-agent'
+        legacy.parent.mkdir(parents=True)
+        legacy.write_bytes((self.root/'treer-launch').read_bytes()); legacy.chmod(0o755)
+        env={k:v for k,v in self.env.items() if k!='TREER_AGENT_LAUNCHER'}
+        probe=json.loads(subprocess.check_output([sys.executable,'-c',client.PREFLIGHT,'claude'],env=env,timeout=30))
+        self.assertEqual((probe['launcher'],probe['session_transfer']),(str(legacy.resolve()),True))
+
+    def test_codex_is_not_saved_and_self_requires_authoritative_session(self):
+        denied=self.call('save','--harness','codex',success=False)
+        self.assertIn('invalid choice',denied.stderr)
+        self.assertIn('invalid choice',self.call('capture-codex',success=False).stderr)
         self.claude()
         project=self.home/'.claude/projects'/project_key(self.cwd)
         (project/'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl').write_text('{}\n')
@@ -211,21 +222,22 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         self.assertEqual(restored_session.read_text(),'evolved\n')
         self.assertEqual((original_project/(SID+'.jsonl')).read_bytes(),original)
 
-    def test_codex_restore_login_stays_local_session_is_isolated(self):
-        original=self.codex()
-        before=original.read_bytes()
-        record=self.save('codex')
-        result=json.loads(self.call('run',record['soul_id']).stdout)
-        config=Path(result['codex_home'])
-        self.assertNotEqual(config,self.home/'.codex')
-        self.assertTrue((config/'auth.json').is_symlink())
-        target=next((config/'sessions').rglob('*.jsonl'))
-        self.assertEqual(json.loads(target.read_text().splitlines()[0])['payload']['cwd'],result['cwd'])
-        target.write_text('new learning\n')
-        self.call('run',record['soul_id'])
-        self.assertEqual(target.read_text(),'new learning\n')
-        self.assertEqual(original.read_bytes(),before)
-        self.assertFalse((config/'shell_snapshots').exists())
+    def test_archived_codex_soul_stays_readable_but_is_not_restored(self):
+        soul_id='soul_'+'c'*32
+        legacy=self.root/'legacy-codex'
+        (legacy/'souls').mkdir(parents=True)
+        manifest=dict(schema_version=1,name='Old Codex',environment={},adapter=dict(name='codex',session_id=SID,
+            session_file='files/session.jsonl',session_relative_path='2026/10/12/rollout-'+SID+'.jsonl'))
+        with tarfile.open(legacy/'souls'/f'{soul_id}.tar','w') as archive:
+            for path,data in [('manifest.json',json.dumps(manifest).encode()),('files/session.jsonl',b'{}\n')]:
+                member=tarfile.TarInfo(path);member.size=len(data);archive.addfile(member,io.BytesIO(data))
+        (legacy/'souls'/f'{soul_id}.json').write_text(json.dumps(dict(soul_id=soul_id,created_at='2025-01-01T00:00:00Z')))
+        from soul import SoulStore
+        self.server.store.close();self.server.store=SoulStore(legacy);self.server.auth.store=self.server.store
+        self.assertEqual(json.loads(self.call('show',soul_id).stdout)['manifest']['adapter']['name'],'codex')
+        self.assertIn('Unsupported harness',self.call('incarnate',soul_id,'--machine','target',success=False).stderr)
+        self.assertIn('Claude only',self.call('run',soul_id,success=False).stderr)
+        self.assertFalse(self.session_log.exists())
 
     def test_installer_piped_stdin_and_atomic_single_file(self):
         env=dict(self.env,TREER_SOUL_INSTALL_DIR=str(self.root/'bin'))
@@ -295,10 +307,8 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
                 self.assertEqual(client.self_session('claude'),SID)
                 cli.assert_called_once_with('interface','show')
                 with self.assertRaises(RuntimeError): client.self_session('codex')
-                State.harness='codex'
-                self.assertEqual(client.self_session('codex'),SID)
             with patch.object(client,'treer',return_value='null'):
-                self.assertIsNone(client.self_session('codex'))
+                self.assertIsNone(client.self_session('claude'))
         finally:
             server.shutdown(); server.server_close()
 
@@ -353,7 +363,7 @@ print(json.dumps({'argv':sys.argv[1:],'cwd':os.getcwd(),'codex_home':os.environ.
         local=self.root/'known-claude'
         unrelated=self.root/'someone-else-claude'
         result=dict(sessionId=adapter['session_id'],cwd=str(state/'native'),environment={'CLAUDE_CONFIG_DIR':str(unrelated)})
-        with patch.dict(os.environ,{'CLAUDE_CONFIG_DIR':str(local)}), patch.object(soul_sessions,'transfer_cli',return_value='/unused'), patch.object(soul_sessions,'run_transfer',return_value=result):
+        with patch.dict(os.environ,{'CLAUDE_CONFIG_DIR':str(local)}), patch.object(soul_sessions,'run_transfer',return_value=result):
             with self.assertRaisesRegex(RuntimeError,'unrelated Claude home'):
                 soul_sessions.import_session(bundle,adapter,state/'workspace',state)
             result['environment']['CLAUDE_CONFIG_DIR']=str(local)

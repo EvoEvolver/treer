@@ -422,14 +422,10 @@ the rollback record.
 
 ## Updating enrolled machines
 
-Control-plane Apply does not roll Controllers. On each enrolled machine, keep
-using:
-
-```bash
-treer-agent-server update
-```
-
-Remote orchestration of machine updates from `/admin` is a follow-up.
+Control-plane Apply does not touch machines. Update each machine from its
+Console page (or the `controller-update` API), or run
+`treer-agent-server update` on it; see
+[Updates](../docs/operator-guide.md#machines).
 
 ## Security boundary
 

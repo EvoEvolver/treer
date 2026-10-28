@@ -1909,6 +1909,47 @@ fn output_trimming_uses_slack_and_preserves_utf8() {
 }
 
 #[test]
+fn truncated_terminal_replay_starts_at_a_sequence_or_line_boundary() {
+    let replay = |first: u64, data: &[u8]| HostOutputReplay {
+        process_id: "p1".into(),
+        stream_epoch: "stream_a".into(),
+        first_available_revision: first,
+        next_revision: first + 1,
+        gap: false,
+        chunks: vec![treer_host_protocol::HostOutputChunk {
+            process_id: "p1".into(),
+            stream_epoch: "stream_a".into(),
+            revision: first,
+            data: data.to_vec(),
+            bracketed_paste: false,
+            emitted_at: Utc::now(),
+        }],
+    };
+    let cursor = |revision: u64| TerminalCursor {
+        stream_epoch: "stream_a".into(),
+        revision,
+    };
+    // The ring evicted revisions 1..=6: drop the tail of a cut CSI / UTF-8.
+    let cut = replay(7, b"8;5;208m\xa0text\x1b[0mok");
+    assert_eq!(terminal_replay(&cut, None).unwrap(), b"\x1b[0mok");
+    assert_eq!(
+        terminal_replay(&cut, Some(&cursor(2))).unwrap(),
+        b"\x1b[0mok"
+    );
+    let line = replay(7, b"tle\x07 half line\nnext\x1b[1m");
+    assert_eq!(terminal_replay(&line, None).unwrap(), b"next\x1b[1m");
+    // Contiguous with the cursor (or the stream start): replay verbatim.
+    assert_eq!(
+        terminal_replay(&cut, Some(&cursor(6))).unwrap(),
+        b"8;5;208m\xa0text\x1b[0mok"
+    );
+    assert_eq!(terminal_replay(&replay(1, b"8;5m"), None).unwrap(), b"8;5m");
+    // No boundary nearby: keep the bytes rather than drop a whole screen.
+    let plain = vec![b'x'; REPLAY_BOUNDARY_SCAN_BYTES + 1];
+    assert_eq!(terminal_replay(&replay(7, &plain), None).unwrap(), plain);
+}
+
+#[test]
 fn workload_credentials_are_unique_and_compared_exactly() {
     let first = new_workload_credential();
     let second = new_workload_credential();

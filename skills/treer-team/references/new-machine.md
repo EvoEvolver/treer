@@ -56,26 +56,20 @@ treer interface contract
 Confirm the expected machine is online and read its root/Controller identity.
 A fresh shell outside a managed Agent needs the intended authenticated local
 Controller/operator context; never copy another Agent's workload credential.
-For several Controllers under one OS user, explicitly select and verify the
-intended local Controller before installing profiles. Follow current
-`treer-agent-server launcher --help` and the
-[launcher installation instructions](../../../launchers/agent/README.md#installation-and-updates);
-do not guess that the default loopback port belongs to this workspace.
+See the
+[launcher installation notes](../../../launchers/agent/README.md#installation-and-updates).
 
-## 2. Install only the selected launcher/provider
+## 2. Check the launcher; install only the selected provider
 
-Install trusted Node.js 22+ on the target and identify its absolute executable.
-Run locally against the intended Controller:
+The Treer install already put `treer-launch` next to `treer`. Verify it and
+the workspace's default profiles:
 
 ```sh
-treer-agent-server launcher --node /absolute/node install --agent claude --agent codex
-treer-agent-server launcher --node /absolute/node status
-treer agent admin profile list
+treer-launch --version            # else: treer-agent-server launcher install
+treer agent admin profile list    # Codex + UI, Claude + UI
 ```
 
-The installer saves matching portable profiles and the per-user `treer-agent`
-entry; it does not create or restart Agents. Ensure that bin directory is on the
-Agent's PATH. Install and log into only the provider CLIs the user selected,
+Nothing here creates or restarts Agents. Install and log into only the provider CLIs the user selected,
 using their own login flow; never read or transmit login files. A profile being
 present does not prove that its provider executable or account is usable.
 Read [Agent integration](agents.md) for the supported profiles.
@@ -93,13 +87,13 @@ treer agent mkdir -p /team/dev
 treer agent mkdir -p /team/review
 treer agent admin create --machine target-machine --kind command \
   --name leader --folder /team --cwd projects/example -- \
-  treer-agent --harness claude
+  treer-launch --harness claude
 treer agent admin create --machine target-machine --kind command \
   --name developer --folder /team/dev --cwd projects/example -- \
-  treer-agent --harness codex
+  treer-launch --harness codex
 treer agent admin create --machine target-machine --kind command \
   --name reviewer --folder /team/review --cwd projects/example -- \
-  treer-agent --harness claude
+  treer-launch --harness claude
 ```
 
 Create only the user-requested count/roles; more developers or a release role
@@ -130,15 +124,14 @@ failed its last request; a successful prompt plus the expected AIS/UI is the
 stronger signal. If the round-trip fails, inspect the chosen Agent/provider,
 report the cause and stop; do not reinstall Core or restart peers to hide it.
 
-## 5. Optional: shared ticket board
+## 5. Optional: shared issue tracker
 
-**If you want a shared ticket board**, deploy the [Issues App](presets.md#minimal-optional-issues-example)
+**If you want a shared issue tracker**, deploy the [Issues App](presets.md#minimal-optional-issues-example)
 and point participants at it. It is not required for Core Message, Agent
 prompts, a folder tree or team health checks. For a new version-directory App,
 the sequence is init → stage → bootstrap → app create; deploy is for subsequent
 upgrades, not a replacement for first creation. Adopt whatever collaboration
-rules the user asks for, rather than imposing this repository's ticket process
-on every workspace.
+rules the user asks for.
 
 ## Pitfalls
 

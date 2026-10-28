@@ -1,60 +1,48 @@
 # Issues App
 
-Issues is an ordinary workspace App for humans and Agents sharing a tracker.
-It owns issues, Markdown source descriptions, priorities, labels, assignments,
-parent/child hierarchies, blocked-by dependencies, comments, activity and leased
-claims. It does not implement Core Issue/Task/Run/Artifact objects, scheduling
-or Agent prompting. No Treer core code is changed.
+Issues is a workspace App for humans and Agents sharing a tracker: issues with
+Markdown source descriptions, priorities, labels, assignments, parent/child
+hierarchies (a DAG), blocked-by dependencies, comments, activity, notes and
+leased claims, plus change notifications and reminders sent as Core Messages.
+It does not schedule or prompt Agents.
+
+The HTTP root negotiates the [Agent manual](AGENT.md) (commands and complete
+`/v1` API) or the human UI. This README covers deployment and operator concerns.
 
 ## Design
 
-The backend is Python 3.10+ standard library and SQLite; it does not need Node
-at runtime. The browser UI is React (TypeScript, `ui/src`) built with a pinned
-esbuild into four committed files in `dist/` that the App serves as-is, so
-deploying is still `python3 apps/issues/issues.py` from a checkout. Treer owns the
-identity directory, service tokens and browser OAuth; there are no local users.
-All state, including OAuth session mappings, lives in one SQLite database.
-Writes use `BEGIN IMMEDIATE`: permissions and claim ownership are checked inside
-the same transaction as the mutation. Foreign references and parent/dependency
-cycles are validated before commit. Progress counts all descendants, with
-`done` and `closed` counted as completed. A lease is separate from assignment
-and status; expiry immediately makes it available without resetting either.
+The backend is Python 3.10+ standard library and SQLite, with no Node at
+runtime. The React/TypeScript UI in `ui/src` is built with pinned esbuild into
+committed files in `dist/`, served as-is. Treer owns identities, service tokens
+and browser OAuth; there are no local users. All state, including OAuth session
+mappings, is in one SQLite database. Writes use `BEGIN IMMEDIATE`, so permission
+and claim checks run in the same transaction as the mutation; references and
+parent/dependency cycles are validated before commit.
 
-The HTTP root negotiates an [Agent manual](AGENT.md) or the human UI. APIs use
-`/v1/`, bounded pages and JSON errors. Browser assets (`./app.js`, `./app.css`,
-`./boot.js`) and API calls are document-relative and preserve a Treer tunnel
-prefix. Descriptions/comments are **text**, including their Markdown source;
-no user content is inserted through HTML or evaluated, and the CSP allows only
-same-origin scripts and styles.
+APIs use `/v1/`, bounded pages and JSON errors. Assets and API calls are
+document-relative and preserve a Treer tunnel prefix. Descriptions and comments
+are displayed as **text** (no Markdown rendering, no HTML sinks), and the CSP
+allows only same-origin scripts and styles.
 
 ### Interface
 
-A quiet, dense, keyboard-first layout in the launcher's green palette, light and
-dark (it follows the system theme until the toggle is used). Issues are grouped
-by status (done/closed collapsed by default) or shown as a hierarchy tree, with
-status, assignee, label and text filters; the detail pane edits status,
-assignee and priority in place. On phones the list is one column and the detail
-is a full-screen sheet with a Back button.
+A dense, keyboard-first layout with light/dark themes. Issues are grouped by
+status (done/closed collapsed) or shown as a hierarchy tree, with status,
+assignee, label and text filters; the detail pane edits status, assignee and
+priority in place. On phones the detail is a full-screen sheet. Views include
+**Needs me** (`GET /v1/issues?assignee=me&unresolved=1`) and **Stale**. Close /
+reopen is one click with an Undo toast; buttons are disabled with the reason
+when the viewer may not edit (the server still enforces permissions).
 
-**Close** is one click in every list row, child row and the detail header
-(reopen for closed issues); closing from a row or with `X` offers an Undo toast.
-The buttons mirror the backend rule: they are disabled, with the reason shown,
-unless the viewer is the creator, assignee, live lease holder or a human
-owner/admin (a live lease held by someone else blocks everyone else). The server
-still enforces permissions; the UI only explains them.
-
-The **Needs me** view lists issues assigned to you that are not done/closed
-(the API form is `GET /v1/issues?assignee=me&unresolved=1`; add `&label=x` or the
-Label filter to narrow it).
+Assignee pickers show humans under People and Agents in folders by the canonical
+`path` from Core's permission-filtered directory. A missing path (`null`, hidden
+or unplaced) shows the stable ID. Selection always sends the stable principal ID;
+paths are display-only and never used for authorization.
 
 Shortcuts: `J`/`K` move, `Enter`/`O` open, `X` close, `E` edit, `C` new issue,
 `/` search, `Esc` back, `?` help.
 
 ### Building the UI
-
-Sources live in `ui/`; `dist/` is generated and committed, like the launcher UI,
-and is compared byte for byte with a fresh build. Versions are pinned exactly in
-`package.json`/`package-lock.json`. After changing anything under `ui/`:
 
 ```sh
 cd apps/issues
@@ -63,12 +51,12 @@ npm run build:ui     # rewrites dist/
 npm run check        # tsc, rebuild-and-compare, size budget, no absolute paths or HTML sinks
 ```
 
-`.gitattributes` forces LF for `ui/` and `dist/`. Markdown rendering is
-deliberately absent; adding marked/DOMPurify would need a security review.
+`dist/` must match a fresh build byte for byte; `.gitattributes` forces LF for
+`ui/` and `dist/`.
 
 ## Deploy as a Managed App
 
-Check for an existing name first. Do not use `--public`:
+Do not use `--public`:
 
 ```sh
 treer app list
@@ -77,425 +65,220 @@ treer app create --machine self --name issues --cwd treer --port 9440 \
   ISSUES_PROXY_URL=https://proxy.example.com/ \
   ISSUES_DB=/absolute/durable/path/issues.sqlite3 \
   python3 apps/issues/issues.py
-treer app show issues
+treer app show /issues
 curl -fsS http://issues.treer/health
 curl -fsS http://issues.treer/v1/me
 ```
 
-Replace the Proxy URL with the trusted deployment's actual public Proxy URL,
-not the App ingress or Controller loopback URL. Read the generated `public_url`
-from the App record and open it in a browser, or select Issues in Treer's
-workspace UI. With a Proxy containing human request identity forwarding, an
-already logged-in user is recognized automatically on both paths; no second
-App sign-in is required. The OAuth button appears only as a no-token fallback
-for direct access or older Proxies. The App lazily discovers its own service/workspace and
-public URL using `treer app list` and its injected runtime identity. This
-requires the App's Policy to allow App discovery. It does not register a service
-on behalf of the creating Agent. Discovery failure returns 503, never anonymous
-access. Keep the command directory and Python installation available for recovery.
-The runtime's own inherited HTTP proxy supports App discovery and `.treer`
-clients. No Host/Controller restart is needed.
+`ISSUES_PROXY_URL` is the deployment's public Proxy URL (not the App ingress or
+Controller loopback URL). A logged-in Treer user is recognized automatically
+inside the Console and through Workspace ingress; the OAuth button appears only
+for direct access without a forwarded identity. The App discovers its own
+service, workspace and public URL with `treer app list` and its runtime
+identity (its Policy must allow App listing); discovery failure returns 503,
+never anonymous access. Without wildcard ingress it uses the
+`/api/workspaces/WORKSPACE/apps/APP_ID/ui/` root; the OAuth fallback callback
+still needs wildcard ingress. For externally supervised servers, or a Policy
+that denies App listing, set `ISSUES_SERVICE_ID`, `ISSUES_PUBLIC_URL` and
+`ISSUES_WORKSPACE_ID` explicitly.
 
-Embedded automatic identity works without wildcard ingress: discovery derives
-the canonical Proxy `/api/workspaces/WORKSPACE/apps/APP_ID/ui/` root when no
-public origin exists. Wildcard workspace ingress is still needed for the OAuth
-fallback callback. For externally managed servers or a Policy that denies App listing, configure all identity values
-explicitly after registering the service. Never select a service audience from
-request headers or bodies.
+Use the App's stable ID or tree path (for example `/infra/issues`) with
+`treer app` commands.
 
-## Deploy from a version directory (production layout)
+### Version-directory deployment
 
-The production App runs through `scripts/app-deploy` instead of a source checkout:
-a stable entry executes `releases/<FULL SHA>` (selected by `current`), the database
-lives in `ROOT/state/app.sqlite3`, and later releases are staged, health-checked and
-rolled back by the tool (see the operator guide, "Deploy new Apps from version
-directories"). Issues supports it with two additions:
+Issues supports `scripts/app-deploy` (see "Deploy new Apps from version
+directories" in the [operator guide](../../docs/operator-guide.md)): a stable
+entry runs `releases/<FULL SHA>` selected by `current`, with the database in
+`ROOT/state/app.sqlite3`. For this the App provides:
 
-- `GET /deployment-health` (unauthenticated, `no-store`, GET/HEAD only):
-  `{"version": APP_DEPLOY_VERSION, "app_id": TREER_AGENT_ID, "ready": …, "database_ready": …}`;
-  503 when the database does not answer. It exposes only a commit SHA and the App ID,
-  and the probe result is cached for two seconds.
-- `--proxy-url URL` overrides `ISSUES_PROXY_URL`. The deployment's saved command
-  cannot carry environment variables, so the Proxy URL travels in the fixed arguments
-  written by `init` (`… --db-env ISSUES_DB -- --proxy-url https://proxy.example.com/`).
-  The entry sets `ISSUES_DB` and `APP_DEPLOY_VERSION` itself.
+- `GET /deployment-health` (unauthenticated, `no-store`):
+  `{"version": APP_DEPLOY_VERSION, "app_id": TREER_AGENT_ID, "ready": …, "database_ready": …}`,
+  503 when the database does not answer, cached for two seconds.
+- `--proxy-url`, `--leader-agent` and `--release-agent` flags, because the saved
+  command cannot carry environment variables; pass them as fixed arguments to
+  `app-deploy init` (`… --db-env ISSUES_DB -- --proxy-url https://proxy.example.com/`).
+  The entry sets `ISSUES_DB` and `APP_DEPLOY_VERSION`.
 
-Migrating an existing App (rehearsed end to end by `tests/rehearse_migration.py`,
-which prints every command and its rollback point; run it before touching a live App):
-
-1. Back up the database with the online backup API (see *Backup and recovery*) and
-   record `treer app show APP` in a private snapshot.
-2. `app-deploy init`, `stage` (the component's tests run in the exported tree) and
-   `bootstrap` — no downtime; deleting `ROOT` undoes it.
-3. `treer app stop APP`; copy the old database into `ROOT/state/app.sqlite3` with the
-   backup API and compare `integrity_check` and row counts; `treer app update APP --cwd
-   <ROOT relative to the machine root> --command <the interpreter init printed> -- ROOT/entry.py
-   run --root ROOT`; `treer app start APP`; check `/deployment-health` on loopback **and**
-   through the Treer route, the unchanged App/service IDs and `/v1/issues`.
-4. Rollback (the old database file is never modified): stop, `treer app update` back
-   to the saved legacy command/cwd/args, start. Writes made on the new database after
-   the cutover do not return to the old one.
-5. Later upgrades: `app-deploy stage …` then `app-deploy deploy …`; a failing release
-   is rolled back automatically together with the pre-deploy SQLite backup.
-
-Use the App's stable ID or tree path (`/infra/issues`), not a bare name, with `treer app`.
-`init` records the interpreter path exactly as given (since #51), so pass a stable shim such
-as `/Users/dooms/.local/bin/python3.12`, which keeps following interpreter updates; the
-interpreter is outside the release hashes, so keep the shim and its targets writable only by
-trusted operators. App-deploy needs Python 3.11 or newer. A root created before #51 holds a
-resolved, version-numbered path (for example `cpython-3.12.15`) in both `command` and
-`launcher_command` of its `config.json`, which breaks when that interpreter is upgraded or
-removed. Switch such a root explicitly: write the stable path into both fields of
-`ROOT/config.json` (atomic replace, mode 0600, keep a copy), then
-`treer app update /infra/issues --command <stable path>` (arguments and cwd are preserved and
-the process restarts), and check `/deployment-health`, the unchanged App ID and that
-`app-deploy`'s identity check still passes. The saved command and `launcher_command` must
-stay identical or `deploy` refuses with `app_not_using_stable_entry`. Production was switched
-this way after #51.
+`init` records the interpreter path as given; pass a stable shim (not a
+version-numbered path) and keep it writable only by trusted operators.
+`tests/rehearse_migration.py` rehearses moving an existing App onto this layout
+on a copy, printing each command and its rollback point.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `ISSUES_PROXY_URL` | required | Trusted Proxy origin for verification, directory, OAuth and messages |
-| `ISSUES_LEADER_AGENT` / `--leader-agent` | unset | Stable ID (`ag_` + 32 hex digits) of the leader Agent: `leader`/`user` in `waiting_on` resolve to it and ownerless issues are reminded to it. Unset: those values are refused and ownerless issues are not reminded. A deployed App carries it as a fixed argument, like `--proxy-url` |
-| `ISSUES_LISTEN` | `127.0.0.1:9440` | Private listener host:port, matching App declared port |
-| `ISSUES_DB` | `.treer/apps/issues/issues.sqlite3` | Durable SQLite file, relative to runtime cwd if not absolute |
-| `ISSUES_SERVICE_ID` | own Managed App record | Registered service audience; configure together with public URL |
-| `ISSUES_PUBLIC_URL` | own Managed App record | Workspace-authenticated App origin, including trailing slash |
-| `ISSUES_WORKSPACE_ID` | injected workspace or own record | Workspace boundary; required for external supervision |
-| `TREER_BIN` | `treer` | CLI used only for own Managed App identity discovery |
-| `ISSUES_URL` | `http://issues.treer/` | Client-side root override for the `issues` CLI |
-| `ISSUES_NOTIFY_HOURLY_LIMIT` | `20` | Immediate Messages per recipient per hour before updates fold into one digest |
-| `ISSUES_NOTIFY` | `on` | `0`/`off`/`false`/`no` disables issue-change notifications and digests |
-| `ISSUES_REMINDER_SKIP_LABELS` | `epic,pinned` | Comma-separated labels (case-insensitive) whose issues are never counted by reminders; empty = none |
+| `ISSUES_PROXY_URL` / `--proxy-url` | required | Trusted Proxy origin for verification, directory, OAuth and Messages |
+| `ISSUES_LEADER_AGENT` / `--leader-agent` | unset | Stable Agent ID (`ag_…`) that `leader`/`user` in `waiting_on` resolve to and that receives ownerless-issue reminders; unset refuses those values and skips ownerless reminders |
+| `ISSUES_RELEASE_AGENT` / `--release-agent` | unset | Agent whose release comments trigger shipped-but-open reminders (below); off when unset |
+| `ISSUES_LISTEN` | `127.0.0.1:9440` | Listener; match the App's `--port` |
+| `ISSUES_DB` | `.treer/apps/issues/issues.sqlite3` | SQLite file, relative to the runtime cwd if not absolute |
+| `ISSUES_SERVICE_ID` | own Managed App record | Service audience; set together with the public URL |
+| `ISSUES_PUBLIC_URL` | own Managed App record | Workspace-authenticated App origin with trailing slash; also the link in human notifications |
+| `ISSUES_WORKSPACE_ID` | injected or own record | Workspace boundary; required for external supervision |
+| `TREER_BIN` | `treer` | CLI for discovery, `agent show` and App-identity Messages |
+| `ISSUES_URL` | `http://issues.treer/` | Root used by the `issues` client |
+| `ISSUES_NOTIFY` | `on` | `0`/`off`/`false`/`no` disables change notifications and digests |
+| `ISSUES_NOTIFY_HOURLY_LIMIT` | `20` | Immediate Messages per recipient per hour (1–1000) |
 | `ISSUES_REMINDERS` | `on` | `0`/`off`/`false`/`no` disables the reminder poller |
-| `ISSUES_REMINDER_FIRST` | `10m` | First reminder this long after an issue starts needing one (1m–24h) |
-| `ISSUES_REMINDER_FACTOR` | `2` | Each later interval = previous × factor (1–10) |
+| `ISSUES_REMINDER_SKIP_LABELS` | `epic,pinned` | Labels (case-insensitive) never reminded; empty = none |
+| `ISSUES_REMINDER_FIRST` | `10m` | First reminder delay (1m–24h) |
+| `ISSUES_REMINDER_FACTOR` | `2` | Backoff multiplier (1–10) |
 | `ISSUES_REMINDER_MAX` | `24h` | Interval cap (≥ FIRST, ≤ 30d) |
 
-Protect the database directory: sessions contain short-lived human access
-tokens. Startup uses restrictive umask and database mode `0600`. OAuth uses
-S256 PKCE, one-use state, hashed local session IDs, HttpOnly/SameSite cookies
-and Secure cookies on HTTPS. Identity is reverified on every API call. The UI
-never receives tokens. Authentication checks injected `X-Treer-Identity-Token`
-first (even if a local cookie exists), then explicit Bearer, then an OAuth cookie.
-Invalid/expired/other-audience supplied tokens fail without cookie fallback.
-Forwarded tokens are verified on each request and are not saved as sessions.
-Human writes, including injected human tokens, require JSON and
-`X-Issues-Request: 1`. `Origin`, when present, must exactly match the configured
-App or Proxy origin; `Sec-Fetch-Site`, when present, must be same-origin or
-same-site. Null/untrusted origins and cross-site/none Fetch Metadata fail.
-Non-browser clients may lack these headers, but human writes still require the
-custom header. No cross-origin API access is enabled. CSP and nosniff protect assets.
+Durations are written `90s`, `10m`, `1.5h`, `24h`. Invalid values stop startup
+with the variable named; they are never replaced by defaults.
 
-## Permissions and notifications
+## Authentication
 
-Every authenticated principal in the workspace may read, create and comment.
-Only creator, assignee, live lease holder, or human owner/admin may edit. A live
-lease overrides editing privilege: only its holder may mutate, although anyone
-may comment. Only unassigned issues or issues assigned to the caller can be
-claimed. Lease duration is 1–86400 seconds; renew/release require a live owned
-lease. Dependency resolution is required before claiming, starting or marking
-done. Human administrators can edit after a lease expires, but cannot steal it.
-This is a shared workspace tracker, not a per-issue ACL system. Treer's network
-Policy and App permissions remain additional upstream gates.
+Authentication checks an injected `X-Treer-Identity-Token` first (even if a
+cookie exists), then explicit Bearer, then the OAuth cookie. Invalid, expired or
+other-audience supplied tokens fail without cookie fallback, and identity is
+reverified on every call. OAuth uses S256 PKCE, one-use state paired with an
+HttpOnly browser nonce, hashed session IDs and HttpOnly/SameSite (Secure on
+HTTPS) cookies; the UI never receives tokens. Human writes require JSON and
+`X-Issues-Request: 1`; a present `Origin` must match the App or Proxy origin and
+`Sec-Fetch-Site` must be same-origin or same-site. No CORS is enabled.
+
+## Permissions
+
+Every authenticated workspace principal may read, create and comment. Only the
+creator, assignee, live lease holder or a human owner/admin may edit; a live
+lease restricts mutation to its holder (anyone may still comment). Only
+unassigned issues or issues assigned to the caller can be claimed; leases last
+1–86400 seconds and renew/release need a live owned lease. Dependencies must be
+resolved before claiming, starting or marking done. Human admins can edit after
+a lease expires but cannot steal it. This is a shared tracker, not per-issue
+ACLs; Treer Policy remains an upstream gate.
+
+## Notifications
 
 Edits and comments notify the people they concern, never the actor, through
-`/api/apps/SERVICE/messages` using the **verified caller's** service token, so
-Core evaluates that caller's Message Policy:
+`/api/apps/SERVICE/messages` using the **verified caller's** token, so Core
+applies that caller's Message Policy:
 
-| Event | Who is notified |
+| Event | Notified |
 | --- | --- |
-| Issue created | assignee |
-| Comment | assignee |
-| Status or assignee change | assignee, creator, and the previous assignee on reassignment |
-| Any other edit (priority, labels, text…) | assignee |
-| `@name` in a comment, or newly added to a title/description | the mentioned Agent, in addition to the above |
+| Issue created, comment, other edits | assignee |
+| Status or assignee change | assignee, creator, previous assignee on reassignment |
+| `@name`, `@/tree/path` or `@ag_id` in a comment, or newly in a title/description | the mentioned Agent |
 
-Agent paths shown in the UI come only from Core's directory (`path` is the
-canonical path for display and location; `null` when hidden or unplaced, in which
-case the stable ID is shown; authorization always uses the ID). `GET /v1/directory`
-adds `capabilities` and `paths: supported|unsupported`; a Proxy without
-`app.directory-paths.v1` is reported as unsupported rather than guessed around.
-Claims/leases and updates that change nothing send nothing. A mention is
-`@name` (must match exactly one Agent name, case-insensitive), `@/tree/path` or
-`@ag_id`. Paths are resolved by Core's `recipients/resolve` with the **author's
-own token** before the write, so the
-author's Policy decides what a path means; the result must also be an Agent in
-the author's directory. At most 10 paths are resolved per event, and none when
-notifications are off. An ambiguous or unknown mention is ignored and reported:
-`notification.unresolved_mentions` lists it and, for a duplicated name,
-`notification.mention_candidates` offers the exact spellings: stable IDs, or a tree
-path only when Core put it in the author's own directory (Core applies
-`agent.tree.read`); no other path source is used, so the App identity never
-discloses tree paths. The UI toast shows
-them. Only Agents can be mentioned; the creator therefore hears plain comments
-only when mentioned (`@author`).
+Mentions resolve with the author's own token (Core `recipients/resolve` and the
+author's directory); at most 10 per event. Unknown or ambiguous mentions are
+reported in `notification.unresolved_mentions` (with `mention_candidates` for
+duplicate names). Only Agents can be mentioned. Claims and no-op updates send
+nothing.
 
-A Message is one short fixed sentence plus a reference, for example
-`Issue #22 · Status open→done · by security-claude`. The only author text it can
-carry is a **comment title**, quoted behind a fixed marker:
-`Issue #159 · New comment, title (untrusted): "(security) 9ec2032c static review: PASS" · by security-claude`.
-Issue titles, descriptions and comment bodies never appear in a Message. The
-reference line depends on the recipient: **Agents** get a fixed command with a
-validated integer, `issues show 159 --titles` (no URL, no Tree path, never any title
-text; an unknown recipient kind is treated as an Agent), **people** get the browser
-link when `ISSUES_PUBLIC_URL` is set. One event can therefore produce one Message per
-kind (idempotency keys `issues-event-ID` and `issues-event-ID-human`). Digests use the
-same reference (`issues list --assignee me --unresolved` for the overflow digest) and
-list at most four notices with their titles shortened to 60 characters.
+Messages contain a fixed sentence and a reference, never issue titles,
+descriptions or comment bodies. The only author text is a comment title,
+sanitized (`notify.clean_title`: NFKC, control/bidi/zero-width/private-use
+removed, quotes and brackets neutralized, `@` → `at`, at most 120 code points)
+and quoted behind `title (untrusted):`. Agents get the command
+`issues show N --titles`; humans get the browser link when `ISSUES_PUBLIC_URL` is
+set. Names appear only if they are 1–24 characters of `A–Z a–z 0–9 space . _ / -`,
+otherwise the stable ID. Idempotency keys are `issues-event-ID` (and
+`-human`). Delivery failures are recorded in activity; the write still succeeds.
 
-**Intent and per-recipient policy.** A comment's intent comes from the first token of its title, matched
-case-insensitively after NFKC and trimming and followed by a space or the end:
-`[decision]`, `[blocker]`, `[incident]` or `[action-<agent>]` (a unique Agent name or stable ID; an unknown or
-ambiguous name makes the comment plain `fyi` and the response says `intent_note`). Anything else, including an
-untitled comment, is `fyi`. The intent is stored on the event and never re-derived from text.
-Each Agent has a notification policy, `all` (default: unchanged behaviour) or `asks`, kept in
-SQLite (`notify_policy`) and changed through `PUT /v1/notify-policy {mode, agent?}` or
-`issues policy set asks|all [--agent ID]`. The verified caller can change their own policy; a
-human owner/admin can change any Agent's; an Agent can never change another's; unknown fields are
-rejected. Changes are recorded in an append-only audit (last 1000, `GET /v1/notify-policy?audit=1`).
-A recipient on `asks` receives immediately only: a decision/blocker/incident comment, an `[action-X]` comment
-aimed at them, the issue becoming `blocked`, or an assignment to them (a work assignment is never hidden). Ask pushes are
-limited to 5 per author per recipient per hour, the existing hourly budget still applies, and the excess is filtered.
-Everything else for an `asks` recipient waits in **one hourly digest per issue** (sanitized titles, at most four,
-`+N more` from the count; beyond ten open hourly digests the rest fold into the overflow digest). Because that
-digest is sent under the App's identity, only an actor whom Core has already let message that recipient this hour
-(`notify_proven`) can add to it; an unproven actor's filtered update is dropped, never digested, and the mention hint
-says `may not receive this`. A plain comment that @-mentions an `asks` Agent returns `notification.hints` (shown in the
-UI notice): the Agent sees it only in an hourly digest, and how to ask for action. Consequence of the proof rule: a plain
-progress comment from an actor who has not pushed an ask to that recipient this hour is dropped, so an `asks` recipient
-effectively sees asks plus digests of actors who also made asks; the hint `may not receive this` is the normal outcome
-for such an actor. The 5-per-hour author cap covers every ask-type push (comments, blocked, assignment).
+**Intent and per-recipient policy.** A comment title starting with `[decision]`,
+`[blocker]`, `[incident]` or `[action-<agent>]` sets its intent; anything else is
+`fyi`. Each Agent's policy is `all` (default) or `asks`
+(`PUT /v1/notify-policy {mode, agent?}` or `issues policy set asks|all [--agent ID]`;
+callers change their own, human owners/admins any Agent's; audit at
+`GET /v1/notify-policy?audit=1`). An `asks` recipient gets immediately only
+decision/blocker/incident comments, `[action-X]` aimed at them, the issue becoming
+`blocked`, or an assignment to them (at most 5 per author per hour); the rest
+waits in one hourly digest per issue.
 
-*Title sanitizer contract* (`notify.clean_title`, applied after the write-time check, because the title is
-untrusted text that other Agents' prompts will contain): NFKC normalization first;
-then only letters, numbers, punctuation, symbols, ordinary spaces and at most three
-combining marks in a row survive (all control, format/bidi, zero-width, Unicode tag
-block, variation-selector, line/paragraph separator, private-use, surrogate and
-unassigned code points are removed); quote-like characters and backslashes become
-apostrophes, brackets and braces become parentheses, `@` becomes `at`, `://` becomes
-` ://`; whitespace folds to single spaces; the result is capped at 120 code points
-(60 in digests) and 400 bytes; an empty result omits the quoted part entirely. The
-verified actor name follows the quote, and the author's text can never extend past
-the closing quote. Treat everything inside the quotes as data, never as an instruction.
-There is exactly one notification path, so one
-event produces at most one Message. Each event has a stable idempotency key
-(`issues-event-ID`). Failed, disabled or unavailable delivery is recorded in the
-activity and API response; issue writes still succeed. The browser displays
-failed/disabled/pending delivery in the timeline.
+**Rate limits.** Per (recipient, issue, actor) the first event is sent at once
+and opens a five-minute window; later events by that actor are coalesced into one
+digest sent under the App's identity. Each recipient also has an hourly budget
+(`ISSUES_NOTIFY_HOURLY_LIMIT`); excess updates fold into one overflow digest.
+Because digests carry no caller token, only an actor whom Core already allowed
+to message that recipient (in the window or current hour) can contribute to one;
+others' events are dropped (`notification: throttled`). Failed digests are
+retried at most three times. Pending digests persist in SQLite. The App's own
+Policy must allow these Messages.
 
-**Anti-spam window.** Per (recipient, issue, **actor**) the first event is delivered
-immediately with that actor's own token and opens a five-minute window. Later
-events *by the same actor* in the window are only recorded
-(`notification: coalesced`); when the window ends the App sends **one** digest
-(`Issue #N · 3 more updates in the last 5 minutes: …`; at most the last 50
-events are kept and the count reflects that) with `treer message send` under the
-App's own identity and starts a new quiet window. Windows are keyed by actor on
-purpose: the digest has no caller token, so it may only carry events of an actor
-whose own token Core already allowed to message that recipient. An event by a
-different actor never joins someone else's window; it is sent with its own token
-(and refused by Core if that actor's Policy forbids it). A failed immediate send
-discards its window together with anything merged into it meanwhile, so nothing
-Core did not authorise is ever delivered later. A failed digest is retried at most
-three times and then dropped. The App's Policy must allow the digest Message.
+## Reminders
 
-**Per-recipient cap.** Each recipient also has an hourly budget of immediate
-Messages (`ISSUES_NOTIFY_HOURLY_LIMIT`, default 20, 1–1000). Beyond it, updates
-from any number of issues are folded into one per-recipient digest per window
-(`Issues · N more updates (over the hourly limit)…`), so the total sent to one
-Agent is bounded whatever anyone @-mentions. A single comment @-mentions at most
-10 Agents. The overflow digest is sent under the App identity too, so only an
-actor whom Core already let message that recipient *in the current hour* (a
-recorded successful send) may overflow into it; once the budget is spent, anyone
-else's event is dropped and the activity shows `notification: throttled`. A
-determined authorised sender can still use the 20 immediate slots, which delays
-other people's notifications to the next digest (at most five minutes, nothing
-is lost); there is no separate per-actor limit.
+On by default. An issue needs a reminder while it is unresolved (not
+`done`/`closed`/`note`), has no skip label, and has a responsible Agent: the
+Agent it waits on (`waiting_on`), else its Agent assignee; an unassigned issue
+goes to the leader Agent (if configured). Issues assigned to humans are not
+reminded, and humans are never messaged.
 
-**Names in Messages.** Directory names are attacker-influenced text, so a name
-appears in a Message only if it is 1–24 characters of `A–Z a–z 0–9 space . _ / -`;
-otherwise the stable ID is shown instead. Titles, descriptions and comment bodies
-never appear.
+- **Schedule:** per (recipient, issue) exponential backoff stored in SQLite:
+  10m, 20m, 40m, … capped at 24h with the defaults.
+- **Reset:** only progress restarts it: the responsible party commenting or
+  editing, or responsibility moving to a party not responsible in the last 24
+  hours.
+- **Idle only:** at the due time the App runs `treer agent show ID` and sends only
+  if the Agent is idle; busy or unreachable Agents are retried next poll without
+  growing the interval. Polling is every minute.
+- **Batched:** one Message per Agent per poll listing up to ten issue IDs and the
+  command `issues list --assignee me --unresolved`, sent under the App's identity;
+  at most 4 reminder Messages per recipient per hour. The idempotency key covers
+  the issue set, versions and backoff steps; failed sends retry with the same key.
 
-**Unresolved mentions.** An `@name` that matches no Agent or several is ignored,
-and the write response and activity say so (`notification.unresolved_mentions`;
-the UI toast lists them), so an author does not assume the Agent was reached.
+`waiting_on` is `null`, an Agent's stable ID, `leader` or `user` (both mean the
+leader Agent). It exists only while the status is `blocked`, is set by anyone who
+may edit, and records `waiting_by`/`waiting_at`. Set it with `issues wait`.
 
-`ISSUES_NOTIFY=off` disables all issue-change notifications (activity shows
-`notification: off`); it is independent of `ISSUES_REMINDERS`. Pending digests
-live in the SQLite `notify_windows`/`notify_budget` tables and survive restarts.
+Anyone who may assign an issue to an Agent can thereby make the App message that
+Agent; the text is fixed and still subject to Message Policy. The App's Policy
+must allow `agent show` and Messages to the reminded Agents.
 
-## Reminders (exponential backoff)
+**Shipped-but-open reminder.** With `--release-agent` set, a comment by that
+Agent titled `[release]` or `[deployed]`, containing `canary_passed` and a commit
+of 8–40 hex digits, records one signal per (issue, commit prefix). The reminder
+worker later tells the current Agent assignee once, when idle, that the issue
+looks shipped and can be closed. Resolved or skip-labelled issues are settled
+silently.
 
-> **On by default.** Set `ISSUES_REMINDERS=off` (and restart only this App) to disable
-> the poller. Anyone who may edit an issue can set its assignee, so being able to assign
-> an issue to an Agent also lets that person make the App message that Agent. The
-> Message text is fixed (issue IDs and a link only), is sent as the App's own identity,
-> and remains subject to Treer's Message authorization and Policy.
+**Stale view.** `GET /v1/stale?hours=4&limit=50&offset=0` (hours 1..720;
+`issues stale [--hours N]`) lists unresolved issues whose last progress is older
+than that, oldest first, with the responsible Agent, `waiting_on`, `stale_hours`
+and `since_any_activity_hours`.
 
-An issue **needs a reminder** while it is not `done`/`closed`, its assignee is an Agent
-(stable ID `ag_…`; humans are never messaged) and it carries none of the labels in
-`ISSUES_REMINDER_SKIP_LABELS` (default `epic,pinned`). For each such (assignee, issue) the App keeps
-a backoff in SQLite (`reminder_backoff`, so restarts keep it): the first reminder is due
-`ISSUES_REMINDER_FIRST` (default `10m`) after the issue started needing one, and every
-later interval is the previous one times `ISSUES_REMINDER_FACTOR` (default `2`) capped at
-`ISSUES_REMINDER_MAX` (default `24h`): **10m, 20m, 40m, 1h20m, 2h40m, 5h20m, 10h40m,
-21h20m, then every 24h**.
+## Search, references, hierarchy and notes
 
-- **Who is reminded (#185).** The party that can move the issue: the Agent it **waits on**
-  (`waiting_on`), else its Agent assignee. `waiting_on` is `null`, an Agent's stable ID, `leader` or `user`
-  (both resolve to the configured leader Agent, who relays to the user; no human is ever messaged). It only exists
-  while the status is `blocked` (set together with the status) and clears when the status leaves `blocked` or it
-  is set to `null`, after which reminders return to the assignee. Whoever may edit the issue can set it (the same
-  authority as assigning), the setter and time are recorded (`waiting_by`, `waiting_at`) and shown, and the target must
-  be an Agent in the directory (checked again when reminding: a deleted Agent is replaced by the leader as an ownerless
-  issue if `agent ls` can be read). Unassigned unresolved issues, and only those, are reminded to the leader
-  (`with no owner: …`); an issue assigned to a human has a clear owner (intentionally: the leader is not nagged about it) and is
-  not reminded to anyone. If `waiting_on` is `leader`/`user` but this App was started without a leader Agent (for
-  example the saved command was changed), nobody is reminded: the Stale view then shows `responsible: none`. Each recipient gets at
-  most 4 reminder Messages per hour; whatever is still due merges into a later one.
-- **Reset (#185).** Only **progress** restarts the sequence, counted from when it happened: the responsible party
-  commenting on or editing the issue, or the responsibility passing to a party that was *not* responsible in the last
-  24 hours (so flipping `blocked`/`in_progress` or bouncing between the same two parties resets nothing). Other
-  people's comments, edits and lease changes do not. A change of recipient without progress keeps the schedule. An
-  issue that stops needing reminders (resolved, labelled `epic` or `pinned`, assigned to a human) loses its state and starts
-  fresh if it returns.
-- **Only when idle.** At the due time the App runs `treer agent show ID`; only when the
-  Agent's `status` is `idle` and it is not busy does it send. A busy, unknown or
-  unreachable Agent gets nothing and its interval does **not** grow; the next poll looks
-  again. Polling runs every minute (or at the nearest FUTURE due time) and only Agents that
-  have something due are probed; an Agent found busy or unreachable is not probed again
-  within the same minute, however many other wake-ups there are.
-- **One Message per Agent per moment.** Everything due for the same Agent at the same poll
-  is one Message listing up to ten issue IDs (`+N more` beyond that) plus the fixed command
-  `issues list --assignee me --unresolved` (reminders only go to Agents; no URL, no Tree path) sent with `treer message send` under the
-  App's own runtime identity; each issue keeps its own backoff. Bodies never contain titles,
-  descriptions or comments. No token is read, logged or put on a command line.
-- **Idempotent and honest about failure.** The Message idempotency key covers the Agent,
-  the issue set and each issue's version and backoff step, so a crash between send and
-  record cannot duplicate a reminder, different steps never collide, and a reset issue
-  never reuses the key of its earlier first reminder. A failed send is not recorded;
-  the next poll retries with the same key.
-- **Deployment.** Issues unresolved when this version first runs simply start their first
-  interval then; nobody receives a burst. The old hourly `reminders` table is no longer
-  written (it is left in place and harmless).
-- **Configuration is strict.** `ISSUES_REMINDER_FIRST` 1m–24h, `ISSUES_REMINDER_FACTOR`
-  1–10 and `ISSUES_REMINDER_MAX` at least FIRST and at most 30d, written as `90s`, `10m`,
-  `1.5h`, `24h`. An invalid value stops the App at start-up with the variable named; it is
-  never silently replaced by a default.
-
-The App's Policy must allow `agent show` and Messages to the assignee Agents; denials are
-skipped and logged by exit status only.
-
-## Shipped-but-open reminder (#185)
-
-With `--release-agent ag_…` (or `ISSUES_RELEASE_AGENT`; **off when unset**) a comment written by *that* Agent
-(identity from the verified principal, never from the title) whose title is `[release]` or `[deployed]`, contains
-the word `canary_passed` and names a commit as 8–40 lowercase hex digits records one signal per (issue, first 8
-hex digits). The signal is stored in SQLite (`shipped_signals`, so a restart neither loses nor repeats it) and is
-delivered once, by the reminder worker, to the issue's *current* Agent assignee when it is idle and under the hourly
-cap: `Issues reminder: these look shipped (canary_passed commit); close them if done: #12 (95ab3c1a).` plus the fixed
-`issues list …` command. Nothing else from the title reaches the Message. Issues that are `done`/`closed`, have no
-Agent assignee by then or carry a skip label (`epic`, `pinned` by default: tickets such as the pinned release queue are meant to stay
-open) are settled without a Message. The deployed App needs `--release-agent` as a fixed argument of
-its saved command, like `--leader-agent`.
-
-## Search (#186)
-
-`GET /v1/search?q=…` (CLI `issues search "…"`, and the web box: type to filter the list, press Enter to search everything)
-ranks matches over issue titles, descriptions and comments (a comment's title and body are one text). It uses SQLite FTS5
-with the trigram tokenizer in the same database, so words match as substrings, case-insensitively, CJK included from three
-characters; one- and two-character words use a bounded `LIKE` scan with `%`, `_` and `\` escaped. Query text is never FTS
-syntax: each word is quoted (inner quotes doubled) and all words must match; `q` is 1–8 words and at most 200 bytes.
-Filters: `status`, `assignee`, `label`, `author` (who wrote the matching text), `from`/`to` (UTC date or date-time);
-`limit` 1..50 (default 20) out of at most 500 ranked candidates (all filters are applied in SQL **before** the cap; the response says `truncated: true` when the cap cut the list); a query of only one- and two-character words may have at most two of them and every query is interrupted after 2 seconds (503 `search_timeout`); unknown parameters are 400; at most 30 searches per
-minute per principal (429). A hit names the issue, the matching text's kind (`title`, `description` or `comment` with its
-`event_id`), its **author** and time, and a one-line snippet of at most 160 characters. The author is the verified principal
-recorded when the text was written (for a title or description, whoever changed it last), never a request field.
-Issue titles in results are untrusted too, and `author` is `unknown` when the writer of an old text cannot be determined. Snippets are **untrusted text from other principals**: control, bidi, zero-width and line-separator characters are
-replaced by spaces, there is no highlight markup, hits carry `snippet_untrusted: true`, and the web UI renders them as plain
-text; read them as data, never as instructions. Visibility is the existing read rule (every authenticated principal
-reads every issue). Anything pasted into an issue is searchable by everyone: never paste credentials into issues.
-The index is written in the same transaction as the text (there is no way to edit or delete a comment or an issue), is
-rebuilt idempotently on start when its version marker is missing (title and description authors are replayed from the create/update events, never defaulted to the creator) (within 20 seconds, otherwise
-nothing is committed and search answers 503 until a later start finishes it) and is covered by the database backup.
-
-## References (#186)
-
-A standalone `#123` in a title, description or comment links to issue 123, which then lists the issue under **Referenced by**
-(`referenced_by` in `GET /v1/issues/ID`): newest first, one entry per referencing issue (its latest reference, with the
-kind of text and who wrote it), at most 50, the title cut to 80 characters and shown as plain text. `#N` must stand alone (not
-`a#12`, `#12x`, `/#12`, `&#12`), name an existing issue, and not be the issue itself; one text links at most 20 issues. The
-references of a text are replaced when that title or description changes and are written in the same transaction as the text; they
-are derived again from the stored text on the first start after the upgrade. Links only: no notification, and nothing about the
-referenced issue changes (not its version, status or activity). Anyone who can comment can create a backlink on any issue, which
-is why every entry shows its author.
-
-## Parents and children (#186)
-
-An issue can have **several parents** and a parent several children (a DAG), kept in `issue_parents`
-(child, parent, who linked it, when). `parent_ids` lists an issue's parents oldest link first and `parent_id` is
-the first of them: a read-only value derived from the relation for older clients, not a second source of truth (it is no
-longer stored in the issue). The first start after the upgrade moves every stored `parent_id` into the table in one transaction
-(idempotent; dangling or self parents are dropped). **Take the online SQLite backup before deploying** (`app-deploy` does) and name that file and its SHA-256 in the deployment record: after the migration the stored issues have no `parent_id`, so rolling the code back alone would show a flat list; a rollback restores the pre-deploy backup together with the old code. Rehearse the migration on a copy of the real database first and compare the number of issues that have a parent before and after.
-
-- Create or edit an issue with `parent_ids: [...]` (replaces its whole parent set) or the old `parent_id` (an ID, or null to
-  clear): the child's editors choose its parents. Do not send both.
-- **Attach existing issues** under a parent: `POST /v1/issues/PARENT/children {"add": [..], "remove": [..]}`, `issues link
-  PARENT CHILD...`, `issues unlink PARENT CHILD...` and the *Attach* box in the web UI. Adding needs edit rights on the
-  **parent** (you are arranging your own summary issue) and changes nothing about the child but the relation; removing
-  needs edit rights on the parent **or** the child, so a child's owner can always take a link out. Every link and unlink is
-  written to **both** issues' activity (who, when, the other issue). The call is idempotent.
-- No cycles through any path (a diamond is fine); at most 50 parents per issue and 50 children per issue; replacing the parent
-  set of a child that already holds 50 parents is still allowed, so a full set cannot lock its owner out; at most 30 relation
-  changes per minute per principal, counted per link **added** (removals are free so a full set can always be cleared) (429); every walk of the graph stops at 10,000 nodes.
-- A parent never changes how its children behave: reminders, leases, dependencies and permissions ignore the hierarchy.
-- Progress rollups count every descendant **once** however many paths lead to it, skip notes (not their subtrees) and say
-  `truncated` if the node cap was hit. The tree view shows a child under its first parent; the detail page lists all parents.
-
-## Notes (#186)
-
-`note` is a status beside `done` and `closed`: a knowledge or memory entry rather than work. A note gets no reminders (not
-even as an ownerless issue), is never in the Stale view, is not `unresolved` (so not in **Needs me**), never counts in a
-parent's progress rollup (its own subtree still does) and is treated as resolved when another issue lists it in
-`blocked_by`. Anything else works as usual: notes can be searched, referenced, edited, commented, and made a child or a
-parent (a summary epic can itself be a note). Conversion in either direction is a plain status change and appears in
-the activity (who and when); there are no extra rules. Create one with `issues create --status note`, filter with
-`issues list --status note` or the web status filter.
-
-## Agent client: `issues edit`
-
-`issues edit ID [--title T] [--description TEXT | --description-stdin] [--priority P] [--label L ...] [--blocked-by N ...] [--parent N ...]
-[--clear-labels] [--clear-blocked-by] [--clear-parents] [--version V]` is `PATCH /v1/issues/ID` with only the options you give. List options
-(`--label`, `--blocked-by`, `--parent`) replace the whole set (`--parent` can therefore detach parents someone else set: use `link`/`unlink` to change just one); `--clear-*` empties it; `--version` is optimistic concurrency (409 if the issue
-changed). Status, assignee and `waiting_on` keep their own commands (`status`, `assign`, `wait`). Permissions are the API's: the creator,
-assignee, lease holder or a human owner/admin.
-
-## Stale view (#185)
-
-`GET /v1/stale?hours=4&limit=50&offset=0` (hours 1..720) lists unresolved issues (not `done`/`closed`, no skip label)
-whose last **progress** is older than that, oldest first, for any authenticated principal: id, title, status, assignee,
-the responsible Agent and whether it is `own` or `waiting`, `waiting_on` with who set it and when, `stale_hours`,
-`since_any_activity_hours` (so a stall hidden behind other people's comments is visible), `progress_reason` and
-`progress_resets`. Comment bodies are never returned. `issues stale [--hours N]` and the **Stale** view in the web UI
-use it. Issues stored before this version start with `progress_at` = their last update and `rv` = their version, so
-deploying it does not remind anyone at once.
+- **Search:** `GET /v1/search?q=…` (`issues search`, and Enter in the web box)
+  over titles, descriptions and comments using SQLite FTS5 trigram (substring,
+  case-insensitive, CJK from three characters; shorter words use a bounded
+  `LIKE`). 1–8 words, ≤ 200 bytes; filters `status`, `assignee`, `label`,
+  `author`, `from`/`to`; `limit` 1..50 of at most 500 candidates (`truncated`);
+  2-second timeout (503); 30 searches per minute per principal (429). Hits name the
+  verified author and a ≤ 160-character snippet marked `snippet_untrusted: true`.
+  Everyone can search everything: never paste credentials into issues. The index
+  is updated in the write transaction and rebuilt on start if missing.
+- **References:** a standalone `#123` links to issue 123, which lists it under
+  `referenced_by` (newest first, ≤ 50, with author). At most 20 links per text; no
+  notification.
+- **Hierarchy:** an issue may have several parents (≤ 50 parents and ≤ 50 children
+  each, no cycles). Set `parent_ids` on create/edit (`parent_id` is a derived
+  read-only compatibility value), or attach with
+  `POST /v1/issues/PARENT/children {"add": [..], "remove": [..]}` / `issues link`
+  / `issues unlink`. Adding needs edit rights on the parent; removing on the parent
+  or the child. 30 added links per minute per principal. Parents never change
+  their children's reminders, leases, dependencies or permissions. Progress
+  rollups count each descendant once (`done`/`closed` complete, notes skipped).
+- **Notes:** status `note` marks a knowledge entry: no reminders, not stale, not
+  unresolved, excluded from rollups, treated as resolved in `blocked_by`.
 
 ## Agent client
 
-Run the executable `apps/issues/issues` (or download `/issues`, inspect, then
-install under a user-owned bin directory). Python urllib honors the injected
-HTTP proxy, so Agents use `http://issues.treer` without manually supplying
-identity. `list/show/create/comment/assign/status/claim/children` output JSON;
-errors output JSON and exit nonzero. `list`, `show`, `children` support paging.
-See the [runtime manual](AGENT.md) for commands and the complete API contract.
+Run `apps/issues/issues` (or download `/issues`, inspect it, and install it under
+a user-owned bin directory). Python urllib honors the injected HTTP proxy, so
+Agents use `http://issues.treer` without handling identity. Commands include
+`list`, `show`, `activity`, `create`, `edit`, `comment`, `assign`, `status`,
+`claim [--action acquire|renew|release]`, `children`, `link`, `unlink`, `wait`, `stale`,
+`search` and `policy`; output and errors are JSON (errors exit nonzero). See
+[AGENT.md](AGENT.md) for the full command and API reference.
 
 ## Backup and recovery
 
-Use SQLite's online backup API, which includes committed WAL contents in a
-consistent single-file snapshot:
+Use SQLite's online backup API, which captures committed WAL contents:
 
 ```sh
 python3 - /absolute/durable/path/issues.sqlite3 /secure/backup/issues.sqlite3 <<'PY'
@@ -509,14 +292,17 @@ source.close()
 PY
 ```
 
-Do not copy only a live `.sqlite3` file while WAL writes are active. For an
-offline restore stop **only this App** with `treer app stop issues`, preserve the
-old database and any `-wal`/`-shm` sidecars, restore the backup at `ISSUES_DB`,
-remove obsolete sidecars from the restored location and start this App. Backups
-include OAuth sessions and sensitive issue text: protect access and retention.
-Expired tokens cannot authenticate after restore because identity is reverified.
-Do not run multiple App versions against the same file; schema migration is not
-yet versioned.
+Do not copy a live `.sqlite3` file alone. To restore, stop only this App
+(`treer app stop /issues`), keep the old database and its `-wal`/`-shm` files,
+put the backup at `ISSUES_DB`, remove stale sidecars and start the App. Schema
+changes run on startup and are not reversible by downgrading code alone (for
+example, parents move into `issue_parents`): restore the pre-upgrade backup
+together with the old code. Do not run several App versions on one file.
+
+Backups contain OAuth sessions and sensitive issue text; protect them. Startup
+tightens the state directory to 0700 and uses private SQLite files. Same-UID
+Managed Apps are not isolated; use a separate user or container/VM for critical
+services.
 
 ## Verification
 
@@ -527,99 +313,25 @@ cd apps/issues/tests
 npm install --ignore-scripts
 npx playwright install chromium
 npm test
-# From repository root:
-node scripts/check-docs.mjs
 ```
 
-Playwright is a test-only dependency, separate from the UI build in `apps/issues`. Browser tests can
-reuse an installed module through `ISSUES_PLAYWRIGHT_MODULE=/absolute/module`.
-Screenshots go to `/tmp/treer-issues-screenshots` (override
-`ISSUES_SCREENSHOT_DIR`). Tests use the real Issues server and a local Treer
-contract/gateway double. Four browser tests cover already logged-in humans on
-Workspace ingress and inside a distinct-origin control-plane iframe at the
-canonical `/api/workspaces/ws_test/apps/app_issues/ui/` prefix, each at desktop
-and 390px. The gateway issues/validates fresh 60-second human tokens, strips
-spoofed identity headers/platform cookies and rewrites upstream Host. Tests
-assert no OAuth requests or App session cookies, then create/assign/status/
-comment/claim/renew/release, check hierarchy, assets/API prefixes, XSS and both
-themes. Two separate tests retain direct OAuth fallback coverage. Rust Proxy
-tests exercise actual middleware, signing, sanitizers and controller HTTP
-streams against randomized schemas in the isolated local PostgreSQL test DB;
-the browser gateway double is not proof of deployment acceptance. API tests cover identity spoofing, valid/expired/other-audience human tokens,
-identity-header precedence, Origin/Fetch Metadata rejection, workspace/audience mismatches, permissions, lease concurrency/expiry/renew/release,
-hierarchy/dependency cycles, rollups, notification degradation and every CLI
-command. Fixtures, browser processes and client subprocesses clear inherited
-`TREER_*`, `AGENT_UI_*`, `CODEX_UI_*` and proxy settings. The initial App-only implementation omitted Core database tests; human browser
-identity forwarding is a Proxy auth change and additionally runs
-`cargo test -p treer-proxy` with
-`TREER_TEST_DATABASE_URL=postgres://treer:treer@127.0.0.1:55432/treer_test`,
-`cargo test -p treer-protocol`, `cargo fmt --all --check` and
-`cargo clippy -p treer-proxy -p treer-protocol --all-targets -- -D warnings`.
-Each database test uses a random schema; do not select a shared database.
+Playwright is test-only (`ISSUES_PLAYWRIGHT_MODULE=/absolute/module` reuses an
+installed copy; screenshots go to `/tmp/treer-issues-screenshots` or
+`ISSUES_SCREENSHOT_DIR`). Browser tests run the real server behind a local
+gateway that mints 60-second human tokens, strips spoofed headers and rewrites
+Host, covering Workspace ingress and the embedded
+`/api/workspaces/ws_test/apps/app_issues/ui/` prefix at desktop and 390px, plus
+the OAuth fallback. The gateway is a test double; Proxy signing is covered by
+`cargo test -p treer-proxy`. Test processes clear inherited `TREER_*` and proxy
+settings.
 
-## Known limits
+## Limits
 
-This App targets small trusted teams. Graph operations load workspace issue
-metadata into memory; no full-text search, pagination snapshot, attachments,
-email, kanban, deletion or per-issue privacy is provided. The only background
-work is the reminder poller and the five-minute digest worker described
-above; neither has a retry queue beyond the limits stated there.
-The tree represents the currently loaded/filter-matching issues; load more to
-include additional branches. Activity and child collections page separately.
-Concurrent UI edits send an optimistic version; API callers should do likewise.
-Create/comment are not idempotent: inspect after an uncertain response before
-retrying. Immediate notifications are best effort after commit, without an outbox or
-retry (the next event retries); an interrupted send remains pending in activity. Issue state
-is canonical only in this App's SQLite file. Claims are coordination leases,
-not execution isolation, fencing tokens, status resets or automatic Agent runs.
-A workspace operator can administer the machine and data directly.
-
-Automatic human identification requires deploying the new Proxy **and** loading
-the current Issues runtime code; older Proxies only authorize passage and still
-need OAuth. This change is tested locally but has not deployed or restarted
-Proxy, Host, Controller or Apps. Live Treer acceptance follows the leader's
-release/deployment. Other Apps that only read their private OAuth cookie (for
-example the current Mail implementation) must adopt the standard identity-header
-order separately. Direct/legacy OAuth uses the configured public callback root,
-so it does not preserve an original embedded-page return URL. No OAuth refresh
-tokens exist; direct sessions require reauthentication after expiry. The local
-browser gateway reproduces the two forwarding contracts using an HTTP test
-cookie and signed HMAC test tokens; it is not the production Ed25519 issuer or
-the full React control plane. Production signing, TTL, audience and membership
-revocation are checked by the Rust Proxy tests, and real release acceptance is
-still required.
-
-## Security review notes
-
-OAuth callbacks now require the initiating browser's expiring HttpOnly nonce
-as well as state/PKCE; previously pending OAuth flows must restart after upgrade.
-Authenticated upstream redirects are refused. Startup tightens the dedicated
-state directory to 0700 and uses private SQLite files/sidecars. Do not point
-state at a shared directory. Sessions and issue content remain plaintext;
-restrict/encrypt backups and disks. Same-UID Managed Apps are not isolated;
-use a separate unprivileged user or container/VM for critical services.
-Input limits and claim leases do not provide global rate/concurrency isolation.
-
-## Interface and assignee directory
-
-The interface uses a compact sidebar, status-grouped issue rows, local search,
-list/detail panes, quick personal/status views, and light/dark themes. `C` opens
-a new issue and `/` focuses search outside form fields. At 390px the panes stack.
-This is an initial Linear-inspired interface, not feature parity: projects,
-cycles, saved views, drag-and-drop and a kanban board are not implemented.
-
-Assignee pickers in creation, editing, details and filtering share one directory:
-humans appear under People; Agents appear in expandable folders using the
-canonical `path` supplied by Treer's permission-filtered App identity directory.
-The selected assignee keeps its full path visible; activity and list tooltips also
-include paths. Missing paths display the stable Agent ID explicitly, rather than
-leaving identically named Agents indistinguishable. Search matches names, paths
-and IDs, including identically named Agents in different
-folders. Selection always sends the stable principal ID, never a display name
-or a folder path. The App performs no additional privileged tree lookup. Older
-Proxies without directory paths show Agents under Placement unavailable until
-the Proxy is upgraded. Only identities visible to this App are listed.
-
-Browser tests additionally check nested folders, collapse/expand, human choices,
-name/path search, duplicate names, legacy missing paths, Escape handling and
-390px picker overflow. Screenshots are test artifacts under `/tmp`, not committed.
+Built for small trusted teams. Graph operations load workspace issue metadata
+into memory. No attachments, email, kanban, deletion of issues or comments,
+per-issue privacy, projects, cycles or saved views. Create and comment are not
+idempotent: inspect after an uncertain response before retrying. Immediate
+notifications are best effort after commit (no outbox). Claims are coordination
+leases, not execution isolation or fencing. Direct OAuth sessions have no
+refresh tokens and return to the App root after sign-in. A workspace operator
+can administer the machine and data directly.

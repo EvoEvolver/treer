@@ -657,15 +657,6 @@ pub fn registered_config(workspace: &str) -> Result<Option<ServiceConfig>> {
     Ok(find_installed_service(workspace)?.map(|(_, config)| config))
 }
 
-/// Local-host enrollments for launcher selection. These records contain secrets:
-/// callers must only display the bounded identifier/address projection.
-pub(crate) fn launcher_configs() -> Result<Vec<ServiceConfig>> {
-    Ok(installed_services()?
-        .into_iter()
-        .map(|(_, config)| config)
-        .collect())
-}
-
 /// Locally provisioned release trust, preferred over the bundled official key.
 pub(crate) fn release_public_key_path() -> Result<PathBuf> {
     Ok(config_dir()?
@@ -1035,7 +1026,7 @@ fn relocate_root_at(paths: &ServicePaths, config: &ServiceConfig, root: &Path) -
         return Err(error);
     }
     println!("treer: root updated; no files were moved and no service was started");
-    println!("treer: reinstall the launcher in the new root and review saved absolute startup/profile paths; the old .treer directory was not moved or cleaned");
+    println!("treer: review saved absolute startup/profile paths; the old .treer directory was not moved or cleaned");
     Ok(())
 }
 

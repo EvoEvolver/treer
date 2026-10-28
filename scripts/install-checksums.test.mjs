@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,7 +9,8 @@ import { test } from 'node:test';
 
 const source = readFileSync(new URL('../crates/treer-proxy/src/api/machines.rs', import.meta.url), 'utf8');
 const template = source.split('pub(super) fn render_install_script(')[1].match(/r#"([\s\S]*?)"#,/)[1];
-const binaries = ['treer', 'treer-agent-host', 'treer-agent-server'];
+const binaries = ['treer', 'treer-launch', 'treer-agent-host', 'treer-agent-server'];
+const cliDir = name => ['treer', 'treer-launch'].includes(name);
 const payload = Object.fromEntries(binaries.map(name => [name, `#!/bin/sh\n# ${name}\ntouch "$HOME/binary-ran"\n`]));
 const sums = binaries.map(name => `${createHash('sha256').update(payload[name]).digest('hex')}  ${name}\n`).join('');
 
@@ -29,7 +30,7 @@ async function fixture(t, options = {}) {
   const cli = join(home, 'bin with spaces');
   const serverDir = join(home, 'libexec');
   mkdirSync(cli); mkdirSync(serverDir);
-  for (const name of binaries) writeFileSync(join(name === 'treer' ? cli : serverDir, name), `old ${name}`);
+  for (const name of binaries) writeFileSync(join(cliDir(name) ? cli : serverDir, name), `old ${name}`);
   const server = createServer((request, response) => {
     const name = request.url.split('/').at(-1);
     if (name === 'SHA256SUMS') {
@@ -66,7 +67,9 @@ async function fixture(t, options = {}) {
 test('verified complete set installs without executing any binary', async t => {
   const f = await fixture(t);
   assert.equal(f.result.status, 0, f.result.stderr);
-  for (const name of binaries) assert.equal(readFileSync(join(name === 'treer' ? f.cli : f.serverDir, name), 'utf8'), payload[name]);
+  for (const name of binaries) assert.equal(readFileSync(join(cliDir(name) ? f.cli : f.serverDir, name), 'utf8'), payload[name]);
+  // Deprecated alias for profiles saved before the rename.
+  assert.equal(readlinkSync(join(f.cli, 'treer-agent')), 'treer-launch');
 });
 
 const failures = [
@@ -81,5 +84,5 @@ const failures = [
 for (const [description, options] of failures) test(`${description} fails before replacing any installed binary`, async t => {
   const f = await fixture(t, options);
   assert.notEqual(f.result.status, 0, f.result.stdout);
-  for (const name of binaries) assert.equal(readFileSync(join(name === 'treer' ? f.cli : f.serverDir, name), 'utf8'), `old ${name}`);
+  for (const name of binaries) assert.equal(readFileSync(join(cliDir(name) ? f.cli : f.serverDir, name), 'utf8'), `old ${name}`);
 });

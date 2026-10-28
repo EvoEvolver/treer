@@ -89,9 +89,8 @@ manifest.adapter.name accepts claude, codex or generic. Claude/Codex declare
 session_id (UUID), session_file (archive path), cwd, optional cli_version.
 Legacy Codex adapters also declare session_relative_path (.jsonl), optional
 shell_snapshot_file and shell_snapshot_name; these snapshot fields are retained
-only for archive compatibility and are never imported. New Codex saves omit
-shell snapshots and report `omitted=["shell_snapshot"]` in client output, with
-no inclusion/allow override. Claude may declare memory_files (paths strictly below
+only for archive compatibility. The current client cannot save or restore
+Codex (the launcher transfer CLI is Claude-only); such archives remain readable. Claude may declare memory_files (paths strictly below
 files/memory/) and project_instructions_file. All referenced files must exist.
 The archive never contains a restore script. On incarnation the client generates
 a fresh native session UUID, rebases structured cwd/session metadata and imports

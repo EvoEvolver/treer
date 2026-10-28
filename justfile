@@ -82,6 +82,7 @@ agent-launcher-test:
     npm --prefix launchers/agent ci --ignore-scripts
     npm --prefix launchers/agent run check
     npm --prefix launchers/agent test
+    cargo clippy --locked --manifest-path launchers/agent/Cargo.toml -- -D warnings
     TREER_TEST_NODE="$(command -v node)" cargo test --locked --features fixture-harness --manifest-path launchers/agent/Cargo.toml
 
 messaging-e2e:
@@ -102,13 +103,9 @@ stage-artifacts:
       Darwin-arm64|Darwin-aarch64) platform=darwin-aarch64 ;;
       *) echo "unsupported platform $(uname -s)/$(uname -m)" >&2; exit 1 ;;
     esac
-    payload=$(mktemp -d "${TMPDIR:-/tmp}/treer-launcher-payload.XXXXXX")
-    trap 'rm -rf "$payload"' EXIT
     commit=$(git rev-parse HEAD)
-    npm --prefix launchers/agent ci --ignore-scripts
-    node scripts/prepare-launcher-release.mjs --output "$payload" --source-commit "$commit"
-    TREER_LAUNCHER_PAYLOAD_DIR="$payload" TREER_REQUIRE_LAUNCHER_BUNDLE=1 \
-        cargo build --locked --release -p treer-agent-host -p treer-agent-server -p treer-cli
+    TREER_BUILD_COMMIT="$commit" cargo build --locked --release -p treer-agent-host -p treer-agent-server -p treer-cli
+    TREER_BUILD_COMMIT="$commit" cargo build --locked --release --manifest-path launchers/agent/Cargo.toml --target-dir target
     TREER_BUILD_COMMIT="$commit" sh scripts/stage-release-artifacts.sh "$platform" "dist/$platform"
 
 # Verify dist/, or download (dispatching if needed) the native workflow artifacts for a commit.

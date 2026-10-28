@@ -158,7 +158,7 @@ const recipeProfile = {
   name: "Codex Agent UI",
   description: "Codex app-server plus the thread UI iframe",
   cwd: "codex-agent-ui",
-  command: "./scripts/treer-agent.sh",
+  command: "treer-launch",
   args: [] as string[],
   created_at: NOW,
   created_by: "u1",
@@ -396,8 +396,9 @@ for (const mobile of [false, true]) {
 
 // Helpers — machine entries in workspace settings are <button>s whose accessible
 // name includes the machine name, root path and build label.
-const workstationRow = (page: Page) => page.getByRole("button", { name: /^workstation(\s|$)/ })
-const cloudboxRow = (page: Page) => page.getByRole("button", { name: /^cloudbox(\s|$)/ })
+// Machine rows in workspace settings; the sidebar's Machines section has its own rows.
+const workstationRow = (page: Page) => page.locator("main > section").getByRole("button", { name: /^workstation(\s|$)/ })
+const cloudboxRow = (page: Page) => page.locator("main > section").getByRole("button", { name: /^cloudbox(\s|$)/ })
 const agentsTab = (page: Page) => page.locator("aside").getByText("Tree", { exact: true })
 const appsTab = agentsTab
 
@@ -789,10 +790,8 @@ for (const mobile of [false, true]) test(`new agent visibly guides an empty work
   const addMachinePrompt = page.getByRole("menuitem", { name: "Set up a machine before creating an agent" })
   await expect(addMachinePrompt).toBeEnabled()
   await addMachinePrompt.click()
-  await expect(page.getByText("Add a machine to create agents", { exact: true })).toBeVisible()
-  await expect(page.getByText("Agents run on machines.", { exact: false })).toBeVisible()
+  // Straight to enrollment: no detour through workspace settings.
   await expect(page.getByRole("heading", { name: "Create agent" })).toHaveCount(0)
-  await page.getByRole("tabpanel", { name: "Settings", exact: true }).getByRole("button", { name: "Set up a machine", exact: true }).click()
   await expect(page.getByRole("dialog").getByRole("heading", { name: "Add machine", exact: true })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
@@ -811,9 +810,8 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) test(
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: info.outputPath(`machine-guide-${theme}-${mobile ? '390' : '1360'}.png`) })
   await expect.poll(async () => { await setup.focus(); return setup.evaluate((element) => element === document.activeElement) }).toBe(true)
+  // The sidebar guide goes straight to the enrollment commands, without a detour through settings.
   await setup.press('Enter')
-  await expect(page.getByText('Add a machine to create agents', { exact: true })).toBeVisible()
-  await page.getByRole('tabpanel', { name: 'Settings', exact: true }).getByRole('button', { name: 'Set up a machine', exact: true }).click()
   await expect(page.getByRole('dialog').getByRole('heading', { name: 'Add machine', exact: true })).toBeVisible()
 })
 
@@ -1107,7 +1105,7 @@ test("create agent dialog lists an installed recipe launch profile", async ({ pa
   await expect(page.getByRole("dialog")).toBeVisible()
   await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
   await page.getByRole("option", { name: "Codex Agent UI" }).click()
-  await expect(page.getByText("./scripts/treer-agent.sh")).toBeVisible()
+  await expect(page.getByText("treer-launch")).toBeVisible()
   await expect(page.getByRole("dialog").getByRole("textbox")).toHaveValue(/codex-agent-ui-\d{4}-/)
   await expect(page.getByRole("button", { name: "Create agent" })).toBeVisible()
 })

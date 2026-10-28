@@ -41,7 +41,7 @@ class AssembleTests(unittest.TestCase):
         base = Path(self.tmp.name)
         self.artifacts, self.output = base / "artifacts", base / "input"
         for platform, machine in MACHINES.items():
-            leaf(self.artifacts / f"treer-{platform}", {"treer", "treer-agent-host", "treer-agent-server"}, platform, machine)
+            leaf(self.artifacts / f"treer-{platform}", {"treer", "treer-launch", "treer-agent-host", "treer-agent-server"}, platform, machine)
             leaf(self.artifacts / f"treer-proxy-{platform}", {"treer-proxy"}, platform, machine)
         self.cargo = base / "Cargo.toml"
         self.cargo.write_text(f'[workspace.package]\nversion = "{VERSION}"\n[workspace.dependencies]\n')

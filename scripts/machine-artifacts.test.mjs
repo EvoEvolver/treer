@@ -10,7 +10,7 @@ import { promisify } from "node:util";
 
 const commit = "a".repeat(40);
 const platforms = ["linux-x86_64", "linux-aarch64", "darwin-x86_64", "darwin-aarch64", "windows-x86_64"];
-const binaries = ["treer", "treer-agent-host", "treer-agent-server"];
+const binaries = ["treer", "treer-launch", "treer-agent-host", "treer-agent-server"];
 const verifier = new URL("./verify-machine-artifacts.sh", import.meta.url).pathname;
 const servedVerifier = new URL("./verify-served-artifacts.sh", import.meta.url).pathname;
 const exec = promisify(execFile);
@@ -56,7 +56,7 @@ for (const mode of ["matching", "redirect", "stale"]) {
     const check = exec("sh", [servedVerifier, url, root]);
     if (mode === "matching") {
       await check;
-      assert.equal(requests, 15);
+      assert.equal(requests, 20);
     } else {
       await assert.rejects(check);
     }

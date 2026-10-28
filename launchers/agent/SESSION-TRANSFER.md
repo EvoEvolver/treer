@@ -7,13 +7,13 @@ explicit `--auth owner-default` mode uses the same owner's normal default Claude
 authentication, without extracting or copying any credential:
 
 ```sh
-treer-agent session inspect --input /private/snapshot.json \
+treer-launch session inspect --input /private/snapshot.json \
   --directory /existing-parent/new-project --session-id NEW_UUID \
   --sha256 SNAPSHOT_SHA256 --auth owner-default
-treer-agent session prepare --input /private/snapshot.json \
+treer-launch session prepare --input /private/snapshot.json \
   --directory /existing-parent/new-project --session-id NEW_UUID \
   --sha256 SNAPSHOT_SHA256 --auth owner-default
-treer-agent session run --directory /existing-parent/new-project \
+treer-launch session run --directory /existing-parent/new-project \
   --session-id NEW_UUID --auth owner-default
 ```
 
@@ -49,7 +49,7 @@ original source session is never modified. A competing occupied destination
 cannot be overwritten. Retain the intent and sensitive snapshot for readback:
 
 ```sh
-treer-agent session publication --directory /existing-parent/new-project \
+treer-launch session publication --directory /existing-parent/new-project \
   --session-id NEW_UUID --auth owner-default
 ```
 
@@ -75,21 +75,16 @@ complete user flow and real provider continuation have their own acceptance.
 
 This batch implements an offline export/import command in the native executable
 on macOS/Linux. It does not resume, stop, inspect, or modify a running runtime.
-The installed dispatcher forwards `treer-agent session ...` to its hash-bound
-native executable, without launching a provider or falling back to Node.
-An older installed native image must be updated before using this command.
-The dispatcher also sets an invalid runtime harness and uses the pinned regular
-executable as the runtime cwd: an older image that ignores `session` argv must
-refuse its ordinary startup rather than accidentally launch a current session.
-The new CLI uses only its explicit transfer arguments, ignoring those runtime
-selectors. This guard does not assert that an old image implements transfer.
+`treer-launch session ...` runs this CLI without launching a provider (update
+an older launcher with `treer-launch update` first).
+The CLI uses only its explicit transfer arguments.
 
 ```sh
-treer-agent session export --harness claude \
+treer-launch session export --harness claude \
   --config-dir /absolute/explicit/claude-config \
   --cwd /absolute/source-project --session-id SOURCE_UUID > snapshot.json
 
-treer-agent session import --input /absolute/snapshot.json \
+treer-launch session import --input /absolute/snapshot.json \
   --directory /absolute/existing-parent/new-project
 ```
 
@@ -106,11 +101,11 @@ The authenticated Console flow can bind inspection and preparation to the exact
 snapshot bytes, without passing file contents or credentials in process argv:
 
 ```sh
-treer-agent session inspect --input /absolute/uploaded-snapshot.json \
+treer-launch session inspect --input /absolute/uploaded-snapshot.json \
   --directory /absolute/existing-parent/new-project \
   --session-id NEW_UUID --sha256 SNAPSHOT_SHA256
 # After explicit confirmation, use exactly the same selectors and hash:
-treer-agent session prepare --input /absolute/uploaded-snapshot.json \
+treer-launch session prepare --input /absolute/uploaded-snapshot.json \
   --directory /absolute/existing-parent/new-project \
   --session-id NEW_UUID --sha256 SNAPSHOT_SHA256
 ```
@@ -243,11 +238,11 @@ files remain in place. No import or new runtime starts through this endpoint.
 The smallest native/runtime loop is now separate explicit commands:
 
 ```sh
-treer-agent session prepare --input /absolute/snapshot.json \
+treer-launch session prepare --input /absolute/snapshot.json \
   --directory /absolute/existing-parent/new-project
 # Read the returned NEW_UUID and isolated CLAUDE_CONFIG_DIR.
 # Supply provider-supported environment auth separately, never as argv/bundle.
-treer-agent session launch --directory /absolute/existing-parent/new-project \
+treer-launch session launch --directory /absolute/existing-parent/new-project \
   --session-id NEW_UUID --auth environment
 ```
 
@@ -279,8 +274,8 @@ must already exist, pass normal private placement checks and contain no state
 other than the ordinary single-writer lease. Existing even idle journals or
 auxiliary files refuse. No identity/Agent is created, migrated or restarted by
 these commands. A new managed launch retains its normal authenticated quota
-checks; the installed dispatcher requires a Claude native binding, selects the
-bundled public assets and registers its new AIS through the usual CLI.
+checks and registers its new AIS through the usual CLI (`session launch` and
+`session run` always register).
 
 Authentication is explicitly **environment** mode: a nonempty
 `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` must be supplied by the new
@@ -357,7 +352,7 @@ this opt-in Console path does not imply that every installed runtime supports it
 launcher or supervisor:
 
 ```sh
-treer-agent session run --directory /absolute/prepared-project \
+treer-launch session run --directory /absolute/prepared-project \
   --session-id NEW_UUID --auth environment
 ```
 
@@ -373,15 +368,14 @@ An intent without a checkpoint cannot bootstrap again. There is no automatic
 retry, delete/recreate, cleanup of a reservation or conversion to a new UUID.
 Ordinary resumed uncertainty remains fenced with its AIS recovery controls
 reachable; an existing unknown receipt is not a reason to kill that provider
-or treat the receipt as successful. The installed dispatcher uses the pinned
-Claude/native binding and public directory and ignores inherited port files.
+or treat the receipt as successful. `session run` ignores inherited port files.
 
 Use the **existing** normal Create API/command to persist that exact command,
 for example, after explicitly reviewing the prepared target on that machine:
 
 ```sh
 treer agent admin create --machine MACHINE_ID --kind command --name NEW_NAME \
-  --cwd prepared-project -- /absolute/installed/treer-agent session run \
+  --cwd prepared-project -- treer-launch session run \
   --directory /absolute/machine-root/prepared-project \
   --session-id NEW_UUID --auth environment
 ```

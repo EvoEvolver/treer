@@ -14,11 +14,10 @@ import { readEmbedAppearance, withEmbedTheme } from "@/lib/embed-ui"
 import { WorkloadFocusBar } from "@/components/workload-focus-bar"
 import { WorkspaceTabBar, type TabLabel, type TabAction, type TabActions } from "@/components/workspace-tab-bar"
 import { OVERVIEW_TAB, useWorkspaceTabs } from "@/components/use-workspace-tabs"
-import { workspaceWorkloads } from "@/lib/workspace-workloads"
 import { UserMenu } from "@/components/user-menu"
 import { WorkspaceOverview } from "@/components/workspace-overview"
 import { LayoutDashboard } from "lucide-react"
-import { AppSettingsView,AppsView } from "@/components/apps-view"
+import { AppSettingsView } from "@/components/apps-view"
 import { AuditView } from "@/components/audit-view"
 import { InvitationEntry, readPendingInvitation, type InvitationIntent } from "@/components/invitation-entry"
 import { AuthScreen } from "@/components/auth-screen"
@@ -37,6 +36,8 @@ import { useWorkspaceLiveFeed } from "@/components/use-workspace-live-feed"
 import { useWorkspaceMetrics } from "@/components/use-workspace-metrics"
 import { useWorkspaceRoute } from "@/components/use-workspace-route"
 import { WorkloadTree,type NewAgentFolder } from "@/components/workload-tree"
+import { workspaceWorkloads } from "@/lib/workspace-workloads"
+import { AttentionSection, MachinesSection, SidebarSearch, buildInbox, useFinishedAgents } from "@/components/sidebar-sections"
 import { useWorkspaceDialogState } from "@/components/workspace-dialog-state"
 import { WorkspaceDialogs } from "@/components/workspace-dialogs"
 import { WorkspaceSettingsView } from "@/components/workspace-settings-view"
@@ -53,11 +54,15 @@ ChevronRight,
 FolderKanban,
 MoreHorizontal,
 Plus,
-RotateCw
+RotateCw,
+Upload,
+ExternalLink
 } from "lucide-react"
 import { FormEvent,useCallback,useEffect,useMemo,useRef,useState } from "react"
 import { useLocation,useParams } from "react-router"
 import { roleLabel, statusLabel, t } from "@/i18n"
+
+const EMPTY_AGENTS: Agent[] = []
 
 export function WorkspaceApp() {
   const route = useParams<{ organizationId?: string; workspaceId?: string }>()
@@ -98,6 +103,8 @@ function WorkspaceAppContent() {
   const uploadMachine = snapshot?.servers.find((machine) => machine.server_id === uploadAgent?.server_id)
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
+  const [sidebarQuery, setSidebarQuery] = useState("")
+  useEffect(() => { setSidebarQuery("") }, [workspaceId])
   const [appNodeIntent, setAppNodeIntent] = useState<{ workspaceId: string | null; ownerId: string; endpoint: string } | null>(null)
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null)
   const [preparedCreated, setPreparedCreated] = useState(false)
@@ -399,6 +406,9 @@ function WorkspaceAppContent() {
   const mobileTerminalIdle = isMobile && ((mainView === "terminal" && !mobileTerminalOpen) || (mainView === "overview" && mobileTreeOpen))
   const mobileSidebarHidden = isMobile && ((mainView === "terminal" && mobileTerminalOpen) || (mainView !== "terminal" && !(mainView === "overview" && mobileTreeOpen)))
   const selectedMachine = snapshot?.servers.find((machine) => machine.server_id === selectedMachineId)
+  const finishedAgents = useFinishedAgents(workspaceId, snapshot?.agents ?? EMPTY_AGENTS, mainView === "terminal" ? selectedAgentId : null)
+  const inbox = useMemo(() => buildInbox({ agents: snapshot?.agents ?? [], apps, machines: snapshot?.servers ?? [], tree: workloadTree, finished: finishedAgents }), [snapshot, apps, workloadTree, finishedAgents])
+  const attentionCount = inbox.length
 
   const transformTerminalInput = useCallback((data: string) => {
     if (!ctrlArmedRef.current) return data
@@ -711,8 +721,9 @@ function WorkspaceAppContent() {
   }
 
   function openCreateAgentOrMachineSetup(folder?: NewAgentFolder) {
+    // Every "set up a machine" path lands in the same Add machine dialog.
     if (!preview && snapshot && snapshot.servers.length === 0) {
-      openWorkspaceSettings()
+      void openInstall()
       return
     }
     openCreateAgent(true, folder ?? null)
@@ -783,10 +794,6 @@ function WorkspaceAppContent() {
   useEffect(() => {
     if (mainView === "app" && selectedAppId && !appsLoading && !selectedApp) setMainView("overview")
   }, [mainView, selectedAppId, selectedApp, appsLoading])
-
-  function openApps() {
-    showOverview()
-  }
 
   function openAppSettings(app: AppDeployment) {
     setSelectedAppId(app.app_id)
@@ -1072,10 +1079,6 @@ function WorkspaceAppContent() {
     if (url) window.open(url, "_blank", "noopener,noreferrer")
   }
 
-  function openApp(app: AppDeployment) {
-    showAgentTerminal(app.runtime_agent_id ?? app.app_id)
-  }
-
   async function copy(value: string) {
     try { await navigator.clipboard.writeText(value) }
     catch { showError(t("app.unable_to_copy_to_the")) }
@@ -1103,39 +1106,47 @@ function WorkspaceAppContent() {
       <main style={treeWidth.style} className={cn("grid h-dvh min-h-0 bg-background md:grid-cols-[var(--tree-width)_var(--tree-divider)_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden", treeWidth.dragging && "select-none cursor-col-resize", mobileTerminalIdle || mobileSidebarHidden ? "grid-rows-1 overflow-hidden" : "grid-rows-[374px_minmax(620px,1fr)] overflow-auto", focusedId && "grid-cols-1 grid-rows-1 overflow-hidden md:grid-cols-1")}>
         <aside id="tree-sidebar" className={cn("flex min-h-0 min-w-0 flex-col border-b bg-sidebar md:border-b-0", mobileSidebarHidden && "hidden md:flex", treeWidth.collapsed && "md:invisible md:overflow-hidden", focusedId && "hidden md:hidden")}>
         {preview && <div className="treer-tour-banner"><span>{t("app.tour_preview_empty_first_run")}</span></div>}
-        <div className="grid min-h-[58px] grid-cols-[32px_minmax(0,1fr)_32px] items-center gap-2 px-3 py-2 max-md:grid-cols-[32px_minmax(0,1fr)_44px]">
-          <div className="grid size-8 place-items-center rounded-[5px] bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(organization?.name ?? "Treer")}</div>
-          <div className="min-w-0"><div className="mb-0.5 px-1 text-[9px] font-semibold uppercase text-muted-foreground">{t("app.organization")}</div><Select value={organizationId ?? undefined} onValueChange={selectOrganization}><SelectTrigger aria-label={t("app.organization")} className="h-7 max-md:h-11 border-0 bg-transparent px-1 shadow-none hover:bg-accent"><SelectValue placeholder={t("app.no_organization")} /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
-          <IconButton label={organization ? t("app.organization_settings") : t("dialogs.create_organization")} className={cn("size-8 max-md:size-11", mainView === "organization" && "bg-accent")} onClick={openOrganizationSettings}>{organization ? <MoreHorizontal /> : <Plus />}</IconButton>
-        </div>
-        <div className="grid grid-cols-[20px_minmax(0,1fr)_32px] items-center gap-2 px-3 pb-3 pl-5 max-md:grid-cols-[20px_minmax(0,1fr)_44px]">
-          <FolderKanban className="size-3.5 text-muted-foreground" />
-          <div data-tour="workspace-select">
-            <Select value={workspaceId ?? undefined} onValueChange={selectWorkspace} disabled={!organizationId}><SelectTrigger aria-label={t("app.workspace")} className="h-7 max-md:h-11 border-0 bg-transparent px-1 text-xs shadow-none hover:bg-accent"><SelectValue placeholder={t("app.no_workspace")} /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
+        {/* Context switcher: organization above workspace, one column with the Tree below. */}
+        <div className="grid grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 px-3 pb-2 pt-3 max-md:grid-cols-[28px_minmax(0,1fr)_44px]">
+          <div aria-hidden="true" className="grid size-7 place-items-center rounded-md bg-primary text-[11px] font-semibold text-primary-foreground">{initials(organization?.name ?? "Treer")}</div>
+          <Select value={organizationId ?? undefined} onValueChange={selectOrganization}><SelectTrigger aria-label={t("app.organization")} className="h-7 border-0 bg-transparent px-1.5 text-[13px] font-semibold shadow-none hover:bg-accent max-md:h-11"><SelectValue placeholder={t("app.no_organization")} /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select>
+          <IconButton label={organization ? t("app.organization_settings") : t("dialogs.create_organization")} className={cn("size-7 text-muted-foreground hover:text-foreground max-md:size-11", mainView === "organization" && "bg-accent text-foreground")} onClick={openOrganizationSettings}>{organization ? <MoreHorizontal /> : <Plus />}</IconButton>
+          <FolderKanban aria-hidden="true" className="size-4 justify-self-center text-muted-foreground" />
+          <div data-tour="workspace-select" className="min-w-0">
+            <Select value={workspaceId ?? undefined} onValueChange={selectWorkspace} disabled={!organizationId}><SelectTrigger aria-label={t("app.workspace")} className="h-7 border-0 bg-transparent px-1.5 text-[13px] text-muted-foreground shadow-none hover:bg-accent hover:text-foreground max-md:h-11"><SelectValue placeholder={t("app.no_workspace")} /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
           </div>
-          <span data-tour="create-workspace"><IconButton label={workspace ? t("app.workspace_settings") : t("org.create_workspace")} disabled={!organizationId} className={cn("max-md:size-11", mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
+          <span data-tour="create-workspace"><IconButton label={workspace ? t("app.workspace_settings") : t("org.create_workspace")} disabled={!organizationId} className={cn("size-7 text-muted-foreground hover:text-foreground max-md:size-11", mainView === "workspace" && "bg-accent text-foreground")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
         </div>
-        <button type="button" aria-label={t("app.workspace_overview")} onClick={showOverview} className={cn("mx-3 mb-2 flex min-h-10 items-center gap-2 rounded-md px-2 text-left text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", mainView === "overview" && "bg-accent")}><LayoutDashboard aria-hidden="true" className="size-3.5" />{t("app.overview")}</button>
-        <WorkloadTree appTree={{ scope: JSON.stringify([user.user_id, authEpoch, workspaceId]), selected: selectedNodeApp && appEndpoint !== null ? { ownerId: selectedAgentId!, path: appEndpoint.split("/") } : null, open: openAppNode, href: appNodeHref }} prewarm={embedPrewarm} pins={pins} key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} workloadHref={workloadHref} onOpenInNewTab={openInNewTab} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} onAddMachine={() => void openInstall()} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
+        <nav aria-label={t("app.workspace")} className="px-2 pb-2">
+          <button type="button" aria-label={t("app.workspace_overview")} aria-current={mainView === "overview" ? "page" : undefined} onClick={showOverview} className={cn("flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring motion-reduce:transition-none max-md:h-11 [@media(pointer:coarse)]:h-11", mainView === "overview" && "bg-primary/10 font-medium hover:bg-primary/10 dark:bg-primary/20 dark:hover:bg-primary/20")}><LayoutDashboard aria-hidden="true" className={cn("size-4", mainView === "overview" ? "text-primary" : "text-muted-foreground")} />{t("app.overview")}</button>
+        </nav>
+        {workspaceId && <SidebarSearch value={sidebarQuery} onChange={setSidebarQuery} />}
+        {/* One scroll region: triage first, then the Tree, then the machines that run it. */}
+        <div className="thin-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+          {workspaceId && <AttentionSection inbox={inbox} machines={snapshot?.servers ?? []} query={sidebarQuery} selectedId={mainView === "terminal" ? selectedAgentId : null} workloadHref={workloadHref} onOpen={showAgentTerminal} onOpenMachine={showMachineOverview} />}
+          {workspaceId && <WorkloadTree appTree={{ scope: JSON.stringify([user.user_id, authEpoch, workspaceId]), selected: selectedNodeApp && appEndpoint !== null ? { ownerId: selectedAgentId!, path: appEndpoint.split("/") } : null, open: openAppNode, href: appNodeHref }} prewarm={embedPrewarm} pins={pins} key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} workloadHref={workloadHref} onOpenInNewTab={openInNewTab} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} onAddMachine={() => void openInstall()} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} query={sidebarQuery} />}
+          {workspaceId && Boolean(snapshot?.servers.length) && <MachinesSection machines={snapshot?.servers ?? []} agents={snapshot?.agents ?? []} query={sidebarQuery} selectedId={mainView === "machine" ? selectedMachineId : null} onOpen={showMachineOverview} onAdd={() => void openInstall()} />}
+        </div>
 
         <UserMenu user={user} role={roleLabel(currentRole)} preview={preview} collapseRef={treeWidth.collapseRef} onCollapse={treeWidth.toggle} onSettings={openSettings} onTour={replayFirstRunTour} onLogout={logout} />
       </aside>
       {!focusedId && <TreeResizer settings={treeWidth} />}
 
       <section className={cn("min-h-0 min-w-0 flex-col", treeWidth.dragging && "pointer-events-none", mobileTerminalIdle ? "hidden md:flex" : "flex")}>
-        {focusedId ? <WorkloadFocusBar path={tabLabels.get(focusedId)?.path ?? focusedId} status={tabLabels.get(focusedId)?.agent.status ? statusLabel(tabLabels.get(focusedId)!.agent.status) : undefined} consoleHref={workloadPath(organizationId, workspaceId, focusedId)} onOpenConsole={() => routingRef.current.navigate({ pathname: location.pathname, search: "", hash: location.hash })} /> : <WorkspaceTabBar key={`${user.user_id}:${workspaceId}`} tabs={tabs.tabs} labels={tabLabels} activeId={mainView === "overview" ? OVERVIEW_TAB : mainView === "terminal" ? selectedAgentId : null} limit={tabs.limit} liveCount={tabs.liveCount} mobile={isMobile} onOpen={selectTab} onClose={closeTab} actions={tabActions} onAction={tabAction} onCloseMany={closeTabs} onBrowseTree={browseMobileTree} sidebarCollapsed={treeWidth.collapsed} expandRef={treeWidth.expandRef} onExpandSidebar={treeWidth.toggle} />}
+        {focusedId ? <WorkloadFocusBar path={tabLabels.get(focusedId)?.path ?? focusedId} status={tabLabels.get(focusedId)?.agent.status ? statusLabel(tabLabels.get(focusedId)!.agent.status) : undefined} consoleHref={workloadPath(organizationId, workspaceId, focusedId)} onOpenConsole={() => routingRef.current.navigate({ pathname: location.pathname, search: "", hash: location.hash })} /> : <WorkspaceTabBar key={`${user.user_id}:${workspaceId}`} tabs={tabs.tabs} labels={tabLabels} activeId={mainView === "overview" ? OVERVIEW_TAB : mainView === "terminal" ? selectedAgentId : null} limit={tabs.limit} liveCount={tabs.liveCount} mobile={isMobile} onOpen={selectTab} onClose={closeTab} actions={tabActions} onAction={tabAction} onCloseMany={closeTabs} onBrowseTree={browseMobileTree} sidebarCollapsed={treeWidth.collapsed} expandRef={treeWidth.expandRef} onExpandSidebar={treeWidth.toggle} attention={attentionCount} />}
         <p role="status" className="sr-only">{tabNotice}</p>
         {preparedCreated && <p role="status" className="px-4 py-2 text-sm">{t("prepared.created")} {t(`sessionCopy.${preparedReadiness}`)}</p>}
-        {mainView !== "terminal" && <header className="flex h-12 shrink-0 min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
+        {/* Pages carry their own title and Close; the bar stays for the phone back button and audit refresh. */}
+        {mainView !== "terminal" && mainView !== "overview" && (isMobile || mainView === "audit") && <header className="flex h-12 shrink-0 min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
 
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
-            {isMobile && mainView !== "overview" && <IconButton label={t("org.back")} className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "app" ? openApps : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}
-            <button type="button" onClick={showOverview} aria-label={t("app.back_to_workspace_overview")} className="hidden truncate rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? t("app.organization") : workspace?.name ?? t("app.workspace")}</button><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "overview" ? t("app.overview") : mainView === "organization" || mainView === "workspace" ? t("settings.title") : mainView === "apps" ? t("apps.apps") : mainView === "app" ? selectedApp?.name ?? t("apps.app") : mainView === "audit" ? t("audit.audit") : t("machine.terminal")}</strong></div>
-          {mainView === "apps" ? <IconButton label={t("app.refresh_apps")} onClick={loadApps} disabled={appsLoading}><RotateCw /></IconButton> : mainView === "audit" ? <IconButton label={t("app.refresh_audit")} onClick={refreshAudit} disabled={auditLoading}><RotateCw /></IconButton> : null}
+            {isMobile && <IconButton label={t("org.back")} className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "app" ? showOverview : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}
+            <button type="button" onClick={showOverview} aria-label={t("app.back_to_workspace_overview")} className="hidden truncate rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? t("app.organization") : workspace?.name ?? t("app.workspace")}</button><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "organization" || mainView === "workspace" ? t("settings.title") : mainView === "app" ? selectedApp?.name ?? t("apps.app") : mainView === "audit" ? t("audit.audit") : mainView === "machine" ? machineName(selectedMachine, selectedMachineId ?? "") : t("machine.terminal")}</strong></div>
+          {mainView === "audit" ? <IconButton label={t("app.refresh_audit")} onClick={refreshAudit} disabled={auditLoading}><RotateCw /></IconButton> : null}
         </header>}
         <div className={cn("relative min-h-0 flex-1", mainView !== "overview" && mainView !== "terminal" && "hidden")}>
           <div id="workspace-panel-overview" role="tabpanel" aria-labelledby={isMobile ? undefined : "workspace-tab-overview"} aria-label={isMobile ? t("app.overview") : undefined} hidden={mainView !== "overview"} className="absolute inset-0 overflow-auto">
-            <WorkspaceOverview pins={pins} members={members} key={workspaceId} workspace={workspace} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} tree={workloadTree} loading={Boolean(workspaceId && !snapshot)} workloadHref={workloadHref} onOpen={showAgentTerminal} onNewAgent={() => openCreateAgentOrMachineSetup()} onWorkspaceSettings={openWorkspaceSettings} />
+            <WorkspaceOverview pins={pins} members={members} key={workspaceId} workspace={workspace} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} tree={workloadTree} loading={Boolean(workspaceId && !snapshot)} workloadHref={workloadHref} onOpen={showAgentTerminal} onNewAgent={() => openCreateAgentOrMachineSetup()} onAddMachine={() => void openInstall()} onOpenMachine={showMachineOverview} start={{ hasOrganization: Boolean(organization), onCreateOrganization: () => { setCreateOrganizationName(""); setCreateOrganizationOpen(true) }, onCreateWorkspace: () => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) } }} />
           </div>
           {workspaceId && tabs.tabs.map((tab) => {
             const label = tabLabels.get(tab.id)
@@ -1144,11 +1155,15 @@ function WorkspaceAppContent() {
             const app = apps.find((entry) => (entry.runtime_agent_id ?? entry.app_id) === tab.id)
             const machine = snapshot?.servers.find((entry) => entry.server_id === label.agent.server_id)
             return <div key={`${workspaceId}:${tab.id}`} id={`workspace-panel-${tab.id}`} role="tabpanel" aria-labelledby={isMobile ? undefined : `workspace-tab-${tab.id}`} aria-label={isMobile ? label.path : undefined} hidden={!visible} className="absolute inset-0 min-h-0 overflow-hidden">
-              {selectedNodeApp && appEndpoint !== null && selectedAgentId === tab.id ? <div className="h-full overflow-auto"><AppNodeRoute key={JSON.stringify([user.user_id, authEpoch, workspaceId, selectedNodeApp.app_id, appEndpoint])} workspaceId={workspaceId} appId={selectedNodeApp.app_id} ownerId={tab.id} endpoint={appEndpoint} /></div> : tab.live ? <WorkloadSurface ref={visible ? terminalPaneRef : undefined} workspaceId={workspaceId} agent={label.agent} app={app} machine={machine} path={label.path} tab={tab} embedMode={agentCapabilities.embed} embedOrigin={agentOriginMode === "isolated" ? agentOwnUrls.get(tab.id) : undefined} visible={visible} mobile={isMobile && mobileTerminalOpen} theme={theme} ctrlArmed={ctrlArmed} transformInput={transformTerminalInput} onToggleCtrl={() => setCtrlModifier(!ctrlArmedRef.current)} onCopy={copy} onLogs={(logs) => setShowWorkloadLogs(logs)} /> : <div className="grid size-full place-content-center gap-3 p-6 text-center"><p className="text-sm font-medium">{t("app.page_unloaded")}</p><p className="max-w-sm text-xs text-muted-foreground">{t("app.this_browser_page_was_unloaded")}</p><Button onClick={() => showAgentTerminal(tab.id)}>{t("app.reload_tab")}</Button></div>}
+              {selectedNodeApp && appEndpoint !== null && selectedAgentId === tab.id ? <div className="h-full overflow-auto"><AppNodeRoute key={JSON.stringify([user.user_id, authEpoch, workspaceId, selectedNodeApp.app_id, appEndpoint])} workspaceId={workspaceId} appId={selectedNodeApp.app_id} ownerId={tab.id} endpoint={appEndpoint} /></div> : tab.live ? <WorkloadSurface ref={visible ? terminalPaneRef : undefined} workspaceId={workspaceId} agent={label.agent} app={app} machine={machine} path={label.path} tab={tab} embedMode={agentCapabilities.embed} embedOrigin={agentOriginMode === "isolated" ? agentOwnUrls.get(tab.id) : undefined} visible={visible} mobile={isMobile && mobileTerminalOpen} theme={theme} ctrlArmed={ctrlArmed} transformInput={transformTerminalInput} onToggleCtrl={() => setCtrlModifier(!ctrlArmedRef.current)} onCopy={copy} onLogs={(logs) => setShowWorkloadLogs(logs)} actions={<>
+                <IconButton label={t("surface.upload_file")} className="size-7 text-muted-foreground max-md:size-11" disabled={!machineOnline(machine)} onClick={() => tabAction(tab.id, "upload")}><Upload /></IconButton>
+                <IconButton label={t("app.open_in_new_tab")} className="size-7 text-muted-foreground max-md:size-11" onClick={() => tabAction(tab.id, "newtab")}><ExternalLink /></IconButton>
+                <IconButton label={t("app.reconnect_terminal")} className="size-7 text-muted-foreground max-md:size-11" onClick={() => tabAction(tab.id, "reload")}><RotateCw /></IconButton>
+              </>} /> : <div className="grid size-full place-content-center gap-3 p-6 text-center"><p className="text-sm font-medium">{t("app.page_unloaded")}</p><p className="max-w-sm text-xs text-muted-foreground">{t("app.this_browser_page_was_unloaded")}</p><Button onClick={() => showAgentTerminal(tab.id)}>{t("app.reload_tab")}</Button></div>}
             </div>
           })}
         </div>
-        {mainView !== "overview" && mainView !== "terminal" && <div className="min-h-0 flex-1 overflow-auto">{mainView === "organization" ? <OrganizationSettingsView organization={organization} name={organizationName} workspaces={workspaces} selectedWorkspaceId={workspaceId} members={members} groups={groups} groupName={groupName} canManage={canManageMembers} currentRole={currentRole} onNameChange={setOrganizationName} onRename={renameOrganization} onCreateOrganization={() => { setCreateOrganizationName(""); setCreateOrganizationOpen(true) }} onCreateWorkspace={() => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) }} onSelectWorkspace={(selectedWorkspaceId) => { selectWorkspace(selectedWorkspaceId); closeMainView() }} onInvite={createInvite} onMemberRoleChange={updateMemberRole} onRemoveMember={removeMember} onGroupNameChange={setGroupName} onCreateGroup={createGroup} onDeleteGroup={deleteGroup} onSetGroupMember={setGroupMember} onOpenAudit={openAudit} onClose={closeMainView} /> : mainView === "workspace" ? <WorkspaceSettingsView agents={snapshot?.agents ?? []} key={workspaceId} workspace={workspace} organization={organization} name={workspaceName} machines={snapshot?.servers ?? []} machineCount={workspaceMachineCount} profiles={launchProfiles} profilesLoading={launchProfilesLoading} apps={apps} onPolicyAppInstalled={(app) => setApps((current) => [...current.filter((item) => item.app_id !== app.app_id), app].sort((left, right) => left.name.localeCompare(right.name)))} canDelete={canManageMembers} preview={preview} onNameChange={setWorkspaceName} onRename={renameWorkspace} onAddMachine={openInstall} onOpenMachine={(machine) => showMachineOverview(machine.server_id)} onRenameMachine={(machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDeleteMachine={(machine) => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onCopy={copy} onRefreshProfiles={loadLaunchProfiles} onNewProfile={openNewLaunchProfile} onEditProfile={openEditLaunchProfile} onLaunchProfile={openLaunchProfile} onDeleteProfile={setDeletingProfile} onDelete={() => setDeleteWorkspaceOpen(true)} onClose={closeMainView} /> : mainView === "apps" ? <AppsView apps={apps} machines={snapshot?.servers ?? []} loading={appsLoading} onOpen={openApp} onSettings={openAppSettings} /> : mainView === "app" ? <AppSettingsView app={selectedApp} machine={selectedAppMachine} onOpen={openAppExternal} onAccess={updateAppAccess} onAction={appLifecycle} onDelete={setDeletingApp} onClose={openApps} onCopy={copy} /> : mainView === "machine" ? <MachineOverviewView key={`${user.user_id}/${workspaceId}/${selectedMachineId}`} machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMachineOverview} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} workspaceId={workspaceId!} refreshRevision={auditRefreshRevision} agents={snapshot?.agents ?? []} machines={snapshot?.servers ?? []} loading={auditLoading} /> : null}</div>}
+        {mainView !== "overview" && mainView !== "terminal" && <div className="min-h-0 flex-1 overflow-auto">{mainView === "organization" ? <OrganizationSettingsView organization={organization} name={organizationName} workspaces={workspaces} selectedWorkspaceId={workspaceId} members={members} groups={groups} groupName={groupName} canManage={canManageMembers} currentRole={currentRole} onNameChange={setOrganizationName} onRename={renameOrganization} onCreateOrganization={() => { setCreateOrganizationName(""); setCreateOrganizationOpen(true) }} onCreateWorkspace={() => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) }} onSelectWorkspace={(selectedWorkspaceId) => { selectWorkspace(selectedWorkspaceId); closeMainView() }} onInvite={createInvite} onMemberRoleChange={updateMemberRole} onRemoveMember={removeMember} onGroupNameChange={setGroupName} onCreateGroup={createGroup} onDeleteGroup={deleteGroup} onSetGroupMember={setGroupMember} onOpenAudit={openAudit} onClose={closeMainView} /> : mainView === "workspace" ? <WorkspaceSettingsView agents={snapshot?.agents ?? []} key={workspaceId} workspace={workspace} organization={organization} name={workspaceName} machines={snapshot?.servers ?? []} machineCount={workspaceMachineCount} profiles={launchProfiles} profilesLoading={launchProfilesLoading} apps={apps} onPolicyAppInstalled={(app) => setApps((current) => [...current.filter((item) => item.app_id !== app.app_id), app].sort((left, right) => left.name.localeCompare(right.name)))} canDelete={canManageMembers} preview={preview} onNameChange={setWorkspaceName} onRename={renameWorkspace} onAddMachine={openInstall} onOpenMachine={(machine) => showMachineOverview(machine.server_id)} onRenameMachine={(machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDeleteMachine={(machine) => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onCopy={copy} onRefreshProfiles={loadLaunchProfiles} onNewProfile={openNewLaunchProfile} onEditProfile={openEditLaunchProfile} onLaunchProfile={openLaunchProfile} onDeleteProfile={setDeletingProfile} onDelete={() => setDeleteWorkspaceOpen(true)} onClose={closeMainView} /> : mainView === "app" ? <AppSettingsView app={selectedApp} machine={selectedAppMachine} onOpen={openAppExternal} onAccess={updateAppAccess} onAction={appLifecycle} onDelete={setDeletingApp} onClose={showOverview} onCopy={copy} /> : mainView === "machine" ? <MachineOverviewView key={`${user.user_id}/${workspaceId}/${selectedMachineId}`} machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMachineOverview} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} workspaceId={workspaceId!} refreshRevision={auditRefreshRevision} agents={snapshot?.agents ?? []} machines={snapshot?.servers ?? []} loading={auditLoading} /> : null}</div>}
 
       </section>
     </main>

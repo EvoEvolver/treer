@@ -93,7 +93,7 @@ The Dockerfile is systemd `/sbin/init` only. Treer binaries come from
 
 ## 4. Create the machine
 
-Use the name agreed in step 1 (default `treer`):
+Use the name agreed in steps 1–2 (default `treer`):
 
 ```bash
 container machine create local/treer-machine:latest \
@@ -180,10 +180,6 @@ macOS extension. The operator owns guest isolation and any port mapping. Use
 explicit service registration and forwarding as described in the
 [operator guide](../../docs/operator-guide.md#workspace-network).
 
-After a guest restart, run `treer-agent-server restore --workspace WORKSPACE_ID`
-inside the guest to start its saved Host/Controller and restore intended-running
-workloads. Automatic guest boot and login startup remain operator choices.
-
 From the guest:
 
 ```bash
@@ -210,8 +206,9 @@ shell does **not** stop the machine. Stop the Host with
 
 ## Boundaries
 
-- After a guest reboot, run `treer-agent-server service start`; nohup does not
-  provide boot activation or crash restart.
+- nohup mode has no boot activation or crash restart. After a guest reboot,
+  run `treer-agent-server restore --workspace WORKSPACE_ID` in the guest to
+  start the saved Host/Controller and restore intended-running workloads.
 - Do not copy Mac `~/.config/treer/agent-servers` into the guest.
 - Do not enroll the same `server_id` on the Mac and in the container.
 - Do not set guest `HOME` to `/Users/<name>`.

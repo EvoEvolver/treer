@@ -41,35 +41,33 @@ def copy_snapshot(source, destination, jsonl=False):
     destination.chmod(0o600)
 
 
-def launcher_path(machine_root=None):
+def launcher_path():
+    """The installed `treer-launch` command (else its deprecated `treer-agent`
+    alias), or an explicit TREER_AGENT_LAUNCHER override."""
     override=os.environ.get('TREER_AGENT_LAUNCHER')
-    if override:
-        path=Path(override).expanduser()
-        if not path.is_file() or not os.access(path,os.X_OK):
-            raise RuntimeError('Configured launcher is not executable')
-        return path.resolve()
-    root=Path(os.environ.get('TREER_AGENT_INSTALL_ROOT',Path(machine_root or os.environ.get('TREER_MACHINE_ROOT',str(Path.home())))/'.treer/launchers/agent'))/'current'
-    for relative in ('launchers/agent/scripts/treer-agent.sh','scripts/treer-agent.sh','treer-agent.sh'):
-        path=root/relative
+    candidates=[Path(override).expanduser()] if override else [
+        Path(found) for name in ('treer-launch','treer-agent')
+        for found in [shutil.which(name),Path.home()/'.local/bin'/name] if found]
+    for path in candidates:
         if path.is_file() and os.access(path,os.X_OK): return path.resolve()
-    raise RuntimeError('Unified launcher not installed; configure TREER_AGENT_LAUNCHER or install treer-agent')
+    if override: raise RuntimeError('Configured launcher is not executable')
+    raise RuntimeError('treer-launch is not installed (it ships with Treer); install Treer or configure TREER_AGENT_LAUNCHER')
 
 
-def transfer_cli(machine_root=None):
-    path=launcher_path(machine_root).with_name('session.sh')
-    if not path.is_file() or not os.access(path,os.X_OK):
-        raise RuntimeError('Launcher session transfer is unavailable; update unified launcher')
-    return path
-
-
-def run_transfer(cli,*args):
+def run_transfer(*args):
+    # `treer-launch session ...` runs the launcher's native offline transfer CLI.
     with tempfile.TemporaryFile() as output:
-        result=subprocess.run([str(cli),*args],stdin=subprocess.DEVNULL,stdout=output,
+        result=subprocess.run([str(launcher_path()),'session',*args],stdin=subprocess.DEVNULL,stdout=output,
                               stderr=subprocess.DEVNULL,timeout=60)
         if result.returncode: raise RuntimeError('Launcher session transfer failed; verify session identity, version and destination')
         if output.tell()>MAX_FILE*2: raise RuntimeError('Session-transfer result too large')
         output.seek(0)
         return json.load(output)
+
+
+def require_transfer_harness(harness):
+    if harness!='claude':
+        raise RuntimeError('treer-launch session transfer supports Claude only; '+str(harness)+' sessions cannot be saved or restored')
 
 
 def validate_bundle(bundle,harness=None,session=None):
@@ -98,10 +96,13 @@ def validate_bundle(bundle,harness=None,session=None):
     return decoded
 
 
-def export_session(harness,session,cwd,destination,machine_root=None):
+def export_session(harness,session,cwd,destination):
+    require_transfer_harness(harness)
     if not isinstance(session,str) or not UUID.fullmatch(session):
         raise RuntimeError('Cannot identify own self session; pass --session ID explicitly')
-    bundle=run_transfer(transfer_cli(machine_root),'export','--harness',harness,'--session-id',session,'--cwd',str(Path(cwd).resolve()))
+    config=Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home()/'.claude').expanduser().resolve()
+    bundle=run_transfer('export','--harness',harness,'--config-dir',str(config),
+                        '--session-id',session,'--cwd',str(Path(cwd).resolve()))
     decoded=validate_bundle(bundle,harness,session)
     entries=[]
     for scope,path,data in decoded:
@@ -114,23 +115,17 @@ def export_session(harness,session,cwd,destination,machine_root=None):
                 exported_at=bundle.get('exportedAt'),transfer_files=entries)
 
 
-def import_session(bundle_root,adapter,workspace,state_root,machine_root=None):
+def import_session(bundle_root,adapter,workspace,state_root):
+    require_transfer_harness(adapter.get('name'))
     entries=adapter.get('transfer_files')
     if not isinstance(entries,list):
         # Legacy v1 snapshots are translated structurally, not interpreted natively.
         # Provider decoding/rebasing remains wholly in the launcher's adapter.
-        entries=[]
-        harness=adapter['name']
-        session=adapter.get('source_session_id',adapter['session_id'])
-        if harness=='codex':
-            entries.append(dict(scope='session',path='session.jsonl',file=adapter['session_file']))
-            # Legacy shell snapshots remain archived but never enter native restore.
-        else:
-            entries.append(dict(scope='session',path='session.jsonl',file=adapter['session_file']))
-            for file in adapter.get('memory_files',[]):
-                entries.append(dict(scope='memory',path=file.removeprefix('files/memory/'),file=file))
-            if adapter.get('project_instructions_file'):
-                entries.append(dict(scope='project',path='CLAUDE.md',file=adapter['project_instructions_file']))
+        entries=[dict(scope='session',path='session.jsonl',file=adapter['session_file'])]
+        for file in adapter.get('memory_files',[]):
+            entries.append(dict(scope='memory',path=file.removeprefix('files/memory/'),file=file))
+        if adapter.get('project_instructions_file'):
+            entries.append(dict(scope='project',path='CLAUDE.md',file=adapter['project_instructions_file']))
     files=[]
     for entry in entries:
         data=(Path(bundle_root)/safe_path(entry['file'])).read_bytes()
@@ -145,24 +140,21 @@ def import_session(bundle_root,adapter,workspace,state_root,machine_root=None):
     destination=Path(state_root)/'native'
     with tempfile.NamedTemporaryFile(mode='w',suffix='.json',dir=state_root,encoding='utf-8') as source:
         json.dump(bundle,source);source.flush()
-        result=run_transfer(transfer_cli(machine_root),'import','--directory',str(destination),
+        result=run_transfer('import','--directory',str(destination),
                             '--session-id',adapter['session_id'],'--input',source.name)
     if result.get('sessionId')!=adapter['session_id']:
         raise RuntimeError('Imported session ID does not match new incarnation')
     cwd=Path(result.get('cwd','')).resolve()
     if not cwd.is_relative_to(destination.resolve()): raise RuntimeError('Launcher imported outside dedicated Agent directory')
     environment=result.get('environment',{})
-    if not isinstance(environment,dict) or set(environment)-{'CODEX_HOME','CLAUDE_CONFIG_DIR'}:
+    if not isinstance(environment,dict) or set(environment)-{'CLAUDE_CONFIG_DIR'}:
         raise RuntimeError('Launcher returned unsupported environment selectors')
-    for key,path in environment.items():
+    for path in environment.values():
         if not isinstance(path,str): raise RuntimeError('Invalid launcher storage selector')
         resolved=Path(path).resolve()
-        if key=='CLAUDE_CONFIG_DIR' and adapter['name']=='claude':
-            # Claude stores each project's native state under its existing config
-            # home; only that exact locally configured home may be selected.
-            local=Path(os.environ.get('CLAUDE_CONFIG_DIR',Path.home()/'.claude')).resolve()
-            if resolved!=local and not resolved.is_relative_to(destination.resolve()):
-                raise RuntimeError('Launcher selected an unrelated Claude home')
-        elif not resolved.is_relative_to(destination.resolve()):
-            raise RuntimeError('Launcher storage selector is outside dedicated Agent directory')
+        # The launcher may select an isolated home inside the dedicated Agent
+        # directory, or exactly the locally configured Claude home.
+        local=Path(os.environ.get('CLAUDE_CONFIG_DIR',Path.home()/'.claude')).resolve()
+        if resolved!=local and not resolved.is_relative_to(destination.resolve()):
+            raise RuntimeError('Launcher selected an unrelated Claude home')
     return environment,str(cwd)

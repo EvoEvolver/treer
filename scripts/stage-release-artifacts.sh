@@ -4,7 +4,7 @@ set -eu
 # Stage native release binaries with SHA256SUMS and build-metadata.json.
 #   stage-release-artifacts.sh <platform> <destination>          CLI, Host and Controller
 #   stage-release-artifacts.sh --proxy <linux-platform> <dest>   Proxy (single-container image input)
-binaries="treer treer-agent-host treer-agent-server"
+binaries="treer treer-launch treer-agent-host treer-agent-server"
 if [ "${1:-}" = --proxy ]; then
     binaries=treer-proxy
     shift

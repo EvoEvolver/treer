@@ -49,7 +49,7 @@ Railway IDs and URLs default to the Treer project; override with
 `TREER_RAILWAY_PROJECT_ID`, `TREER_PROXY_SERVICE`, `TREER_RAILWAY_ENVIRONMENT`,
 `TREER_PROXY_URL`, `TREER_APP_URL`, `TREER_INGRESS_URL`,
 `TREER_WORKER_ENVIRONMENT` and `TREER_DEPLOY_TIMEOUT`. `just test-canary` and its
-fixtures are described in [Canary environment](canary.md).
+fixtures are described in [Canary](#canary).
 
 Optional Cloudflare Workers Builds may upload inactive Canary App versions from
 `main` (`worker:upload:canary`); uploads never receive traffic.
@@ -63,14 +63,49 @@ Controller without `agent.reservation-fence.v1`; never delete fences to force it
 Back up App state (Mail, Telegram) before replacing an App; stop App processes,
 not Core Message routes, to stop channel traffic.
 
+## Canary
+
+Canary is a separate Railway environment (Proxy, PostgreSQL, NATS), a separate
+Worker and the wildcard ingress domain `*.canary.apps.treer.ai`. A revision is
+promoted only after `just test-canary` passes; health checks alone are not
+enough. The wildcard needs DNS-only records that Railway reports with
+`railway domain status` (`CNAME *.canary.apps`, `CNAME _acme-challenge.canary.apps`,
+and a `_railway-verify` TXT while unverified).
+
+`just test-canary` (`scripts/test-canary.sh`) is a black-box test against the
+deployed Proxy. It logs in with the Canary admin password, reuses the
+`canary-tester@treer.invalid` account and `canary-e2e` workspace, restarts the
+two long-lived Railway machine services `treer-canary-machine-a`/`-b`
+(enrolled as `canary-a`/`canary-b`, image in `canary/machine`, identities on
+their `/workspace` volumes), and checks:
+
+1. machine B's loopback HTTP server, registered as a service, is reachable from
+   a command Agent on machine A through `treer service forward`;
+2. the same service published on wildcard HTTPS is reachable from the tester;
+3. the A-to-B payload appears in traffic accounting.
+
+It then deletes only the resources it created. Variants:
+`just test-canary-provision` redeploys the machine image to both services;
+`just test-canary-enroll` additionally mints new enrollment keys (only after an
+identity was removed). `TREER_CANARY_KEEP_RESOURCES=1` keeps the run's
+resources for investigation; `TREER_CANARY_SKIP_PUBLIC=1` skips the ingress
+step and is not Canary evidence. Cookie writes send `Origin` from
+`TREER_CANARY_APP_URL`. Other overrides: `TREER_RAILWAY_PROJECT_ID`,
+`TREER_CANARY_ENVIRONMENT`, `TREER_CANARY_PROXY_SERVICE`,
+`TREER_CANARY_MACHINE_{A,B}_{SERVICE,NAME}`, `TREER_CANARY_TEST_TIMEOUT`,
+`TREER_CANARY_RESTART_ATTEMPTS`. The test does not exercise Mail, Telegram or
+other Apps.
+
+Cloudflare preview URLs for uploaded Canary Worker versions are public but take
+no traffic from `app.canary.treer.ai`; they are frontend build evidence only.
+
 ## Machine artifacts
 
 `Build release artifacts` (`.github/workflows/build-release-artifacts.yml`) runs
 for `v*` tags or by manual dispatch with a `revision`. Native runners build the
-CLI, Host and Controller for `linux-x86_64`, `linux-aarch64`, `darwin-x86_64`,
-`darwin-aarch64` and `windows-x86_64`, after preparing the launcher payload with
-`scripts/prepare-launcher-release.mjs` (lockfile-pinned `npm ci --ignore-scripts`;
-the build fails without a valid payload). `scripts/stage-release-artifacts.sh`
+CLI, Host, Controller and the `treer-launch` Agent launcher (its own Cargo
+workspace, built with `--target-dir target`) for `linux-x86_64`,
+`linux-aarch64`, `darwin-x86_64`, `darwin-aarch64` and `windows-x86_64`. `scripts/stage-release-artifacts.sh`
 (`.ps1` on Windows) stages each platform with `SHA256SUMS` and
 `build-metadata.json`. Windows also runs ConPTY/Controller/CLI tests, the
 standard-user and installer checks and a byte-identical clean rebuild (`/Brepro`).
@@ -108,12 +143,30 @@ it locally with `scripts/build-single-image.sh`.
 
 ## Signed R2 releases
 
-Installed Controllers update only from the signed R2 channel. `scripts/release-r2.mjs`
-prepares a version manifest from `dist/`, signs it, publishes it to the `canary`
-channel and promotes it to `stable` (`just artifacts-*`). Both signatures, the
-channel's manifest SHA256 and every binary's signed size and SHA256 must verify
-before downloaded code runs. See
-[Publish signed R2 releases](operator-guide.md#publish-signed-r2-releases).
+Installed Controllers update only from signed releases in the `treer-releases`
+R2 bucket at `https://releases.treer.ai/`. Version objects under
+`releases/<version>/` are immutable; `channels/canary.json` and
+`channels/stable.json` are separately signed pointers. Every manifest and
+pointer carries a detached Ed25519 signature, and every binary is pinned by
+size and SHA-256.
+
+`scripts/release-r2.mjs` (`just artifacts-*`) needs all three binaries for every
+platform in `dist/<platform>/` (`TREER_RELEASE_PLATFORMS` narrows the set), a
+clean worktree, and a version equal to `Cargo.toml`:
+
+```bash
+just artifacts-prepare vX.Y.Z
+just artifacts-canary vX.Y.Z
+just artifacts-verify vX.Y.Z
+just artifacts-stable vX.Y.Z    # local tag must point at the canary manifest's commit
+```
+
+Promotion never re-uploads binaries; republishing identical bytes is
+idempotent and different bytes for an existing version are rejected. Uploads
+use Wrangler; `TREER_RELEASE_BUCKET`, `TREER_RELEASE_BASE_URL`,
+`TREER_CLOUDFLARE_PROFILE` and `TREER_WRANGLER` select another environment.
+Publishing does not update machines; see
+[Updates](operator-guide.md#machines).
 
 ## Official release signing authority
 
@@ -139,12 +192,10 @@ For an existing installation without the key,
 `node scripts/install-release-trust.mjs [--config-dir ABS]` installs only the
 shipped public key (exclusive create; refuses a different or unsafe existing key).
 
-## Launcher channel
+## Launcher
 
-`treer-agent update --latest` reads the launcher-only pointer
-`launcher-stable/launcher-latest.json` on GitHub Releases; version objects live
-under `launcher-<full-source-SHA>` and are never overwritten. Stage with
-`node scripts/launcher-release.mjs stage --payload ABS --native ABS --binding ABS
---build ABS --source FULL_SHA --platform PLATFORM --output ABS` and publish once
-with `node scripts/launcher-release.mjs publish ABS_OUTPUT ABS_STAGE_JSON...`.
-Trust is the repository publisher over HTTPS plus pinned SHA256.
+`treer-launch` is an ordinary artifact of every signed release, listed in the
+manifest beside the other executables; there is no separate launcher channel.
+`treer-launch update` (`treer-agent-server launcher update`) installs only that
+artifact, by default at the installed Controller's version. Consumers treat a
+manifest without `treer-launch` as predating it.

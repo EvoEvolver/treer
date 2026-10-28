@@ -145,8 +145,8 @@ pub(super) fn resolve_agent_command(
         format!(
             "executable not found in absolute PATH directories: {}{}",
             command.chars().take(128).collect::<String>(),
-            if command == "treer-agent" {
-                "; install the agent launcher on this machine (treer-agent-server launcher install)"
+            if matches!(command, "treer-launch" | "treer-agent") {
+                "; install the Agent launcher on this machine (treer-agent-server launcher install)"
             } else {
                 ""
             }
@@ -214,13 +214,13 @@ mod command_resolution_tests {
     fn bare_command_uses_absolute_path_and_never_a_system_search_fallback() {
         let fixture = Fixture::new();
         let name = if cfg!(windows) {
-            "treer-agent.exe"
+            "treer-launch.exe"
         } else {
-            "treer-agent"
+            "treer-launch"
         };
         let expected = fixture.executable(name);
         assert_eq!(
-            resolve_agent_command("treer-agent", &fixture.environment()).unwrap(),
+            resolve_agent_command("treer-launch", &fixture.environment()).unwrap(),
             expected.to_str().unwrap()
         );
         // Even an installed executable is not an implicit search location.
@@ -230,7 +230,7 @@ mod command_resolution_tests {
                 BTreeMap::from([("PATH".into(), path.into())])
             });
             assert_eq!(
-                resolve_agent_command("treer-agent", &environment)
+                resolve_agent_command("treer-launch", &environment)
                     .unwrap_err()
                     .code,
                 "command_not_found"
@@ -242,9 +242,9 @@ mod command_resolution_tests {
     fn empty_and_relative_path_entries_are_ignored_before_absolute_entries() {
         let fixture = Fixture::new();
         let expected = fixture.executable(if cfg!(windows) {
-            "treer-agent.exe"
+            "treer-launch.exe"
         } else {
-            "treer-agent"
+            "treer-launch"
         });
         let path = std::env::join_paths([
             Path::new(""),
@@ -255,7 +255,7 @@ mod command_resolution_tests {
         .unwrap();
         let environment = BTreeMap::from([("PATH".into(), path.to_str().unwrap().into())]);
         assert_eq!(
-            resolve_agent_command("treer-agent", &environment).unwrap(),
+            resolve_agent_command("treer-launch", &environment).unwrap(),
             expected.to_str().unwrap()
         );
     }
@@ -264,21 +264,21 @@ mod command_resolution_tests {
     fn cwd_decoy_is_rejected_in_an_isolated_process() {
         let fixture = Fixture::new();
         fixture.executable(if cfg!(windows) {
-            "treer-agent.exe"
+            "treer-launch.exe"
         } else {
-            "treer-agent"
+            "treer-launch"
         });
         std::fs::create_dir(fixture.0.join("relative")).unwrap();
         std::fs::copy(
             fixture.0.join(if cfg!(windows) {
-                "treer-agent.exe"
+                "treer-launch.exe"
             } else {
-                "treer-agent"
+                "treer-launch"
             }),
             fixture.0.join("relative").join(if cfg!(windows) {
-                "treer-agent.exe"
+                "treer-launch.exe"
             } else {
-                "treer-agent"
+                "treer-launch"
             }),
         )
         .unwrap();
@@ -305,22 +305,22 @@ mod command_resolution_tests {
     #[ignore = "isolated child launched by cwd_decoy_is_rejected_in_an_isolated_process"]
     fn cwd_decoy_child() {
         assert!(Path::new(if cfg!(windows) {
-            "treer-agent.exe"
+            "treer-launch.exe"
         } else {
-            "treer-agent"
+            "treer-launch"
         })
         .is_file());
         for path in ["", ".", "relative"] {
             let environment = BTreeMap::from([("PATH".into(), path.into())]);
             assert_eq!(
-                resolve_agent_command("treer-agent", &environment)
+                resolve_agent_command("treer-launch", &environment)
                     .unwrap_err()
                     .code,
                 "command_not_found"
             );
         }
         assert_eq!(
-            resolve_agent_command("treer-agent", &BTreeMap::new())
+            resolve_agent_command("treer-launch", &BTreeMap::new())
                 .unwrap_err()
                 .code,
             "command_not_found"
@@ -331,13 +331,13 @@ mod command_resolution_tests {
     fn relative_command_paths_are_rejected_and_absolute_commands_are_unchanged() {
         let fixture = Fixture::new();
         for command in [
-            "./treer-agent",
-            "../treer-agent",
-            "sub/treer-agent",
-            "sub\\treer-agent",
-            "C:treer-agent",
-            "treer-agent.",
-            "treer-agent ",
+            "./treer-launch",
+            "../treer-launch",
+            "sub/treer-launch",
+            "sub\\treer-launch",
+            "C:treer-launch",
+            "treer-launch.",
+            "treer-launch ",
             ".",
             "..",
         ] {
@@ -359,15 +359,15 @@ mod command_resolution_tests {
     fn missing_executable_error_does_not_expose_path_and_directories_are_not_commands() {
         let fixture = Fixture::new();
         std::fs::create_dir(fixture.0.join(if cfg!(windows) {
-            "treer-agent.exe"
+            "treer-launch.exe"
         } else {
-            "treer-agent"
+            "treer-launch"
         }))
         .unwrap();
-        let error = resolve_agent_command("treer-agent", &fixture.environment()).unwrap_err();
+        let error = resolve_agent_command("treer-launch", &fixture.environment()).unwrap_err();
         assert_eq!(error.code, "command_not_found");
         assert!(!error.message.contains(fixture.0.to_str().unwrap()));
-        assert!(error.message.contains("treer-agent"));
+        assert!(error.message.contains("treer-launch"));
         assert!(error
             .message
             .contains("treer-agent-server launcher install"));
@@ -385,15 +385,15 @@ mod command_resolution_tests {
         use std::os::unix::fs::{symlink, PermissionsExt};
         let fixture = Fixture::new();
         let target = fixture.executable("actual");
-        let entry = fixture.0.join("treer-agent");
+        let entry = fixture.0.join("treer-launch");
         symlink(&target, &entry).unwrap();
         assert_eq!(
-            resolve_agent_command("treer-agent", &fixture.environment()).unwrap(),
+            resolve_agent_command("treer-launch", &fixture.environment()).unwrap(),
             entry.to_str().unwrap()
         );
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
-            resolve_agent_command("treer-agent", &fixture.environment())
+            resolve_agent_command("treer-launch", &fixture.environment())
                 .unwrap_err()
                 .code,
             "command_not_found"
@@ -416,11 +416,11 @@ mod command_resolution_tests {
     #[test]
     fn windows_extensions_are_fixed_and_unc_device_drive_relative_search_is_rejected() {
         let fixture = Fixture::new();
-        fixture.executable("treer-agent.cmd");
-        fixture.executable("treer-agent.bat");
+        fixture.executable("treer-launch.cmd");
+        fixture.executable("treer-launch.bat");
         let mut environment = fixture.environment();
         environment.insert("PATHEXT".into(), ".CMD;.BAT;.EXE".into());
-        for command in ["treer-agent", "treer-agent.cmd", "treer-agent.bat"] {
+        for command in ["treer-launch", "treer-launch.cmd", "treer-launch.bat"] {
             assert_eq!(
                 resolve_agent_command(command, &environment)
                     .unwrap_err()
@@ -428,9 +428,9 @@ mod command_resolution_tests {
                 "command_not_found"
             );
         }
-        let expected = fixture.executable("treer-agent.com");
+        let expected = fixture.executable("treer-launch.com");
         assert_eq!(
-            resolve_agent_command("treer-agent", &environment).unwrap(),
+            resolve_agent_command("treer-launch", &environment).unwrap(),
             expected.to_str().unwrap()
         );
         for path in [

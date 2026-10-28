@@ -78,7 +78,7 @@ jobs:
       - run: pnpm test:e2e
 
   agent-launcher:
-    name: Agent launcher UI, installer scripts and native runtime
+    name: Agent launcher UI and native runtime
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
@@ -94,12 +94,12 @@ jobs:
         run: npm --prefix launchers/agent ci --ignore-scripts
       - name: Check launcher and browser sources
         run: npm --prefix launchers/agent run check
-      - name: Installer, update and UI unit tests
+      - name: UI unit tests
         run: npm --prefix launchers/agent test
       - name: Native runtime unit tests (fixture harness)
         run: |
-          TREER_TEST_NODE="$(command -v node)" TREER_SPIKE_BUILD_CODEX=/usr/bin/true TREER_SPIKE_BUILD_TREER=/usr/bin/true \
-            cargo test --locked --features fixture-harness --manifest-path launchers/agent/Cargo.toml
+          cargo clippy --locked --manifest-path launchers/agent/Cargo.toml -- -D warnings
+          TREER_TEST_NODE="$(command -v node)" cargo test --locked --features fixture-harness --manifest-path launchers/agent/Cargo.toml
 
   release-tooling:
     name: Release, install-trust and deploy tooling

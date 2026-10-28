@@ -156,7 +156,7 @@ def self_session(harness, cwd=None):
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,160}', actor):
             raise RuntimeError('Cannot identify own Agent for self session discovery')
         directory = Path(cwd).resolve() / '.treer/agents' / actor
-        for name in ('agent-ui.json','codex-ui.json'):
+        for name in ('agent-ui.json',):
             file = directory / name
             if file.is_file() and not file.is_symlink():
                 saved = json.loads(file.read_text())
@@ -165,8 +165,7 @@ def self_session(harness, cwd=None):
                 if not isinstance(session, str) or not UUID.fullmatch(session):
                     raise RuntimeError('Saved own Agent session ID is invalid')
                 return session
-        keys = ('CLAUDE_SESSION_ID','TREER_SESSION_ID') if harness == 'claude' else ('CODEX_SESSION_ID','CODEX_THREAD_ID','TREER_SESSION_ID')
-        for key in keys:
+        for key in ('CLAUDE_SESSION_ID','TREER_SESSION_ID'):
             if os.environ.get(key):
                 from soul_sessions import UUID
                 if not UUID.fullmatch(os.environ[key]): raise RuntimeError('Native self session environment ID is invalid')
@@ -199,7 +198,7 @@ def command_save(args):
         root.chmod(0o700)
         session = self_session(args.harness, args.cwd) if args.session == 'self' else args.session
         who=json.loads(treer('whoami'))
-        adapter=export_session(args.harness,session or args.session,args.cwd,root,who.get('machine',{}).get('root'))
+        adapter=export_session(args.harness,session or args.session,args.cwd,root)
         source_machine=who.get('machine',{}).get('server_id')
         manifest={'schema_version':1,'name':args.name or f"{args.harness} {adapter['session_id'][:8]}",
                   'environment':{},'adapter':adapter}
@@ -212,8 +211,6 @@ def command_save(args):
         if source_machine:
             options.append(('source_machine',source_machine))
         record=api(args.server,'POST','v1/souls?'+urlencode(options),create_archive(root,manifest,files))
-        if args.harness == 'codex':
-            record['omitted'] = ['shell_snapshot']
         record['redaction']={'enabled':args.redact,'findings':counts,'count':sum(counts.values())}
         # created_by is authoritative server metadata, not self-reported upload input.
         print_json(record)
@@ -255,7 +252,6 @@ def resolve(server,target):
 PREFLIGHT = '''import json,os,shutil,subprocess,sys
 from pathlib import Path
 harness=sys.argv[1]
-machine_root=Path(sys.argv[2])
 exe=shutil.which('python3' if harness=='generic' else harness)
 version=''
 if exe:
@@ -268,9 +264,6 @@ if exe:
 home=Path.home()
 if harness=='generic':
     logged_in=True
-elif harness=='codex':
-    config=Path(os.environ.get('CODEX_HOME',home/'.codex'))
-    logged_in=(config/'auth.json').is_file() or bool(os.environ.get('OPENAI_API_KEY'))
 else:
     config=Path(os.environ.get('CLAUDE_CONFIG_DIR',home/'.claude'))
     logged_in=(config/'.credentials.json').is_file() or bool(os.environ.get('ANTHROPIC_API_KEY'))
@@ -278,29 +271,30 @@ else:
         try:
             logged_in = logged_in or subprocess.run(['security','find-generic-password','-s','Claude Code-credentials'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=5).returncode==0
         except Exception: pass
-root=Path(os.environ.get('TREER_AGENT_INSTALL_ROOT',machine_root/'.treer/launchers/agent'))/'current'
-candidates=[Path(os.environ['TREER_AGENT_LAUNCHER'])] if os.environ.get('TREER_AGENT_LAUNCHER') else [root/p for p in ['launchers/agent/scripts/treer-agent.sh','scripts/treer-agent.sh','treer-agent.sh']]
+override=os.environ.get('TREER_AGENT_LAUNCHER')
+candidates=[Path(override).expanduser()] if override else [Path(p) for name in ('treer-launch','treer-agent') for p in [shutil.which(name),home/'.local/bin'/name] if p]
 launcher=next((str(p.resolve()) for p in candidates if p.is_file() and os.access(p,os.X_OK)),None)
-session_transfer=bool(launcher and Path(launcher).with_name('session.sh').is_file() and os.access(Path(launcher).with_name('session.sh'),os.X_OK))
+session_transfer=False
+if launcher and harness!='generic':
+    try:
+        r=subprocess.run([launcher,'session','--help'],stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=20)
+        session_transfer=r.returncode==0 and 'session export' in r.stdout
+    except Exception: pass
 print(json.dumps(dict(executable=bool(exe),version=version,logged_in=logged_in,launcher=launcher,session_transfer=session_transfer,free_bytes=shutil.disk_usage(home).free)))
 '''
 
 
 def preflight(machine,harness,size):
-    machine_record = json.loads(treer('machine', 'show', machine))
-    machine_root = machine_record.get('root')
-    if not isinstance(machine_root, str) or not machine_root.startswith('/'):
-        raise RuntimeError('Target machine has no absolute root')
-    probe=json.loads(treer('exec','--machine',machine,'--cwd','.','--timeout','20000','--','python3','-c',PREFLIGHT,harness,machine_root))
+    probe=json.loads(treer('exec','--machine',machine,'--cwd','.','--timeout','30000','--','python3','-c',PREFLIGHT,harness))
     problems=[]
     if not probe.get('executable'): problems.append('Install '+harness)
     if not probe.get('logged_in'): problems.append('Log in to '+harness+' on target machine')
-    if harness!='generic' and not probe.get('launcher'): problems.append('Install unified treer-agent launcher on target machine')
-    if harness!='generic' and not probe.get('session_transfer'): problems.append('Update unified launcher to include session transfer CLI')
+    if harness!='generic' and not probe.get('launcher'): problems.append('Install the treer-launch Agent launcher on target machine (it ships with Treer)')
+    if harness!='generic' and not probe.get('session_transfer'): problems.append('Update treer-launch (treer-launch update) to include the session transfer CLI')
     version=probe.get('version','')
     try:
         parsed=tuple(int(p) for p in version.split('.'))
-        minimum=(0,149,0) if harness=='codex' else (2,0,0) if harness=='claude' else (3,9,0)
+        minimum=(2,0,0) if harness=='claude' else (3,9,0)
         if parsed<minimum: problems.append('Upgrade '+harness+' to '+'.'.join(map(str,minimum))+' or later')
     except ValueError:
         problems.append('Could not determine harness version')
@@ -326,8 +320,9 @@ def command_incarnate(args):
         raise RuntimeError('New Agent cannot read this private Soul; save a new --visibility workspace snapshot first')
     adapter=record.get('manifest',{}).get('adapter',{})
     harness=adapter.get('name','generic')
-    if harness not in ('claude','codex','generic'):
-        raise RuntimeError('Unsupported harness adapter')
+    if harness not in ('claude','generic'):
+        # Archived Codex Souls stay readable, but treer-launch cannot import them.
+        raise RuntimeError('Unsupported harness adapter for restore: '+str(harness))
     if harness == 'generic' and not args.command:
         raise RuntimeError('Generic Soul needs an explicit command after --')
     probe,problems=preflight(args.machine,harness,record['size_bytes'])
@@ -404,7 +399,7 @@ def command_run(args):
                 bundle=Path(temp)/'bundle'
                 manifest=safe_extract(raw,bundle)
                 adapter=dict(manifest.get('adapter',{}))
-                if adapter.get('name') in ('claude','codex'):
+                if adapter.get('name') == 'claude':
                     import uuid
                     adapter['source_session_id'] = adapter['session_id']
                     adapter['session_id'] = str(uuid.uuid4())
@@ -425,10 +420,7 @@ def command_run(args):
                             raise RuntimeError('Missing environment binding file')
                         environment[key] = str((files_root / path).resolve())
                 else:
-                    machine_root = None
-                    if not os.environ.get('TREER_AGENT_LAUNCHER') and not os.environ.get('TREER_AGENT_INSTALL_ROOT'):
-                        machine_root = json.loads(treer('whoami')).get('machine',{}).get('root')
-                    environment, workspace_path=import_session(bundle,adapter,workspace,root,machine_root)
+                    environment, workspace_path=import_session(bundle,adapter,workspace,root)
                     workspace=Path(workspace_path)
                 state=dict(soul_id=args.soul_id,adapter=adapter,environment=environment,workspace=str(workspace))
             temporary=marker.with_suffix('.tmp')
@@ -445,12 +437,7 @@ def command_run(args):
         if argv and argv[0] == '--': argv = argv[1:]
         if not argv: raise RuntimeError('Generic Soul requires a command after --')
     else:
-        machine_root = None
-        if not os.environ.get('TREER_AGENT_LAUNCHER') and not os.environ.get('TREER_AGENT_INSTALL_ROOT'):
-            machine_root = json.loads(treer('whoami')).get('machine', {}).get('root')
-            if not isinstance(machine_root, str) or not Path(machine_root).is_absolute():
-                raise RuntimeError('Cannot locate launcher without an absolute machine root')
-        argv=[str(launcher_path(machine_root)),'--harness',adapter['name'],'--session-id',adapter['session_id'],'--cwd',str(workspace)]
+        argv=[str(launcher_path()),'--harness',adapter['name'],'--session-id',adapter['session_id'],'--cwd',str(workspace)]
     os.chdir(workspace)
     os.execvpe(argv[0],argv,environment)
 
@@ -468,18 +455,12 @@ def parser():
         command.add_argument('--label',action='append',default=[])
         command.add_argument('--allow-secrets',action='store_true')
     save=sub.add_parser('save')
-    save.add_argument('--harness',choices=['claude','codex'],required=True)
+    save.add_argument('--harness',choices=['claude'],required=True)
     save.add_argument('--session',default='self')
     save.add_argument('--cwd',default=str(Path.cwd()))
     save.add_argument('--redact',action=argparse.BooleanOptionalAction,default=True)
     sharing(save)
     save.set_defaults(function=command_save)
-    capture=sub.add_parser('capture-codex',help='compatibility alias for save --harness codex')
-    capture.add_argument('--session',default='self')
-    capture.add_argument('--cwd',default=str(Path.cwd()))
-    capture.add_argument('--redact',action=argparse.BooleanOptionalAction,default=True)
-    sharing(capture)
-    capture.set_defaults(harness='codex',function=command_save)
     upload=sub.add_parser('upload')
     upload.add_argument('--manifest',required=True)
     upload.add_argument('--file',action='append',default=[])
