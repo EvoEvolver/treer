@@ -129,26 +129,6 @@ pub fn secure_directory(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Windows only: whether `path` still carries the private owner/DACL that
-/// `secure_directory` applies. Unix callers check uid/mode themselves.
-#[cfg(windows)]
-pub fn private_path_is_secure(path: &Path) -> io::Result<bool> {
-    windows::private_path_is_secure(path)
-}
-
-/// Windows only: diagnostic listing of a path's owner, control flags and ACEs
-/// (SIDs/flags/masks only), for logs and native test failures.
-#[cfg(windows)]
-pub fn private_path_security_report(path: &Path) -> io::Result<String> {
-    windows::private_path_security_report(path)
-}
-
-/// Windows only, test support: apply an SDDL DACL to a path.
-#[cfg(windows)]
-pub fn apply_sddl_dacl(path: &Path, sddl: &str) -> io::Result<()> {
-    windows::apply_sddl_dacl(path, sddl)
-}
-
 /// Available bytes on the volume holding `path`, for quota admission.
 pub fn available_disk_bytes(path: &Path) -> io::Result<u64> {
     #[cfg(unix)]
