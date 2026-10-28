@@ -371,6 +371,7 @@
   },
   "message ack": {
     "flags": {
+      "--endpoint": "value",
       "--operation-id": "value"
     },
     "positionals": 1,
@@ -400,6 +401,8 @@
   },
   "message receive": {
     "flags": {
+      "--after": "value",
+      "--endpoint": "value",
       "--limit": "value",
       "--wait": "value"
     },

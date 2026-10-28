@@ -72,6 +72,8 @@ pub const CAPABILITY_AGENT_INTERFACE_PROVENANCE: &str = "agent.interface-provena
 /// Launcher-contract feature: Controller-owned per-Agent private state directory,
 /// quota reservations and deletion cleanup. Not an AIS manifest capability.
 pub const CAPABILITY_AGENT_PRIVATE_STATE: &str = "agent.private-state.v1";
+/// Message receive/ack scoped to one endpoint of the caller's App mailbox.
+pub const CAPABILITY_MESSAGE_ENDPOINT_INBOX: &str = "message.endpoint-inbox.v1";
 pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_LAUNCHER_INSTALL,
     CAPABILITY_AGENT_INTERFACE_PROVENANCE,
@@ -91,6 +93,7 @@ pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_RUNTIME_RESTORE,
     CAPABILITY_SERVICE_HTTP_FETCH,
     CAPABILITY_POLICY_PATH_RULES,
+    CAPABILITY_MESSAGE_ENDPOINT_INBOX,
 ];
 pub const AGENT_INTERFACE_PROTOCOL_V1: &str = "treer.agent-interface/v1";
 /// Semantic AIS features implemented by this Controller. Unknown advertised AIS

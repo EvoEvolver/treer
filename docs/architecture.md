@@ -185,8 +185,9 @@ edge never grants visibility of its parent.
   identity and the Proxy evaluates `message.*` Policy.
 - Browser Apps call `/api/apps/{service_id}/messages...` with a
   service-audience token and reach the same implementation.
-- Managed Apps can expose logical sub-addresses (`/path/to/app/child`) and
-  send with `--from-endpoint`; see [App-owned trees](app-tree.md).
+- Managed Apps can expose logical sub-addresses (`/path/to/app/child`), send
+  with `--from-endpoint`, and receive/ack one endpoint of their own mailbox
+  (`app_endpoint`, `message.endpoint-inbox.v1`); see [App-owned trees](app-tree.md).
 
 A Message never wakes an Agent; prompting is a separate, separately authorized
 action. Message routes are enabled by `TREER_ENABLE_CORE_MESSAGES` (on in the

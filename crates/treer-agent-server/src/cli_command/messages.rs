@@ -142,12 +142,19 @@ pub(super) async fn run_message_command(
             let suffix = message_list_suffix(before.as_deref(), limit);
             client.value(Method::GET, &suffix, None).await
         }
-        MessageCommand::Receive { wait, limit } => {
+        MessageCommand::Receive {
+            wait,
+            limit,
+            endpoint,
+            after,
+        } => {
             client
                 .value(
                     Method::POST,
                     "api/messages/receive",
                     Some(serde_json::to_value(ReceiveMessagesRequest {
+                        app_endpoint: endpoint,
+                        after,
                         limit,
                         wait_milliseconds: wait,
                     })?),
@@ -157,12 +164,14 @@ pub(super) async fn run_message_command(
         MessageCommand::Ack {
             delivery_ids,
             operation_id,
+            endpoint,
         } => {
             client
                 .value(
                     Method::POST,
                     "api/messages/ack",
                     Some(serde_json::to_value(AcknowledgeMessagesRequest {
+                        app_endpoint: endpoint,
                         delivery_ids,
                         operation_id: operation_id.unwrap_or_else(new_operation_id),
                     })?),

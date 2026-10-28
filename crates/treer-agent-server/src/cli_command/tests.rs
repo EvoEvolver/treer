@@ -747,8 +747,37 @@ fn message_commands_parse_machine_readable_inputs() {
             command: MessageCommand::Ack {
                 delivery_ids,
                 operation_id: Some(operation_id),
+                endpoint: None,
             }
         }) if delivery_ids == ["dlv-a", "dlv-b"] && operation_id == "ack-42"
+    ));
+
+    let scoped = Args::try_parse_from([
+        "treer",
+        "message",
+        "receive",
+        "--endpoint",
+        "alice",
+        "--after",
+        "cur",
+        "--limit",
+        "5",
+    ])
+    .expect("endpoint receive should parse");
+    assert!(matches!(
+        scoped.command,
+        Some(Command::Message {
+            command: MessageCommand::Receive { limit: 5, endpoint: Some(endpoint), after: Some(after), .. }
+        }) if endpoint == "alice" && after == "cur"
+    ));
+    let scoped_ack =
+        Args::try_parse_from(["treer", "message", "ack", "dlv-a", "--endpoint", "alice"])
+            .expect("endpoint ack should parse");
+    assert!(matches!(
+        scoped_ack.command,
+        Some(Command::Message {
+            command: MessageCommand::Ack { endpoint: Some(endpoint), .. }
+        }) if endpoint == "alice"
     ));
 }
 

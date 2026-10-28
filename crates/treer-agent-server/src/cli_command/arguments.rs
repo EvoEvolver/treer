@@ -287,6 +287,12 @@ pub(super) enum MessageCommand {
         wait: u64,
         #[arg(long, default_value_t = 50)]
         limit: u16,
+        /// Only deliveries addressed to this endpoint of the caller's own App mailbox
+        #[arg(long, value_name = "KEY")]
+        endpoint: Option<String>,
+        /// Continue a scan from an earlier `next_cursor` (does not acknowledge)
+        #[arg(long, value_name = "CURSOR")]
+        after: Option<String>,
     },
     #[command(about = "Explicitly acknowledge one or more deliveries")]
     Ack {
@@ -294,6 +300,9 @@ pub(super) enum MessageCommand {
         delivery_ids: Vec<String>,
         #[arg(long)]
         operation_id: Option<String>,
+        /// Require every delivery to belong to this endpoint of the caller's App mailbox
+        #[arg(long, value_name = "KEY")]
+        endpoint: Option<String>,
     },
     #[command(about = "Import a bounded operator-authorized legacy Message batch")]
     Import {

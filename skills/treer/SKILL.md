@@ -446,6 +446,18 @@ Bridges forwarding an external channel can pipe one JSON object
 the authenticated sender. Only an authenticated Managed App may send with
 `--from-endpoint` for its own logical subtree.
 
+A Managed App with logical endpoints can poll and acknowledge one endpoint of
+its own mailbox (`message.endpoint-inbox.v1`):
+
+```bash
+treer message receive --endpoint KEY [--after CURSOR] --limit 50
+treer message ack <delivery-id> --endpoint KEY --operation-id <stable-id>
+```
+
+Endpoint pages carry `next_cursor`; a cursor only advances the scan and never
+acknowledges, so omit `--after` to rescan everything still unacknowledged. A
+scoped `ack` fails entirely if any delivery belongs to another endpoint.
+
 Context edges do not grant access to a parent's body; missing and invisible
 Messages return the same error. Policy actions are `message.send`,
 `message.read`, `message.receive` and `message.ack`. `core_messages_disabled`
