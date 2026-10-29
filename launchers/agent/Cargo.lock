@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "treer-agent-launcher"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -1178,11 +1178,11 @@ dependencies = [
 
 [[package]]
 name = "treer-build-info"
-version = "0.2.2"
+version = "0.2.3"
 
 [[package]]
 name = "treer-platform"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "rustix",
  "tokio",

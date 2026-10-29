@@ -216,6 +216,31 @@ manifest without `treer-launch` as predating it.
 
 ### Unreleased
 
+### 0.2.3
+
+Additive release: no schema change; the Proxy is unchanged apart from its
+version. Update machines from the Console or with `treer-agent-server update
+--version v0.2.3`. Running launcher Agents keep their old launcher until they
+are restarted.
+
+- **Console sidebar trim:** the sidebar holds only the Tree, Machines and
+  Workspace settings. The filter box, its `/` shortcut and the Overview row
+  are gone; search lives in the top bar (Cmd/Ctrl+K) and Overview is the
+  pinned first tab. On phones the Tree opens under the tab bar, whose Tree
+  button reads "Close tree", and the tab switcher always holds Overview.
+- **Agent Hub** (`apps/agent-hub`) replaces the echo/reverse app-tree example:
+  each job runs a fresh single-task worker from a versioned template
+  (`templates/*.md`, seven Treer development templates), sends only the task
+  and input handoffs, validates the structured handoff, exports the
+  transcript and notifies the requester. Jobs queue under a concurrency
+  limit, can be stopped with an interruption handoff and can be created by
+  Core Message; the hub publishes an `app-tree.v1` subtree (`templates/`,
+  `jobs/`, `handoffs/`) and a small web UI.
+- **Git Gateway** (`apps/git-gateway`), a new App: one gateway machine holds
+  the GitHub credential (`gh` token or GitHub App) and forwards Smart HTTP
+  (`/github/OWNER/REPO.git`) and REST (`/github-api`) for identity-verified
+  workspace Agents, with branch/push rules enforced before forwarding, a
+  JSONL audit log and a small UI.
 - **Agent Hub workers are App-owned subtree Agents.** Each job's worker is a
   `treer-launch --no-register` child process of the hub (`/<hub>/jobs/<id>`
   in the App tree), not an Agent in the workspace Tree; nothing is created
@@ -237,6 +262,10 @@ manifest without `treer-launch` as predating it.
   capability shows the App's own page for that node (`ui/?node=PATH`) in the
   node view, through the App UI tunnel and iframe isolation, with a
   Page/Messages toggle when it also has message capabilities.
+- **Release tooling:** `release-r2.mjs publish` checks for an existing
+  version in the R2 bucket instead of the public URL, so a pre-upload check no
+  longer leaves a cached 404 at the Cloudflare edge. v0.2.2 was never
+  advanced on the canary channel; canary moves from v0.2.1 to v0.2.3.
 
 ### 0.2.2
 
