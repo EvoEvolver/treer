@@ -202,8 +202,43 @@ manifest without `treer-launch` as predating it.
 
 ## Release notes
 
-### Unreleased
+### 0.2.2
 
+Additive release: no schema contraction. The Proxy adds columns to
+`invitations` (`invitation_id`, `email`, `expires_at`, `revoked_at`,
+`created_by_kind`, `created_by_name`, `group_ids`, `workspace_ids`,
+`explicit_role`), `sessions` (`session_id`, `last_seen_at`) and
+`app_deployments` (`ui_capabilities`), backfilling IDs for existing rows; a
+0.2.1 Proxy keeps working against the expanded schema. Update machines from the
+Console or with `treer-agent-server update --version v0.2.2`. Running launcher
+Agents keep their old browser UI until they are restarted.
+
+- **Trust model:** Agents are trusted collaborators and Policy is
+  cooperative. Agent administration is gated by ordinary Policy evaluation,
+  not by grants, caps or defences against malicious Agents or Policy
+  authors. Tenant isolation, human authentication, the last-owner invariant
+  and actor audit are unchanged.
+- **Console settings hub:** a top bar with an organization/workspace context
+  switcher and Cmd/Ctrl+K search; settings pages for You (profile and password, sessions,
+  preferences), the organization (members, invitations, groups, danger zone) and
+  the workspace (access and effective access, machines, policy, audit, danger
+  zone) on real routes (`/settings/*`, `/orgs/:o/settings/*`,
+  `/orgs/:o/workspaces/:w/settings/*`), so Back and deep links work. The
+  sidebar shows only the workspace (Machines collapsed by default, a
+  Workspace settings link) and the sidebar "Needs attention" inbox is gone;
+  Tree status icons and the Overview board's Needs attention section remain.
+- **Launcher UI redesign** (`treer-launch`, same HTTP/WebSocket API): worded
+  run status in the header and tab title, per-turn activity summaries and
+  changed-file diffs, a run bar and a stable composer with explicit
+  Steer/Queue, Files and Tasks drawers, and a recovery banner that keeps the
+  conversation visible during a provider restart. One light/dark design
+  replaces the three looks. The conversation now stops following only when
+  the reader scrolls up (a hidden Console tab or layout reset no longer
+  leaves it stuck at the top).
+- **Launcher model selection on resume:** the chosen model and effort are
+  journaled and re-applied after a provider or launcher restart (Claude via
+  `model/set`/`effort/set`, Codex via the thread model); previously a restart
+  silently fell back to the default model.
 - **App UI capabilities:** Apps declare browser UI contracts with
   `treer app create|update --ui-capability NAME` (repeatable) or
   `ui_capabilities` on the App create/update API; `AppDeployment.ui_capabilities`
@@ -223,6 +258,8 @@ manifest without `treer-launch` as predating it.
   organization, the last owner is kept, and deleting or transferring the
   organization stays human-only. Changes are audited with the Agent as actor;
   its name is frozen at write time and the Console shows `agent: <name>`.
+  Within its own organization an Agent acts like an owner: any invitation
+  role, role changes and owner removal.
 - **Invitations:** `email` is where the link is delivered, not a binding;
   any signed-in account with a usable link may accept. Invitations stay
   usable until accepted, revoked or expired. `POST /api/auth/password` now
