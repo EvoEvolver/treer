@@ -146,7 +146,8 @@ enroll other machines on a trusted LAN. Verification commands are in
   optional groups and workspace grants applied on acceptance; it can be listed
   and revoked (`GET|POST /api/organizations/{org}/invitations`,
   `DELETE .../invitations/{id}`). With the Cloudflare email sender configured
-  and an `email` given, Treer also emails the link.
+  and an `email` given, Treer also emails the link. The email is only where
+  the link goes: any signed-in account holding a usable link can accept it.
 - Members leave with `POST /api/organizations/{org}/leave`; an owner hands over
   with `POST .../transfer {"user_id"}` (caller becomes admin) and deletes an
   organization without workspaces with `DELETE /api/organizations/{org}
@@ -525,32 +526,28 @@ change or remove the Provider, even when rules deny everything. Setup of the
 Policy App and its administration token is in
 [apps/policy/README.md](../apps/policy/README.md).
 
-**Delegating administration to an Agent.** Agents never inherit org or
-workspace administration from monitor mode, action defaults, Tree placement or
-a fail-open Provider. Grant it with an explicit allow rule that names the Agent
-(`id`, or a `group` whose principals list its ID) and lists the actions, e.g.:
+**Administration by Agents.** Agents are trusted collaborators: they may
+administer their own workspace and its organization (invitations, members and
+roles, groups, workspaces, access, enrollment, audit, the Policy Provider) by
+calling `$TREER_AGENT_SERVER_URL/api/org-admin/...` with their workload
+credential ([Treer skill](../skills/treer/SKILL.md#administration-over-http)).
+Each route is an ordinary Policy action (`org.manage`, `org.member.manage`,
+`org.invite.manage`, `org.group.manage`, `workspace.manage`,
+`workspace.access.manage`, `policy.provider.manage`, `audit.read`,
+`machine.enroll`): allowed by default and in monitor mode, denied by an
+enforced deny rule, e.g.:
 
 ```json
-{"id": "ops-bot-admin", "priority": 100, "effect": "allow",
- "subjects": [{"kind": "agent", "id": "AGENT_ID"}],
- "actions": ["org.invite.manage", "org.member.manage", "workspace.access.manage"],
+{"id": "no-member-admin", "priority": 100, "effect": "deny",
+ "subjects": [{"kind": "agent"}],
+ "actions": ["org.member.manage"],
  "resources": [{}]}
 ```
 
-The Agent then calls `$TREER_AGENT_SERVER_URL/api/org-admin/...` with its
-workload credential ([Treer skill](../skills/treer/SKILL.md#administration-over-http)).
-Workspace actions (`workspace.access.manage`, `machine.enroll`, renaming its
-workspace, its own workspace's audit) need only that rule. Organization actions
-(`org.*`, organization-wide `audit.read`, listing/creating/deleting workspaces)
-also need an organization grant from an owner or admin: Console Organization
-settings → Agent permissions, or
-`PUT /api/organizations/{org}/agent-grants/{agent_id}` with
-`{"workspace_id": ..., "actions": [...]}`. A grant stops working when its
-creator is no longer an owner/admin. Agents never invite or assign
-`owner`/`admin`, change roles, remove owners, delete or transfer the
-organization, and are never granted `policy.provider.manage`. Rules with
-administration actions must be published with a verified owner, even under
-`provider_operator`. Every change is audited with the Agent as actor.
+Policy is cooperative, not a security boundary. Agents never reach another
+organization; an organization always keeps one owner; deleting or
+transferring the organization is a human action. Every change is audited
+with the Agent as actor.
 
 ## Updates
 
