@@ -1076,6 +1076,44 @@ async fn agent_workspace_and_enrollment_routes() {
     assert_eq!(creator, "agent:agent-a");
 }
 
+#[tokio::test]
+async fn workspace_ids_are_validated_on_create() {
+    let fx = fixture().await;
+    let long = "w".repeat(129);
+    for invalid in ["", "has space", "../escape", "ws/a", "ws.a", long.as_str()] {
+        let (status, body) = fx
+            .agent(
+                Method::POST,
+                "workspaces",
+                Some(json!({"workspace_id": invalid, "name": "Bad"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid:?}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_workspace_id");
+        let (status, body) = send(
+            &fx.router,
+            Method::POST,
+            "/api/workspaces",
+            &human(&fx.owner),
+            Some(json!({"organization_id": fx.organization_id,
+                        "workspace_id": invalid, "name": "Bad"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid:?}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_workspace_id");
+    }
+    let (status, body) = send(
+        &fx.router,
+        Method::POST,
+        "/api/workspaces",
+        &human(&fx.owner),
+        Some(json!({"organization_id": fx.organization_id,
+                    "workspace_id": "ws_Valid-1", "name": "Good"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 /// A user who joins the organization as a member (through an invitation).
 async fn member_user(fx: &Fixture, email: &str) -> CurrentSession {
     let (token, _) = fx
@@ -1169,4 +1207,86 @@ async fn invitation_email_is_for_delivery_and_creator_changes_do_not_revoke() {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["role"], role);
     }
+}
+
+#[tokio::test]
+async fn organization_deletes_after_traffic_and_hard_deleted_workspaces_do_not_authenticate() {
+    let fx = fixture().await;
+    let owner = human(&fx.owner);
+    let pool = fx.auth.pool();
+    sqlx::query(
+        "INSERT INTO traffic_usage_hourly(workspace_id, window_start, traffic_class, source_type, \
+         source_id, destination_type, destination_id, payload_bytes, meter_version, updated_at) \
+         VALUES('ws_a', 0, 'virtual_network', 'machine', 'a', 'machine', 'b', 10, 1, 'now')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO agent_traffic_usage_hourly(workspace_id, window_start, traffic_class, \
+         source_type, source_id, destination_type, destination_id, payload_bytes, meter_version, \
+         updated_at) VALUES('ws_a', 0, 'virtual_network', 'agent', 'a', 'machine', 'b', 10, 1, 'now')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO network_usage_receipts(ticket, workspace_id, server_id, destination, created_at) \
+         VALUES('tkt_1', 'ws_a', $1, 'x', 0)",
+    )
+    .bind(&fx.server_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, body) = send(
+        &fx.router,
+        Method::DELETE,
+        "/api/workspaces/ws_a",
+        &owner,
+        Some(json!({"confirm_name": "Alpha", "revoke_machines": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let name = fx.auth.list_organizations(&fx.owner.user_id).await.unwrap()[0]
+        .name
+        .clone();
+    let (status, body) = send(
+        &fx.router,
+        Method::DELETE,
+        &format!("/api/organizations/{}", fx.organization_id),
+        &owner,
+        Some(json!({"confirm_name": name})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let left: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM traffic_usage_hourly) + \
+         (SELECT COUNT(*) FROM agent_traffic_usage_hourly) + \
+         (SELECT COUNT(*) FROM network_usage_receipts)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 0);
+    // A machine and Agent credential whose workspace row is gone (never
+    // revoked) do not authenticate.
+    sqlx::query("UPDATE machines SET revoked_at = NULL WHERE server_id = $1")
+        .bind(&fx.server_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, _) = send(
+        &fx.router,
+        Method::GET,
+        "/agent/workspaces/ws_a/admin/workspace/access",
+        &fx.agent_headers,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(fx
+        .auth
+        .authenticate_machine(&fx.machine_headers)
+        .await
+        .is_err());
 }

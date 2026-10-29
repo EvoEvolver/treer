@@ -63,6 +63,23 @@ pub(crate) fn validate_workspace_role(role: &str) -> Result<(), AuthFailure> {
     }
 }
 
+/// Workspace IDs appear in URLs, Controller state paths and Policy documents:
+/// 1-128 ASCII letters, digits, `_` or `-` (the machine/server ID charset).
+pub(crate) fn validate_workspace_id(value: &str) -> Result<(), AuthFailure> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(AuthFailure::bad_request(
+            "invalid_workspace_id",
+            "workspace_id must be 1-128 ASCII letters, digits, '_' or '-'",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_installation_id(value: &str) -> Result<String, AuthFailure> {
     if value.len() != 36
         || !value.starts_with("mid_")

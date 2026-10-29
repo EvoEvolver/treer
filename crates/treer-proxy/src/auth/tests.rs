@@ -1858,6 +1858,7 @@ async fn machine_enrollment_is_single_use_and_binds_identity() {
 #[tokio::test]
 async fn re_enrollment_reuses_installation_identity_and_rotates_credentials() {
     let store = AuthStore::for_test("owner-password").await;
+    store.seed_test_workspace("workspace-a").await;
     let installation = "mid_0123456789abcdef0123456789abcdef";
     let first = enroll(&store, "workspace-a", Some(installation), None)
         .await
@@ -1900,6 +1901,7 @@ async fn deleted_machine_can_be_re_enrolled_from_a_new_installation_but_a_live_o
     // Issue #126: a service config still names the old server ID while the
     // installation identity was regenerated after the machine was deleted.
     let store = AuthStore::for_test("owner-password").await;
+    store.seed_test_workspace("workspace-a").await;
     let (old_install, new_install) = (
         "mid_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "mid_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1975,6 +1977,7 @@ async fn deleted_machine_can_be_re_enrolled_from_a_new_installation_but_a_live_o
 #[tokio::test]
 async fn concurrent_claims_for_a_deleted_machine_each_become_their_own_machine() {
     let store = AuthStore::for_test("owner-password").await;
+    store.seed_test_workspace("workspace-a").await;
     let first = enroll(
         &store,
         "workspace-a",

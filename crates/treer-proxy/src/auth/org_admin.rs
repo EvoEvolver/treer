@@ -650,8 +650,25 @@ impl AuthStore {
         if workspace_count != 0 {
             return Ok(Err(DeletedOrganizationBlocked { workspace_count }));
         }
-        // The organization row cascades members, groups, invitations, deleted
-        // workspaces and its audit events; record the deletion platform-wide.
+        // Traffic meters and network receipts reference workspaces without a
+        // cascade (they outlive workspace soft-deletion); remove them with
+        // the organization. The organization row then cascades members,
+        // groups, invitations, deleted workspaces and its audit events.
+        for table in [
+            "traffic_usage_hourly",
+            "agent_traffic_usage_hourly",
+            "network_usage_receipts",
+        ] {
+            sqlx::query(&format!(
+                "DELETE FROM {table} WHERE workspace_id IN \
+                 (SELECT workspace_id FROM workspaces WHERE organization_id = $1)"
+            ))
+            .bind(organization_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        }
+        // Record the deletion platform-wide.
         sqlx::query(
             "INSERT INTO platform_audit_events(event_id, occurred_at, action, resource_kind, \
              resource_id, resource_name, payload) VALUES($1, $2, 'organization.deleted', \
