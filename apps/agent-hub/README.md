@@ -181,6 +181,15 @@ journal, port file, log), `jobs/<id>/` working directories. One process lock
 protects the state directory. Workers run on the hub's machine as the hub's OS
 user with full tool access.
 
+**Linux hosts.** `treer-launch` refuses a private state directory any of whose
+ancestors is group- or world-writable (workers fail with
+`private_state_unavailable`); Ubuntu's umask 002 creates such directories, so
+`chmod 755` the directories above `--state-dir`. Host-started processes get a
+fixed `PATH`, so start the App through `env PATH=... CARGO_HOME=... python3 ...`
+when workers need a user-local toolchain; workers inherit the hub's environment,
+including the workload `http_proxy` that reaches `*.treer` services such as the
+Git Gateway.
+
 **Upgrading from the Tree-Agent hub.** The schema is migrated in place. A job
 that was still live with a real worker Agent is marked `failed` ("hub
 upgraded") and that Agent is deleted with `treer agent admin delete`; the
