@@ -3,14 +3,11 @@ import { MachineMetricsPanel } from "@/components/machine-metrics-panel"
 import { agentPath } from "@/lib/workload-path"
 import { EmptyState, MachineRecovery, Status } from "@/components/control-plane-ui"
 import { Button } from "@/components/ui/button"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { api, machineName, type Agent, type Machine, type MachineService, type MachineTrafficRecord, type VirtualNetworkHost } from "@/lib/api"
-import { agentDisplayStatus, buildLabel, formatBytes, machineDisplayName, machineListen, machineRecoveryCommands, supervisionLabel } from "@/lib/control-plane"
+import { agentDisplayStatus, buildLabel, formatBytes, machineDisplayName, machineListen, supervisionLabel } from "@/lib/control-plane"
 import { cn } from "@/lib/utils"
 import {
-  Copy,
   ExternalLink,
-  MoreHorizontal,
   Network,
   Pencil,
   Server,
@@ -21,7 +18,7 @@ import {
 import { useState } from "react"
 import { statusLabel, t, intlLocale } from "@/i18n"
 
-export function MachineOverviewView({ machine, agents, services, virtualHosts, traffic, machines, workspaceId, onOpenAgent, onClose, onCopy }: { machine?: Machine; agents: Agent[]; services: MachineService[]; virtualHosts: VirtualNetworkHost[]; traffic: MachineTrafficRecord[]; machines: Machine[]; workspaceId?: string | null; onOpenAgent: (agentId: string) => void; onClose: () => void; onCopy: (value: string) => void }) {
+export function MachineOverviewView({ machine, agents, services, virtualHosts, traffic, machines, workspaceId, onOpenAgent, onClose, onCopy, onRename, onDelete }: { machine?: Machine; agents: Agent[]; services: MachineService[]; virtualHosts: VirtualNetworkHost[]; traffic: MachineTrafficRecord[]; machines: Machine[]; workspaceId?: string | null; onOpenAgent: (agentId: string) => void; onClose: () => void; onCopy: (value: string) => void; onRename: (machine: Machine) => void; onDelete: (machine: Machine) => void }) {
   const [localHealth, setLocalHealth] = useState<Record<string, "healthy" | "unreachable">>({})
   const outBytes = traffic.filter((t) => (t.source_type ?? "machine") === "machine" && t.source_server_id === machine?.server_id).reduce((sum, t) => sum + t.payload_bytes, 0)
   const inBytes = traffic.filter((t) => (t.destination_type ?? "machine") === "machine" && t.destination_server_id === machine?.server_id).reduce((sum, t) => sum + t.payload_bytes, 0)
@@ -33,7 +30,9 @@ export function MachineOverviewView({ machine, agents, services, virtualHosts, t
 
   async function probe(serviceId: string) {
     try {
-      await api(`/api/services/${encodeURIComponent(serviceId)}/probe`, { method: "POST", body: "{}" })
+      if (!workspaceId) throw new Error("no workspace")
+      // The Proxy routes service probes per workspace.
+      await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/services/${encodeURIComponent(serviceId)}/probe`, { method: "POST", body: "{}" })
       setLocalHealth((current) => ({ ...current, [serviceId]: "healthy" }))
     } catch {
       setLocalHealth((current) => ({ ...current, [serviceId]: "unreachable" }))
@@ -58,7 +57,11 @@ export function MachineOverviewView({ machine, agents, services, virtualHosts, t
         <p className="mt-2 max-w-2xl break-all font-mono text-[11px] text-muted-foreground" title={machine.root}>{machine.root}</p>
         {machine.status !== "online" && workspaceId && <MachineRecovery workspaceId={workspaceId} onCopy={onCopy} reason={t("machine.disconnected")} />}
       </div>
-      <Button variant="outline" className="shrink-0" onClick={onClose}>{t("org.close")}</Button>
+      <div className="flex shrink-0 flex-wrap justify-end gap-2">
+        <Button variant="outline" className="max-md:h-11" onClick={() => onRename(machine)}><Pencil />{t("machine.rename")}</Button>
+        <Button variant="outline" className="text-destructive max-md:h-11" onClick={() => onDelete(machine)}><Trash2 />{t("hub.remove_machine")}</Button>
+        <Button variant="outline" className="max-md:hidden" onClick={onClose}>{t("org.close")}</Button>
+      </div>
     </div>
 
     {workspaceId && <div className="mb-6 flex flex-wrap items-start gap-3"><ControllerUpdater key={`${workspaceId}/${machine.server_id}`} workspaceId={workspaceId} machine={machine} /></div>}
@@ -120,11 +123,4 @@ export function MachineOverviewView({ machine, agents, services, virtualHosts, t
       </div>})}</div> : <EmptyState icon={<Network />} label={t("machine.no_virtual_hosts_routed_to")} />}
     </section>
   </div></div>
-}
-
-export function MachineItem({ machine, machines = [], workspaceId, selected, onClick, onRename, onDelete, onCopy }: { machine: Machine; machines?: Machine[]; workspaceId?: string | null; selected?: boolean; onClick?: () => void; onRename: () => void; onDelete: () => void; onCopy: (value: string) => void }) {
-  const builds = t("machine.builds", { controller: buildLabel(machine.controller_build), host: buildLabel(machine.host_build) })
-  const buildTitle = `Controller ${machine.controller_build.version} (${machine.controller_build.git_commit})\nHost ${machine.host_build.version} (${machine.host_build.git_commit})`
-  const commands = workspaceId ? machineRecoveryCommands(workspaceId) : null
-  return <div className={cn("group flex min-h-[68px] items-start gap-2 rounded-[5px] px-2.5 py-2 hover:bg-accent", selected && "bg-accent hover:bg-accent")}><button type="button" onClick={onClick} className="flex min-w-0 flex-1 items-start gap-2 text-left"><span className={cn("mt-1.5 size-1.5 shrink-0 rounded-full bg-zinc-400", machine.status === "online" && "bg-emerald-500")} /><div className="min-w-0 flex-1"><div className="truncate text-xs font-medium">{machineDisplayName(machine, machines)}</div><div className="mt-1 truncate font-mono text-[9px] text-muted-foreground">{machine.root}</div><div className="mt-1 truncate font-mono text-[9px] text-muted-foreground" title={buildTitle}>{builds}</div>{machine.status !== "online" && <div className="mt-1 text-[9px] uppercase text-red-600">{t("machine.offline")}</div>}</div></button><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-7 shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[state=open]:opacity-100 max-md:opacity-100" aria-label={t("machine.actions_for", { name: machineName(machine) })}><MoreHorizontal /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={onRename}><Pencil />{t("machine.rename")}</DropdownMenuItem>{commands && machine.status !== "online" && <><DropdownMenuItem onSelect={() => onCopy(commands.restartController)}><Copy />{t("machine.copy_restart_controller")}</DropdownMenuItem><DropdownMenuItem onSelect={() => onCopy(commands.start)}><Copy />{t("machine.copy_restore")}</DropdownMenuItem><DropdownMenuSeparator /></>}<DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={onDelete}><Trash2 />{t("machine.delete")}</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
 }
