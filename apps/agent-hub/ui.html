@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Hub</title>
+<style>
+:root{color-scheme:light dark;--bg:#fbfbfa;--fg:#1d1d1b;--muted:#6b6a65;--line:#e3e2dc;--card:#fff;--accent:#2f5bd3;--ok:#1d7a46;--warn:#9a6200;--bad:#b42318;--code:#f3f2ee;--on-accent:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--fg:#ecebe6;--muted:#a3a29b;--line:#2f2e2b;--card:#1e1e1c;--accent:#8aa8ff;--ok:#5cc58b;--warn:#e0a84a;--bad:#ff8a7a;--code:#262623;--on-accent:#10131c}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{display:flex;flex-wrap:wrap;gap:.5rem 1rem;align-items:center;padding:.75rem 1rem;border-bottom:1px solid var(--line)}
+header h1{font-size:1rem;margin:0 1rem 0 0}nav{display:flex;gap:.25rem;flex-wrap:wrap}
+nav a{color:var(--fg);text-decoration:none;padding:.35rem .7rem;border-radius:.4rem;min-height:2.25rem;display:inline-flex;align-items:center}
+nav a[aria-current=page]{background:var(--code);font-weight:600}
+main{max-width:64rem;margin:0 auto;padding:1rem}
+h2{font-size:1.15rem;margin:.25rem 0 1rem}h3{font-size:1rem;margin:1.25rem 0 .5rem}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.45rem .5rem;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:600;color:var(--muted);font-size:.85rem}td a{color:var(--accent)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:.5rem;padding:1rem;margin-bottom:1rem}
+.meta{margin:0;display:grid;grid-template-columns:max-content 1fr;gap:.25rem 1rem;font-size:.9rem}.meta dt{color:var(--muted)}.meta dd{margin:0;overflow-wrap:anywhere}
+pre{background:var(--code);padding:.75rem;border-radius:.4rem;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;margin:0}
+.badge{display:inline-block;padding:0 .45rem;border-radius:1rem;font-size:.8rem;border:1px solid currentColor}
+.s-running,.s-starting,.s-handoff{color:var(--accent)}.s-archived,.s-done{color:var(--ok)}.s-failed,.s-blocked{color:var(--bad)}.s-stopped,.s-queued,.s-partial{color:var(--warn)}
+label{display:block;font-weight:600;margin:.75rem 0 .25rem}input,select,textarea{width:100%;font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:.4rem;padding:.5rem}
+textarea{min-height:8rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+button{font:inherit;min-height:2.5rem;padding:.4rem 1rem;border-radius:.4rem;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}button:disabled{opacity:.6;cursor:default}
+.row{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}.muted{color:var(--muted)}.error{color:var(--bad)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (max-width:640px){.hide-sm{display:none}main{padding:1rem}}
+</style>
+</head>
+<body>
+<header><h1>Agent Hub</h1><nav aria-label="Sections">
+<a href="#jobs">Jobs</a><a href="#new">New job</a><a href="#templates">Templates</a><a href="#handoffs">Handoffs</a></nav>
+<span id="who" class="muted" style="margin-left:auto;font-size:.85rem"></span></header>
+<main id="view" aria-live="polite"><p class="muted">Loading…</p></main>
+<script>
+"use strict";
+const view=document.getElementById('view');
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const badge=s=>s?`<span class="badge s-${esc(s)}">${esc(s)}</span>`:'';
+const when=s=>s?new Date(s).toLocaleString():'';
+let timer=null,me=null;
+async function api(path,options={}){
+  const r=await fetch('api/'+path,{...options,credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-Hub-Request':'1',...(options.headers||{})}});
+  const text=await r.text();let data;try{data=JSON.parse(text)}catch{data={error:{message:text}}}
+  if(!r.ok)throw new Error((data.error&&(data.error.code+': '+data.error.message))||('HTTP '+r.status));
+  return data;
+}
+function agentUi(job){
+  if(job.ui_url)return job.ui_url;
+  const m=location.pathname.match(/^(.*\/api\/workspaces\/[^/]+)\/apps\/[^/]+\/ui\//);
+  return m&&job.worker_agent_id&&job.status!=='archived'?`${m[1]}/agents/${encodeURIComponent(job.worker_agent_id)}/interface/ui/`:null;
+}
+function nav(){const r=(location.hash.slice(1)||'jobs').split('/')[0],section={job:'jobs',template:'templates'}[r]||r;for(const a of document.querySelectorAll('nav a')){if(a.getAttribute('href')==='#'+section)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current')}}
+async function jobs(){
+  const filter=sessionStorage.getItem('hub-filter')||'';
+  const data=await api('jobs'+(filter?'?status='+encodeURIComponent(filter):''));
+  view.innerHTML=`<div class="row" style="justify-content:space-between"><h2>Jobs</h2><label class="row" style="font-weight:400;margin:0">Status <select id="filter" style="width:auto">${['','queued,starting,running,handoff','archived','failed,stopped'].map(v=>`<option value="${v}" ${v===filter?'selected':''}>${v?esc(v.split(',')[0]==='queued'?'live':v):'all'}</option>`).join('')}</select></label></div>
+  ${data.jobs.length?`<table><thead><tr><th>Job</th><th>Template</th><th>Status</th><th class="hide-sm">Task</th><th class="hide-sm">Created</th></tr></thead><tbody>${data.jobs.map(j=>`<tr><td><a href="#job/${esc(j.id)}">${esc(j.id)}</a></td><td>${esc(j.template)}</td><td>${badge(j.status)}${j.handoff?' '+badge(j.handoff.status):''}</td><td class="hide-sm">${esc(j.task.slice(0,90))}</td><td class="hide-sm muted">${esc(when(j.created_at))}</td></tr>`).join('')}</tbody></table>`:'<p class="muted">No jobs yet. <a href="#new">Create one.</a></p>'}`;
+  document.getElementById('filter').onchange=e=>{try{sessionStorage.setItem('hub-filter',e.target.value)}catch{}render()};
+  timer=setTimeout(render,4000);
+}
+async function job(id){
+  const j=await api('jobs/'+encodeURIComponent(id));
+  const ui=agentUi(j),live=['queued','starting','running','handoff'].includes(j.status);
+  view.innerHTML=`<h2>${esc(j.id)} ${badge(j.status)}</h2>
+  <div class="card"><dl class="meta"><dt>Template</dt><dd><a href="#template/${esc(j.template.split('@')[0])}">${esc(j.template)}</a></dd><dt>Requester</dt><dd>${esc(j.requester.kind)} ${esc(j.requester.id)}</dd>
+  <dt>Address</dt><dd>${esc(j.address)}</dd><dt>Created</dt><dd>${esc(when(j.created_at))}</dd>${j.finished_at?`<dt>Finished</dt><dd>${esc(when(j.finished_at))}</dd>`:''}
+  ${j.worker_agent_id?`<dt>Worker</dt><dd>${esc(j.agent_name||'')} ${esc(j.worker_agent_id)}${j.cleanup?` <span class="muted">(${esc(j.cleanup)})</span>`:''}</dd>`:''}${j.session_id?`<dt>Session</dt><dd>${esc(j.session_id)}</dd>`:''}
+  ${j.error?`<dt>Error</dt><dd class="error">${esc(j.error)}</dd>`:''}${j.notice&&!live?`<dt>Notice</dt><dd>${esc(j.notice)}</dd>`:''}</dl>
+  <div class="row" style="margin-top:.75rem">${ui&&live?`<a href="${esc(ui)}" target="_blank" rel="noopener noreferrer"><button type="button">Open worker Agent UI</button></a>`:''}
+  ${live&&!j.stop_requested?'<button type="button" id="stop">Stop job</button>':''}${j.stop_requested&&live?'<span class="muted">Stop requested; waiting for the interruption handoff.</span>':''}
+  ${j.handoff?'<button type="button" id="chain">New job from this handoff</button>':''}${j.transcript?`<a href="${esc(j.transcript)}" target="_blank" rel="noopener noreferrer">Transcript export</a>`:''}</div></div>
+  <h3>Task</h3><pre>${esc(j.task)}</pre>
+  ${j.inputs.handoffs.length||j.inputs.repo||j.inputs.branch||j.inputs.notes?`<h3>Inputs</h3><dl class="meta">${j.inputs.handoffs.length?`<dt>Handoffs</dt><dd>${j.inputs.handoffs.map(h=>`<a href="#job/${esc(h)}">${esc(h)}</a>`).join(', ')}</dd>`:''}${['repo','branch','notes'].filter(k=>j.inputs[k]).map(k=>`<dt>${k}</dt><dd>${esc(j.inputs[k])}</dd>`).join('')}</dl>`:''}
+  <h3>Handoff</h3>${j.handoff?`<p>${badge(j.handoff.status)} ${esc(j.handoff.summary)}</p><pre>${esc(j.handoff.markdown)}</pre>`:'<p class="muted">No handoff yet.</p>'}
+  ${live?`<h3>Message the worker</h3><form id="msg"><label for="mt">Message</label><textarea id="mt" required maxlength="65536"></textarea><div class="row" style="margin-top:.5rem"><select id="mm" style="width:auto"><option value="queue">Queue after current turn</option><option value="steer">Steer current turn</option></select><button class="primary">Send</button><span id="ms" role="status"></span></div></form>`:''}
+  ${j.messages.length?`<h3>Messages</h3><table><tbody>${j.messages.map(m=>`<tr><td class="muted hide-sm">${esc(when(m.at))}</td><td>${esc(m.sender)} <span class="muted">${esc(m.mode)} · ${esc(m.state)}</span><pre>${esc(m.text)}</pre></td></tr>`).join('')}</tbody></table>`:''}`;
+  const stop=document.getElementById('stop');if(stop)stop.onclick=async()=>{if(!confirm('Stop '+j.id+'? The worker is asked for an interruption handoff first.'))return;stop.disabled=true;try{await api('jobs/'+j.id+'/stop',{method:'POST',body:'{}'});render()}catch(e){alert(e.message);stop.disabled=false}};
+  const chain=document.getElementById('chain');if(chain)chain.onclick=()=>{location.hash='new/'+j.id};
+  const form=document.getElementById('msg');if(form){form.onsubmit=async e=>{e.preventDefault();const s=document.getElementById('ms');try{const r=await api('jobs/'+j.id+'/message',{method:'POST',body:JSON.stringify({text:document.getElementById('mt').value,mode:document.getElementById('mm').value})});s.textContent=r.state;document.getElementById('mt').value=''}catch(err){s.textContent=err.message;s.className='error'}};}
+  if(live)timer=setTimeout(()=>{if(!document.activeElement||!['TEXTAREA','SELECT'].includes(document.activeElement.tagName))render();else timer=setTimeout(render,4000)},4000);
+}
+async function templates(){
+  const data=await api('templates');
+  view.innerHTML=`<h2>Templates</h2><table><thead><tr><th>Name</th><th>Version</th><th>Harness</th><th class="hide-sm">Description</th></tr></thead><tbody>${data.templates.map(t=>`<tr><td><a href="#template/${esc(t.name)}">${esc(t.name)}</a></td><td>v${t.version}</td><td>${esc(t.harness)}${t.model?' · '+esc(t.model):''}${t.effort?' · '+esc(t.effort):''}</td><td class="hide-sm">${esc(t.description)}</td></tr>`).join('')}</tbody></table>
+  <h3>New template</h3><form id="tf"><label for="tn">Name</label><input id="tn" required pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,63}"><label for="th">Harness</label><select id="th"><option>claude</option><option>codex</option></select><label for="ta">agent.md</label><textarea id="ta" required></textarea><div class="row" style="margin-top:.5rem"><button class="primary">Create</button><span id="ts" role="status"></span></div></form>`;
+  document.getElementById('tf').onsubmit=async e=>{e.preventDefault();try{const t=await api('templates',{method:'POST',body:JSON.stringify({name:tn.value,harness:th.value,agent_md:ta.value})});location.hash='template/'+t.name}catch(err){ts.textContent=err.message;ts.className='error'}};
+}
+async function template(name,version){
+  const t=await api('templates/'+encodeURIComponent(name)+(version?'?version='+version:''));
+  view.innerHTML=`<h2>${esc(t.name)} <span class="muted">v${t.version}</span></h2><div class="card"><dl class="meta"><dt>Harness</dt><dd>${esc(t.harness)}</dd><dt>Model</dt><dd>${esc(t.model||'default')}</dd><dt>Effort</dt><dd>${esc(t.effort||'default')}</dd><dt>Working dir</dt><dd>${esc(t.cwd)}</dd><dt>Description</dt><dd>${esc(t.description)}</dd><dt>Updated</dt><dd>${esc(when(t.updated_at))} by ${esc(t.updated_by)}</dd></dl>
+  <div class="row" style="margin-top:.75rem"><button type="button" id="use" class="primary">New job</button><button type="button" id="edit">Edit (new version)</button></div></div>
+  <h3>Versions</h3><p>${t.versions.map(v=>`<a href="#template/${esc(t.name)}/${v.version}">v${v.version}</a>${v.version===t.version?' (shown)':''}`).join(' · ')}</p>
+  <h3>agent.md</h3><div id="md"><pre>${esc(t.agent_md)}</pre></div>`;
+  document.getElementById('use').onclick=()=>{location.hash='new//'+t.name};
+  document.getElementById('edit').onclick=()=>{
+    document.getElementById('md').innerHTML=`<form id="ef"><label for="eh">Harness</label><select id="eh"><option ${t.harness==='claude'?'selected':''}>claude</option><option ${t.harness==='codex'?'selected':''}>codex</option></select><label for="emo">Model (empty = default)</label><input id="emo" value="${esc(t.model||'')}"><label for="eef">Effort (empty = default)</label><input id="eef" value="${esc(t.effort||'')}"><label for="ed">Description</label><input id="ed" value="${esc(t.description)}"><label for="ea">agent.md</label><textarea id="ea" style="min-height:24rem">${esc(t.agent_md)}</textarea><div class="row" style="margin-top:.5rem"><button class="primary">Save as new version</button><span id="es" role="status"></span></div></form>`;
+    document.getElementById('ef').onsubmit=async e=>{e.preventDefault();try{const n=await api('templates/'+encodeURIComponent(t.name),{method:'PUT',body:JSON.stringify({harness:eh.value,model:emo.value||null,effort:eef.value||null,description:ed.value,agent_md:ea.value})});location.hash='template/'+n.name+'/'+n.version}catch(err){es.textContent=err.message;es.className='error'}};
+  };
+}
+async function newJob(from,templateName){
+  const list=(await api('templates')).templates;
+  view.innerHTML=`<h2>New job</h2><form id="jf" class="card"><label for="jt">Template</label><select id="jt">${list.map(t=>`<option value="${esc(t.name)}" ${t.name===templateName?'selected':''}>${esc(t.name)} v${t.version} — ${esc(t.description)}</option>`).join('')}</select>
+  <label for="jk">Task</label><textarea id="jk" required></textarea><label for="jh">Input handoffs (job ids, comma separated)</label><input id="jh" value="${esc(from||'')}" placeholder="j-0001, j-0002">
+  <label for="jb">Branch (optional)</label><input id="jb" placeholder="apps-integration"><label for="jr">Repository (optional)</label><input id="jr" placeholder="/Users/dooms/treer"><label for="jn">Notes (optional)</label><textarea id="jn" style="min-height:4rem"></textarea>
+  <div class="row" style="margin-top:.75rem"><button class="primary">Create job</button><span id="js" role="status"></span></div></form>`;
+  document.getElementById('jf').onsubmit=async e=>{e.preventDefault();const s=document.getElementById('js');const inputs={handoffs:jh.value.split(',').map(x=>x.trim()).filter(Boolean)};if(jb.value)inputs.branch=jb.value;if(jr.value)inputs.repo=jr.value;if(jn.value)inputs.notes=jn.value;
+    try{const j=await api('jobs',{method:'POST',body:JSON.stringify({template:jt.value,task:jk.value,inputs})});location.hash='job/'+j.id}catch(err){s.textContent=err.message;s.className='error'}};
+}
+async function handoffs(){
+  const data=await api('handoffs');
+  view.innerHTML=`<h2>Handoffs</h2>${data.handoffs.length?`<table><thead><tr><th>Job</th><th>Template</th><th>Status</th><th>Summary</th><th class="hide-sm">Submitted</th></tr></thead><tbody>${data.handoffs.map(h=>`<tr><td><a href="#job/${esc(h.job)}">${esc(h.job)}</a></td><td>${esc(h.template)}</td><td>${badge(h.status)}</td><td>${esc(h.summary)}</td><td class="hide-sm muted">${esc(when(h.submitted_at))}</td></tr>`).join('')}</tbody></table>`:'<p class="muted">No handoffs yet.</p>'}`;
+}
+async function render(){
+  clearTimeout(timer);nav();
+  const [route,a,b]=(location.hash.slice(1)||'jobs').split('/');
+  try{
+    if(!me){me=await api('me');document.getElementById('who').textContent=`${me.address} · ${me.principal.kind} ${me.principal.id}`}
+    if(route==='job')await job(a);else if(route==='templates')await templates();else if(route==='template')await template(a,b);
+    else if(route==='new')await newJob(a,b);else if(route==='handoffs')await handoffs();else await jobs();
+  }catch(e){view.innerHTML=`<p class="error" role="alert">${esc(e.message)}</p>`}
+}
+// Console App-tree pages open `?node=<path>`; map them onto the same views.
+const node=new URLSearchParams(location.search).get('node');
+if(node&&!location.hash){const [k,v]=node.split('/');location.hash=k==='templates'?(v?'template/'+v:'templates'):k==='jobs'||k==='handoffs'?(v?'job/'+v:k):'jobs'}
+addEventListener('hashchange',render);render();
+</script>
+</body>
+</html>

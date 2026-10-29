@@ -152,13 +152,12 @@ owner, not each internal endpoint; Apps should namespace them. Delivery and App
 execution are separate: Apps must use a durable inbox/outbox and cannot infer
 exactly-once external effects from ACK or a network timeout.
 
-The bundled `apps/agent-hub` example persists local nodes, receipt tombstones,
-immutable outbox replies and retry keys. Its pure echo/reverse handlers have no
-external side effects. Queue/storage bounds refuse further admissions. Confirmed
-terminal rows may be retired in bounded batches; pending work and unconfirmed
-ACKs remain. This depends on Core's current ACK finality and retained sender/key
-idempotency, as documented in the example's README. Removing a key stops its future local
-handling; already accepted work follows the App's persisted job contract.
+The bundled [Agent Hub](../apps/agent-hub/README.md) uses this contract for
+real work: `templates/`, `jobs/` and `handoffs/` are App nodes, and a running
+`jobs/<id>` is an `agent` node whose Messages the hub forwards to the job's
+real worker Agent with `treer agent prompt`; once archived it becomes an App
+node. It records each handled message ID before ACK, so a redelivery after a
+crash is not forwarded twice, and creates at most one job per root Message.
 
 Message routes require `TREER_ENABLE_CORE_MESSAGES`. Clients must not strip a
 logical address and retry against the root mailbox when a send fails. Apps
