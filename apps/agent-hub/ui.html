@@ -125,7 +125,7 @@ async function job(id){
   body.innerHTML=`<div class="page">${node&&live?`<p class="muted" role="status">${j.status==='queued'?'Queued: waiting for a free worker slot.':'Waiting for the worker to start…'}</p>`:''}
   ${node&&j.error?`<p class="error">${esc(j.error)}</p>`:''}
   <h3>Task</h3><pre>${esc(j.task)}</pre>
-  ${j.inputs.handoffs.length||j.inputs.repo||j.inputs.branch||j.inputs.notes?`<h3>Inputs</h3><dl class="meta">${j.inputs.handoffs.length?`<dt>Handoffs</dt><dd>${j.inputs.handoffs.map(h=>`<a href="#job/${esc(h)}">${esc(h)}</a>`).join(', ')}</dd>`:''}${['repo','branch','notes'].filter(k=>j.inputs[k]).map(k=>`<dt>${k}</dt><dd>${esc(j.inputs[k])}</dd>`).join('')}</dl>`:''}
+  ${j.inputs.handoffs.length||j.inputs.repo||j.inputs.branch||j.inputs.notes?`<h3>Inputs</h3><dl class="meta">${j.inputs.handoffs.length?`<dt>Handoffs</dt><dd>${j.inputs.handoffs.map(h=>h.includes('/')?esc(h):`<a href="#job/${esc(h)}">${esc(h)}</a>`).join(', ')}</dd>`:''}${['repo','branch','notes'].filter(k=>j.inputs[k]).map(k=>`<dt>${k}</dt><dd>${esc(j.inputs[k])}</dd>`).join('')}</dl>`:''}
   <h3>Handoff</h3>${j.handoff?`<p>${badge(j.handoff.status)} ${esc(j.handoff.summary)}</p><pre>${esc(j.handoff.markdown)}</pre>`:'<p class="muted">No handoff yet.</p>'}
   ${live&&!node?`<h3>Message the worker</h3><form id="msg"><label for="mt">Message</label><textarea id="mt" required maxlength="60000"></textarea><div class="row" style="margin-top:.5rem"><select id="mm" style="width:auto"><option value="queue">Queue after current turn</option><option value="steer">Steer current turn</option></select><button class="primary">Send</button><span id="ms" role="status"></span></div></form>`:''}
   ${j.messages.length?`<h3>Messages</h3><table><tbody>${j.messages.map(m=>`<tr><td class="muted hide-sm">${esc(when(m.at))}</td><td>${esc(m.sender)} <span class="muted">${esc(m.mode)} · ${esc(m.state)}</span><pre>${esc(m.text)}</pre></td></tr>`).join('')}</tbody></table>`:''}
@@ -156,7 +156,7 @@ async function template(name,version){
 async function newJob(from,templateName){
   const list=(await api('templates')).templates;
   view.innerHTML=`<div class="page"><h2>New job</h2><form id="jf" class="card"><label for="jt">Template</label><select id="jt">${list.map(t=>`<option value="${esc(t.name)}" ${t.name===templateName?'selected':''}>${esc(t.name)} v${t.version} — ${esc(t.description)}</option>`).join('')}</select>
-  <label for="jk">Task</label><textarea id="jk" required></textarea><label for="jh">Input handoffs (job ids, comma separated)</label><input id="jh" value="${esc(from||'')}" placeholder="j-0001, j-0002">
+  <label for="jk">Task</label><textarea id="jk" required></textarea><label for="jh">Input handoffs (job ids or /other_hub/j-0003, comma separated)</label><input id="jh" value="${esc(from||'')}" placeholder="j-0001, /agent_hub_linux/j-0002">
   <label for="jb">Branch (optional)</label><input id="jb" placeholder="apps-integration"><label for="jr">Repository (optional)</label><input id="jr" placeholder="/Users/dooms/treer"><label for="jn">Notes (optional)</label><textarea id="jn" style="min-height:4rem"></textarea>
   <div class="row" style="margin-top:.75rem"><button class="primary">Create job</button><span id="js" role="status"></span></div></form></div>`;
   document.getElementById('jf').onsubmit=async e=>{e.preventDefault();const s=document.getElementById('js');const inputs={handoffs:jh.value.split(',').map(x=>x.trim()).filter(Boolean)};if(jb.value)inputs.branch=jb.value;if(jr.value)inputs.repo=jr.value;if(jn.value)inputs.notes=jn.value;

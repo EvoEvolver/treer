@@ -9,7 +9,9 @@ worker over its loopback Agent Interface, reverse-proxies its UI under
 `/workers/<id>/`, accepts the structured handoff the worker submits with a
 per-job secret, then archives the job (handoff, transcript export, provider
 session id), ends the worker process group and notifies the requester. Callers
-chain jobs themselves by passing earlier job ids in `inputs.handoffs`.
+chain jobs themselves by passing earlier job ids in `inputs.handoffs`, or another
+hub's handoffs by address (`/<other-hub>/j-0003`), which the hub fetches once at
+job creation through its workload proxy.
 """
 import argparse
 import contextlib
@@ -33,12 +35,16 @@ import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.error import HTTPError
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 HERE = Path(__file__).resolve().parent
 KEY = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z')
 JOB_ID = re.compile(r'j-[0-9]{4,9}\Z')
+# A handoff on another hub: `/<hub path>/j-0003` (also `<hub path>/jobs/j-0003`, a job's `address`).
+HANDOFF_REF = re.compile(r'/?((?:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}/){1,8}?)(?:jobs/|handoffs/)?(j-[0-9]{4,9})\Z')
+SERVICE_ID = re.compile(r'svc_[A-Za-z0-9]{1,64}\Z')
 PRINCIPAL = re.compile(r'[A-Za-z0-9_-]{1,128}\Z')
 HARNESSES = ('codex', 'claude')
 LIVE = ('queued', 'starting', 'running', 'handoff')
@@ -46,6 +52,9 @@ FINAL = ('archived', 'failed', 'stopped')
 STATUSES = LIVE + FINAL
 HANDOFF_STATUS = ('done', 'partial', 'blocked')
 HANDOFF_SECTIONS = ('What changed', 'Verification', 'Open questions', 'Next steps')
+VERDICTS = ('approve', 'changes-needed')
+REVIEW_TEMPLATE = 'reviewer'          # its handoffs must carry `verdict` and implementer notes
+REVIEW_NOTES = 'Notes for the implementer'
 MAX_BODY = 1024 * 1024
 MAX_TASK = 64 * 1024
 MAX_AGENT_MD = 128 * 1024
@@ -153,7 +162,30 @@ def template_file(path):
 
 # ---------------------------------------------------------------- handoffs
 
-def validate_handoff(markdown, job):
+def handoff_ref(ref, local):
+    """`j-0003` (this hub) or `/<hub path>/j-0003` -> (hub path or None, job id); `local` is this hub's address."""
+    if not isinstance(ref, str):
+        return None
+    if JOB_ID.fullmatch(ref):
+        return None, ref
+    match = HANDOFF_REF.fullmatch(ref)
+    if not match:
+        return None
+    hub = '/' + match.group(1).rstrip('/')
+    return (None if hub == local else hub), match.group(2)
+
+
+def section(body, title):
+    """The text under a `## title` heading up to the next heading of the same or a higher level."""
+    match = re.search(r'^(#{1,3})\s+' + re.escape(title) + r'\b[^\n]*\n', body, re.M | re.I)
+    if not match:
+        return None
+    rest = body[match.end():]
+    end = re.search(r'^#{1,%d}\s' % len(match.group(1)), rest, re.M)
+    return (rest[:end.start()] if end else rest).strip()
+
+
+def validate_handoff(markdown, job, hub=None):
     if not isinstance(markdown, str) or not markdown.strip():
         raise Fail(400, 'invalid_handoff', 'handoff markdown is required')
     if len(markdown.encode()) > MAX_HANDOFF:
@@ -171,22 +203,35 @@ def validate_handoff(markdown, job):
         problems.append('front matter `status` must be done, partial or blocked')
     if not front.get('summary'):
         problems.append('front matter `summary` (one line) is required')
+    if hub and front.get('hub') not in (None, hub):
+        problems.append(f'front matter `hub` must be {hub}')
+    reviewer = job['template'] == REVIEW_TEMPLATE
+    if (reviewer or 'verdict' in front) and front.get('verdict') not in VERDICTS:
+        problems.append('front matter `verdict` must be approve or changes-needed'
+                        + (' (required for reviewer jobs)' if reviewer else ''))
     headings = {m.group(1).strip().lower() for m in re.finditer(r'^#{1,3}\s+(.+?)\s*#*\s*$', body, re.M)}
-    for section in HANDOFF_SECTIONS:
-        if not any(h.startswith(section.lower()) for h in headings):
-            problems.append(f'section `## {section}` is missing')
+    for name in HANDOFF_SECTIONS + ((REVIEW_NOTES,) if reviewer else ()):
+        if not any(h.startswith(name.lower()) for h in headings):
+            problems.append(f'section `## {name}` is missing')
     if problems:
         raise Fail(400, 'invalid_handoff', 'handoff rejected: ' + '; '.join(problems))
+    if hub and 'hub' not in front:
+        # Every stored handoff names its hub, so a copy read elsewhere stays attributable.
+        markdown = markdown.replace('\n', f'\nhub: {hub}\n', 1)
+        front['hub'] = hub
     refs = {'branch': front.get('branch') or None,
             'commits': sorted(set(re.findall(r'\b[0-9a-f]{7,40}\b', front.get('commits', ''))))}
+    if front.get('verdict'):
+        refs['verdict'] = front['verdict']
     return markdown, front, refs
 
 
 HANDOFF_FORMAT = '''---
 job: {job}
+hub: {hub}
 template: {template}
 status: done            # done | partial | blocked
-summary: One line the caller can act on.
+summary: One line the caller can act on.{verdict}
 branch: feat/example    # optional; the branch you committed to
 commits: abc1234 def5678 # optional; space-separated hashes
 ---
@@ -202,7 +247,17 @@ Anything the caller must decide; "none" if none.
 
 ## Next steps
 What the next job should do; "none" if finished.
-'''
+{notes}'''
+REVIEW_FORMAT = ('\nverdict: changes-needed  # approve | changes-needed', '''
+## Notes for the implementer
+Written to be passed verbatim to a fresh implementer: each required change with
+path:line, why, and how to verify it; "none" when the verdict is approve.
+''')
+
+
+def handoff_format(job, template, hub):
+    verdict, notes = REVIEW_FORMAT if template == REVIEW_TEMPLATE else ('', '')
+    return HANDOFF_FORMAT.format(job=job, template=template, hub=hub, verdict=verdict, notes=notes)
 
 
 # ---------------------------------------------------------------- store
@@ -252,7 +307,8 @@ class Store:
         # earlier hub that created real Tree Agents).
         columns = {row[1] for row in self.db.execute('PRAGMA table_info(jobs)')}
         for name, decl in (('worker_pid', 'INTEGER'), ('worker_port', 'INTEGER'), ('worker_instance', 'TEXT'),
-                           ('token_hash', 'TEXT'), ('spawned_at', 'REAL'), ('restarts', 'INTEGER NOT NULL DEFAULT 0')):
+                           ('token_hash', 'TEXT'), ('spawned_at', 'REAL'), ('restarts', 'INTEGER NOT NULL DEFAULT 0'),
+                           ('remote_handoffs', 'TEXT')):
             if name not in columns:
                 self.db.execute(f'ALTER TABLE jobs ADD COLUMN {name} {decl}')
 
@@ -318,7 +374,9 @@ class Store:
         row = self.one('SELECT * FROM jobs WHERE id=?', (job_id,))
         return dict(row) if row else None
 
-    def create_job(self, body, requester, source_message=None):
+    def create_job(self, body, requester, source_message=None, remote=None):
+        """`remote` maps each non-local `inputs.handoffs` reference to its fetched snapshot (Hub.create_job)."""
+        remote = remote or {}
         if not isinstance(body, dict):
             raise Fail(400, 'invalid_job', 'job body must be a JSON object')
         unknown = set(body) - {'template', 'task', 'inputs', 'model'}
@@ -339,10 +397,11 @@ class Store:
             raise Fail(400, 'invalid_inputs', 'inputs is an object with handoffs, repo, branch, notes')
         handoffs = inputs.get('handoffs') or []
         if not isinstance(handoffs, list) or len(handoffs) > MAX_INPUT_HANDOFFS or len(set(handoffs)) != len(handoffs) \
-                or not all(isinstance(h, str) and JOB_ID.fullmatch(h) for h in handoffs):
-            raise Fail(400, 'invalid_inputs', f'inputs.handoffs is a list of at most {MAX_INPUT_HANDOFFS} distinct job ids')
+                or not all(isinstance(h, str) and (JOB_ID.fullmatch(h) or h in remote) for h in handoffs):
+            raise Fail(400, 'invalid_inputs', f'inputs.handoffs is a list of at most {MAX_INPUT_HANDOFFS} distinct job ids '
+                       'or other hubs\' handoff references (/<hub>/j-0003)')
         for h in handoffs:
-            if not self.one('SELECT 1 FROM handoffs WHERE job_id=?', (h,)):
+            if h not in remote and not self.one('SELECT 1 FROM handoffs WHERE job_id=?', (h,)):
                 raise Fail(409, 'input_handoff_missing', f'job {h} has no handoff yet')
         for name_ in ('repo', 'branch', 'notes'):
             value = inputs.get(name_)
@@ -360,9 +419,10 @@ class Store:
             seq = (db.execute('SELECT coalesce(max(seq),0)+1 FROM jobs').fetchone()[0])
             job_id = f'j-{seq:04d}'
             db.execute('''INSERT INTO jobs(seq,id,template,template_version,task,inputs,model,requester_id,requester_kind,
-                          source_message,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?)''',
+                          source_message,status,created_at,remote_handoffs) VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?)''',
                        (seq, job_id, template['name'], template['version'], task, encoded(clean), model,
-                        requester['id'], requester['kind'], source_message, now()))
+                        requester['id'], requester['kind'], source_message, now(),
+                        encoded({h: remote[h] for h in handoffs if h in remote}) if remote else None))
         return self.job(job_id)
 
     def update_job(self, job_id, **fields):
@@ -511,9 +571,65 @@ class Hub:
 
     # ---- requests from the API / Messages
     def create_job(self, body, requester, source_message=None):
-        job = self.store.create_job(body, requester, source_message)
+        remote = {}
+        inputs = body.get('inputs') if isinstance(body, dict) else None
+        refs = inputs.get('handoffs') if isinstance(inputs, dict) else None
+        if isinstance(refs, list) and len(refs) <= MAX_INPUT_HANDOFFS:
+            normalized = []
+            for ref in refs:
+                parsed = handoff_ref(ref, self.address)
+                if parsed is None:
+                    raise Fail(400, 'invalid_inputs', f'inputs.handoffs entry {str(ref)[:80]!r} is neither a job id nor '
+                               'a handoff reference /<hub>/j-0003')
+                other, job_id = parsed
+                if other is None:
+                    normalized.append(job_id)
+                    continue
+                key = f'{other}/{job_id}'
+                if key not in remote:
+                    remote[key] = self.fetch_remote_handoff(other, job_id)
+                normalized.append(key)
+            body = {**body, 'inputs': {**inputs, 'handoffs': normalized}}
+        job = self.store.create_job(body, requester, source_message, remote)
         self.log('job_created', job['id'])
         return job
+
+    def fetch_remote_handoff(self, other, job_id):
+        """Another hub's handoff, read once at job creation: resolve its App path to a service with the hub's
+        `treer`, then GET it through the workload proxy (http_proxy) as this hub's runtime identity."""
+        ref = f'{other}/{job_id}'
+
+        def unresolved(why):
+            return Fail(400, 'input_handoff_unresolved', f'input handoff {ref}: {why}')
+        try:
+            app = (self.cli.run(['app', 'show', other], timeout=20) or {}).get('app') or {}
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+            raise unresolved(f'no App {other} ({str(error)[:200]})')
+        service = app.get('service_id')
+        if not isinstance(service, str) or not SERVICE_ID.fullmatch(service):
+            raise unresolved(f'{other} has no service')
+        url = f'http://{service}.treer/api/handoffs/{quote(job_id)}?format=markdown'
+        try:
+            with build_opener(NoRedirect()).open(Request(url, headers={'Accept': 'text/markdown'}), timeout=30) as response:
+                markdown = response.read(MAX_HANDOFF + 1).decode('utf-8', 'strict')
+        except HTTPError as error:
+            detail = ''
+            with contextlib.suppress(Exception):
+                detail = json.loads(error.read(65536))['error']['message']
+            raise unresolved(f'{other} answered HTTP {error.code} {detail}'.strip())
+        except (OSError, ValueError) as error:
+            raise unresolved(f'{other} ({service}) is unreachable: {str(error)[:200]}')
+        if len(markdown.encode()) > MAX_HANDOFF:
+            raise unresolved('handoff is too large')
+        try:
+            front, _ = parse_front_matter(markdown.replace('\r\n', '\n'))
+        except Fail:
+            front = None
+        if not front or front.get('job') != job_id:
+            raise unresolved(f'{other} did not return a hub handoff for {job_id}')
+        self.log('remote_handoff_fetched', ref, service)
+        return {'markdown': markdown, 'hub': other, 'service_id': service,
+                'template': front.get('template', ''), 'fetched_at': now()}
 
     def worker_principal(self, job_id, token):
         """The per-job secret in the worker's environment (TREER_HUB_TOKEN)."""
@@ -529,7 +645,7 @@ class Hub:
             raise Fail(403, 'handoff_forbidden', 'only the job\'s worker (X-Hub-Job-Token) or a human may submit its handoff')
         if job['status'] not in ('starting', 'running') and not (job['status'] == 'queued' and principal['kind'] == 'human'):
             raise Fail(409, 'job_not_running', f"job {job_id} is {job['status']}; its handoff can no longer change")
-        markdown, front, refs = validate_handoff(markdown, job)
+        markdown, front, refs = validate_handoff(markdown, job, self.address)
         with self.store.tx() as db:
             current = db.execute('SELECT status FROM jobs WHERE id=?', (job_id,)).fetchone()['status']
             if current not in ('queued', 'starting', 'running'):
@@ -602,10 +718,16 @@ class Hub:
         extra = [f'- {k}: {inputs[k]}' for k in ('repo', 'branch') if inputs.get(k)]
         if extra or inputs.get('notes'):
             parts += ['## Inputs', ''] + extra + ([f"- notes:\n\n{inputs['notes'].strip()}"] if inputs.get('notes') else []) + ['']
+        remote = json.loads(job.get('remote_handoffs') or '{}')
         for ref in inputs.get('handoffs', []):
+            if ref in remote:
+                # Fetched from another hub at job creation; labelled with its full reference.
+                parts += [f"## Input handoff {ref} ({remote[ref]['template'] or 'template unknown'}; from hub {remote[ref]['hub']})", '',
+                          remote[ref]['markdown'].strip(), '']
+                continue
             handoff = self.store.handoff(ref)
             source = self.store.job(ref)
-            parts += [f"## Input handoff {ref} ({source['template']}@{source['template_version']})", '',
+            parts += [f"## Input handoff {self.address}/{ref} ({source['template']}@{source['template_version']})", '',
                       handoff['markdown'].strip() if handoff else '(missing)', '']
         parts += ['## This job', '',
                   f"- Job id: {job['id']} (also `$TREER_HUB_JOB`)",
@@ -615,7 +737,7 @@ class Hub:
                   'job\'s secret: use it only in the commands below and never print it.',
                   '', '## Submit the handoff (last step, once)', '',
                   'Write `handoff.md` in exactly this format (front matter + the four sections):', '',
-                  '```markdown', HANDOFF_FORMAT.format(job=job['id'], template=template['name']).strip(), '```', '',
+                  '```markdown', handoff_format(job['id'], template['name'], self.address).strip(), '```', '',
                   'Then submit it; a 400 response explains what to fix, so fix and resubmit:', '',
                   '```sh', self.HANDOFF_CMD, '```', '',
                   'If you cannot finish, submit with `status: partial` or `status: blocked` and say why.']
@@ -1063,15 +1185,19 @@ class Hub:
                 'worker': {'running': running, 'pid': job['worker_pid'] if running else None, 'restarts': job['restarts'],
                            'ui': f"workers/{job['id']}/" if running else None},
                 'session_id': job['session_id'], 'stop_requested': bool(job['stop_requested_at']),
-                'address': f"{self.address}/jobs/{job['id']}",
+                'hub': self.address, 'address': f"{self.address}/jobs/{job['id']}",
                 'handoff': None if not handoff else {'status': json.loads(handoff['front']).get('status'),
                                                      'summary': json.loads(handoff['front']).get('summary'),
+                                                     'verdict': json.loads(handoff['front']).get('verdict'),
+                                                     'ref': f"{self.address}/{job['id']}",
                                                      'url': f"api/handoffs/{job['id']}"}}
         if full:
             view.update({'cwd': job['cwd'], 'notice': job['notice'], 'messages': [
                              {'at': iso(m['at']), 'sender': m['sender'], 'mode': m['mode'], 'text': m['text'], 'state': m['state']}
                              for m in self.store.messages(job['id'])],
-                         'transcript': f"api/jobs/{job['id']}/transcript" if self.store.one('SELECT 1 FROM archives WHERE job_id=?', (job['id'],)) else None})
+                         'transcript': f"api/jobs/{job['id']}/transcript" if self.store.one('SELECT 1 FROM archives WHERE job_id=?', (job['id'],)) else None,
+                         'remote_handoffs': {ref: {'hub': r['hub'], 'service_id': r['service_id'], 'fetched_at': iso(r['fetched_at'])}
+                                             for ref, r in json.loads(job.get('remote_handoffs') or '{}').items()}})
             if handoff:
                 view['handoff'].update({'markdown': handoff['markdown'], 'front': json.loads(handoff['front']),
                                         'refs': json.loads(handoff['refs']), 'submitted_by': handoff['submitted_by'],
@@ -1113,6 +1239,11 @@ class Hub:
 
 # ---------------------------------------------------------------- identity
 
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
 class Identity:
     """Verify `X-Treer-Identity-Token` with the Proxy for this service; never decode claims locally."""
 
@@ -1149,10 +1280,6 @@ class Identity:
         return principal
 
     def verify(self, token):
-
-        class NoRedirect(HTTPRedirectHandler):
-            def redirect_request(self, *_args, **_kwargs):
-                return None
         request = Request(self.url, data=encoded({'token': token, 'audience': self.service_id}).encode(),
                           headers={'Content-Type': 'application/json'}, method='POST')
         try:
@@ -1289,7 +1416,12 @@ def server(hub, host, port, authorize, origins=()):
                     return self.send(200, manual.replace('HUB_URL', hub.base_url.rstrip('/')).replace('HUB_ADDRESS', hub.address),
                                      'text/markdown; charset=utf-8', [('Vary', 'Accept, User-Agent')])
                 if method == 'GET' and path == '/api/handoff-format':
-                    return self.send(200, HANDOFF_FORMAT.format(job='j-0000', template='TEMPLATE'), 'text/markdown; charset=utf-8')
+                    template = query.get('template', 'TEMPLATE')
+                    return self.send(200, handoff_format('j-0000', template if KEY.fullmatch(template) else 'TEMPLATE', hub.address),
+                                     'text/markdown; charset=utf-8')
+                if method == 'GET' and path == '/flows/review_loop.py':
+                    # The caller-side review loop script (public code, like the manual).
+                    return self.send(200, (HERE / 'flows' / 'review_loop.py').read_bytes(), 'text/x-python; charset=utf-8')
                 if not path.startswith('/api/'):
                     raise Fail(404, 'not_found', 'not found')
                 parts = path[5:].strip('/').split('/')
@@ -1470,7 +1602,8 @@ def server(hub, host, port, authorize, origins=()):
                 if n == 1 and method == 'GET':
                     rows = hub.store.q('''SELECT h.job_id, h.front, h.submitted_at, j.template, j.template_version, j.status
                                           FROM handoffs h JOIN jobs j ON j.id=h.job_id ORDER BY h.submitted_at DESC LIMIT ?''', (MAX_PAGE,))
-                    return self.send(200, {'handoffs': [{'job': r['job_id'], 'template': f"{r['template']}@{r['template_version']}",
+                    return self.send(200, {'handoffs': [{'job': r['job_id'], 'ref': f"{hub.address}/{r['job_id']}",
+                                                         'template': f"{r['template']}@{r['template_version']}",
                                                          'job_status': r['status'], 'status': json.loads(r['front']).get('status'),
                                                          'summary': json.loads(r['front']).get('summary'),
                                                          'submitted_at': iso(r['submitted_at'])} for r in rows]})
@@ -1481,7 +1614,9 @@ def server(hub, host, port, authorize, origins=()):
                         raise Fail(404, 'handoff_not_found', f"job {job['id']} has no handoff (status {job['status']})")
                     if query.get('format') == 'markdown':
                         return self.send(200, handoff['markdown'], 'text/markdown; charset=utf-8')
-                    return self.send(200, {'job': job['id'], 'template': f"{job['template']}@{job['template_version']}",
+                    return self.send(200, {'job': job['id'], 'hub': hub.address, 'ref': f"{hub.address}/{job['id']}",
+                                           'address': f"{hub.address}/jobs/{job['id']}",
+                                           'template': f"{job['template']}@{job['template_version']}",
                                            'job_status': job['status'], 'markdown': handoff['markdown'],
                                            'front': json.loads(handoff['front']), 'refs': json.loads(handoff['refs']),
                                            'session_id': job['session_id'], 'submitted_by': handoff['submitted_by'],
