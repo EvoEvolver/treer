@@ -61,6 +61,8 @@ export const zh: Messages = {
   "app_tree.refresh": "刷新子树",
   "app_tree.app": "App 管理的 App",
   "app_tree.agent": "App 管理的 Agent",
+  "app_tree.page": "页面",
+  "app_tree.view": "节点视图",
   "app_tree.messages": "消息",
   "app_tree.managed": "由 App 管理，不提供机器进程控制。",
   "app_tree.no_send": "此节点未提供消息能力。",

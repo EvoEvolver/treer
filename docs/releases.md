@@ -202,6 +202,30 @@ manifest without `treer-launch` as predating it.
 
 ## Release notes
 
+### Unreleased
+
+- **Agent Hub workers are App-owned subtree Agents.** Each job's worker is a
+  `treer-launch --no-register` child process of the hub (`/<hub>/jobs/<id>`
+  in the App tree), not an Agent in the workspace Tree; nothing is created
+  under `/agent-hub-workers` and the hub's `--folder` flag is gone. The hub
+  drives the worker over its loopback Agent Interface, forwards `jobs/<id>`
+  Messages to it, reverse-proxies its UI (HTTP and WebSocket) under
+  `/workers/<id>/`, and accepts the handoff over loopback with a per-job
+  secret (`TREER_HUB_URL`, `TREER_HUB_JOB`, `TREER_HUB_TOKEN`). Worker crashes
+  are restarted on the same session (`--max-restarts`), and a hub restart
+  resumes live jobs from their launcher journals. Upgrading fails jobs that
+  were live with a real worker Agent and deletes that Agent.
+- **Launcher `--no-register`:** with `--state-dir DIR`, `--listen
+  127.0.0.1:PORT` and `--port-file PATH`, a parent-owned launcher serves its
+  AIS on loopback without interface registration, a Core Message watcher or
+  the Controller private-state check, even when it inherits an Agent identity
+  (left to its tools). `--instructions FILE` adds system-level instructions;
+  `--model`/`--effort` seed a new session.
+- **Console node pages:** an App tree node with the new `page.read`
+  capability shows the App's own page for that node (`ui/?node=PATH`) in the
+  node view, through the App UI tunnel and iframe isolation, with a
+  Page/Messages toggle when it also has message capabilities.
+
 ### 0.2.2
 
 Additive release: no schema contraction. The Proxy adds columns to
