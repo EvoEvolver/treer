@@ -106,6 +106,7 @@ fn operator_requests_require_the_private_controller_credential() {
 
 #[test]
 fn admin_passthrough_keeps_paths_below_the_admin_prefix() {
+    assert!(ORG_ADMIN_ROUTE.starts_with("/api/org-admin/"));
     assert_eq!(
         admin_proxy_suffix("organization/invitations").unwrap(),
         "admin/organization/invitations"

@@ -193,7 +193,7 @@ async fn service_connect(
         .into_response())
 }
 
-/// Administration passthrough: `ANY /api/admin/PATH?QUERY` is forwarded as
+/// Administration passthrough: `ANY /api/org-admin/PATH?QUERY` is forwarded as
 /// the calling Agent to `/agent/workspaces/{ws}/admin/PATH?QUERY`. Only a
 /// validated workload identity is accepted (never the operator credential);
 /// the Proxy decides with an explicit Policy grant. Status and JSON body are
@@ -247,6 +247,10 @@ async fn admin_passthrough(
     );
     Ok(relayed)
 }
+
+/// Distinct from the Proxy's platform-administrator `/api/admin/*` so the
+/// two can never be confused in docs, logs or allowlists.
+const ORG_ADMIN_ROUTE: &str = "/api/org-admin/{*path}";
 
 /// `PATH` must stay a plain relative path below `admin/` on the Proxy.
 fn admin_proxy_suffix(path: &str) -> Result<String, LocalApiError> {
@@ -652,7 +656,7 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/api/messages/ack", post(acknowledge_core_messages))
         .route("/api/messages/import", post(import_core_messages))
         .route("/api/messages/{message_id}", get(get_core_message))
-        .route("/api/admin/{*path}", axum::routing::any(admin_passthrough))
+        .route(ORG_ADMIN_ROUTE, axum::routing::any(admin_passthrough))
         .route("/api/email", post(send_app_email))
         .route("/api/email/{idempotency_key}", get(app_email_status))
         .with_state(state)
