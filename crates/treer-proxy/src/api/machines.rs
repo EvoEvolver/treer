@@ -78,9 +78,19 @@ pub(super) async fn bootstrap_info(
     Extension(session): Extension<CurrentSession>,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<treer_protocol::MachineBootstrapResponse>, ApiFailure> {
+    machine_bootstrap(&state, &config, &auth, workspace_id, &session.user_id).await
+}
+
+pub(super) async fn machine_bootstrap(
+    state: &AppState,
+    config: &BootstrapConfig,
+    auth: &AuthStore,
+    workspace_id: String,
+    created_by: &str,
+) -> Result<Json<treer_protocol::MachineBootstrapResponse>, ApiFailure> {
     state.snapshot(&workspace_id).await?;
     let enrollment = auth
-        .create_machine_enrollment(&workspace_id, &session.user_id)
+        .create_machine_enrollment(&workspace_id, created_by)
         .await?;
     let (mut install_command, connect_command) =
         bootstrap_commands(&config.public_url, &enrollment);

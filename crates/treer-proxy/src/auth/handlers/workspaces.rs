@@ -62,6 +62,17 @@ pub(crate) async fn delete_workspace_group_grant(
     })))
 }
 
+pub(crate) async fn effective_workspace_access(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(workspace_id): AxumPath<String>,
+) -> Result<Json<treer_protocol::EffectiveWorkspaceAccess>, AuthFailure> {
+    Ok(Json(
+        auth.effective_workspace_access(&workspace_id, &AdminActor::User(session.user_id))
+            .await?,
+    ))
+}
+
 pub(crate) async fn audit_events(
     Extension(auth): Extension<AuthStore>,
     Extension(session): Extension<CurrentSession>,

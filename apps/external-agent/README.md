@@ -72,9 +72,13 @@ cargo build --release --locked --manifest-path apps/external-agent/Cargo.toml
 treer-external-agent /private/external-agent/config.json
 ```
 
-Run it as a Managed App (it checks `TREER_WORKSPACE_ID`, `TREER_AGENT_ID`,
+Run it as a Managed App whose UI port is `owner_listen`, declaring the
+`app-tree.v1` UI capability because the owner port serves `/api/tree`
+(`treer app create ... --ui-capability app-tree.v1 treer-external-agent -- CONFIG`,
+or `treer app update APP --ui-capability app-tree.v1` for an existing App;
+no restart). It checks `TREER_WORKSPACE_ID`, `TREER_AGENT_ID`,
 `TREER_SERVER_ID`, `TREER_AGENT_SERVER_URL` against the config and uses
-`TREER_WORKLOAD_CREDENTIAL`). The config is a private 0600 JSON file:
+`TREER_WORKLOAD_CREDENTIAL`. The config is a private 0600 JSON file:
 
 ```json
 {

@@ -180,11 +180,121 @@ pub(crate) async fn create_invitation(
     Extension(auth): Extension<AuthStore>,
     Extension(session): Extension<CurrentSession>,
     AxumPath(organization_id): AxumPath<String>,
-) -> Result<Json<Value>, AuthFailure> {
-    let (token, url) = auth
-        .create_invitation(&organization_id, &session.user_id)
+    body: axum::body::Bytes,
+) -> Result<Response, AuthFailure> {
+    let request = parse_optional_json::<treer_protocol::CreateInvitationRequest>(&body, "{}")?;
+    let created = auth
+        .create_organization_invitation(
+            &organization_id,
+            &AdminActor::User(session.user_id),
+            request,
+        )
         .await?;
-    Ok(Json(json!({ "token": token, "url": url.as_str() })))
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(created)).into_response())
+}
+
+pub(crate) async fn list_invitations(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(organization_id): AxumPath<String>,
+) -> Result<Json<treer_protocol::InvitationList>, AuthFailure> {
+    Ok(Json(treer_protocol::InvitationList {
+        invitations: auth
+            .list_organization_invitations(&organization_id, &AdminActor::User(session.user_id))
+            .await?,
+    }))
+}
+
+pub(crate) async fn revoke_invitation(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((organization_id, invitation_id)): AxumPath<(String, String)>,
+) -> Result<StatusCode, AuthFailure> {
+    auth.revoke_organization_invitation(
+        &organization_id,
+        &AdminActor::User(session.user_id),
+        &invitation_id,
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn leave_organization_handler(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(organization_id): AxumPath<String>,
+) -> Result<StatusCode, AuthFailure> {
+    auth.leave_organization(&organization_id, &session.user_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn transfer_organization_handler(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(organization_id): AxumPath<String>,
+    Json(request): Json<treer_protocol::TransferOrganizationRequest>,
+) -> Result<Json<Value>, AuthFailure> {
+    auth.transfer_organization(&organization_id, &session.user_id, &request.user_id)
+        .await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub(crate) async fn delete_organization_handler(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(organization_id): AxumPath<String>,
+    Json(request): Json<treer_protocol::DeleteOrganizationRequest>,
+) -> Result<Response, AuthFailure> {
+    delete_organization_response(
+        &auth,
+        &organization_id,
+        &AdminActor::User(session.user_id),
+        &request.confirm_name,
+    )
+    .await
+}
+
+pub(crate) async fn delete_organization_response(
+    auth: &AuthStore,
+    organization_id: &str,
+    actor: &AdminActor,
+    confirm_name: &str,
+) -> Result<Response, AuthFailure> {
+    match auth
+        .delete_organization(organization_id, actor, confirm_name)
+        .await?
+    {
+        Ok(()) => Ok(StatusCode::NO_CONTENT.into_response()),
+        Err(blocked) => Ok((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": ProtocolError::new(
+                    "organization_has_workspaces",
+                    format!(
+                        "delete the organization's {} workspace(s) first",
+                        blocked.workspace_count
+                    ),
+                ),
+                "workspace_count": blocked.workspace_count,
+            })),
+        )
+            .into_response()),
+    }
+}
+
+/// Parse a JSON body that older clients may omit entirely.
+pub(crate) fn parse_optional_json<T: serde::de::DeserializeOwned>(
+    body: &[u8],
+    empty: &str,
+) -> Result<T, AuthFailure> {
+    let body = if body.iter().all(u8::is_ascii_whitespace) {
+        empty.as_bytes()
+    } else {
+        body
+    };
+    serde_json::from_slice(body)
+        .map_err(|error| AuthFailure::bad_request("invalid_request", &error.to_string()))
 }
 
 pub(crate) async fn update_member_role_handler(

@@ -23,6 +23,7 @@ pub(super) async fn run_app_command(
             cwd,
             port,
             public,
+            ui_capability,
             executable,
             args,
         } => {
@@ -41,6 +42,7 @@ pub(super) async fn run_app_command(
                     port,
                     hostname: String::new(),
                     public,
+                    ui_capabilities: ui_capability,
                 })?,
             )
             .await
@@ -53,6 +55,7 @@ pub(super) async fn run_app_command(
             cwd,
             command,
             clear_args,
+            ui_capability,
             args,
         } => {
             let target = workload_tree::resolve_target(client, &target).await?;
@@ -61,9 +64,10 @@ pub(super) async fn run_app_command(
             } else {
                 None
             };
-            if cwd.is_none() && command.is_none() && args.is_none() {
+            let ui_capabilities = (!ui_capability.is_empty()).then_some(ui_capability);
+            if cwd.is_none() && command.is_none() && args.is_none() && ui_capabilities.is_none() {
                 anyhow::bail!(
-                    "app update requires --cwd, --command, arguments after --, or --clear-args"
+                    "app update requires --cwd, --command, --ui-capability, arguments after --, or --clear-args"
                 );
             }
             client
@@ -71,7 +75,12 @@ pub(super) async fn run_app_command(
                     Method::POST,
                     &format!("api/apps/{}/update", path_segment(&target)),
                     Some(serde_json::to_value(
-                        treer_protocol::UpdateAppDeploymentRequest { cwd, command, args },
+                        treer_protocol::UpdateAppDeploymentRequest {
+                            cwd,
+                            command,
+                            args,
+                            ui_capabilities,
+                        },
                     )?),
                 )
                 .await

@@ -935,6 +935,7 @@ async fn managed_app_owns_a_stable_service_and_virtual_host_across_runtime_resta
                 port: 9420,
                 hostname: String::new(),
                 public: false,
+                ui_capabilities: Vec::new(),
             },
         )
         .await
@@ -991,6 +992,7 @@ async fn managed_app_owns_a_stable_service_and_virtual_host_across_runtime_resta
                 port: 8080,
                 hostname: String::new(),
                 public: true,
+                ui_capabilities: Vec::new(),
             },
         )
         .await

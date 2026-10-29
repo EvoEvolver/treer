@@ -65,7 +65,7 @@ impl AuthStore {
         &self,
         session: &CurrentSession,
     ) -> Result<Option<Value>, AuthFailure> {
-        let row = sqlx::query("SELECT p.pending_id,i.token FROM pending_organization_invitations p JOIN invitations i ON encode(sha256(convert_to(i.token,'UTF8')),'hex')=p.invite_hash WHERE p.session_hash=$1 AND p.user_id=$2 AND p.expires_at>now() AND i.used_at IS NULL")
+        let row = sqlx::query("SELECT p.pending_id,i.token FROM pending_organization_invitations p JOIN invitations i ON encode(sha256(convert_to(i.token,'UTF8')),'hex')=p.invite_hash WHERE p.session_hash=$1 AND p.user_id=$2 AND p.expires_at>now() AND i.used_at IS NULL AND i.revoked_at IS NULL AND (i.expires_at IS NULL OR i.expires_at>now())")
             .bind(fast_secret_hash(&session.token)).bind(&session.user_id).fetch_optional(&self.pool).await.map_err(AuthFailure::database)?;
         let Some(row) = row else {
             return Ok(None);
@@ -141,7 +141,7 @@ impl AuthStore {
         let row = if token.is_empty() || token.len() > 256 {
             None
         } else {
-            sqlx::query("SELECT i.kind,o.organization_id,o.name FROM invitations i LEFT JOIN organizations o ON o.organization_id=i.organization_id WHERE i.token=$1 AND i.used_at IS NULL")
+            sqlx::query(&format!("SELECT i.kind,o.organization_id,o.name FROM invitations i LEFT JOIN organizations o ON o.organization_id=i.organization_id WHERE i.token=$1 AND {}", super::org_admin::INVITATION_USABLE))
                 .bind(token).fetch_optional(&self.pool).await.map_err(AuthFailure::database)?
         };
         Ok(treer_protocol::InvitationPreview {
@@ -153,7 +153,7 @@ impl AuthStore {
         })
     }
 
-    pub(super) async fn accept_invitation(
+    pub(crate) async fn accept_invitation(
         &self,
         token: &str,
         user_id: &str,
@@ -162,7 +162,7 @@ impl AuthStore {
             return Err(invalid_invitation());
         }
         let mut tx = self.pool.begin().await.map_err(AuthFailure::database)?;
-        let invitation = sqlx::query("SELECT kind,organization_id,role,used_at,used_by FROM invitations WHERE token=$1 FOR UPDATE")
+        let invitation = sqlx::query("SELECT kind,organization_id,CASE WHEN explicit_role THEN role ELSE 'member' END AS role,used_at,used_by,(revoked_at IS NOT NULL OR (expires_at IS NOT NULL AND expires_at <= now())) AS unusable FROM invitations WHERE token=$1 FOR UPDATE")
             .bind(token).fetch_optional(&mut *tx).await.map_err(AuthFailure::database)?
             .ok_or_else(invalid_invitation)?;
         if invitation.get::<String, _>("kind") != "organization" {
@@ -212,12 +212,26 @@ impl AuthStore {
                 already_member: true,
             });
         }
-        if used {
+        if used || invitation.get::<bool, _>("unusable") {
             return Err(invalid_invitation());
         }
+        let invited_role: String = invitation
+            .get::<Option<String>, _>("role")
+            .unwrap_or_else(|| "member".into());
+        let now = Utc::now().to_rfc3339();
         let inserted = sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES($1,$2,$3,$4) ON CONFLICT(organization_id,user_id) DO NOTHING")
-            .bind(&organization_id).bind(user_id).bind("member").bind(Utc::now().to_rfc3339())
+            .bind(&organization_id).bind(user_id).bind(&invited_role).bind(&now)
             .execute(&mut *tx).await.map_err(AuthFailure::database)?.rows_affected() == 1;
+        if inserted {
+            super::org_admin::apply_invitation_grants(
+                &mut tx,
+                token,
+                &organization_id,
+                user_id,
+                &now,
+            )
+            .await?;
+        }
         let role: String = sqlx::query_scalar(
             "SELECT role FROM organization_members WHERE organization_id=$1 AND user_id=$2",
         )
@@ -265,7 +279,7 @@ impl AuthStore {
     /// The bucket key is normalized by PostgreSQL's `lower()`, the same function
     /// the account lookup uses, so Unicode case variants share one budget; the
     /// window is judged on the database clock shared by all Proxies.
-    async fn reserve_login_attempt(
+    pub(super) async fn reserve_login_attempt(
         &self,
         prefix: &str,
         identifier: &str,
@@ -303,7 +317,7 @@ impl AuthStore {
         Ok(())
     }
 
-    async fn clear_login_attempts(
+    pub(super) async fn clear_login_attempts(
         &self,
         prefix: &str,
         identifier: &str,
@@ -318,7 +332,7 @@ impl AuthStore {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) async fn login(
+    pub(crate) async fn login(
         &self,
         email: &str,
         password: &str,
@@ -614,6 +628,9 @@ impl AuthStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
+        if row.is_some() {
+            self.touch_session(token).await;
+        }
         Ok(row.map(|row| CurrentSession {
             token: token.to_string(),
             user_id: row.get("id"),
@@ -746,47 +763,34 @@ impl AuthStore {
         Ok(())
     }
 
-    pub(super) async fn create_invitation(
+    /// Legacy member invitation (no email/grants); returns the secret token.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn create_invitation(
         &self,
         organization_id: &str,
         created_by: &str,
     ) -> Result<(String, Url), AuthFailure> {
-        self.require_manager(organization_id, created_by).await?;
-        let token = format!("inv_{}", Uuid::new_v4().simple());
-        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
-        sqlx::query(
-            "INSERT INTO invitations(\
-             token, created_at, created_by, kind, organization_id, role) \
-             VALUES($1, $2, $3, 'organization', $4, 'member')",
-        )
-        .bind(&token)
-        .bind(Utc::now().to_rfc3339())
-        .bind(created_by)
-        .bind(organization_id)
-        .execute(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?;
-        audit::insert(
-            &mut transaction,
-            NewAuditEvent {
+        let created = self
+            .insert_organization_invitation(
                 organization_id,
-                workspace_id: None,
-                actor_kind: "user",
-                actor_id: Some(created_by),
-                source: "api",
-                action: "invitation.created",
-                resource_kind: "invitation",
-                resource_id: organization_id,
-                resource_name: None,
-                payload: json!({ "role": "member" }),
-            },
-        )
-        .await
-        .map_err(AuthFailure::database)?;
-        transaction.commit().await.map_err(AuthFailure::database)?;
-        let mut url = self.app_public_url.clone();
-        url.set_path("/");
-        url.query_pairs_mut().clear().append_pair("invite", &token);
+                &AdminActor::user(created_by),
+                treer_protocol::CreateInvitationRequest {
+                    email: None,
+                    role: treer_protocol::OrganizationRole::Member,
+                    expires_in_hours: None,
+                    group_ids: Vec::new(),
+                    workspace_ids: Vec::new(),
+                },
+                false,
+            )
+            .await?;
+        let url = Url::parse(&created.url)
+            .map_err(|error| AuthFailure::internal("invitation_url_error", error.to_string()))?;
+        let token = url
+            .query_pairs()
+            .find(|(key, _)| key == "invite")
+            .map(|(_, value)| value.into_owned())
+            .ok_or_else(invalid_invitation)?;
         Ok((token, url))
     }
 
@@ -814,39 +818,49 @@ impl AuthStore {
         target_user_id: &str,
         role: &str,
     ) -> Result<(), AuthFailure> {
-        let actor_role = self
-            .require_organization_member(organization_id, actor)
-            .await?;
-        if actor_role != "owner" {
-            return Err(AuthFailure::forbidden(
-                "organization_owner_required",
-                "organization owner access required",
-            ));
-        }
-        if !matches!(role, "admin" | "member") {
+        self.update_member_role_as(
+            organization_id,
+            &AdminActor::user(actor),
+            target_user_id,
+            role,
+        )
+        .await
+    }
+
+    /// Owners (and Agents granted `org.member.manage`) set `owner`, `admin` or
+    /// `member`; an organization always keeps at least one owner.
+    pub async fn update_member_role_as(
+        &self,
+        organization_id: &str,
+        actor: &AdminActor,
+        target_user_id: &str,
+        role: &str,
+    ) -> Result<(), AuthFailure> {
+        self.require_owner_as(organization_id, actor).await?;
+        if !matches!(role, "owner" | "admin" | "member") {
             return Err(AuthFailure::bad_request(
                 "invalid_member_role",
-                "member role must be admin or member",
+                "member role must be owner, admin or member",
             ));
         }
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
-        let target = sqlx::query(
-            "SELECT m.role, u.preferred_name FROM organization_members m \
-             JOIN users u ON u.id = m.user_id \
-             WHERE m.organization_id = $1 AND m.user_id = $2 FOR UPDATE",
-        )
-        .bind(organization_id)
-        .bind(target_user_id)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?;
-        let old_role = target.as_ref().map(|row| row.get::<String, _>("role"));
-        let target_name = target
-            .as_ref()
-            .map(|row| row.get::<String, _>("preferred_name"));
-        let result = sqlx::query(
-            "UPDATE organization_members SET role = $1 \
-             WHERE organization_id = $2 AND user_id = $3 AND role != 'owner'",
+        let roles = super::org_admin::lock_member_roles(&mut transaction, organization_id).await?;
+        let old_role = roles
+            .iter()
+            .find(|(id, _)| id == target_user_id)
+            .map(|(_, role)| role.clone())
+            .ok_or_else(|| AuthFailure::not_found("member_not_found", "member does not exist"))?;
+        if old_role == "owner" && role != "owner" && super::org_admin::owner_count(&roles) <= 1 {
+            return Err(super::org_admin::last_owner_error());
+        }
+        let target_name: Option<String> =
+            sqlx::query_scalar("SELECT preferred_name FROM users WHERE id = $1")
+                .bind(target_user_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "UPDATE organization_members SET role = $1 WHERE organization_id = $2 AND user_id = $3",
         )
         .bind(role)
         .bind(organization_id)
@@ -854,19 +868,13 @@ impl AuthStore {
         .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
-        if result.rows_affected() != 1 {
-            return Err(AuthFailure::not_found(
-                "member_not_found",
-                "member does not exist or is the organization owner",
-            ));
-        }
         audit::insert(
             &mut transaction,
             NewAuditEvent {
                 organization_id,
                 workspace_id: None,
-                actor_kind: "user",
-                actor_id: Some(actor),
+                actor_kind: actor.kind(),
+                actor_id: Some(actor.id()),
                 source: "api",
                 action: "member.role_updated",
                 resource_kind: "organization_member",
@@ -887,61 +895,53 @@ impl AuthStore {
         actor: &str,
         target_user_id: &str,
     ) -> Result<(), AuthFailure> {
-        self.require_manager(organization_id, actor).await?;
+        self.remove_member_as(organization_id, &AdminActor::user(actor), target_user_id)
+            .await
+    }
+
+    /// Managers remove admins and members; removing an owner needs an owner
+    /// (or an Agent) and never leaves the organization without one.
+    pub async fn remove_member_as(
+        &self,
+        organization_id: &str,
+        actor: &AdminActor,
+        target_user_id: &str,
+    ) -> Result<(), AuthFailure> {
+        let actor_role = self.require_manager_as(organization_id, actor).await?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
-        let target = sqlx::query(
-            "SELECT m.role, u.preferred_name FROM organization_members m \
-             JOIN users u ON u.id = m.user_id \
-             WHERE m.organization_id = $1 AND m.user_id = $2 FOR UPDATE",
-        )
-        .bind(organization_id)
-        .bind(target_user_id)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?
-        .ok_or_else(|| AuthFailure::not_found("member_not_found", "member does not exist"))?;
-        let target_role: String = target.get("role");
-        let target_name: String = target.get("preferred_name");
+        let roles = super::org_admin::lock_member_roles(&mut transaction, organization_id).await?;
+        let target_role = roles
+            .iter()
+            .find(|(id, _)| id == target_user_id)
+            .map(|(_, role)| role.clone())
+            .ok_or_else(|| AuthFailure::not_found("member_not_found", "member does not exist"))?;
         if target_role == "owner" {
-            return Err(AuthFailure::conflict(
-                "owner_cannot_be_removed",
-                "the organization owner cannot be removed",
-            ));
+            if actor_role == "admin" {
+                return Err(AuthFailure::conflict(
+                    "owner_cannot_be_removed",
+                    "only an organization owner can remove an owner",
+                ));
+            }
+            if super::org_admin::owner_count(&roles) <= 1 {
+                return Err(super::org_admin::last_owner_error());
+            }
         }
-        sqlx::query(
-            "DELETE FROM organization_group_members gm USING organization_groups g \
-             WHERE gm.group_id = g.group_id AND g.organization_id = $1 AND gm.user_id = $2",
-        )
-        .bind(organization_id)
-        .bind(target_user_id)
-        .execute(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?;
-        sqlx::query(
-            "DELETE FROM workspace_user_grants g USING workspaces w \
-             WHERE g.workspace_id = w.workspace_id AND w.organization_id = $1 AND g.user_id = $2",
-        )
-        .bind(organization_id)
-        .bind(target_user_id)
-        .execute(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?;
-        sqlx::query(
-            "DELETE FROM organization_members \
-             WHERE organization_id = $1 AND user_id = $2",
-        )
-        .bind(organization_id)
-        .bind(target_user_id)
-        .execute(&mut *transaction)
-        .await
-        .map_err(AuthFailure::database)?;
+        let target_name: String =
+            sqlx::query_scalar("SELECT preferred_name FROM users WHERE id = $1")
+                .bind(target_user_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?
+                .unwrap_or_default();
+        super::org_admin::remove_member_rows(&mut transaction, organization_id, target_user_id)
+            .await?;
         audit::insert(
             &mut transaction,
             NewAuditEvent {
                 organization_id,
                 workspace_id: None,
-                actor_kind: "user",
-                actor_id: Some(actor),
+                actor_kind: actor.kind(),
+                actor_id: Some(actor.id()),
                 source: "api",
                 action: "member.removed",
                 resource_kind: "organization_member",
@@ -964,7 +964,25 @@ impl AuthStore {
         before: Option<i64>,
         limit: u16,
     ) -> Result<Vec<OrganizationAuditEvent>, AuthFailure> {
-        self.require_manager(organization_id, user_id).await?;
+        self.list_audit_events_as(
+            organization_id,
+            &AdminActor::user(user_id),
+            workspace_id,
+            before,
+            limit,
+        )
+        .await
+    }
+
+    pub async fn list_audit_events_as(
+        &self,
+        organization_id: &str,
+        actor: &AdminActor,
+        workspace_id: Option<&str>,
+        before: Option<i64>,
+        limit: u16,
+    ) -> Result<Vec<OrganizationAuditEvent>, AuthFailure> {
+        self.require_manager_as(organization_id, actor).await?;
         audit::list(
             &self.pool,
             organization_id,
@@ -1380,7 +1398,7 @@ impl AuthStore {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) async fn register(
+    pub(crate) async fn register(
         &self,
         invite: Option<&str>,
         email: &str,
@@ -1479,10 +1497,12 @@ impl AuthStore {
             }
             return Ok(None);
         };
-        let invitation = sqlx::query(
-            "SELECT kind, organization_id, role FROM invitations \
-             WHERE token = $1 AND used_at IS NULL FOR UPDATE",
-        )
+        let invitation = sqlx::query(&format!(
+            "SELECT i.kind, i.organization_id, \
+             CASE WHEN i.explicit_role THEN i.role ELSE 'member' END AS role FROM invitations i \
+             WHERE i.token = $1 AND {} FOR UPDATE",
+            super::org_admin::INVITATION_USABLE
+        ))
         .bind(invite)
         .fetch_optional(&mut **transaction)
         .await
@@ -1498,6 +1518,7 @@ impl AuthStore {
             token: invite.to_string(),
             kind: invitation.get("kind"),
             organization_id: invitation.get("organization_id"),
+            role: invitation.get("role"),
         }))
     }
 
@@ -1607,8 +1628,17 @@ pub(super) async fn apply_registration_membership(
                 .organization_id
                 .as_deref()
                 .ok_or_else(invalid_invitation)?;
-            sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES($1,$2,'member',$3)")
-                .bind(organization_id).bind(user_id).bind(now).execute(&mut **transaction).await.map_err(AuthFailure::database)?;
+            let role = invitation.role.as_deref().unwrap_or("member");
+            sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES($1,$2,$3,$4)")
+                .bind(organization_id).bind(user_id).bind(role).bind(now).execute(&mut **transaction).await.map_err(AuthFailure::database)?;
+            super::org_admin::apply_invitation_grants(
+                transaction,
+                &invitation.token,
+                organization_id,
+                user_id,
+                now,
+            )
+            .await?;
             audit::insert(
                 transaction,
                 NewAuditEvent {
@@ -1621,7 +1651,7 @@ pub(super) async fn apply_registration_membership(
                     resource_kind: "organization",
                     resource_id: organization_id,
                     resource_name: None,
-                    payload: json!({"role":"member","registration":true,"invitation_ref":fast_secret_hash(&invitation.token)}),
+                    payload: json!({"role":role,"registration":true,"invitation_ref":fast_secret_hash(&invitation.token)}),
                 },
             )
             .await

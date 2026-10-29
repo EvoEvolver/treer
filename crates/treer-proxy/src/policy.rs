@@ -71,6 +71,30 @@ pub const ACTION_MESSAGE_READ: &str = "message.read";
 pub const ACTION_MESSAGE_RECEIVE: &str = "message.receive";
 pub const ACTION_MESSAGE_ACK: &str = "message.ack";
 pub const ACTION_MESSAGE_IMPORT: &str = "message.import";
+// Administration actions an Agent may be granted (Agents only; humans keep
+// their organization/workspace role checks). Default-deny: see
+// [`PolicyEngine::authorize_admin`].
+pub const ACTION_ORG_MANAGE: &str = "org.manage";
+pub const ACTION_ORG_MEMBER_MANAGE: &str = "org.member.manage";
+pub const ACTION_ORG_INVITE_MANAGE: &str = "org.invite.manage";
+pub const ACTION_ORG_GROUP_MANAGE: &str = "org.group.manage";
+pub const ACTION_WORKSPACE_MANAGE: &str = "workspace.manage";
+pub const ACTION_WORKSPACE_ACCESS_MANAGE: &str = "workspace.access.manage";
+pub const ACTION_POLICY_PROVIDER_MANAGE: &str = "policy.provider.manage";
+pub const ACTION_AUDIT_READ: &str = "audit.read";
+pub const ACTION_MACHINE_ENROLL: &str = "machine.enroll";
+pub const ADMIN_ACTIONS: &[&str] = &[
+    ACTION_ORG_MANAGE,
+    ACTION_ORG_MEMBER_MANAGE,
+    ACTION_ORG_INVITE_MANAGE,
+    ACTION_ORG_GROUP_MANAGE,
+    ACTION_WORKSPACE_MANAGE,
+    ACTION_WORKSPACE_ACCESS_MANAGE,
+    ACTION_POLICY_PROVIDER_MANAGE,
+    ACTION_AUDIT_READ,
+    ACTION_MACHINE_ENROLL,
+];
+pub const RESOURCE_ORGANIZATION: &str = "organization";
 pub const RESOURCE_NETWORK_ENDPOINT: &str = "network.endpoint";
 pub const RESOURCE_AGENT: &str = "agent";
 pub const RESOURCE_WORKSPACE: &str = "workspace";
@@ -516,6 +540,38 @@ impl PolicyEngine {
         sensitive_read_baseline(role_allowed)
     }
 
+    /// Administration actions are default-deny for every non-human subject,
+    /// whatever the Policy mode, action defaults or Provider failure mode:
+    /// only a matched allow rule that names the subject (by ID, Tree or
+    /// group selector) grants them. A matched deny always wins; in monitor
+    /// mode the rule's computed effect is applied as if enforced.
+    pub async fn authorize_admin(&self, request: &PolicyRequest) -> Result<(), ProtocolError> {
+        let request = self.enrich(request).await?;
+        let denied = || {
+            ProtocolError::new(
+                "policy_denied",
+                "administration requires an explicit Policy allow rule naming this Agent",
+            )
+        };
+        for evaluator in self.evaluators.iter() {
+            if let Some(explanation) = evaluator.explain(&request).await? {
+                self.check_tree_revision(&request).await?;
+                self.record(&request, &explanation).await;
+                let granted = explanation.matched_rule_id.is_some()
+                    && explanation.subject_named
+                    && explanation.computed_effect == PolicyEffect::Allow
+                    && explanation.effective_decision == PolicyEffect::Allow;
+                return if granted { Ok(()) } else { Err(denied()) };
+            }
+            match evaluator.evaluate(&request).await? {
+                PolicyEvaluation::Abstain => {}
+                // Evaluators without explanations cannot show an explicit rule.
+                PolicyEvaluation::Decide(_) => return Err(denied()),
+            }
+        }
+        Err(denied())
+    }
+
     pub async fn authorize_batch(
         &self,
         requests: &[PolicyRequest],
@@ -639,8 +695,30 @@ pub struct PolicyExplanation {
     pub policy_revision: u64,
     pub tree_revision: Option<u64>,
     pub source: String,
+    /// The matched rule selects the subject by ID, Tree or group, not only by
+    /// kind/machine or an empty selector. Administration grants require it.
+    #[serde(skip)]
+    pub subject_named: bool,
 }
 impl PolicyExplanation {
+    /// What [`PolicyEngine::authorize_admin`] decides for a non-human subject,
+    /// so simulations show the administration default-deny.
+    pub fn with_admin_default_deny(mut self, action: &str) -> Self {
+        if !ADMIN_ACTIONS.contains(&action) {
+            return self;
+        }
+        let granted = self.matched_rule_id.is_some()
+            && self.subject_named
+            && self.computed_effect == PolicyEffect::Allow
+            && self.effective_decision == PolicyEffect::Allow;
+        if !granted {
+            self.computed_effect = PolicyEffect::Deny;
+            self.effective_decision = PolicyEffect::Deny;
+            self.reason = "administration actions need an allow rule naming the subject".into();
+        }
+        self
+    }
+
     fn into_decision(self) -> PolicyDecision {
         if self.effective_decision == PolicyEffect::Allow {
             PolicyDecision::Allow
@@ -666,6 +744,7 @@ impl PolicyExplanation {
             policy_revision: 0,
             tree_revision,
             source: "baseline".into(),
+            subject_named: false,
         }
     }
 }
@@ -1307,6 +1386,12 @@ impl CompiledWorkspacePolicy {
             .map(|r| r.effect)
             .or_else(|| self.defaults.get(&request.action).copied())
             .unwrap_or(PolicyEffect::Allow);
+        let subject_named = matched.is_some_and(|rule| {
+            rule.subjects.iter().any(|selector| {
+                (selector.id.is_some() || selector.tree.is_some() || selector.group.is_some())
+                    && self.subject_matches(selector, request)
+            })
+        });
         PolicyExplanation {
             computed_effect: effect,
             effective_decision: if self.mode == PolicyMode::Monitor {
@@ -1325,6 +1410,7 @@ impl CompiledWorkspacePolicy {
             policy_revision: self.revision,
             tree_revision: request.tree_revision,
             source: "workspace_policy".into(),
+            subject_named,
         }
     }
 
@@ -1565,6 +1651,119 @@ mod tests {
         assert!(cached_provider_result(&absent)
             .expect("missing provider abstains")
             .is_none());
+    }
+
+    struct CompiledEvaluator(CompiledWorkspacePolicy);
+
+    impl PolicyEvaluator for CompiledEvaluator {
+        fn explain<'a>(
+            &'a self,
+            request: &'a PolicyRequest,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<Option<PolicyExplanation>, ProtocolError>> + Send + 'a>,
+        > {
+            Box::pin(async move { Ok(Some(self.0.explain(request))) })
+        }
+        fn evaluate<'a>(&'a self, request: &'a PolicyRequest) -> PolicyFuture<'a> {
+            Box::pin(async move { Ok(PolicyEvaluation::Decide(self.0.evaluate(request))) })
+        }
+    }
+
+    fn admin_engine(mode: PolicyMode, document: serde_json::Value) -> PolicyEngine {
+        let document: WorkspacePolicyDocument = serde_json::from_value(document).unwrap();
+        PolicyEngine::new(
+            PolicyDecision::Allow,
+            vec![Arc::new(CompiledEvaluator(
+                CompiledWorkspacePolicy::compile(WorkspacePolicy {
+                    workspace_id: "workspace-a".into(),
+                    revision: 1,
+                    mode,
+                    document,
+                    updated_at: Utc::now(),
+                    updated_by: PolicyPrincipalRef {
+                        kind: PolicyPrincipalKind::Human,
+                        id: "owner".into(),
+                    },
+                }),
+            ))],
+        )
+    }
+
+    #[tokio::test]
+    async fn administration_actions_need_a_named_allow_rule_in_every_mode() {
+        let request = |action: &str| {
+            PolicyRequest::new(
+                "workspace-a",
+                PolicySubject::Agent {
+                    server_id: "machine-a".into(),
+                    agent_id: "agent-a".into(),
+                },
+                action,
+                PolicyResource::new(RESOURCE_ORGANIZATION, "org-a"),
+            )
+        };
+        // Permissive Core fallback, fail-open Provider policy and allow defaults.
+        assert!(PolicyEngine::allow_all()
+            .authorize_admin(&request(ACTION_ORG_MANAGE))
+            .await
+            .is_err());
+        let fail_open = PolicyEngine::new(
+            PolicyDecision::Allow,
+            vec![Arc::new(CompiledEvaluator(CompiledWorkspacePolicy::allow(
+                3,
+            )))],
+        );
+        assert!(fail_open
+            .authorize_admin(&request(ACTION_ORG_MANAGE))
+            .await
+            .is_err());
+        for mode in [PolicyMode::Monitor, PolicyMode::Enforce] {
+            let defaults = admin_engine(
+                mode,
+                serde_json::json!({"schema_version": POLICY_SCHEMA_VERSION,
+                    "defaults": {ACTION_ORG_MANAGE: "allow"}}),
+            );
+            assert!(defaults
+                .authorize_admin(&request(ACTION_ORG_MANAGE))
+                .await
+                .is_err());
+            let named = admin_engine(
+                mode,
+                serde_json::json!({"schema_version": POLICY_SCHEMA_VERSION,
+                "groups": {"admins": {"principals": [{"kind": "agent", "id": "agent-a"}]}},
+                "rules": [
+                    {"id": "by-kind", "priority": 1, "effect": "allow",
+                     "subjects": [{"kind": "agent"}], "actions": [ACTION_AUDIT_READ], "resources": [{}]},
+                    {"id": "by-group", "priority": 1, "effect": "allow",
+                     "subjects": [{"group": "admins"}], "actions": [ACTION_ORG_MANAGE], "resources": [{}]},
+                    {"id": "deny", "priority": 9, "effect": "deny",
+                     "subjects": [{"kind": "agent", "id": "agent-a"}],
+                     "actions": [ACTION_MACHINE_ENROLL], "resources": [{}]},
+                    {"id": "allow", "priority": 1, "effect": "allow",
+                     "subjects": [{"kind": "agent", "id": "agent-a"}],
+                     "actions": [ACTION_MACHINE_ENROLL], "resources": [{}]}
+                ]}),
+            );
+            assert!(named
+                .authorize_admin(&request(ACTION_ORG_MANAGE))
+                .await
+                .is_ok());
+            assert!(named
+                .authorize_admin(&request(ACTION_AUDIT_READ))
+                .await
+                .is_err());
+            assert!(named
+                .authorize_admin(&request(ACTION_MACHINE_ENROLL))
+                .await
+                .is_err());
+            // Ordinary actions keep the monitor-mode allow.
+            if mode == PolicyMode::Monitor {
+                assert!(named
+                    .authorize(&request(ACTION_MACHINE_ENROLL))
+                    .await
+                    .is_ok());
+            }
+        }
     }
 
     #[test]

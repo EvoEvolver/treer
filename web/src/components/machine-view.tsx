@@ -29,9 +29,8 @@ export function MachineOverviewView({ machine, agents, services, virtualHosts, t
   )).map((id) => machines.find((item) => item.server_id === id)).filter((item): item is Machine => Boolean(item))
 
   async function probe(serviceId: string) {
+    if (!workspaceId) return
     try {
-      if (!workspaceId) throw new Error("no workspace")
-      // The Proxy routes service probes per workspace.
       await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/services/${encodeURIComponent(serviceId)}/probe`, { method: "POST", body: "{}" })
       setLocalHealth((current) => ({ ...current, [serviceId]: "healthy" }))
     } catch {

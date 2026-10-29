@@ -129,7 +129,8 @@ pub(crate) async fn insert(
          event_id, organization_id, workspace_id, occurred_at, actor_kind, actor_id, \
          actor_name, source, action, outcome, resource_kind, resource_id, resource_name, payload, workspace_origin_id) \
          VALUES($1, $2, $3, $4, $5, $6, \
-         (SELECT preferred_name FROM users WHERE id = $6), $7, $8, 'succeeded', $9, $10, $11, $12, $3)",
+         CASE WHEN $5 = 'agent' THEN (SELECT name FROM agent_names WHERE agent_id = $6) \
+         ELSE (SELECT preferred_name FROM users WHERE id = $6) END, $7, $8, 'succeeded', $9, $10, $11, $12, $3)",
     )
     .bind(format!("aud_{}", Uuid::new_v4().simple()))
     .bind(event.organization_id)

@@ -99,6 +99,16 @@ pub(crate) fn app_deployment_from_row(
         created_by: row.get("created_by"),
         updated_at: parse_database_timestamp(&row, "updated_at", "App deployment")?,
         updated_by: row.get("updated_by"),
+        // Optional so projections that do not select it (ingress sync) still decode.
+        ui_capabilities: match row.try_get::<Value, _>("ui_capabilities") {
+            Ok(value) => serde_json::from_value(value).map_err(|error| {
+                AuthFailure::internal(
+                    "database_error",
+                    format!("App deployment has invalid UI capabilities: {error}"),
+                )
+            })?,
+            Err(_) => Vec::new(),
+        },
     })
 }
 

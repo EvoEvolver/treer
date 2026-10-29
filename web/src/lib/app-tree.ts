@@ -41,6 +41,8 @@ export async function readAppTree(workspaceId: string, appId: string, path: stri
   return decodeAppTree(await appJson(`/api/workspaces/${encodeURIComponent(workspaceId)}/apps/${encodeURIComponent(appId)}/ui/api/tree?path=${encodeURIComponent(path.join("/"))}`, signal), path)
 }
 
+export const APP_TREE_UI_CAPABILITY = "app-tree.v1"
+
 export type AppNodeSelection = { appId: string; ownerId: string; path: string[]; node: AppTreeNode }
 
 // Fallback for Proxies that predate AppDeployment.ui_capabilities: the Console asks

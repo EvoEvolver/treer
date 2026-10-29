@@ -140,8 +140,6 @@ export interface AppDeployment {
   access?: "public" | "workspace"
   desired_state: "running" | "stopped"
   runtime_agent_id?: string
-  // Browser UI contracts the App declares (e.g. "app-tree.v1"); absent on older Proxies.
-  ui_capabilities?: string[]
   restart_count: number
   status: "pending" | "running" | "stopped" | "exited" | "unavailable"
   pid?: number
@@ -151,6 +149,8 @@ export interface AppDeployment {
   created_by: string
   updated_at: string
   updated_by: string
+  /** Browser UI contracts the App declares, e.g. "app-tree.v1"; omitted when none. */
+  ui_capabilities?: string[]
 }
 
 export type PolicyPublishAuthority = "owner_session" | "provider_operator"

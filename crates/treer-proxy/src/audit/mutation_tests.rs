@@ -215,6 +215,7 @@ async fn reenrollment_is_a_real_rotation_and_app_compound_mutations_are_atomic()
                 port: 3000,
                 hostname: String::new(),
                 public: false,
+                ui_capabilities: Vec::new(),
             },
         )
         .await

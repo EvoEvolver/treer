@@ -79,4 +79,21 @@ class SchemaTests(unittest.TestCase):
             policy.evaluate_request({'subject':{},'action':'agent.prompt','resource':{}}, {'document':self.rule_document(),'mode':'monitor','revision':1})
         self.assertEqual(caught.exception.code, 'core_explain_required')
 
+    def test_admin_actions_are_default_deny_for_agents_in_the_simulator(self):
+        def run(document, mode, subject):
+            bundle={'revision':1,'mode':mode,'document':{'schema_version':1,'groups':{},'defaults':{},'rules':[],**document}}
+            return policy.evaluate_request({'subject':subject,'action':'org.invite.manage','resource':{'kind':'organization','id':'org_1'}},bundle)
+        agent={'kind':'agent','id':'agent-a'}
+        # No rules (monitor) and an allow default both deny Agents.
+        self.assertEqual(run({}, 'monitor', agent)['decision'], 'deny')
+        self.assertEqual(run({'defaults':{'org.invite.manage':'allow'}}, 'monitor', agent)['decision'], 'deny')
+        rule=lambda subject:{'rules':[{'id':'r','priority':1,'effect':'allow','subjects':[subject],'actions':['org.invite.manage'],'resources':[{}]}]}
+        # Selecting every Agent by kind does not name this one.
+        self.assertEqual(run(rule({'kind':'agent'}), 'enforce', agent)['decision'], 'deny')
+        for mode in ('monitor','enforce'):
+            self.assertEqual(run(rule({'kind':'agent','id':'agent-a'}), mode, agent)['decision'], 'allow')
+        # Humans keep role checks; the simulator does not apply the Agent gate.
+        self.assertEqual(run({}, 'monitor', {'kind':'human','id':'usr_1'})['decision'], 'allow')
+        self.assertEqual(set(policy.ADMIN_ACTIONS), {'org.manage','org.member.manage','org.invite.manage','org.group.manage','workspace.manage','workspace.access.manage','policy.provider.manage','audit.read','machine.enroll'})
+
 if __name__ == '__main__': unittest.main()

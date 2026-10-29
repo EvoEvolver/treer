@@ -235,7 +235,7 @@ impl AuthStore {
         let rows = sqlx::query(
             "SELECT app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
              service_id, desired_state, runtime_agent_id, restart_count, last_error, \
-             created_at, created_by, updated_at, updated_by, startup_revision FROM app_deployments \
+             created_at, created_by, updated_at, updated_by, startup_revision, ui_capabilities FROM app_deployments \
              WHERE workspace_id = $1 ORDER BY lower(name), app_id",
         )
         .bind(workspace_id)
@@ -253,7 +253,7 @@ impl AuthStore {
         let rows = sqlx::query(
             "SELECT app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
              service_id, desired_state, runtime_agent_id, restart_count, last_error, \
-             created_at, created_by, updated_at, updated_by, startup_revision FROM app_deployments \
+             created_at, created_by, updated_at, updated_by, startup_revision, ui_capabilities FROM app_deployments \
              WHERE workspace_id = $1 AND server_id = $2 ORDER BY app_id",
         )
         .bind(workspace_id)
@@ -272,7 +272,7 @@ impl AuthStore {
         let row = sqlx::query(
             "SELECT app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
              service_id, desired_state, runtime_agent_id, restart_count, last_error, \
-             created_at, created_by, updated_at, updated_by, startup_revision FROM app_deployments \
+             created_at, created_by, updated_at, updated_by, startup_revision, ui_capabilities FROM app_deployments \
              WHERE workspace_id = $1 AND (app_id = $2 OR runtime_agent_id = $2 OR name = $2) ORDER BY (app_id = $2) DESC, (runtime_agent_id = $2) DESC, app_id",
         )
         .bind(workspace_id)
@@ -292,7 +292,7 @@ impl AuthStore {
         let row = sqlx::query(
             "SELECT app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
              service_id, desired_state, runtime_agent_id, restart_count, last_error, \
-             created_at, created_by, updated_at, updated_by, startup_revision FROM app_deployments \
+             created_at, created_by, updated_at, updated_by, startup_revision, ui_capabilities FROM app_deployments \
              WHERE workspace_id = $1 AND runtime_agent_id = $2",
         )
         .bind(workspace_id)
@@ -346,6 +346,9 @@ impl AuthStore {
         let command = validate_launch_profile_command(&request.command)?;
         let args = validate_launch_profile_args(request.args)?;
         let cwd = validate_launch_profile_cwd(&request.cwd)?;
+        let ui_capabilities =
+            treer_protocol::normalize_app_ui_capabilities(&request.ui_capabilities)
+                .map_err(|e| AuthFailure::bad_request(&e.code, &e.message))?;
         if request.port == 0 {
             return Err(AuthFailure::bad_request(
                 "invalid_app",
@@ -407,6 +410,7 @@ impl AuthStore {
             created_by: actor.to_string(),
             updated_at: now,
             updated_by: actor.to_string(),
+            ui_capabilities,
         };
 
         sqlx::query(
@@ -442,8 +446,8 @@ impl AuthStore {
         sqlx::query(
             "INSERT INTO app_deployments(app_id, workspace_id, name, server_id, command, args, cwd, \
              port, hostname, service_id, desired_state, runtime_agent_id, restart_count, last_error, \
-             created_at, created_by, updated_at, updated_by) \
-             VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'running', $1, 0, NULL, $11, $12, $13, $14)",
+             created_at, created_by, updated_at, updated_by, ui_capabilities) \
+             VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'running', $1, 0, NULL, $11, $12, $13, $14, $15)",
         )
         .bind(&deployment.app_id)
         .bind(&deployment.workspace_id)
@@ -461,6 +465,7 @@ impl AuthStore {
         .bind(&deployment.created_by)
         .bind(deployment.updated_at.to_rfc3339())
         .bind(&deployment.updated_by)
+        .bind(serde_json::json!(deployment.ui_capabilities))
         .execute(&mut *transaction)
         .await
         .map_err(app_deployment_write_error)?;
@@ -553,7 +558,7 @@ impl AuthStore {
             "UPDATE app_deployments SET desired_state = $1, updated_at = $2, updated_by = $3 \
              WHERE workspace_id = $4 AND app_id = $5 RETURNING app_id, workspace_id, name, server_id, \
              command, args, cwd, port, hostname, service_id, desired_state, runtime_agent_id, \
-             restart_count, last_error, created_at, created_by, updated_at, updated_by, startup_revision",
+             restart_count, last_error, created_at, created_by, updated_at, updated_by, startup_revision, ui_capabilities",
         )
         .bind(app_desired_state_str(desired_state))
         .bind(Utc::now().to_rfc3339())
@@ -583,6 +588,32 @@ impl AuthStore {
         .bind(&request.command)
         .bind(serde_json::json!(request.args))
         .bind(request.cwd.as_deref().unwrap_or("."))
+        .bind(Utc::now().to_rfc3339())
+        .bind(actor)
+        .bind(workspace_id)
+        .bind(app_id)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        self.resolve_app_deployment(workspace_id, app_id).await
+    }
+
+    /// Replace the declared UI capabilities; presentation metadata only, so
+    /// the running process and startup revision are untouched.
+    pub async fn set_app_ui_capabilities(
+        &self,
+        workspace_id: &str,
+        app_id: &str,
+        capabilities: &[String],
+        actor: &str,
+    ) -> Result<AppDeployment, AuthFailure> {
+        let capabilities = treer_protocol::normalize_app_ui_capabilities(capabilities)
+            .map_err(|e| AuthFailure::bad_request(&e.code, &e.message))?;
+        sqlx::query(
+            "UPDATE app_deployments SET ui_capabilities = $1, updated_at = $2, updated_by = $3 \
+             WHERE workspace_id = $4 AND app_id = $5",
+        )
+        .bind(serde_json::json!(capabilities))
         .bind(Utc::now().to_rfc3339())
         .bind(actor)
         .bind(workspace_id)

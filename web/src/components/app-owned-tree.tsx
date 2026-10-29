@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { Bot, Boxes, RefreshCw } from "lucide-react"
 import { ApiError, type AppDeployment } from "@/lib/api"
-import { knownAppTreeSupport, probeAppTreeSupport, readAppTree, type AppNodeSelection, type AppTreeNode } from "@/lib/app-tree"
+import { APP_TREE_UI_CAPABILITY, knownAppTreeSupport, probeAppTreeSupport, readAppTree, type AppNodeSelection, type AppTreeNode } from "@/lib/app-tree"
 import { workloadLinkProps } from "@/lib/workload-link"
 import { TreeGroup, TreeRow, treeIndent } from "@/components/tree-row"
 import { t } from "@/i18n"
@@ -18,7 +18,6 @@ export type AppTreeNavigation = {
 // only when a Proxy predates that field does the Console fall back to asking
 // each running App once. Until a legacy App answers, and for every App that
 // does not own a directory, its row stays a plain leaf.
-export const APP_TREE_CAPABILITY = "app-tree.v1"
 export function useAppTreeSupport(workspaceId: string | null, apps: AppDeployment[]): Set<string> {
   const running = workspaceId ? apps.filter(app => app.ui_capabilities === undefined && app.status === "running").map(app => app.app_id).sort() : []
   const runningKey = running.join("\n")
@@ -38,7 +37,7 @@ export function useAppTreeSupport(workspaceId: string | null, apps: AppDeploymen
   }, [workspaceId, runningKey, retry])
   if (!workspaceId) return new Set()
   return new Set(apps.filter(app => app.ui_capabilities !== undefined
-    ? app.ui_capabilities.includes(APP_TREE_CAPABILITY)
+    ? app.ui_capabilities.includes(APP_TREE_UI_CAPABILITY)
     : knownAppTreeSupport(workspaceId, app.app_id) === "yes").map(app => app.app_id))
 }
 

@@ -693,6 +693,7 @@ async fn raw_public_tcp_is_refused_for_the_active_policy_provider_service() {
                 port: 8888,
                 hostname: String::new(),
                 public: false,
+                ui_capabilities: Vec::new(),
             },
         )
         .await
@@ -764,6 +765,7 @@ async fn concurrent_provider_selection_and_raw_tcp_publication_are_mutually_excl
                 port: 8888,
                 hostname: String::new(),
                 public: false,
+                ui_capabilities: Vec::new(),
             },
         )
         .await

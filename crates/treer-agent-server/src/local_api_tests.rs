@@ -103,3 +103,21 @@ fn operator_requests_require_the_private_controller_credential() {
     );
     assert!(operator_credential_matches("opc_secret", &headers));
 }
+
+#[test]
+fn admin_passthrough_keeps_paths_below_the_admin_prefix() {
+    assert_eq!(
+        admin_proxy_suffix("organization/invitations").unwrap(),
+        "admin/organization/invitations"
+    );
+    for path in [
+        "",
+        "../machines",
+        "organization//members",
+        "a/./b",
+        "a%2F..",
+        "a\\b",
+    ] {
+        assert!(admin_proxy_suffix(path).is_err(), "{path}");
+    }
+}

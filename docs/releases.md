@@ -202,6 +202,36 @@ manifest without `treer-launch` as predating it.
 
 ## Release notes
 
+### Unreleased
+
+- **App UI capabilities:** Apps declare browser UI contracts with
+  `treer app create|update --ui-capability NAME` (repeatable) or
+  `ui_capabilities` on the App create/update API; `AppDeployment.ui_capabilities`
+  persists them. `app-tree.v1` makes the Console show the App's subtree without
+  probing; Agent Hub and External Agent declare it. A capability-only update
+  does not restart the App and needs `agent.update`.
+- **Agent administration through Policy** (`agent.admin.v1`): Agents call
+  `$TREER_AGENT_SERVER_URL/api/admin/...` (Proxy
+  `/agent/workspaces/{ws}/admin/...`) to manage their organization and
+  workspace. New actions `org.manage`, `org.member.manage`,
+  `org.invite.manage`, `org.group.manage`, `workspace.manage`,
+  `workspace.access.manage`, `policy.provider.manage`, `audit.read` and
+  `machine.enroll` are default-deny for Agents in every Policy mode; only an
+  explicit allow rule naming the Agent grants them. Changes are audited with
+  the Agent as actor (`actor_name` now resolves Agent names).
+- **Settings APIs** (`settings.admin.v1`): invitations take `email`, `role`,
+  `expires_in_hours`, `group_ids`, `workspace_ids` and can be listed and
+  revoked (`GET`/`DELETE`); accepting applies them, and invitations created
+  before this release still join as `member` and never expire. Organization
+  `leave`, `transfer` and `DELETE` (`409 organization_has_workspaces` with
+  `workspace_count`); owners can now promote/demote owners while one remains
+  (`409 last_owner`). `GET/DELETE /api/auth/sessions`, `POST /api/auth/password`,
+  `GET /api/workspaces/{id}/access/effective`, and
+  `DELETE /api/workspaces/{id}` with `{confirm_name, revoke_machines}`.
+  Schema: additive columns on `invitations` and `sessions`.
+- **Console:** machine-page service probes call
+  `POST /api/workspaces/{ws}/services/{id}/probe` (the old path had no route).
+
 ### 0.2.1
 
 Additive release: no breaking changes and no schema contraction. Update

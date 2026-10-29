@@ -193,6 +193,76 @@ async fn service_connect(
         .into_response())
 }
 
+/// Administration passthrough: `ANY /api/admin/PATH?QUERY` is forwarded as
+/// the calling Agent to `/agent/workspaces/{ws}/admin/PATH?QUERY`. Only a
+/// validated workload identity is accepted (never the operator credential);
+/// the Proxy decides with an explicit Policy grant. Status and JSON body are
+/// relayed unchanged, including 204.
+async fn admin_passthrough(
+    State(state): State<LocalApiState>,
+    Path(path): Path<String>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let mut url = state.proxy_url(&admin_proxy_suffix(&path)?)?;
+    url.set_query(uri.query());
+    let method = reqwest::Method::from_bytes(method.as_str().as_bytes())
+        .map_err(|error| LocalApiError::bad_request(error.to_string()))?;
+    let mut request = state
+        .client
+        .request(method, url)
+        .header(AGENT_ID_HEADER, &agent.agent_id)
+        .header(WORKLOAD_CREDENTIAL_HEADER, &agent.workload_credential);
+    if let Some(token) = &state.machine_token {
+        request = request.bearer_auth(token);
+    }
+    if !body.is_empty() {
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_vec());
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| LocalApiError::bad_gateway(error.to_string()))?;
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| LocalApiError::bad_gateway(error.to_string()))?;
+    let mut relayed = (status, bytes.to_vec()).into_response();
+    if !bytes.is_empty() {
+        relayed.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+    }
+    relayed.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    Ok(relayed)
+}
+
+/// `PATH` must stay a plain relative path below `admin/` on the Proxy.
+fn admin_proxy_suffix(path: &str) -> Result<String, LocalApiError> {
+    if path.is_empty()
+        || path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        || path.contains(['\\', '%', '?', '#'])
+    {
+        return Err(LocalApiError::bad_request(
+            "invalid administration path".into(),
+        ));
+    }
+    Ok(format!("admin/{path}"))
+}
+
 async fn cli_session(
     State(state): State<LocalApiState>,
     headers: HeaderMap,
@@ -582,6 +652,7 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/api/messages/ack", post(acknowledge_core_messages))
         .route("/api/messages/import", post(import_core_messages))
         .route("/api/messages/{message_id}", get(get_core_message))
+        .route("/api/admin/{*path}", axum::routing::any(admin_passthrough))
         .route("/api/email", post(send_app_email))
         .route("/api/email/{idempotency_key}", get(app_email_status))
         .with_state(state)

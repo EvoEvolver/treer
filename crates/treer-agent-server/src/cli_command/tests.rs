@@ -997,9 +997,25 @@ fn managed_app_commands_parse() {
     ])
     .unwrap();
     assert!(
-        matches!(update.command, Some(Command::App { command: AppCommand::Update { target, cwd: Some(cwd), command: Some(command), clear_args: false, args } })
-        if target == "/infra/issues" && cwd == "apps/issues" && command == "python3" && args == ["issues.py"])
+        matches!(update.command, Some(Command::App { command: AppCommand::Update { target, cwd: Some(cwd), command: Some(command), clear_args: false, ui_capability, args } })
+        if ui_capability.is_empty() && target == "/infra/issues" && cwd == "apps/issues" && command == "python3" && args == ["issues.py"])
     );
+    let declared = Args::try_parse_from([
+        "treer",
+        "app",
+        "update",
+        "/infra/hub",
+        "--ui-capability",
+        "app-tree.v1",
+        "--ui-capability",
+        "other.v1",
+    ])
+    .unwrap();
+    assert!(matches!(
+        declared.command,
+        Some(Command::App { command: AppCommand::Update { ui_capability, cwd: None, command: None, .. } })
+        if ui_capability == ["app-tree.v1", "other.v1"]
+    ));
     let clear =
         Args::try_parse_from(["treer", "app", "update", "app_stable", "--clear-args"]).unwrap();
     assert!(matches!(
