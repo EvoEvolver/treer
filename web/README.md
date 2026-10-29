@@ -204,8 +204,10 @@ addressed by stable IDs; display names are unique only within a folder.
   menus add new folder/Agent. Tab menus deliberately have no Stop/Delete.
 - An App with an App-owned subtree has a disclosure chevron ("App contents")
   on its own row; nested App nodes expand the same way. Core declares the
-  subtree with `ui_capabilities: ["app-tree.v1"]` on the App deployment; only
-  when the field is absent (older Proxy) does the Console probe the App once.
+  subtree with `ui_capabilities: ["app-tree.v1"]` on the App deployment. A
+  Proxy whose `/api/health` advertises `settings.admin.v1` omits an empty list,
+  so a missing field there means no subtree and nothing is probed; only an
+  older Proxy without that capability makes the Console probe the App once.
 - Dragging highlights the target folder or the insertion line, and shows a
   workspace-root drop zone at the bottom.
 - The header **+** menu has Add folder, Add agent and Add machine (opens the
@@ -388,7 +390,7 @@ the same change.
 | Scope | Routes |
 | --- | --- |
 | You | `/settings/{profile,sessions,preferences,organizations}` |
-| Organization | `/orgs/:org/settings/{general,members,invitations,groups,workspaces,audit,danger}` |
+| Organization | `/orgs/:org/settings/{general,members,invitations,groups,workspaces,agent-permissions,audit,danger}` |
 | Workspace | `/orgs/:org/workspaces/:ws/settings/{general,access,machines,launch-profiles,policy,audit,danger}` |
 
 - Desktop shows a grouped navigation beside the page and opens a scope's first
@@ -404,6 +406,19 @@ the same change.
   Active / Pending invitation tabs. **Invitations**: one link per email with
   role, optional groups and workspaces, and expiry; links are shown once
   (kept in memory for this page session only) and can be revoked.
+- **Agent permissions** (owners/admins only; listed when `/api/health`
+  advertises `org.agent-grants.v1`): organization-level grants that let one
+  Agent use `org.manage`, `org.member.manage`, `org.invite.manage`,
+  `org.group.manage`, `workspace.manage` or `audit.read` through
+  `/api/organizations/{org}/agent-grants[/{agent_id}]` (GET/PUT/DELETE). The
+  Agent's workspace Policy must also allow the action with a rule naming it by
+  id; `policy.provider.manage` is never grantable. A grant whose creator lost
+  owner/admin is shown inactive until re-saved. Members and Invitations note
+  that Agents can invite members only and cannot create owners/admins or
+  remove or demote owners.
+- Audit lists label Agent actors `agent: <name>` with the name Core stored on
+  the event (falling back to the Agent id), never the Agent's current name;
+  invitations an Agent created read "Invited by agent: <name>".
 - **Access** is one "who has access and why" list (organization role, group,
   direct grant) from `/api/workspaces/{ws}/access/effective`, computed
   locally from `/access` on older Proxies; one picker adds people or groups,

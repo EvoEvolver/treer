@@ -149,7 +149,8 @@ export interface AppDeployment {
   created_by: string
   updated_at: string
   updated_by: string
-  /** Browser UI contracts the App declares, e.g. "app-tree.v1"; omitted when none. */
+  /** Browser UI contracts the App declares, e.g. "app-tree.v1"; omitted when none
+   * (a Proxy advertising settings.admin.v1 always omits an empty list). */
   ui_capabilities?: string[]
 }
 
@@ -396,6 +397,23 @@ export interface OrganizationInvitation {
   created_by?: { id: string; name: string; kind?: string } | null
   group_ids?: string[]
   workspace_ids?: string[]
+}
+
+export type AgentGrantAction = "org.manage" | "org.member.manage" | "org.invite.manage" | "org.group.manage" | "workspace.manage" | "audit.read"
+
+// An organization-level grant for one Agent, created by a human owner/admin.
+// It works only together with the Agent's workspace Policy allow rule.
+export interface AgentGrant {
+  agent_id: string
+  agent_name: string | null
+  workspace_id: string
+  workspace_name: string | null
+  actions: string[]
+  created_by: { id: string; name: string; kind: "user" | "agent" }
+  created_by_role: "owner" | "admin"
+  created_at: string
+  // False when the creator is no longer owner/admin or the workspace is gone.
+  active: boolean
 }
 
 export interface CreatedInvitation {

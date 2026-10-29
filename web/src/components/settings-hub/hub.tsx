@@ -8,6 +8,8 @@ import { t, type MessageKey } from "@/i18n"
 import type { OrgDirectory } from "@/components/settings-hub/use-org-directory"
 import { OrganizationsPage, PreferencesPage, ProfilePage, SessionsPage } from "@/components/settings-hub/personal-pages"
 import { InvitationsPage, GroupsPage, MembersPage, OrgAuditPage, OrgDangerPage, OrgGeneralPage, OrgWorkspacesPage, type OrgPageContext } from "@/components/settings-hub/org-pages"
+import { AgentPermissionsPage } from "@/components/settings-hub/org-agent-grants"
+import { ORG_AGENT_GRANTS_CAPABILITY, useProxyCapabilities } from "@/lib/proxy-capabilities"
 import { WorkspaceAccessPage, WorkspaceAuditPage, WorkspaceDangerPage, WorkspaceGeneralPage, WorkspaceMachinesPage, WorkspacePolicyPage, WorkspaceProfilesPage, type WorkspacePageContext } from "@/components/settings-hub/workspace-pages"
 
 export type SettingsHubProps = {
@@ -46,7 +48,7 @@ const personalItems: { section: string; label: MessageKey }[] = [
   { section: "profile", label: "hub.profile" }, { section: "sessions", label: "hub.sessions" }, { section: "preferences", label: "hub.preferences" }, { section: "organizations", label: "hub.organizations" },
 ]
 const organizationItems: { section: string; label: MessageKey }[] = [
-  { section: "general", label: "settings.nav.general" }, { section: "members", label: "org.members" }, { section: "invitations", label: "hub.invitations" }, { section: "groups", label: "org.groups" }, { section: "workspaces", label: "org.workspaces" }, { section: "audit", label: "hub.audit_log" }, { section: "danger", label: "apps.danger_zone" },
+  { section: "general", label: "settings.nav.general" }, { section: "members", label: "org.members" }, { section: "invitations", label: "hub.invitations" }, { section: "groups", label: "org.groups" }, { section: "workspaces", label: "org.workspaces" }, { section: "agent-permissions", label: "grants.title" }, { section: "audit", label: "hub.audit_log" }, { section: "danger", label: "apps.danger_zone" },
 ]
 const workspaceItems: { section: string; label: MessageKey }[] = [
   { section: "general", label: "settings.nav.general" }, { section: "access", label: "hub.access" }, { section: "machines", label: "wsettings.machines" }, { section: "launch-profiles", label: "wsettings.launch_profiles" }, { section: "policy", label: "hub.policy" }, { section: "audit", label: "hub.audit_log" }, { section: "danger", label: "apps.danger_zone" },
@@ -72,9 +74,13 @@ export function SettingsHub(props: SettingsHubProps) {
   useEffect(() => { void reloadAccess() }, [reloadAccess])
   useEffect(() => { document.getElementById("settings-content")?.scrollTo({ top: 0 }) }, [location.pathname])
 
+  // Agent permissions exist only on a Proxy that advertises them, and only owners/admins see the page in the list.
+  const capabilities = useProxyCapabilities(!preview)
+  const grantsSupported = preview ? false : capabilities === null ? null : capabilities.includes(ORG_AGENT_GRANTS_CAPABILITY)
+  const shownOrganizationItems = organizationItems.filter((item) => item.section !== "agent-permissions" || (grantsSupported === true && (organization?.role === "owner" || organization?.role === "admin")))
   const groups: { id: string; title: string; items: NavItem[] }[] = [
     { id: "personal", title: t("hub.group_you"), items: personalItems.map((item) => ({ ...item, path: personalSettingsPath(item.section as never) })) },
-    ...(organization ? [{ id: "organization", title: organization.name, items: organizationItems.map((item) => ({ ...item, path: organizationSettingsPath(organization.organization_id, item.section as never) })) }] : []),
+    ...(organization ? [{ id: "organization", title: organization.name, items: shownOrganizationItems.map((item) => ({ ...item, path: organizationSettingsPath(organization.organization_id, item.section as never) })) }] : []),
     ...(organization && workspace ? [{ id: "workspace", title: t("hub.group_workspace", { name: workspace.name }), items: workspaceItems.map((item) => ({ ...item, path: workspaceSettingsPath(organization.organization_id, workspace.workspace_id, item.section as never) })) }] : []),
   ]
   const activeGroup = route.scope === "personal" ? "personal" : route.scope
@@ -104,10 +110,10 @@ export function SettingsHub(props: SettingsHubProps) {
       : <OrganizationsPage organizations={organizations} currentOrganizationId={props.currentOrganizationId} onCreate={props.createOrganization} linkSearch={linkSearch} />
   } else if (!organization) page = props.organizationsLoaded ? <NotFound text={t("hub.organization_unavailable")} /> : <Loading />
   else if (route.scope === "organization") {
-    const context: OrgPageContext = { organization, user: props.user, preview, directory: props.directory, workspaces: workspaceList, linkSearch, showError: props.showError, copy: props.copy, refreshOrganizations: props.refreshOrganizations, createWorkspace: props.createWorkspace, organizationGone: props.organizationGone }
+    const context: OrgPageContext = { organization, user: props.user, preview, directory: props.directory, workspaces: workspaceList, linkSearch, showError: props.showError, copy: props.copy, refreshOrganizations: props.refreshOrganizations, createWorkspace: props.createWorkspace, organizationGone: props.organizationGone, agentGrantsSupported: grantsSupported === true }
     const section = route.section ?? "general"
     page = section === "general" ? <OrgGeneralPage context={context} /> : section === "members" ? <MembersPage context={context} /> : section === "invitations" ? <InvitationsPage context={context} />
-      : section === "groups" ? <GroupsPage context={context} /> : section === "workspaces" ? <OrgWorkspacesPage context={context} /> : section === "audit" ? <OrgAuditPage context={context} /> : <OrgDangerPage context={context} />
+      : section === "groups" ? <GroupsPage context={context} /> : section === "workspaces" ? <OrgWorkspacesPage context={context} /> : section === "agent-permissions" ? <AgentPermissionsPage context={context} supported={grantsSupported} /> : section === "audit" ? <OrgAuditPage context={context} /> : <OrgDangerPage context={context} />
   } else if (!workspace) page = props.workspacesLoaded && props.workspacesOrganizationId === organizationId ? <NotFound text={t("hub.workspace_unavailable")} /> : <Loading />
   else {
     const machines = props.currentWorkspaceId === workspace.workspace_id ? props.machines : null

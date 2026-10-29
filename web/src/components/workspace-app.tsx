@@ -17,6 +17,7 @@ import { OVERVIEW_TAB, useWorkspaceTabs } from "@/components/use-workspace-tabs"
 import { TopBar } from "@/components/top-bar"
 import { CommandPalette, usePaletteShortcut, type PaletteItem } from "@/components/command-palette"
 import { SettingsHub } from "@/components/settings-hub/hub"
+import { ORG_AGENT_GRANTS_CAPABILITY, useProxyCapabilities } from "@/lib/proxy-capabilities"
 import { useOrgDirectory } from "@/components/settings-hub/use-org-directory"
 import { ORGANIZATION_SECTIONS, PERSONAL_SECTIONS, WORKSPACE_SECTIONS, organizationSettingsPath, parseSettingsRoute, personalSettingsPath, workspaceSettingsPath } from "@/lib/console-routes"
 import { WorkspaceOverview } from "@/components/workspace-overview"
@@ -1113,6 +1114,8 @@ function WorkspaceAppContent() {
     run()
   }
 
+  const proxyCapabilities = useProxyCapabilities(paletteOpen && !preview)
+  const agentGrantsSupported = proxyCapabilities?.includes(ORG_AGENT_GRANTS_CAPABILITY) === true
   const paletteItems = useMemo<PaletteItem[]>(() => {
     if (!paletteOpen) return []
     const items: PaletteItem[] = []
@@ -1125,14 +1128,14 @@ function WorkspaceAppContent() {
     if (organizationId) for (const item of workspaces) items.push({ id: item.workspace_id, group: "workspaces", label: item.name, detail: organization?.name, icon: <FolderKanban />, run: () => selectContext(organizationId, item.workspace_id) })
     const page = (id: string, label: MessageKey, scope: string, path: string) => items.push({ id, group: "settings", label: `${scope} › ${t(label)}`, icon: <SettingsIcon />, run: () => openSettingsPage(path) })
     const personalLabels: Record<(typeof PERSONAL_SECTIONS)[number], MessageKey> = { profile: "hub.profile", sessions: "hub.sessions", preferences: "hub.preferences", organizations: "hub.organizations" }
-    const orgLabels: Record<(typeof ORGANIZATION_SECTIONS)[number], MessageKey> = { general: "settings.nav.general", members: "org.members", invitations: "hub.invitations", groups: "org.groups", workspaces: "org.workspaces", audit: "hub.audit_log", danger: "apps.danger_zone" }
+    const orgLabels: Record<(typeof ORGANIZATION_SECTIONS)[number], MessageKey> = { general: "settings.nav.general", members: "org.members", invitations: "hub.invitations", groups: "org.groups", workspaces: "org.workspaces", "agent-permissions": "grants.title", audit: "hub.audit_log", danger: "apps.danger_zone" }
     const workspaceLabels: Record<(typeof WORKSPACE_SECTIONS)[number], MessageKey> = { general: "settings.nav.general", access: "hub.access", machines: "wsettings.machines", "launch-profiles": "wsettings.launch_profiles", policy: "hub.policy", audit: "hub.audit_log", danger: "apps.danger_zone" }
     if (organizationId && workspaceId && workspace) for (const section of WORKSPACE_SECTIONS) page(`ws:${section}`, workspaceLabels[section], workspace.name, workspaceSettingsPath(organizationId, workspaceId, section))
-    if (organizationId && organization) for (const section of ORGANIZATION_SECTIONS) page(`org:${section}`, orgLabels[section], organization.name, organizationSettingsPath(organizationId, section))
+    if (organizationId && organization) for (const section of ORGANIZATION_SECTIONS) if (section !== "agent-permissions" || (agentGrantsSupported && (organization.role === "owner" || organization.role === "admin"))) page(`org:${section}`, orgLabels[section], organization.name, organizationSettingsPath(organizationId, section))
     for (const section of PERSONAL_SECTIONS) page(`me:${section}`, personalLabels[section], t("hub.group_you"), personalSettingsPath(section))
     return items
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paletteOpen, workloads, apps, snapshot?.servers, members, workspaces, organizationId, workspaceId, organization, workspace, workloadTree, settingsRoute?.scope])
+  }, [paletteOpen, workloads, apps, snapshot?.servers, members, workspaces, organizationId, workspaceId, organization, workspace, workloadTree, settingsRoute?.scope, agentGrantsSupported])
   usePaletteShortcut(() => setPaletteOpen(true), Boolean(user) && pendingInvite === null && !focusMode)
 
   function openAppExternal(app: AppDeployment) {

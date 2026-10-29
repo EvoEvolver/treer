@@ -44,9 +44,19 @@ export function AuditView({ events, workspaceId, refreshRevision, agents, machin
   </div></div>
 }
 
+// An Agent actor is labelled with the name Core froze when the event was
+// written (falling back to its id), never with the Agent's current name or
+// path: an Agent can rename itself, but not its past audit entries.
+export function auditActorLabel(event: Pick<OrganizationAuditEvent, "actor_kind" | "actor_id" | "actor_name">) {
+  if (event.actor_kind === "agent") return agentActorLabel(event.actor_name || event.actor_id)
+  return event.actor_name ?? event.actor_id ?? event.actor_kind
+}
+
+export const agentActorLabel = (name: string | null | undefined) => t("audit.agent_actor", { name: name || t("dialogs.agent_fallback") })
+
 // Shared path resolution; workspace rows use only the already-visible member directory.
 export function AuditEventList({ events, agents = [], members = [], loading, workspace = false }: { events: OrganizationAuditEvent[]; agents?: Agent[]; members?: Member[]; loading: boolean; workspace?: boolean }) {
-  return <section><div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">{t("org.activity")}</h2><span className="text-[10px] text-muted-foreground">{workspace ? t("waudit.count", { count: events.length }) : `${events.length} events`}</span></div><div className="border-y divide-y">{events.map((event) => { const actorAgent = agents.find((agent) => agent.agent_id === event.actor_id); const resourceAgent = agents.find((agent) => agent.agent_id === event.resource_id); const actor = event.actor_kind === "agent" ? actorAgent ? agentPath(actorAgent) : event.actor_id ?? t("dialogs.agent_fallback") : event.actor_name ?? event.actor_id ?? event.actor_kind; const resource = event.resource_kind === "agent" ? resourceAgent ? agentPath(resourceAgent) : event.resource_id : event.resource_name ?? event.resource_id; if (workspace) {
+  return <section><div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">{t("org.activity")}</h2><span className="text-[10px] text-muted-foreground">{workspace ? t("waudit.count", { count: events.length }) : `${events.length} events`}</span></div><div className="border-y divide-y">{events.map((event) => { const resourceAgent = agents.find((agent) => agent.agent_id === event.resource_id); const actor = auditActorLabel(event); const resource = event.resource_kind === "agent" ? resourceAgent ? agentPath(resourceAgent) : event.resource_id : event.resource_name ?? event.resource_id; if (workspace) {
       const who = event.actor_kind === "agent" ? actor : members.find((member) => member.user_id === event.actor_id)?.preferred_name || event.actor_id || event.actor_kind
       const Icon = event.resource_kind === "agent" ? Bot : event.resource_kind === "app" ? AppWindow : event.resource_kind === "machine" ? Server : ScrollText
       return <div key={event.event_id} className="grid grid-cols-[32px_minmax(0,1fr)] gap-3 py-4 sm:grid-cols-[32px_minmax(0,1fr)_auto] sm:items-start">

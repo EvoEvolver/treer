@@ -3,6 +3,7 @@ import { Bot, Boxes, RefreshCw } from "lucide-react"
 import { ApiError, type AppDeployment } from "@/lib/api"
 import { APP_TREE_UI_CAPABILITY, knownAppTreeSupport, probeAppTreeSupport, readAppTree, type AppNodeSelection, type AppTreeNode } from "@/lib/app-tree"
 import { workloadLinkProps } from "@/lib/workload-link"
+import { SETTINGS_ADMIN_CAPABILITY, useProxyCapabilities } from "@/lib/proxy-capabilities"
 import { TreeGroup, TreeRow, treeIndent } from "@/components/tree-row"
 import { t } from "@/i18n"
 
@@ -14,12 +15,17 @@ export type AppTreeNavigation = {
 }
 
 // App IDs whose UI implements the App tree contract (docs/app-tree.md). Core
-// declares it on the deployment (`ui_capabilities` includes "app-tree.v1");
-// only when a Proxy predates that field does the Console fall back to asking
-// each running App once. Until a legacy App answers, and for every App that
-// does not own a directory, its row stays a plain leaf.
+// declares it on the deployment (`ui_capabilities` includes "app-tree.v1").
+// A Proxy that advertises settings.admin.v1 in /api/health always knows that
+// field and omits it when empty, so a missing list there means "no tree" and
+// nothing is probed. Only a Proxy without settings.admin.v1 (predating the
+// field) makes the Console ask each running App once; it waits for /api/health
+// before probing. Until a legacy App answers, and for every App that does not
+// own a directory, its row stays a plain leaf.
 export function useAppTreeSupport(workspaceId: string | null, apps: AppDeployment[]): Set<string> {
-  const running = workspaceId ? apps.filter(app => app.ui_capabilities === undefined && app.status === "running").map(app => app.app_id).sort() : []
+  const capabilities = useProxyCapabilities(Boolean(workspaceId))
+  const legacyProxy = capabilities !== null && !capabilities.includes(SETTINGS_ADMIN_CAPABILITY)
+  const running = workspaceId && legacyProxy ? apps.filter(app => app.ui_capabilities === undefined && app.status === "running").map(app => app.app_id).sort() : []
   const runningKey = running.join("\n")
   const [, rerender] = useState(0)
   const [retry, setRetry] = useState(0)
@@ -38,7 +44,7 @@ export function useAppTreeSupport(workspaceId: string | null, apps: AppDeploymen
   if (!workspaceId) return new Set()
   return new Set(apps.filter(app => app.ui_capabilities !== undefined
     ? app.ui_capabilities.includes(APP_TREE_UI_CAPABILITY)
-    : knownAppTreeSupport(workspaceId, app.app_id) === "yes").map(app => app.app_id))
+    : legacyProxy && knownAppTreeSupport(workspaceId, app.app_id) === "yes").map(app => app.app_id))
 }
 
 // The App row in the workspace Tree owns the root disclosure; this renders its contents at `depth`.

@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { api, ApiError, type Agent, type Member } from '@/lib/api'
 import { auditCategories, AuditSummaryVersionError, readAuditSummary, type AuditCategory, type AuditDrill, type AuditSummary } from '@/lib/audit-summary'
-import { agentPath } from '@/lib/workload-path'
+import { agentActorLabel } from '@/components/audit-view'
 import { intlLocale, t } from '@/i18n'
 
 const categoryLabel = (category: AuditCategory) => t(`waudit.category_${category}`)
@@ -63,7 +63,8 @@ export function WorkspaceAuditSummary({ workspaceId, filters, revision, preview,
     if (combinedRef.current) combinedRef.current.scrollLeft = combinedRef.current.scrollWidth
     setBucketFocus(Math.max(0, (data?.series.length ?? 1) - 1))
   }, [data])
-  const actorName = (kind: string, id?: string) => kind === 'agent' ? agents.find((a) => a.agent_id === id) ? agentPath(agents.find((a) => a.agent_id === id)!) : id ?? kind : members.find((m) => m.user_id === id)?.preferred_name || id || kind
+  // Agents are labelled by id: the summary carries no stored name and an Agent's live name is not proof of who acted.
+  const actorName = (kind: string, id?: string) => kind === 'agent' ? agentActorLabel(id) : members.find((m) => m.user_id === id)?.preferred_name || id || kind
   const drill = (extra: AuditDrill, label: string) => {
     if (!data) return
     onDrill({ ...data.filters, since: data.range.since, until: data.range.until, ...extra }, label)

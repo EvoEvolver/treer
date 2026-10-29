@@ -18,6 +18,8 @@ interface Page { events: OrganizationAuditEvent[]; next_cursor: number | null }
 
 // Project only fields used for display. Never render arbitrary audit payloads,
 // names or server error bodies, including those returned by an older Proxy.
+// The one stored name kept is an Agent actor's (bounded text, shown as
+// "agent: <name>"), because an Agent's current name is not who acted then.
 function auditPage(value: unknown, workspaceId: string): Page {
   if (!value || typeof value !== "object") throw new Error("invalid audit page")
   const page = value as Page
@@ -25,7 +27,7 @@ function auditPage(value: unknown, workspaceId: string): Page {
   const text = (value: unknown): value is string => typeof value === "string" && value.length <= 512
   const events = page.events.map((event) => {
     if (!event || event.workspace_id !== workspaceId || !Number.isSafeInteger(event.sequence) || event.sequence <= 0 || !text(event.event_id) || !text(event.occurred_at) || !Number.isFinite(Date.parse(event.occurred_at)) || !text(event.actor_kind) || (event.actor_id !== undefined && event.actor_id !== null && !text(event.actor_id)) || !text(event.action) || !text(event.resource_kind) || !text(event.resource_id) || !["succeeded", "failed"].includes(event.outcome)) throw new Error("invalid audit event")
-    return { sequence: event.sequence, event_id: event.event_id, organization_id: "", workspace_id: workspaceId, occurred_at: event.occurred_at, actor_kind: event.actor_kind, actor_id: event.actor_id ?? undefined, source: "", action: event.action, outcome: event.outcome, resource_kind: event.resource_kind, resource_id: event.resource_id, payload: {} }
+    return { sequence: event.sequence, event_id: event.event_id, organization_id: "", workspace_id: workspaceId, occurred_at: event.occurred_at, actor_kind: event.actor_kind, actor_id: event.actor_id ?? undefined, ...(event.actor_kind === "agent" && text(event.actor_name) && event.actor_name.trim() ? { actor_name: event.actor_name } : {}), source: "", action: event.action, outcome: event.outcome, resource_kind: event.resource_kind, resource_id: event.resource_id, payload: {} }
   })
   return { events, next_cursor: page.next_cursor }
 }
