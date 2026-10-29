@@ -109,7 +109,17 @@ impl AuthStore {
         user_id: &str,
         name: &str,
     ) -> Result<OrganizationInfo, AuthFailure> {
-        let role = self.require_manager(organization_id, user_id).await?;
+        self.rename_organization_as(organization_id, &AdminActor::user(user_id), name)
+            .await
+    }
+
+    pub async fn rename_organization_as(
+        &self,
+        organization_id: &str,
+        actor: &AdminActor,
+        name: &str,
+    ) -> Result<OrganizationInfo, AuthFailure> {
+        let role = self.require_manager_as(organization_id, actor).await?;
         let name = validate_resource_name(name, "organization")?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let old_name = sqlx::query_scalar::<_, String>(
@@ -144,8 +154,8 @@ impl AuthStore {
             NewAuditEvent {
                 organization_id,
                 workspace_id: None,
-                actor_kind: "user",
-                actor_id: Some(user_id),
+                actor_kind: actor.kind(),
+                actor_id: Some(actor.id()),
                 source: "api",
                 action: "organization.renamed",
                 resource_kind: "organization",
@@ -295,8 +305,16 @@ impl AuthStore {
         organization_id: &str,
         user_id: &str,
     ) -> Result<Vec<OrganizationMember>, AuthFailure> {
-        self.require_organization_member(organization_id, user_id)
-            .await?;
+        self.list_members_as(organization_id, &AdminActor::user(user_id))
+            .await
+    }
+
+    pub async fn list_members_as(
+        &self,
+        organization_id: &str,
+        actor: &AdminActor,
+    ) -> Result<Vec<OrganizationMember>, AuthFailure> {
+        self.require_member_as(organization_id, actor).await?;
         let rows = sqlx::query(
             "SELECT u.id AS user_id, u.email, u.preferred_name, m.role, m.joined_at \
              FROM organization_members m JOIN users u ON u.id = m.user_id \
@@ -364,8 +382,18 @@ impl AuthStore {
         organization_id: &str,
         user_id: &str,
     ) -> Result<Vec<WorkspaceInfo>, AuthFailure> {
-        self.require_organization_member(organization_id, user_id)
-            .await?;
+        self.list_workspaces_as(organization_id, &AdminActor::user(user_id))
+            .await
+    }
+
+    /// Agents see every active workspace of their organization, as an owner would.
+    pub async fn list_workspaces_as(
+        &self,
+        organization_id: &str,
+        actor: &AdminActor,
+    ) -> Result<Vec<WorkspaceInfo>, AuthFailure> {
+        self.require_member_as(organization_id, actor).await?;
+        let user_id = actor.user_id().unwrap_or("");
         let rows = sqlx::query(
             "SELECT workspace_id, name, created_at FROM workspaces \
              WHERE organization_id = $1 AND deleted_at IS NULL AND ( \
@@ -386,7 +414,7 @@ impl AuthStore {
         )
         .bind(organization_id)
         .bind(user_id)
-        .bind(self.disabled)
+        .bind(self.disabled || actor.user_id().is_none())
         .fetch_all(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
@@ -398,7 +426,16 @@ impl AuthStore {
         workspace_id: &str,
         user_id: &str,
     ) -> Result<WorkspaceAccessInfo, AuthFailure> {
-        let current_role = self.workspace_member_role(workspace_id, user_id).await?;
+        self.workspace_access_info_as(workspace_id, &AdminActor::user(user_id))
+            .await
+    }
+
+    pub async fn workspace_access_info_as(
+        &self,
+        workspace_id: &str,
+        actor: &AdminActor,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        let current_role = self.workspace_role_as(workspace_id, actor).await?;
         let access_mode = sqlx::query_scalar::<_, String>(
             "SELECT access_mode FROM workspaces WHERE workspace_id = $1 AND deleted_at IS NULL",
         )
@@ -463,7 +500,17 @@ impl AuthStore {
         user_id: &str,
         access_mode: &str,
     ) -> Result<WorkspaceAccessInfo, AuthFailure> {
-        self.require_workspace_owner(workspace_id, user_id).await?;
+        self.update_workspace_access_mode_as(workspace_id, &AdminActor::user(user_id), access_mode)
+            .await
+    }
+
+    pub async fn update_workspace_access_mode_as(
+        &self,
+        workspace_id: &str,
+        actor: &AdminActor,
+        access_mode: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner_as(workspace_id, actor).await?;
         if !matches!(access_mode, "organization" | "restricted") {
             return Err(AuthFailure::bad_request(
                 "invalid_workspace_access_mode",
@@ -478,7 +525,16 @@ impl AuthStore {
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
-        self.workspace_access_info(workspace_id, user_id).await
+        self.record_access_audit(
+            workspace_id,
+            actor,
+            "workspace.access.mode_updated",
+            "workspace",
+            workspace_id,
+            json!({ "access_mode": access_mode }),
+        )
+        .await?;
+        self.workspace_access_info_as(workspace_id, actor).await
     }
 
     pub async fn upsert_workspace_user_grant(
@@ -488,9 +544,25 @@ impl AuthStore {
         target_user_id: &str,
         role: &str,
     ) -> Result<WorkspaceAccessInfo, AuthFailure> {
-        self.require_workspace_owner(workspace_id, actor).await?;
+        self.upsert_workspace_user_grant_as(
+            workspace_id,
+            &AdminActor::user(actor),
+            target_user_id,
+            role,
+        )
+        .await
+    }
+
+    pub async fn upsert_workspace_user_grant_as(
+        &self,
+        workspace_id: &str,
+        actor: &AdminActor,
+        target_user_id: &str,
+        role: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner_as(workspace_id, actor).await?;
         validate_workspace_role(role)?;
-        if actor == target_user_id && role != "owner" {
+        if actor.user_id() == Some(target_user_id) && role != "owner" {
             return Err(AuthFailure::conflict(
                 "workspace_owner_cannot_demote_self",
                 "add another owner before changing your own workspace role",
@@ -520,11 +592,20 @@ impl AuthStore {
         .bind(target_user_id)
         .bind(role)
         .bind(Utc::now().to_rfc3339())
-        .bind(actor)
+        .bind(actor.label())
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
-        self.workspace_access_info(workspace_id, actor).await
+        self.record_access_audit(
+            workspace_id,
+            actor,
+            "workspace.access.user_granted",
+            "user",
+            target_user_id,
+            json!({ "role": role }),
+        )
+        .await?;
+        self.workspace_access_info_as(workspace_id, actor).await
     }
 
     pub async fn remove_workspace_user_grant(
@@ -533,8 +614,18 @@ impl AuthStore {
         actor: &str,
         target_user_id: &str,
     ) -> Result<WorkspaceAccessInfo, AuthFailure> {
-        self.require_workspace_owner(workspace_id, actor).await?;
-        if actor == target_user_id {
+        self.remove_workspace_user_grant_as(workspace_id, &AdminActor::user(actor), target_user_id)
+            .await
+    }
+
+    pub async fn remove_workspace_user_grant_as(
+        &self,
+        workspace_id: &str,
+        actor: &AdminActor,
+        target_user_id: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner_as(workspace_id, actor).await?;
+        if actor.user_id() == Some(target_user_id) {
             return Err(AuthFailure::conflict(
                 "workspace_owner_cannot_remove_self",
                 "another workspace owner must remove your access",
@@ -546,7 +637,16 @@ impl AuthStore {
             .execute(&self.pool)
             .await
             .map_err(AuthFailure::database)?;
-        self.workspace_access_info(workspace_id, actor).await
+        self.record_access_audit(
+            workspace_id,
+            actor,
+            "workspace.access.user_revoked",
+            "user",
+            target_user_id,
+            json!({}),
+        )
+        .await?;
+        self.workspace_access_info_as(workspace_id, actor).await
     }
 
     pub async fn upsert_workspace_group_grant(
@@ -556,7 +656,18 @@ impl AuthStore {
         group_id: &str,
         role: &str,
     ) -> Result<WorkspaceAccessInfo, AuthFailure> {
-        self.require_workspace_owner(workspace_id, actor).await?;
+        self.upsert_workspace_group_grant_as(workspace_id, &AdminActor::user(actor), group_id, role)
+            .await
+    }
+
+    pub async fn upsert_workspace_group_grant_as(
+        &self,
+        workspace_id: &str,
+        actor: &AdminActor,
+        group_id: &str,
+        role: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner_as(workspace_id, actor).await?;
         validate_workspace_role(role)?;
         let same_organization = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM workspaces w JOIN organization_groups g \
@@ -582,11 +693,20 @@ impl AuthStore {
         .bind(group_id)
         .bind(role)
         .bind(Utc::now().to_rfc3339())
-        .bind(actor)
+        .bind(actor.label())
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
-        self.workspace_access_info(workspace_id, actor).await
+        self.record_access_audit(
+            workspace_id,
+            actor,
+            "workspace.access.group_granted",
+            "group",
+            group_id,
+            json!({ "role": role }),
+        )
+        .await?;
+        self.workspace_access_info_as(workspace_id, actor).await
     }
 
     pub async fn remove_workspace_group_grant(
@@ -595,14 +715,33 @@ impl AuthStore {
         actor: &str,
         group_id: &str,
     ) -> Result<WorkspaceAccessInfo, AuthFailure> {
-        self.require_workspace_owner(workspace_id, actor).await?;
+        self.remove_workspace_group_grant_as(workspace_id, &AdminActor::user(actor), group_id)
+            .await
+    }
+
+    pub async fn remove_workspace_group_grant_as(
+        &self,
+        workspace_id: &str,
+        actor: &AdminActor,
+        group_id: &str,
+    ) -> Result<WorkspaceAccessInfo, AuthFailure> {
+        self.require_workspace_owner_as(workspace_id, actor).await?;
         sqlx::query("DELETE FROM workspace_group_grants WHERE workspace_id = $1 AND group_id = $2")
             .bind(workspace_id)
             .bind(group_id)
             .execute(&self.pool)
             .await
             .map_err(AuthFailure::database)?;
-        self.workspace_access_info(workspace_id, actor).await
+        self.record_access_audit(
+            workspace_id,
+            actor,
+            "workspace.access.group_revoked",
+            "group",
+            group_id,
+            json!({}),
+        )
+        .await?;
+        self.workspace_access_info_as(workspace_id, actor).await
     }
 
     pub async fn list_organization_groups(
@@ -610,8 +749,16 @@ impl AuthStore {
         organization_id: &str,
         user_id: &str,
     ) -> Result<Vec<OrganizationGroup>, AuthFailure> {
-        self.require_organization_member(organization_id, user_id)
-            .await?;
+        self.list_organization_groups_as(organization_id, &AdminActor::user(user_id))
+            .await
+    }
+
+    pub async fn list_organization_groups_as(
+        &self,
+        organization_id: &str,
+        actor: &AdminActor,
+    ) -> Result<Vec<OrganizationGroup>, AuthFailure> {
+        self.require_member_as(organization_id, actor).await?;
         let rows = sqlx::query(
             "SELECT group_id, organization_id, name FROM organization_groups \
              WHERE organization_id = $1 ORDER BY lower(name), group_id",
@@ -646,7 +793,17 @@ impl AuthStore {
         actor: &str,
         name: &str,
     ) -> Result<OrganizationGroup, AuthFailure> {
-        self.require_manager(organization_id, actor).await?;
+        self.create_organization_group_as(organization_id, &AdminActor::user(actor), name)
+            .await
+    }
+
+    pub async fn create_organization_group_as(
+        &self,
+        organization_id: &str,
+        actor: &AdminActor,
+        name: &str,
+    ) -> Result<OrganizationGroup, AuthFailure> {
+        self.require_manager_as(organization_id, actor).await?;
         let name = validate_resource_name(name, "group")?;
         let group = OrganizationGroup {
             group_id: format!("grp_{}", Uuid::new_v4().simple()),
@@ -662,7 +819,7 @@ impl AuthStore {
         .bind(organization_id)
         .bind(&group.name)
         .bind(Utc::now().to_rfc3339())
-        .bind(actor)
+        .bind(actor.label())
         .execute(&self.pool)
         .await
         .map_err(|error| {
@@ -675,6 +832,16 @@ impl AuthStore {
                 AuthFailure::database(error)
             }
         })?;
+        self.record_organization_audit(
+            organization_id,
+            actor,
+            "group.created",
+            "group",
+            &group.group_id,
+            Some(&group.name),
+            json!({}),
+        )
+        .await?;
         Ok(group)
     }
 
@@ -684,7 +851,17 @@ impl AuthStore {
         actor: &str,
         group_id: &str,
     ) -> Result<(), AuthFailure> {
-        self.require_manager(organization_id, actor).await?;
+        self.delete_organization_group_as(organization_id, &AdminActor::user(actor), group_id)
+            .await
+    }
+
+    pub async fn delete_organization_group_as(
+        &self,
+        organization_id: &str,
+        actor: &AdminActor,
+        group_id: &str,
+    ) -> Result<(), AuthFailure> {
+        self.require_manager_as(organization_id, actor).await?;
         let result = sqlx::query(
             "DELETE FROM organization_groups WHERE organization_id = $1 AND group_id = $2",
         )
@@ -699,7 +876,16 @@ impl AuthStore {
                 "group does not exist",
             ));
         }
-        Ok(())
+        self.record_organization_audit(
+            organization_id,
+            actor,
+            "group.deleted",
+            "group",
+            group_id,
+            None,
+            json!({}),
+        )
+        .await
     }
 
     pub async fn set_organization_group_member(
@@ -710,7 +896,25 @@ impl AuthStore {
         target_user_id: &str,
         present: bool,
     ) -> Result<Vec<OrganizationGroup>, AuthFailure> {
-        self.require_manager(organization_id, actor).await?;
+        self.set_organization_group_member_as(
+            organization_id,
+            &AdminActor::user(actor),
+            group_id,
+            target_user_id,
+            present,
+        )
+        .await
+    }
+
+    pub async fn set_organization_group_member_as(
+        &self,
+        organization_id: &str,
+        actor: &AdminActor,
+        group_id: &str,
+        target_user_id: &str,
+        present: bool,
+    ) -> Result<Vec<OrganizationGroup>, AuthFailure> {
+        self.require_manager_as(organization_id, actor).await?;
         let valid = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM organization_groups g JOIN organization_members om \
              ON om.organization_id = g.organization_id \
@@ -736,7 +940,7 @@ impl AuthStore {
             .bind(group_id)
             .bind(target_user_id)
             .bind(Utc::now().to_rfc3339())
-            .bind(actor)
+            .bind(actor.label())
             .execute(&self.pool)
             .await
             .map_err(AuthFailure::database)?;
@@ -750,7 +954,22 @@ impl AuthStore {
             .await
             .map_err(AuthFailure::database)?;
         }
-        self.list_organization_groups(organization_id, actor).await
+        self.record_organization_audit(
+            organization_id,
+            actor,
+            if present {
+                "group.member_added"
+            } else {
+                "group.member_removed"
+            },
+            "group",
+            group_id,
+            None,
+            json!({ "user_id": target_user_id }),
+        )
+        .await?;
+        self.list_organization_groups_as(organization_id, actor)
+            .await
     }
 
     pub async fn create_workspace(
@@ -760,8 +979,24 @@ impl AuthStore {
         name: &str,
         user_id: &str,
     ) -> Result<WorkspaceInfo, AuthFailure> {
-        self.require_organization_member(organization_id, user_id)
-            .await?;
+        self.create_workspace_as(
+            organization_id,
+            workspace_id,
+            name,
+            &AdminActor::user(user_id),
+        )
+        .await
+    }
+
+    pub async fn create_workspace_as(
+        &self,
+        organization_id: &str,
+        workspace_id: &str,
+        name: &str,
+        actor: &AdminActor,
+    ) -> Result<WorkspaceInfo, AuthFailure> {
+        self.require_member_as(organization_id, actor).await?;
+        let user_id = &actor.label();
         let name = validate_resource_name(name, "workspace")?;
         let now = Utc::now();
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
@@ -802,8 +1037,8 @@ impl AuthStore {
             NewAuditEvent {
                 organization_id,
                 workspace_id: Some(workspace_id),
-                actor_kind: "user",
-                actor_id: Some(user_id),
+                actor_kind: actor.kind(),
+                actor_id: Some(actor.id()),
                 source: "api",
                 action: "workspace.created",
                 resource_kind: "workspace",
@@ -828,7 +1063,17 @@ impl AuthStore {
         user_id: &str,
         name: &str,
     ) -> Result<WorkspaceInfo, AuthFailure> {
-        self.require_workspace_member(workspace_id, user_id).await?;
+        self.rename_workspace_as(workspace_id, &AdminActor::user(user_id), name)
+            .await
+    }
+
+    pub async fn rename_workspace_as(
+        &self,
+        workspace_id: &str,
+        actor: &AdminActor,
+        name: &str,
+    ) -> Result<WorkspaceInfo, AuthFailure> {
+        self.workspace_role_as(workspace_id, actor).await?;
         let name = validate_resource_name(name, "workspace")?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let row = sqlx::query(
@@ -856,8 +1101,8 @@ impl AuthStore {
             NewAuditEvent {
                 organization_id: &organization_id,
                 workspace_id: Some(workspace_id),
-                actor_kind: "user",
-                actor_id: Some(user_id),
+                actor_kind: actor.kind(),
+                actor_id: Some(actor.id()),
                 source: "api",
                 action: "workspace.renamed",
                 resource_kind: "workspace",
@@ -882,12 +1127,27 @@ impl AuthStore {
         Ok(info)
     }
 
+    #[cfg(test)]
     pub async fn delete_workspace(
         &self,
         workspace_id: &str,
         user_id: &str,
     ) -> Result<DeletedWorkspace, AuthFailure> {
-        self.require_workspace_owner(workspace_id, user_id).await?;
+        self.delete_workspace_as(
+            workspace_id,
+            &AdminActor::user(user_id),
+            &treer_protocol::DeleteWorkspaceRequest::default(),
+        )
+        .await
+    }
+
+    pub async fn delete_workspace_as(
+        &self,
+        workspace_id: &str,
+        actor: &AdminActor,
+        request: &treer_protocol::DeleteWorkspaceRequest,
+    ) -> Result<DeletedWorkspace, AuthFailure> {
+        self.require_workspace_owner_as(workspace_id, actor).await?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let row = sqlx::query(
             "SELECT organization_id, name FROM workspaces \
@@ -900,6 +1160,8 @@ impl AuthStore {
         .ok_or_else(|| AuthFailure::not_found("workspace_not_found", "workspace does not exist"))?;
         let organization_id: String = row.get("organization_id");
         let name: String = row.get("name");
+        Self::validate_workspace_deletion(&name, request)?;
+        let now = Utc::now().to_rfc3339();
         let machine_count = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM machines WHERE workspace_id = $1 AND revoked_at IS NULL",
         )
@@ -907,10 +1169,10 @@ impl AuthStore {
         .fetch_one(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
-        if machine_count != 0 {
+        if machine_count != 0 && !request.revoke_machines {
             return Err(AuthFailure::conflict(
                 "workspace_has_machines",
-                "delete all machines in this workspace first",
+                "delete all machines in this workspace first, or pass revoke_machines",
             ));
         }
         let agent_count = sqlx::query_scalar::<_, i64>(
@@ -927,7 +1189,9 @@ impl AuthStore {
         .fetch_one(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
-        let now = Utc::now().to_rfc3339();
+        if request.revoke_machines {
+            Self::revoke_workspace_machines(&mut transaction, workspace_id, &now).await?;
+        }
         sqlx::query(
             "UPDATE agent_credentials SET revoked_at = $1 \
              WHERE workspace_id = $2 AND revoked_at IS NULL",
@@ -942,14 +1206,15 @@ impl AuthStore {
             NewAuditEvent {
                 organization_id: &organization_id,
                 workspace_id: Some(workspace_id),
-                actor_kind: "user",
-                actor_id: Some(user_id),
+                actor_kind: actor.kind(),
+                actor_id: Some(actor.id()),
                 source: "api",
                 action: "workspace.deleted",
                 resource_kind: "workspace",
                 resource_id: workspace_id,
                 resource_name: Some(&name),
                 payload: json!({
+                    "machines_revoked": request.revoke_machines,
                     "machine_count": machine_count,
                     "agent_count": agent_count,
                     "app_count": app_count,
@@ -963,7 +1228,7 @@ impl AuthStore {
              WHERE workspace_id = $3 AND deleted_at IS NULL",
         )
         .bind(&now)
-        .bind(user_id)
+        .bind(actor.label())
         .bind(workspace_id)
         .execute(&mut *transaction)
         .await
@@ -995,5 +1260,59 @@ impl AuthStore {
             agent_count,
             app_count,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn record_organization_audit(
+        &self,
+        organization_id: &str,
+        actor: &AdminActor,
+        action: &str,
+        resource_kind: &str,
+        resource_id: &str,
+        resource_name: Option<&str>,
+        payload: Value,
+    ) -> Result<(), AuthFailure> {
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        audit::insert(
+            &mut transaction,
+            NewAuditEvent {
+                organization_id,
+                workspace_id: None,
+                actor_kind: actor.kind(),
+                actor_id: Some(actor.id()),
+                source: "api",
+                action,
+                resource_kind,
+                resource_id,
+                resource_name,
+                payload,
+            },
+        )
+        .await
+        .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)
+    }
+
+    async fn record_access_audit(
+        &self,
+        workspace_id: &str,
+        actor: &AdminActor,
+        action: &str,
+        resource_kind: &str,
+        resource_id: &str,
+        payload: Value,
+    ) -> Result<(), AuthFailure> {
+        self.record_workspace_audit(NewWorkspaceAuditEvent {
+            workspace_id,
+            actor_kind: actor.kind(),
+            actor_id: Some(actor.id()),
+            action,
+            resource_kind,
+            resource_id,
+            resource_name: None,
+            payload,
+        })
+        .await
     }
 }

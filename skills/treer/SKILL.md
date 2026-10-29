@@ -551,6 +551,46 @@ Ready means the Controller reports `proxy_connected`, not just a live loopback
 API. `treer machine delete <server-id>` revokes the machine and removes every
 Agent on it; it does not uninstall the service.
 
+## Administration over HTTP
+
+Organization and workspace administration has no CLI command; call the local
+Controller, which forwards `ANY /api/admin/PATH?QUERY` as you (your workload
+credential, never the operator's) to the Proxy's
+`/agent/workspaces/$TREER_WORKSPACE_ID/admin/PATH`:
+
+```bash
+admin() { # METHOD PATH [JSON]
+  curl -sS -X "$1" "$TREER_AGENT_SERVER_URL/api/admin/$2" \
+    -H "X-Treer-Agent-Id: $TREER_AGENT_ID" \
+    -H "X-Treer-Workload-Credential: $TREER_WORKLOAD_CREDENTIAL" \
+    ${3:+-H 'Content-Type: application/json' -d "$3"}
+}
+admin POST organization/invitations '{"role":"member","email":"a@example.com","workspace_ids":["'"$TREER_WORKSPACE_ID"'"]}'
+admin GET  workspace/access/effective
+```
+
+| Policy action | Routes under `/api/admin/` |
+| --- | --- |
+| `org.manage` | `GET/PATCH {name}/DELETE {confirm_name} organization` |
+| `org.member.manage` | `GET organization/members`, `PATCH {role}/DELETE organization/members/{user_id}` |
+| `org.invite.manage` | `GET/POST organization/invitations`, `DELETE organization/invitations/{id}` |
+| `org.group.manage` | `GET/POST {name} organization/groups`, `DELETE organization/groups/{id}`, `PUT/DELETE organization/groups/{id}/members/{user_id}` |
+| `audit.read` | `GET organization/audit-events?limit=&before=&workspace_id=` |
+| `workspace.manage` | `GET/POST {name} workspaces`, `PATCH {name}/DELETE {confirm_name,revoke_machines} workspace` |
+| `workspace.access.manage` | `GET/PATCH {access_mode} workspace/access`, `GET workspace/access/effective`, `PUT {role}/DELETE workspace/access/users/{id}` and `.../groups/{id}` |
+| `policy.provider.manage` | `GET/PUT/DELETE workspace/policy-provider` |
+| `machine.enroll` | `POST workspace/bootstrap` (returns a secret enrollment key) |
+
+Bodies and responses match the Console's `/api/organizations/...` and
+`/api/workspaces/...` routes. Each action is denied (`403 policy_denied`) until
+a workspace owner adds an explicit allow rule naming you (`id`, `tree` or
+`group`); monitor mode and defaults never grant it. You act only on your own
+workspace (`workspace/...`) and its organization (`organization/...`), as an
+owner would, and the last owner can never be removed or demoted. Every change
+is audited with you as actor. Session and password routes are human-only.
+Never relay an invitation URL or enrollment key anywhere but its intended
+recipient.
+
 ## Operational boundaries
 
 - Do not stop, restart or delete agents you did not create unless asked.

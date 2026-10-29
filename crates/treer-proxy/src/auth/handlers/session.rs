@@ -116,3 +116,34 @@ pub(crate) async fn logout(
     )
         .into_response())
 }
+
+pub(crate) async fn list_sessions(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+) -> Result<Response, AuthFailure> {
+    let sessions = auth.list_sessions(&session).await?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(treer_protocol::AuthSessionList { sessions }),
+    )
+        .into_response())
+}
+
+pub(crate) async fn revoke_session(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(session_id): AxumPath<String>,
+) -> Result<StatusCode, AuthFailure> {
+    auth.revoke_session(&session, &session_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn change_password(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    Json(request): Json<treer_protocol::ChangePasswordRequest>,
+) -> Result<StatusCode, AuthFailure> {
+    auth.change_password(&session, &request.current_password, &request.new_password)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}

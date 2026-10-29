@@ -141,7 +141,21 @@ enroll other machines on a trusted LAN. Verification commands are in
   (`<name> Personal`). With `TREER_INVITATION_REQUIRED=false` anyone can
   register and receives one.
 - Organization owners/admins invite members from **Members**; the invitee
-  previews the organization and explicitly chooses **Join**.
+  previews the organization and explicitly chooses **Join**. An invitation has
+  a role (only owners invite owners), an expiry (1–720 h, default 168), and
+  optional groups and workspace grants applied on acceptance; it can be listed
+  and revoked (`GET|POST /api/organizations/{org}/invitations`,
+  `DELETE .../invitations/{id}`). With the Cloudflare email sender configured
+  and an `email` given, Treer also emails the link.
+- Members leave with `POST /api/organizations/{org}/leave`; an owner hands over
+  with `POST .../transfer {"user_id"}` (caller becomes admin) and deletes an
+  organization without workspaces with `DELETE /api/organizations/{org}
+  {"confirm_name"}`. Every organization keeps at least one owner.
+- A workspace with machines is deleted in one step with
+  `DELETE /api/workspaces/{id} {"confirm_name","revoke_machines":true}`, which
+  revokes every machine credential in the same transaction.
+- Users list and end their sessions (`GET|DELETE /api/auth/sessions[/{id}]`)
+  and change their password (`POST /api/auth/password`; other sessions end).
 - Workspaces are visible to the whole organization by default; a workspace
   owner can restrict one to selected members and groups. Organization
   owners/admins are implicit owners of every workspace.
@@ -510,6 +524,25 @@ the same subjects, and restrict machine exec/file access. Owners can always
 change or remove the Provider, even when rules deny everything. Setup of the
 Policy App and its administration token is in
 [apps/policy/README.md](../apps/policy/README.md).
+
+**Delegating administration to an Agent.** Agents never inherit org or
+workspace administration from monitor mode, action defaults or a fail-open
+Provider. Grant it with an explicit allow rule that names the Agent (`id`,
+`tree` or `group` selector) and lists the actions, e.g.:
+
+```json
+{"id": "ops-bot-admin", "priority": 100, "effect": "allow",
+ "subjects": [{"kind": "agent", "id": "AGENT_ID"}],
+ "actions": ["org.invite.manage", "org.member.manage", "workspace.access.manage"],
+ "resources": [{}]}
+```
+
+The Agent then calls `$TREER_AGENT_SERVER_URL/api/admin/...` with its workload
+credential ([Treer skill](../skills/treer/SKILL.md#administration-over-http)).
+It acts only in its own workspace and that workspace's organization, never
+removes or demotes the last owner, and every change is audited with the Agent
+as actor. Grant `policy.provider.manage` only to Agents trusted to change
+everyone's Policy, their own included.
 
 ## Updates
 

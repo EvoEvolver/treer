@@ -150,11 +150,17 @@ pub(super) async fn explain_policy_in_workspace(
             policy_revision: 0,
             tree_revision: Some(snapshot.revision),
             source: "owner_break_glass".into(),
+            subject_named: false,
         }
     } else if let Some(document) = candidate {
         crate::policy::CompiledWorkspacePolicy::explain_document(document, mode, &request)
     } else {
         policy.explain_request(&request).await?
+    };
+    let explanation = if matches!(request.subject, PolicySubject::Human { .. }) {
+        explanation
+    } else {
+        explanation.with_admin_default_deny(&request.action)
     };
     Ok((
         [(header::CACHE_CONTROL, "no-store")],

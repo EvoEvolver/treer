@@ -106,6 +106,32 @@ pub(super) async fn set_policy_provider(
 ) -> Result<Json<Value>, ApiFailure> {
     auth.require_workspace_owner(&workspace_id, &session.user_id)
         .await?;
+    set_policy_provider_as(
+        &state,
+        &auth,
+        &config,
+        &policy,
+        &store,
+        &auth::AdminActor::User(session.user_id),
+        workspace_id,
+        request,
+    )
+    .await
+}
+
+/// The caller has authorized `actor` (workspace owner, or an Agent holding an
+/// explicit `policy.provider.manage` grant).
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn set_policy_provider_as(
+    state: &AppState,
+    auth: &AuthStore,
+    config: &IngressConfig,
+    policy: &PolicyEngine,
+    store: &PolicyProviderStore,
+    actor: &auth::AdminActor,
+    workspace_id: String,
+    request: SetWorkspacePolicyProviderRequest,
+) -> Result<Json<Value>, ApiFailure> {
     if request.max_stale_seconds > MAX_POLICY_PROVIDER_STALE_SECONDS {
         return Err(ApiFailure::bad_request(
             "invalid_policy_provider_stale_window",
@@ -116,12 +142,12 @@ pub(super) async fn set_policy_provider(
         .resolve_app_deployment(&workspace_id, request.app_id.trim())
         .await?;
     hydrate_app_deployment(
-        &state,
+        state,
         &mut app,
         super::inventory_view::InventoryView::Browser,
     )
     .await;
-    hydrate_app_public_url(&auth, &config, &mut app).await?;
+    hydrate_app_public_url(auth, config, &mut app).await?;
     let has_public_ingress = auth
         .list_service_ingresses(&workspace_id)
         .await?
@@ -244,7 +270,7 @@ pub(super) async fn set_policy_provider(
             request.failure_mode,
             request.max_stale_seconds,
             bundle.revision,
-            &session.user_id,
+            &actor.label(),
         )
         .await
         .map_err(|error| {
@@ -252,8 +278,8 @@ pub(super) async fn set_policy_provider(
         })?;
     policy.invalidate_provider(&workspace_id).await;
     record_policy_provider_audit(
-        &auth,
-        &session,
+        auth,
+        actor,
         "policy_provider.configured",
         &workspace_id,
         &app,
@@ -459,6 +485,24 @@ pub(super) async fn clear_policy_provider(
 ) -> Result<Json<Value>, ApiFailure> {
     auth.require_workspace_owner(&workspace_id, &session.user_id)
         .await?;
+    clear_policy_provider_as(
+        &auth,
+        &policy,
+        &store,
+        &auth::AdminActor::User(session.user_id),
+        &workspace_id,
+    )
+    .await
+}
+
+pub(super) async fn clear_policy_provider_as(
+    auth: &AuthStore,
+    policy: &PolicyEngine,
+    store: &PolicyProviderStore,
+    actor: &auth::AdminActor,
+    workspace_id: &str,
+) -> Result<Json<Value>, ApiFailure> {
+    let workspace_id = workspace_id.to_string();
     let previous = store.get(&workspace_id).await.map_err(|error| {
         ApiFailure::internal("policy_provider_store_failed", &error.to_string())
     })?;
@@ -472,8 +516,8 @@ pub(super) async fn clear_policy_provider(
             .await
         {
             record_policy_provider_audit(
-                &auth,
-                &session,
+                auth,
+                actor,
                 "policy_provider.removed",
                 &workspace_id,
                 &app,
@@ -549,7 +593,7 @@ pub(super) async fn invalidate_policy_provider(
 
 async fn record_policy_provider_audit(
     auth: &AuthStore,
-    session: &CurrentSession,
+    actor: &auth::AdminActor,
     action: &'static str,
     workspace_id: &str,
     app: &AppDeployment,
@@ -558,8 +602,8 @@ async fn record_policy_provider_audit(
     if let Err(error) = auth
         .record_workspace_audit(NewWorkspaceAuditEvent {
             workspace_id,
-            actor_kind: "user",
-            actor_id: Some(&session.user_id),
+            actor_kind: actor.kind(),
+            actor_id: Some(actor.id()),
             action,
             resource_kind: "policy_provider",
             resource_id: &app.app_id,

@@ -459,6 +459,7 @@ struct RegistrationInvitation {
     token: String,
     kind: String,
     organization_id: Option<String>,
+    role: Option<String>,
 }
 
 #[cfg(test)]
@@ -649,6 +650,26 @@ impl CloudflareEmailSender {
             "<h1>Reset your Treer password</h1><p>Open the link below within 30 minutes.</p><p><a href=\"{html_url}\">Reset password</a></p><p>If you did not request this, you can ignore this email.</p>"
         );
         self.send(recipient, "Reset your Treer password", html, text)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn send_invitation(
+        &self,
+        recipient: &str,
+        organization_name: &str,
+        invite_url: &Url,
+    ) -> anyhow::Result<()> {
+        let text = format!(
+            "You are invited to join {organization_name} on Treer.\n\nAccept the invitation:\n\n{}\n\nIf you did not expect this, you can ignore this email.",
+            invite_url.as_str()
+        );
+        let organization = escape_html(organization_name);
+        let html_url = escape_html(invite_url.as_str());
+        let html = format!(
+            "<h1>Join {organization} on Treer</h1><p><a href=\"{html_url}\">Accept the invitation</a></p><p>If you did not expect this, you can ignore this email.</p>"
+        );
+        self.send(recipient, "You are invited to Treer", html, text)
             .await
             .map_err(Into::into)
     }
@@ -885,11 +906,13 @@ mod email;
 mod handlers;
 mod machines;
 mod network;
+mod org_admin;
 mod organizations;
 mod pins;
 mod workload_tree;
 
 pub(crate) use handlers::*;
+pub(crate) use org_admin::AdminActor;
 
 #[cfg(test)]
 fn app_public_url_is_https(url: &Url) -> bool {

@@ -65,6 +65,17 @@ here are not made.
   publication authority; delegated Policy cannot deny owner recovery.
 - Workspace audit is a sensitive read (owners, or an explicit enforce-mode
   allow), projected through per-action allowlists and served `no-store`.
+- Agent administration (`org.manage`, `org.member.manage`, `org.invite.manage`,
+  `org.group.manage`, `workspace.manage`, `workspace.access.manage`,
+  `policy.provider.manage`, `audit.read`, `machine.enroll`) is **default-deny**
+  for every non-human subject regardless of mode, action defaults or Provider
+  fail-open: only a matched allow rule whose subject selector names the Agent
+  (`id`, `tree` or `group`) grants it, and a matched deny wins. Grants are
+  bounded to owner-equivalent powers in the Agent's own workspace and its
+  organization, keep the last-owner invariant, and are audited with the Agent
+  as actor. Account routes (sessions, password) are human-session only.
+  Changing the Policy Provider needs `policy.provider.manage`, so an Agent
+  cannot rewrite its own grants without that explicit grant.
 
 ### Machine enrollment and the Controller connection
 

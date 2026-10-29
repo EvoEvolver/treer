@@ -65,12 +65,32 @@ pub(super) async fn delete_workspace(
     Extension(auth): Extension<AuthStore>,
     Extension(session): Extension<CurrentSession>,
     Path(workspace_id): Path<String>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, ApiFailure> {
+    let request = auth::parse_optional_json::<treer_protocol::DeleteWorkspaceRequest>(&body, "{}")?;
+    delete_workspace_as(
+        &state,
+        &auth,
+        &workspace_id,
+        &auth::AdminActor::User(session.user_id),
+        &request,
+    )
+    .await
+}
+
+pub(super) async fn delete_workspace_as(
+    state: &AppState,
+    auth: &AuthStore,
+    workspace_id: &str,
+    actor: &auth::AdminActor,
+    request: &treer_protocol::DeleteWorkspaceRequest,
 ) -> Result<Json<Value>, ApiFailure> {
     let deleted = auth
-        .delete_workspace(&workspace_id, &session.user_id)
+        .delete_workspace_as(workspace_id, actor, request)
         .await?;
-    state.delete_workspace(&workspace_id).await?;
-    publish_virtual_network_hosts(&state, &auth, &workspace_id).await?;
+    // Drops live Controller connections, so revoked machines disconnect now.
+    state.delete_workspace(workspace_id).await?;
+    publish_virtual_network_hosts(state, auth, workspace_id).await?;
     Ok(Json(serde_json::to_value(&deleted)?))
 }
 

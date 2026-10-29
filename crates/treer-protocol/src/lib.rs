@@ -239,6 +239,8 @@ impl ProtocolError {
     }
 }
 
+mod admin;
+pub use admin::*;
 mod inventory;
 pub use inventory::*;
 mod policy;
