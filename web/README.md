@@ -159,16 +159,17 @@ workload):
 
 ### Sidebar
 
-The sidebar shows only what runs in the workspace: **Overview**, a filter
-box, the **Tree**, then **Machines** (collapsed by default), in one scroll
-region with sticky section headings (`sidebar-sections.tsx`), and a labeled
-**Workspace settings** link with the collapse button at the bottom. There is
-no separate attention inbox: problems show as status icons on Tree rows and
-collapsed-folder counts, and triage lives on the Overview board.
+The sidebar shows only what runs in the workspace: the **Tree**, then
+**Machines** (collapsed by default), in one scroll region with sticky section
+headings (`sidebar-sections.tsx`), and a labeled **Workspace settings** link
+with the collapse button at the bottom. There is no separate attention inbox:
+problems show as status icons on Tree rows and collapsed-folder counts, and
+triage lives on the Overview board.
 
-- The filter ("/" focuses it) narrows the Tree by name or path, showing
-  matches with their folders expanded, and also filters machines. Escape
-  clears; ArrowDown enters the rows.
+- There is no sidebar filter or Overview row: top-bar **Search**
+  (Cmd/Ctrl+K) finds an Agent or App by name or Tree path, opens it and
+  reveals it in the Tree; **Overview** is the pinned first tab (on phones,
+  in the tab switcher, or **Close tree** from the Tree).
 - **Machines** lists each machine with its workload count and online/offline
   state; a row opens the machine page, **+** opens Add machine. With no
   machines the Tree shows a guide; it, the Overview card and "Add agent" all
@@ -211,7 +212,8 @@ addressed by stable IDs; display names are unique only within a folder.
 - The sidebar resizes (240–480px, double-click resets to 272px) and collapses
   with the footer button or Cmd+B / Ctrl+B (not captured inside terminals or
   rich-text editors). Below 768px the layout is mobile: **Browse tree** opens
-  the Tree full screen and touch targets are 44px.
+  the Tree full screen under the tab bar, where the same button reads **Close
+  tree** and returns to the page underneath; touch targets are 44px.
 - **Copy path** yields an absolute Tree path such as `/research/reviewer`,
   usable as one `treer` CLI argument.
 

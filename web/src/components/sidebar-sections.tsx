@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from "react"
-import { ChevronRight, Monitor, Plus, Search, X } from "lucide-react"
+import { useState, type ReactNode } from "react"
+import { ChevronRight, Monitor, Plus } from "lucide-react"
 import { machineName, type Agent, type Machine } from "@/lib/api"
 import { TreeRow, TreeStatus } from "@/components/tree-row"
 import { cn } from "@/lib/utils"
@@ -25,48 +25,11 @@ export function SidebarSection({ id, title, count, action, children, defaultOpen
   </section>
 }
 
-// Filters the Tree and machines in place. Cmd/Ctrl+K opens the
-// Console-wide search (top bar) instead; "/" focuses this filter.
-export function SidebarSearch({ value, onChange }: { value: string; onChange: (value: string) => void }) {
-  const input = useRef<HTMLInputElement>(null)
-  useEffect(() => {
-    function onKey(event: KeyboardEvent) {
-      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return
-      const target = event.target
-      if (target instanceof Element && target.closest("input, select, .xterm, textarea, [contenteditable]:not([contenteditable=\"false\"])")) return
-      const sidebar = document.getElementById("tree-sidebar")
-      if (!sidebar || sidebar.getClientRects().length === 0) return
-      event.preventDefault(); input.current?.focus(); input.current?.select()
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  }, [])
-  return <div className="relative px-2 pb-2">
-    <Search aria-hidden="true" className="pointer-events-none absolute left-4 top-1/2 size-3.5 -translate-y-[calc(50%+4px)] text-muted-foreground" />
-    <input ref={input} type="search" value={value} onChange={(event) => onChange(event.target.value)} aria-label={t("sidebar.search")} placeholder={t("sidebar.search")}
-      onKeyDown={(event) => {
-        if (event.key === "Escape" && value) { event.preventDefault(); onChange("") }
-        if (event.key === "ArrowDown") { const first = document.querySelector<HTMLElement>("#tree-sidebar [data-sidebar-section] [data-tree-primary]"); if (first) { event.preventDefault(); first.focus() } }
-      }}
-      className="h-8 w-full rounded-md border border-transparent bg-background pl-8 pr-14 text-[13px] text-foreground shadow-[0_0_0_1px_hsl(var(--border))] outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring max-md:h-11 [&::-webkit-search-cancel-button]:hidden" />
-    {value
-      ? <button type="button" aria-label={t("sidebar.clear_search")} onClick={() => { onChange(""); input.current?.focus() }} className="absolute right-3 top-1/2 grid size-6 -translate-y-[calc(50%+4px)] place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground max-md:size-10"><X aria-hidden="true" className="size-3.5" /></button>
-      : <kbd aria-hidden="true" className="pointer-events-none absolute right-4 top-1/2 -translate-y-[calc(50%+4px)] rounded border bg-sidebar px-1 font-sans text-[10px] text-muted-foreground max-md:hidden">/</kbd>}
-  </div>
-}
-
-export const matches = (query: string, ...values: (string | undefined)[]) => {
-  const q = query.trim().toLocaleLowerCase()
-  return !q || values.some((value) => value?.toLocaleLowerCase().includes(q))
-}
-
 // Machines are first-class: health at a glance, one click to the machine page, enrollment one click away.
-export function MachinesSection({ machines, agents, query, selectedId, onOpen, onAdd }: {
-  machines: Machine[]; agents: Agent[]; query: string; selectedId: string | null; onOpen: (id: string) => void; onAdd: () => void
+export function MachinesSection({ machines, agents, selectedId, onOpen, onAdd }: {
+  machines: Machine[]; agents: Agent[]; selectedId: string | null; onOpen: (id: string) => void; onAdd: () => void
 }) {
-  const shown = machines.filter((machine) => matches(query, machineName(machine), machine.hostname))
-    .sort((a, b) => Number(b.status === "online") - Number(a.status === "online") || machineName(a).localeCompare(machineName(b)))
-  if (query.trim() && !shown.length) return null
+  const shown = [...machines].sort((a, b) => Number(b.status === "online") - Number(a.status === "online") || machineName(a).localeCompare(machineName(b)))
   // Collapsed by default: machines are managed in Workspace settings.
   return <SidebarSection id="machines" title={t("wsettings.machines")} count={machines.length} defaultOpen={false}
     action={<button type="button" aria-label={t("dialogs.add_machine")} title={t("dialogs.add_machine")} onClick={onAdd} className="grid size-6 place-items-center rounded-md text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring max-md:size-11"><Plus aria-hidden="true" className="size-4" /></button>}>

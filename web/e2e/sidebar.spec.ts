@@ -14,8 +14,8 @@ async function fixture(page: Page) {
   return { send: (data: unknown) => events!.send(JSON.stringify({ event: 'workspace.snapshot', data })) }
 }
 
-// The sidebar is search, the Tree and machines; triage lives on the Overview board.
-for (const theme of ['light', 'dark']) test(`sidebar search and machines ${theme}`, async ({ page }, info) => {
+// The sidebar is the Tree and machines; triage lives on the Overview board, search in the top bar.
+for (const theme of ['light', 'dark']) test(`sidebar tree and machines ${theme}`, async ({ page }, info) => {
   await page.setViewportSize({ width: 1360, height: 900 })
   await page.addInitScript((value) => localStorage.setItem('treer-theme', value), theme)
   await fixture(page)
@@ -28,18 +28,18 @@ for (const theme of ['light', 'dark']) test(`sidebar search and machines ${theme
   await expect(sidebar.getByRole('list', { name: 'Needs attention' })).toHaveCount(0)
   await page.screenshot({ path: info.outputPath(`sidebar-${theme}.png`) })
 
-  // "/" focuses the sidebar filter (Cmd/Ctrl+K opens the Console-wide search); matching rows and their folders stay.
-  await page.keyboard.press('/')
-  const search = sidebar.getByRole('searchbox', { name: 'Search' })
-  await expect(search).toBeFocused()
-  await search.fill('proto')
-  await expect(tree.getByRole('treeitem', { name: 'prototype', exact: true })).toBeVisible()
+  // No filter box or Overview row: Cmd/Ctrl+K finds a workload by name or path, opens it and reveals it in the Tree.
+  await expect(sidebar.getByRole('searchbox')).toHaveCount(0)
+  await expect(sidebar.getByRole('button', { name: 'Workspace overview' })).toHaveCount(0)
+  await page.keyboard.press('ControlOrMeta+k')
+  const palette = page.getByRole('combobox', { name: 'Search the Console' })
+  await expect(palette).toBeFocused()
+  await palette.fill('experiments')
+  await palette.press('Enter')
   await expect(tree.getByRole('treeitem', { name: 'Experiments', exact: true })).toHaveAttribute('aria-expanded', 'true')
-  await expect(tree.getByRole('treeitem', { name: 'design', exact: true })).toHaveCount(0)
-  await search.fill('zzz-none')
-  await expect(sidebar.getByText('Nothing matches “zzz-none”')).toBeVisible()
-  await search.press('Escape')
-  await expect(search).toHaveValue('')
+  await expect(tree.getByRole('treeitem', { name: 'prototype', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await page.getByRole('tab', { name: 'Tab Overview', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Workspace overview', exact: true })).toBeVisible()
 
   // Machines are collapsed by default; the section remembers being opened and opens machine pages.
   const toggle = sidebar.getByRole('button', { name: /^Machines/ })

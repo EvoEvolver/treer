@@ -69,14 +69,17 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
     await expect.poll(() => backend.terminals.length).toBeGreaterThan(0)
     expect(backend.terminals[0]).toContain('/agents/reviewer-a/terminal')
     if (mobile) {
+      // The phone Tree keeps the tab bar above it; its switcher always holds Overview.
       await backToWorkloads(page)
-      await page.getByRole('button', { name: 'Workspace overview', exact: true }).click()
+      await page.getByRole('button', { name: /^Show all tabs/ }).click()
+      await page.getByRole('button', { name: 'Open tab Overview', exact: true }).click()
     }
     else await page.getByRole('tab', { name: 'Tab Overview', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
     if (mobile) await page.getByRole('button', { name: 'Browse tree', exact: true }).click()
     await expect(page.getByRole('tree', { name: 'Workspace workloads' })).toBeVisible()
-    await page.getByRole('button', { name: 'Workspace overview', exact: true }).click()
+    if (mobile) await page.getByRole('button', { name: 'Close tree', exact: true }).click()
+    else await page.getByRole('tab', { name: 'Tab Overview', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
   })
 }
