@@ -1419,6 +1419,9 @@ def server(hub, host, port, authorize, origins=()):
                     template = query.get('template', 'TEMPLATE')
                     return self.send(200, handoff_format('j-0000', template if KEY.fullmatch(template) else 'TEMPLATE', hub.address),
                                      'text/markdown; charset=utf-8')
+                if method == 'GET' and path == '/flows/review_loop.py':
+                    # The caller-side review loop script (public code, like the manual).
+                    return self.send(200, (HERE / 'flows' / 'review_loop.py').read_bytes(), 'text/x-python; charset=utf-8')
                 if not path.startswith('/api/'):
                     raise Fail(404, 'not_found', 'not found')
                 parts = path[5:].strip('/').split('/')

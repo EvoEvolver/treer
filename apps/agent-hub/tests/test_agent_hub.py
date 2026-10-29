@@ -812,6 +812,10 @@ class HubTests(unittest.TestCase):
         self.assertIn('id="worker"', page, 'the job page embeds the worker UI')
         with urlopen(self.base + 'health') as r:
             self.assertEqual(json.loads(r.read()), {'ok': True})
+        with urlopen(self.base + 'flows/review_loop.py') as r:
+            self.assertEqual(r.read(), (HERE.parent / 'flows' / 'review_loop.py').read_bytes())
+        self.assertIn('Review loop', manual)
+        self.assertIn('curl -fsS http://svc_hub.treer/flows/review_loop.py', manual)
         with urlopen(self.base + 'api/handoff-format?template=reviewer') as r:
             self.assertIn('verdict: changes-needed', r.read().decode())
 

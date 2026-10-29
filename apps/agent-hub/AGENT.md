@@ -88,6 +88,27 @@ curl -fsS -X POST -H 'Content-Type: application/json' HUB_URL/api/jobs -d '{
 }'
 ```
 
+## Review loop
+
+A caller-side script (stdlib Python, public API only) that alternates fresh
+implementer and fresh reviewer jobs, possibly on two hubs: each round the
+reviewer gets the implementation handoff as a reference and treats it as the
+implementer's claim, not evidence; its `## Notes for the implementer` go
+verbatim to the next fresh implementer with both handoffs, until `verdict:
+approve` or `--max-rounds`.
+
+```sh
+curl -fsS HUB_URL/flows/review_loop.py > review_loop.py
+python3 review_loop.py --impl-hub http://svc_IMPL.treer/ --review-hub HUB_URL/ \
+  --impl-template implementer --review-template reviewer \
+  --base-branch origin/main --task @task.md [--max-rounds 4] [--poll-seconds 30]
+```
+
+Exit 0 approved, 2 max rounds without approval, 1 error (job failed/stopped,
+blocked handoff, refused request). Progress on stderr; the summary (rounds,
+final branch and commit, verdict) on stdout, last line JSON. Run it in the
+background: one round is two full jobs.
+
 ## Steer or stop a running job
 
 ```sh
@@ -121,6 +142,7 @@ it after a grace period either way. A running job's live worker UI is
 | `GET /api/tree?path=` | App tree: `templates/`, `jobs/`, `handoffs/` |
 | `GET /?node=PATH` | the page of a `page.read` node (HTML) |
 | `/workers/{id}/…` | the live worker's own UI and API (HTTP + WebSocket) |
+| `GET /flows/review_loop.py` | the review loop script (no identity needed) |
 
 Errors are `{"error": {"code", "message"}}`. Every `/api` route needs a verified
 Treer identity (humans, Agents, and other Apps such as another hub: an App

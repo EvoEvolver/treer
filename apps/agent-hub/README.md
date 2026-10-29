@@ -6,7 +6,8 @@ best with a clean one. For every job the hub starts a new worker from a
 versioned template, gives it only the task and its input handoffs, collects a
 structured handoff, then archives the job and ends the worker so its memory is
 released. Callers chain jobs themselves (`inputs.handoffs`, also across hubs);
-there are no built-in pipelines and no approval steps.
+there are no built-in pipelines and no approval steps. Flows such as the
+[review loop](flows/review_loop.py) are ordinary callers of the public API.
 
 Workers are **App-owned subtree Agents**: `/<hub>/jobs/<id>` in the hub's
 [App tree](../../docs/app-tree.md), never Agents in the workspace Tree. Each is
@@ -152,6 +153,19 @@ handoff, unreachable, not a handoff) is a 400 `input_handoff_unresolved` naming
 the reference; nothing is created. The first prompt labels every input handoff
 with its full reference (`## Input handoff /agent_hub_linux/j-0003 (implementer;
 from hub /agent_hub_linux)`, local ones as `/<this hub>/j-0007`).
+
+## Review loop
+
+[flows/review_loop.py](flows/review_loop.py) (stdlib; also served at
+`/flows/review_loop.py`) is a caller, not a hub feature. Inspired by
+`rlar`-style loops: an implementer job works; a **fresh** reviewer job reads the
+repository and the implementer's handoff, which it treats as a claim, not
+evidence, and returns `verdict` plus *Notes for the implementer*; those notes go
+verbatim, with both handoffs as references, to the next fresh implementer, which
+starts from the previous branch. It stops at `approve` (exit 0), after
+`--max-rounds` (default 4, exit 2) or on an error (exit 1: failed/stopped job,
+blocked handoff, refused request, missing verdict). Usage is in
+[AGENT.md](AGENT.md#review-loop).
 
 ## Identity
 
