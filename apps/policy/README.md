@@ -196,6 +196,29 @@ an allow rule for its runtime ID (`treer app show PATH`), for example
 `{"id":"issues-app-wakes-agents","priority":40,"effect":"allow","subjects":[{"id":"app_RUNTIME_ID"}],"actions":["agent.prompt"],"resources":[{"kind":"agent"}]}`;
 add a `tree` selector to the resource to limit which Agents it may reach.
 
+## Granting organization and workspace administration
+
+Core treats `org.manage`, `org.member.manage`, `org.invite.manage`,
+`org.group.manage`, `workspace.manage`, `workspace.access.manage`,
+`policy.provider.manage`, `audit.read` and `machine.enroll` as
+**default-deny** for Agents and Apps, even in monitor mode, with no rules, with
+an `allow` default or with a fail-open Provider. Only a matched allow rule
+whose subject names the Agent (`id`, `tree` or `group`; `{"kind":"agent"}` alone
+is not enough) grants them, and a matching higher-priority deny wins:
+
+```json
+{"id":"ops-bot-admin","priority":100,"effect":"allow",
+ "subjects":[{"kind":"agent","id":"AGENT_ID"}],
+ "actions":["org.invite.manage","org.member.manage","workspace.access.manage"],
+ "resources":[{}]}
+```
+
+Organization actions use resource `{"kind":"organization","id":ORG_ID}`;
+workspace actions use `{"kind":"workspace","id":WORKSPACE_ID}`. The simulator
+(`POST /v1/policy/test`) applies the same gate. Humans are unaffected: their
+organization and workspace roles decide. Granting `policy.provider.manage` lets
+the Agent replace the Provider, and so its own grants.
+
 ## Isolating the administration Agent
 
 Place the administration Agent and the App in a dedicated folder and gate access

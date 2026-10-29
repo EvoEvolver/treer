@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { Bot, Boxes, RefreshCw } from "lucide-react"
 import { ApiError, type AppDeployment } from "@/lib/api"
-import { knownAppTreeSupport, probeAppTreeSupport, readAppTree, type AppNodeSelection, type AppTreeNode } from "@/lib/app-tree"
+import { APP_TREE_UI_CAPABILITY, knownAppTreeSupport, probeAppTreeSupport, readAppTree, type AppNodeSelection, type AppTreeNode } from "@/lib/app-tree"
 import { workloadLinkProps } from "@/lib/workload-link"
 import { TreeGroup, TreeRow, treeIndent } from "@/components/tree-row"
 import { t } from "@/i18n"
@@ -17,7 +17,9 @@ export type AppTreeNavigation = {
 // running Apps are asked, once per page session; until an App answers, and for
 // every App that does not own a directory, its row stays a plain leaf.
 export function useAppTreeSupport(workspaceId: string | null, apps: AppDeployment[]): Set<string> {
-  const running = workspaceId ? apps.filter(app => app.status === "running").map(app => app.app_id).sort() : []
+  // A declared `app-tree.v1` UI capability answers without a probe.
+  const declared = (app: AppDeployment) => app.ui_capabilities?.includes(APP_TREE_UI_CAPABILITY) ?? false
+  const running = workspaceId ? apps.filter(app => app.status === "running" && !declared(app)).map(app => app.app_id).sort() : []
   const runningKey = running.join("\n")
   const [, rerender] = useState(0)
   const [retry, setRetry] = useState(0)
@@ -33,7 +35,7 @@ export function useAppTreeSupport(workspaceId: string | null, apps: AppDeploymen
     })
     return () => { active = false; clearTimeout(timer) }
   }, [workspaceId, runningKey, retry])
-  return new Set(workspaceId ? apps.filter(app => knownAppTreeSupport(workspaceId, app.app_id) === "yes").map(app => app.app_id) : [])
+  return new Set(workspaceId ? apps.filter(app => declared(app) || knownAppTreeSupport(workspaceId, app.app_id) === "yes").map(app => app.app_id) : [])
 }
 
 // The App row in the workspace Tree owns the root disclosure; this renders its contents at `depth`.

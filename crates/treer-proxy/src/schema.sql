@@ -369,6 +369,27 @@ BEGIN
 END
 $$;
 
+-- Organization invitation management (Settings): a stable public ID that is
+-- never the secret token, optional email/expiry/revocation, and the grants
+-- applied on acceptance. Rows created before these columns never expire.
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS invitation_id TEXT;
+ALTER TABLE invitations ALTER COLUMN invitation_id
+    SET DEFAULT ('invt_' || replace(gen_random_uuid()::text, '-', ''));
+UPDATE invitations SET invitation_id = 'invt_' || replace(gen_random_uuid()::text, '-', '')
+    WHERE invitation_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS invitations_invitation_id ON invitations(invitation_id);
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS created_by_kind TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS group_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS workspace_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
+-- Only invitations created with an explicit role grant it; older rows (and
+-- legacy initial-owner invitations) are capped to member on acceptance.
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS explicit_role BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX IF NOT EXISTS invitations_organization
+    ON invitations(organization_id) WHERE kind = 'organization';
+
 CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
@@ -379,6 +400,15 @@ CREATE TABLE IF NOT EXISTS sessions (
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS device_id TEXT;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS device_name TEXT;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS client TEXT;
+-- Account session list: a public ID that is not the bearer secret, and a
+-- coarse (5 minute) last-seen time.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS session_id TEXT;
+ALTER TABLE sessions ALTER COLUMN session_id
+    SET DEFAULT ('ses_' || replace(gen_random_uuid()::text, '-', ''));
+UPDATE sessions SET session_id = 'ses_' || replace(gen_random_uuid()::text, '-', '')
+    WHERE session_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS sessions_session_id ON sessions(session_id);
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_seen_at TEXT;
 CREATE INDEX IF NOT EXISTS sessions_expires_at ON sessions(expires_at);
 
 CREATE TABLE IF NOT EXISTS password_reset_tokens (
@@ -602,6 +632,8 @@ CREATE TABLE IF NOT EXISTS app_deployments (
 );
 DROP INDEX IF EXISTS app_deployments_workspace_name_lower;
 ALTER TABLE app_deployments ADD COLUMN IF NOT EXISTS startup_revision BIGINT NOT NULL DEFAULT 0 CHECK(startup_revision >= 0);
+-- Browser UI contracts the App declares (e.g. app-tree.v1); presentation only.
+ALTER TABLE app_deployments ADD COLUMN IF NOT EXISTS ui_capabilities JSONB NOT NULL DEFAULT '[]'::jsonb;
 CREATE INDEX IF NOT EXISTS app_deployments_workspace_name ON app_deployments(workspace_id, name);
 CREATE UNIQUE INDEX IF NOT EXISTS app_deployments_workspace_hostname_lower
     ON app_deployments(workspace_id, lower(hostname));

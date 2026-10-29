@@ -8,7 +8,12 @@ mailbox visibility, Policy, and the parent App's existing lifecycle.
 
 ## Recursive directory
 
-Core records no "has a tree" flag, so the Console asks each running Managed App
+An App that implements this contract declares the `app-tree.v1` UI capability
+(`treer app create|update ... --ui-capability app-tree.v1`, or
+`ui_capabilities` on the App create/update API). Core persists the declaration
+and returns it as `AppDeployment.ui_capabilities`; it is presentation metadata
+and grants nothing. The Console makes a declaring App expandable without a
+request. For an App that declares nothing, the Console asks each running App
 once per page session for its root page (`Accept: application/json`, 4 s timeout). Only a `schema_version: 1`
 JSON answer, or a 401/403, makes the App row expandable; 404/405/501, an HTML
 SPA fallback or any other non-tree reply leaves it a plain leaf with no

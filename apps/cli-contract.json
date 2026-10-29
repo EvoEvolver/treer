@@ -233,7 +233,8 @@
       "--machine": "value",
       "--name": "value",
       "--port": "value",
-      "--public": "none"
+      "--public": "none",
+      "--ui-capability": "value"
     },
     "positionals": 2,
     "variadic": true
@@ -272,7 +273,8 @@
     "flags": {
       "--clear-args": "none",
       "--command": "value",
-      "--cwd": "value"
+      "--cwd": "value",
+      "--ui-capability": "value"
     },
     "positionals": 2,
     "variadic": true

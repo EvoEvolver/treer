@@ -120,6 +120,7 @@ pub const AUDIT_CATEGORY_EXACT: &[(&str, AuditCategory)] = &[
     ("machine.update", AuditCategory::MachinesFiles),
     ("machine.exec", AuditCategory::MachinesFiles),
     ("machine.upload", AuditCategory::MachinesFiles),
+    ("machine.enrollment.created", AuditCategory::MachinesFiles),
     // Access and administration.
     ("member.role_updated", AuditCategory::AccessAdmin),
     ("member.removed", AuditCategory::AccessAdmin),
@@ -154,6 +155,12 @@ pub const AUDIT_CATEGORY_PREFIXES: &[(&str, AuditCategory)] = &[
     ("session", AuditCategory::AccessAdmin),
     ("auth", AuditCategory::AccessAdmin),
     ("identity", AuditCategory::AccessAdmin),
+    // Organization lifecycle, groups and workspace access grants. Added
+    // without a version bump: no existing action changes category, and the
+    // Console refuses table versions above 1.
+    ("organization", AuditCategory::AccessAdmin),
+    ("group", AuditCategory::AccessAdmin),
+    ("workspace.access", AuditCategory::AccessAdmin),
 ];
 
 /// Exact first, then the longest prefix, else `Other`.
@@ -220,6 +227,9 @@ pub const NOTABLE_ACTIONS: &[&str] = &[
     "machine.deleted",
     "workspace.deleted",
     "workspace.renamed",
+    "member.left",
+    "organization.ownership_transferred",
+    "machine.enrollment.created",
 ];
 
 /// Prefixes whose every action is notable (`prefix.`-form matching).

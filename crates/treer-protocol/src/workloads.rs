@@ -145,6 +145,46 @@ pub struct AppDeployment {
     pub created_by: String,
     pub updated_at: DateTime<Utc>,
     pub updated_by: String,
+    /// Browser UI contracts the App declares, such as [`APP_UI_CAPABILITY_TREE_V1`].
+    /// The Console uses them to decide what to offer; they grant nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ui_capabilities: Vec<String>,
+}
+
+/// The App serves `GET api/tree?path=` through its UI (docs/app-tree.md).
+pub const APP_UI_CAPABILITY_TREE_V1: &str = "app-tree.v1";
+pub const MAX_APP_UI_CAPABILITIES: usize = 16;
+pub const MAX_APP_UI_CAPABILITY_BYTES: usize = 64;
+
+/// Sort, dedupe and bound declared App UI capabilities. Each is a token of
+/// ASCII letters, digits and `.`, `_`, `-`, starting with a letter or digit.
+pub fn normalize_app_ui_capabilities(values: &[String]) -> Result<Vec<String>, ProtocolError> {
+    let mut normalized = Vec::with_capacity(values.len());
+    for value in values {
+        let value = value.trim();
+        let valid = !value.is_empty()
+            && value.len() <= MAX_APP_UI_CAPABILITY_BYTES
+            && value.as_bytes()[0].is_ascii_alphanumeric()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+        if !valid {
+            return Err(ProtocolError::new(
+                "invalid_app_ui_capability",
+                "UI capabilities are 1-64 ASCII letters, digits, '.', '_' or '-'",
+            ));
+        }
+        normalized.push(value.to_string());
+    }
+    normalized.sort();
+    normalized.dedup();
+    if normalized.len() > MAX_APP_UI_CAPABILITIES {
+        return Err(ProtocolError::new(
+            "invalid_app_ui_capability",
+            "an App declares at most 16 UI capabilities",
+        ));
+    }
+    Ok(normalized)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,9 +205,13 @@ pub struct CreateAppDeploymentRequest {
     pub hostname: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub public: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ui_capabilities: Vec<String>,
 }
 
-/// Patch only launch fields; identity, service, ingress and desired state stay fixed.
+/// Patch launch fields and/or declared UI capabilities; identity, service,
+/// ingress and desired state stay fixed. A capability-only patch does not
+/// restart the App.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateAppDeploymentRequest {
@@ -177,11 +221,18 @@ pub struct UpdateAppDeploymentRequest {
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
+    /// Replaces the declared set; `[]` clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_capabilities: Option<Vec<String>>,
 }
 
 impl UpdateAppDeploymentRequest {
+    pub fn changes_startup(&self) -> bool {
+        self.cwd.is_some() || self.command.is_some() || self.args.is_some()
+    }
+
     pub fn apply(&self, app: &AppDeployment) -> Result<ReplaceAgentStartupRequest, ProtocolError> {
-        if self.cwd.is_none() && self.command.is_none() && self.args.is_none() {
+        if !self.changes_startup() {
             return Err(ProtocolError::new(
                 "invalid_app_update",
                 "at least one launch field is required",

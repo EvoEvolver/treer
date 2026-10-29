@@ -440,6 +440,7 @@ impl BrowserAccess {
     }
 }
 
+mod agent_admin;
 mod agents;
 mod email;
 use email::*;
@@ -523,7 +524,7 @@ async fn core_messages_rollout_disabled() -> ApiFailure {
 
 async fn health() -> Json<Value> {
     Json(
-        json!({ "status": "ok", "service": "treer-proxy", "version": treer_build_info::VERSION, "commit": treer_build_info::GIT_COMMIT, "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE, treer_protocol::controller_update::CAPABILITY, treer_protocol::CAPABILITY_WORKSPACE_PINS, treer_protocol::CAPABILITY_INGRESS_PROTECTION, treer_protocol::CAPABILITY_AGENT_INTERFACE_ORIGIN, treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3, treer_protocol::CAPABILITY_APP_EMAIL, treer_protocol::CAPABILITY_MESSAGE_ENDPOINT_INBOX] }),
+        json!({ "status": "ok", "service": "treer-proxy", "version": treer_build_info::VERSION, "commit": treer_build_info::GIT_COMMIT, "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE, treer_protocol::controller_update::CAPABILITY, treer_protocol::CAPABILITY_WORKSPACE_PINS, treer_protocol::CAPABILITY_INGRESS_PROTECTION, treer_protocol::CAPABILITY_AGENT_INTERFACE_ORIGIN, treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3, treer_protocol::CAPABILITY_APP_EMAIL, treer_protocol::CAPABILITY_MESSAGE_ENDPOINT_INBOX, treer_protocol::CAPABILITY_AGENT_ADMIN, treer_protocol::CAPABILITY_SETTINGS_ADMIN] }),
     )
 }
 
@@ -546,6 +547,9 @@ async fn verify_workload_identity(
         .into_response()
 }
 
+#[cfg(test)]
+#[path = "api/agent_admin_tests.rs"]
+mod agent_admin_tests;
 #[cfg(test)]
 #[path = "api/agent_origin_tests.rs"]
 mod agent_origin_tests;

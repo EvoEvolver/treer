@@ -152,6 +152,7 @@ async fn app_tree_browser_and_workload_messages_preserve_owner_and_nested_identi
                 port: 8081,
                 hostname: String::new(),
                 public: false,
+                ui_capabilities: Vec::new(),
             },
         )
         .await
@@ -447,6 +448,7 @@ async fn app_directory_and_resolution_do_not_enumerate_path_denied_agents() {
                 port: 8888,
                 hostname: String::new(),
                 public: false,
+                ui_capabilities: Vec::new(),
             },
         )
         .await
@@ -1114,6 +1116,7 @@ async fn app_lifecycle_fixture_with_update(
                 port: 8080,
                 hostname: String::new(),
                 public: false,
+                ui_capabilities: Vec::new(),
             },
         )
         .await
@@ -1216,6 +1219,7 @@ async fn app_update_restore_validation_returns_current_spec_only_for_valid_machi
 
 fn app_update_patch() -> treer_protocol::UpdateAppDeploymentRequest {
     treer_protocol::UpdateAppDeploymentRequest {
+        ui_capabilities: None,
         cwd: Some("releases/v2".into()),
         command: Some("node".into()),
         args: Some(vec!["entry.mjs".into()]),
@@ -1270,6 +1274,102 @@ async fn app_update_policy_denies_before_preflight_or_persistence() {
             0
         );
     }
+}
+
+#[tokio::test]
+async fn app_ui_capabilities_persist_and_update_without_restart() {
+    let (auth, state, app, mut rx) = app_lifecycle_fixture_with_update(true).await;
+    assert!(app.ui_capabilities.is_empty());
+    let created = auth
+        .create_app_deployment(
+            "default",
+            "agent-a",
+            app.server_id.clone(),
+            CreateAppDeploymentRequest {
+                folder_id: None,
+                server_id: None,
+                name: "Hub".into(),
+                command: "python3".into(),
+                args: vec![],
+                cwd: ".".into(),
+                port: 8123,
+                hostname: String::new(),
+                public: false,
+                ui_capabilities: vec![
+                    treer_protocol::APP_UI_CAPABILITY_TREE_V1.into(),
+                    "app-tree.v1".into(),
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.ui_capabilities, vec!["app-tree.v1"]);
+    let reloaded = auth
+        .resolve_app_deployment("default", &created.app_id)
+        .await
+        .unwrap();
+    assert_eq!(reloaded.ui_capabilities, vec!["app-tree.v1"]);
+    assert_eq!(
+        serde_json::to_value(&reloaded).unwrap()["ui_capabilities"],
+        json!(["app-tree.v1"])
+    );
+    let invalid = auth
+        .create_app_deployment(
+            "default",
+            "agent-a",
+            app.server_id.clone(),
+            CreateAppDeploymentRequest {
+                folder_id: None,
+                server_id: None,
+                name: "Bad".into(),
+                command: "python3".into(),
+                args: vec![],
+                cwd: ".".into(),
+                port: 8124,
+                hostname: String::new(),
+                public: false,
+                ui_capabilities: vec!["has space".into()],
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(invalid.code(), "invalid_app_ui_capability");
+
+    // A capability-only update dispatches nothing and keeps the startup revision.
+    let update = |capabilities: Vec<String>| {
+        apps::update_app_deployment(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Extension(test_ingress_config()),
+            Extension(PolicyEngine::allow_all()),
+            None,
+            Some(Extension(MachineSession {
+                server_id: Some(app.server_id.clone()),
+                workspace_id: Some(app.workspace_id.clone()),
+            })),
+            HeaderMap::new(),
+            Path((app.workspace_id.clone(), app.app_id.clone())),
+            Json(treer_protocol::UpdateAppDeploymentRequest {
+                cwd: None,
+                command: None,
+                args: None,
+                ui_capabilities: Some(capabilities),
+            }),
+        )
+    };
+    let Json(updated) = update(vec!["app-tree.v1".into()]).await.unwrap();
+    assert_eq!(updated["app"]["ui_capabilities"], json!(["app-tree.v1"]));
+    assert!(rx.try_recv().is_err());
+    let stored = auth
+        .resolve_app_deployment("default", &app.app_id)
+        .await
+        .unwrap();
+    assert_eq!(stored.ui_capabilities, vec!["app-tree.v1"]);
+    assert_eq!(stored.startup_revision, 0);
+    let Json(cleared) = update(Vec::new()).await.unwrap();
+    assert!(cleared["app"].get("ui_capabilities").is_none());
+    let denied = update(vec!["x".repeat(65)]).await.unwrap_err();
+    assert_eq!(denied.into_response().status(), StatusCode::BAD_REQUEST);
 }
 
 pub(super) async fn next_lifecycle_command(
@@ -1406,6 +1506,7 @@ fn app_public_url_reports_the_managed_ingress_access() {
         created_by: "agent-a".to_string(),
         updated_at: now,
         updated_by: "agent-a".to_string(),
+        ui_capabilities: Vec::new(),
     };
     let hostname = crate::auth::platform_service_hostname(
         &app.service_id,

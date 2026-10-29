@@ -417,6 +417,7 @@ async fn workspace_audit_app_tokens_bind_the_caller_and_audience() {
                 port: 8888,
                 hostname: String::new(),
                 public: false,
+                ui_capabilities: Vec::new(),
             },
         )
         .await

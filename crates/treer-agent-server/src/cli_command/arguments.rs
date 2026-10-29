@@ -175,6 +175,12 @@ pub(super) enum AppCommand {
             help = "Expose the App without Treer authentication on its managed public URL"
         )]
         public: bool,
+        #[arg(
+            long = "ui-capability",
+            value_name = "CAPABILITY",
+            help = "Declare a browser UI contract such as app-tree.v1 (repeatable)"
+        )]
+        ui_capability: Vec<String>,
         #[arg(value_name = "COMMAND")]
         executable: String,
         #[arg(last = true)]
@@ -200,6 +206,12 @@ pub(super) enum AppCommand {
         command: Option<String>,
         #[arg(long, conflicts_with = "args")]
         clear_args: bool,
+        #[arg(
+            long = "ui-capability",
+            value_name = "CAPABILITY",
+            help = "Declare a browser UI contract such as app-tree.v1 (repeatable; replaces the declared set without a restart)"
+        )]
+        ui_capability: Vec<String>,
         #[arg(last = true)]
         args: Vec<String>,
     },

@@ -252,6 +252,82 @@ pub fn router(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/terminal",
             get(agent_terminal),
         );
+    // Administration by Agents: explicit Policy grant per action (agent_admin.rs).
+    let agent_control = agent_control
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/organization",
+            get(agent_admin::get_organization)
+                .patch(agent_admin::rename_organization)
+                .delete(agent_admin::delete_organization),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/organization/members",
+            get(agent_admin::list_members),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/organization/members/{user_id}",
+            patch(agent_admin::update_member_role).delete(agent_admin::remove_member),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/organization/invitations",
+            get(agent_admin::list_invitations).post(agent_admin::create_invitation),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/organization/invitations/{invitation_id}",
+            axum::routing::delete(agent_admin::revoke_invitation),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/organization/groups",
+            get(agent_admin::list_groups).post(agent_admin::create_group),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/organization/groups/{group_id}",
+            axum::routing::delete(agent_admin::delete_group),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/organization/groups/{group_id}/members/{user_id}",
+            axum::routing::put(agent_admin::add_group_member)
+                .delete(agent_admin::remove_group_member),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/organization/audit-events",
+            get(agent_admin::audit_events),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/workspaces",
+            get(agent_admin::list_workspaces).post(agent_admin::create_workspace),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/workspace",
+            patch(agent_admin::rename_workspace).delete(agent_admin::delete_workspace),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/workspace/access",
+            get(agent_admin::workspace_access).patch(agent_admin::update_workspace_access),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/workspace/access/effective",
+            get(agent_admin::effective_workspace_access),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/workspace/access/users/{user_id}",
+            axum::routing::put(agent_admin::put_user_grant).delete(agent_admin::delete_user_grant),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/workspace/access/groups/{group_id}",
+            axum::routing::put(agent_admin::put_group_grant)
+                .delete(agent_admin::delete_group_grant),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/workspace/policy-provider",
+            get(agent_admin::get_policy_provider)
+                .put(agent_admin::set_policy_provider)
+                .delete(agent_admin::clear_policy_provider),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/workspace/bootstrap",
+            post(agent_admin::machine_bootstrap),
+        );
     let agent_control = agent_control
         .registered_route(
             "/agent/workspaces/{workspace_id}/email",
@@ -354,7 +430,16 @@ pub fn router(
         )
         .registered_route(
             "/api/organizations/{organization_id}",
-            axum::routing::patch(auth::rename_organization_handler),
+            axum::routing::patch(auth::rename_organization_handler)
+                .delete(auth::delete_organization_handler),
+        )
+        .registered_route(
+            "/api/organizations/{organization_id}/leave",
+            post(auth::leave_organization_handler),
+        )
+        .registered_route(
+            "/api/organizations/{organization_id}/transfer",
+            post(auth::transfer_organization_handler),
         )
         .registered_route(
             "/api/organizations/{organization_id}/members",
@@ -384,7 +469,11 @@ pub fn router(
         )
         .registered_route(
             "/api/organizations/{organization_id}/invitations",
-            post(auth::create_invitation),
+            get(auth::list_invitations).post(auth::create_invitation),
+        )
+        .registered_route(
+            "/api/organizations/{organization_id}/invitations/{invitation_id}",
+            axum::routing::delete(auth::revoke_invitation),
         )
         .registered_route(
             "/api/workspaces/{workspace_id}/bootstrap",
@@ -401,6 +490,10 @@ pub fn router(
         .registered_route(
             "/api/workspaces/{workspace_id}/access",
             get(auth::workspace_access).patch(auth::update_workspace_access),
+        )
+        .registered_route(
+            "/api/workspaces/{workspace_id}/access/effective",
+            get(auth::effective_workspace_access),
         )
         .registered_route(
             "/api/workspaces/{workspace_id}/access/users/{user_id}",
@@ -719,7 +812,13 @@ pub fn router(
             "/api/auth/profile",
             axum::routing::patch(auth::update_profile),
         )
-        .registered_route("/api/auth/logout", post(auth::logout));
+        .registered_route("/api/auth/logout", post(auth::logout))
+        .registered_route("/api/auth/sessions", get(auth::list_sessions))
+        .registered_route(
+            "/api/auth/sessions/{session_id}",
+            axum::routing::delete(auth::revoke_session),
+        )
+        .registered_route("/api/auth/password", post(auth::change_password));
     let authenticated = if rollout.core_messages {
         authenticated
             .registered_route(

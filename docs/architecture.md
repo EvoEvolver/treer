@@ -339,6 +339,23 @@ installing the default Policy App and owner Tree management stay available
 even if rules deny everything. `workspace.audit.read` requires an owner or an
 explicit enforce-mode allow.
 
+**Agent administration** (`agent.admin.v1`). Organization and workspace
+administration is also exposed to Agents at `/agent/workspaces/{ws}/admin/...`
+(Controller passthrough `ANY /api/admin/...`, workload credential only). Each
+route needs one administration action (`org.manage`, `org.member.manage`,
+`org.invite.manage`, `org.group.manage`, `workspace.manage`,
+`workspace.access.manage`, `policy.provider.manage`, `audit.read`,
+`machine.enroll`), evaluated by `PolicyEngine::authorize_admin`: default-deny
+in every mode; only a matched allow rule naming the Agent by `id`, `tree` or
+`group` grants it. The store treats the Agent as an owner of its own
+organization (organization routes) or workspace (workspace routes) and keeps
+the same invariants as for humans. Humans use the `/api/organizations/...`,
+`/api/workspaces/...` and `/api/auth/...` routes with their role checks; the
+Settings additions (`settings.admin.v1`) are invitation list/revoke with
+expiry, email, groups and workspace grants, organization leave/transfer/delete,
+session list/revoke, password change, effective workspace access and
+`DELETE /api/workspaces/{id}` with `revoke_machines`.
+
 ## Routing and ingress
 
 Machines only connect outward. All cross-machine traffic flows through the
