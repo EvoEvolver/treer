@@ -133,7 +133,9 @@ Every workspace has the default profiles **Codex + UI** and **Claude + UI**
 
 Accepted arguments are `--harness codex|claude` (default `codex`),
 `--session-id ID` (alias `--thread-id`), `--cwd ABS`, `--name NAME`,
-`--instructions FILE`, `--model MODEL` and `--effort LEVEL`; see
+`--instructions FILE`, `--model MODEL`, `--effort LEVEL` and, for a
+parent-owned launcher, `--no-register` with `--state-dir DIR`,
+`--listen 127.0.0.1:PORT` and `--port-file PATH` (below); see
 `treer-launch --help`.
 
 `--instructions FILE` (UTF-8, at most 256 KiB, read at startup) adds
@@ -147,6 +149,34 @@ choice always wins. The [Agent Hub](../../apps/agent-hub/README.md) launches its
 template workers this way. With no arguments the runtime is configured only by its
 environment (`AGENT_UI_*`) and does not register an interface, which the
 integration tests use.
+
+### Unregistered mode (owned by a parent process)
+
+```sh
+treer-launch --harness claude --instructions agent.md --no-register \
+  --state-dir /private/jobs/j-0007 --listen 127.0.0.1:0 --port-file /private/jobs/j-0007/port
+```
+
+`--no-register` is for a parent process that owns the launcher as a child,
+such as the [Agent Hub](../../apps/agent-hub/README.md). The launcher then has
+no Treer Agent identity of its own even if `TREER_AGENT_ID` is inherited (that
+identity stays in the environment for the provider's tools): it does not call
+`treer interface register`, runs no Core Message watcher, skips the Controller
+private-state check, Git identity and image attachments (`attachmentsAvailable`
+is false). The journal and session id live in `--state-dir` (required; an
+existing directory, mode 0700), so restarting with the same `--state-dir`
+(and `--session-id`) resumes the same session without replaying accepted
+prompts. `--listen` binds a loopback port (`127.0.0.1:0` picks one, the
+default); `--port-file` must not exist and receives the port once the runtime
+is up. `--state-dir`, `--listen` and `--port-file` require `--no-register`.
+
+The parent talks to the ordinary AIS on that port as a loopback native client
+(no Origin or Fetch-Metadata headers, Host `127.0.0.1:<port>`):
+`POST /v1/prompts {text, delivery: queue|steer, operation_id}`,
+`GET /v1/status`, `GET /api/state`, `GET /v1/transcript`. Browser requests are
+refused as for any launcher, so a parent that shows the UI must proxy it and
+strip browser headers after doing its own authentication; the page uses only
+relative URLs and works under any path prefix that ends in `/`.
 
 ## Resume and recovery
 
@@ -309,6 +339,8 @@ RUST_SPIKE_BIN=$CARGO_TARGET_DIR/debug/treer-launch node --test tests/contract.m
 # Real-browser conversation placement (Playwright Chromium): opens at the latest message, standalone and in a
 # Console-like frame, slow history, hidden tab, reader scroll-up
 RUST_SPIKE_BIN=$CARGO_TARGET_DIR/debug/treer-launch node --test tests/browser-scroll.mjs
+# Unregistered (parent-owned) mode: no registration/message watch, loopback AIS, resume
+RUST_SPIKE_BIN=$CARGO_TARGET_DIR/debug/treer-launch node --test tests/unregistered-entry.mjs
 # Release-feature artifact scan (no fixture overrides may survive)
 RUST_SPIKE_RELEASE_BIN=$CARGO_TARGET_DIR/release/treer-launch node --test tests/default-build.mjs
 ```

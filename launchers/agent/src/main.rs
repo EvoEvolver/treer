@@ -122,7 +122,13 @@ async fn main() -> Result<()> {
     let files = files::Files::new(cwd.clone())
         .map_err(|_| anyhow::anyhow!("workspace_file_root_unavailable"))?;
     let task_output = task_output::Output::new(&cwd)?;
-    let agent = env("TREER_AGENT_ID").unwrap_or_default();
+    // Unregistered (`--no-register`): a parent process owns this launcher, so
+    // the inherited Agent identity is left to tools and never used here.
+    let agent = if env("AGENT_UI_UNREGISTERED").as_deref() == Some("1") {
+        String::new()
+    } else {
+        env("TREER_AGENT_ID").unwrap_or_default()
+    };
     let harness = env("AGENT_UI_HARNESS").unwrap_or("codex".into());
     if !matches!(harness.as_str(), "codex" | "claude") {
         bail!("unsupported harness");

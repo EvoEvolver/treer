@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 pub(crate) const USAGE: &str = "\
 Usage: treer-launch [--harness codex|claude] [--session-id ID|--thread-id ID] [--cwd ABS] [--name NAME]
                     [--instructions FILE] [--model MODEL] [--effort LEVEL]
+                    [--no-register --state-dir DIR [--listen 127.0.0.1:PORT] [--port-file PATH]]
        treer-launch session --help   Claude export/import/prepare/launch/run (macOS/Linux)
        treer-launch update [--version vX.Y.Z | --channel NAME] [--release-base-url URL] [--public-key PEM]
        treer-launch --version
@@ -16,6 +17,11 @@ deprecated alias of this command. `--runtime rust` is accepted and ignored.
 `--instructions` adds system-level instructions (Claude --append-system-prompt,
 Codex developer instructions), kept across restarts and resume. `--model` and
 `--effort` choose the initial selection of a new session.
+`--no-register` runs unregistered for a parent process that owns this launcher
+(the Agent Hub): no Controller interface, no Core message watcher and no
+Treer Agent identity of its own; the journal lives in `--state-dir`, the
+listener binds `--listen` (default 127.0.0.1:0) and `--port-file` receives the
+chosen port.
 `update` replaces only this launcher from the signed release (default: the
 installed Controller's version); running Agents are not restarted.";
 
@@ -76,8 +82,15 @@ pub(crate) fn prepare(args: &[String]) -> Result<Next> {
         .ok()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "codex".into());
+    let mut unregistered = false;
+    let mut owned = Vec::new();
     let mut index = 0;
     while index < args.len() {
+        if args[index] == "--no-register" {
+            unregistered = true;
+            index += 1;
+            continue;
+        }
         let key = args[index].as_str();
         let Some(value) = args.get(index + 1).filter(|value| !value.is_empty()) else {
             bail!("incomplete launcher argument {key}; see treer-launch --help");
@@ -92,6 +105,18 @@ pub(crate) fn prepare(args: &[String]) -> Result<Next> {
             "--instructions" => set("AGENT_UI_INSTRUCTIONS_FILE", value),
             "--model" => set("AGENT_UI_MODEL", value),
             "--effort" => set("AGENT_UI_EFFORT", value),
+            "--state-dir" => {
+                owned.push(key);
+                set("TREER_RUST_SPIKE_STATE_DIR", value);
+            }
+            "--port-file" => {
+                owned.push(key);
+                set("AGENT_UI_PORT_FILE", value);
+            }
+            "--listen" => {
+                owned.push(key);
+                set("AGENT_UI_PORT", &loopback_port(value)?.to_string());
+            }
             _ => bail!("unsupported launcher argument {key}; see treer-launch --help"),
         }
         index += 2;
@@ -105,8 +130,34 @@ pub(crate) fn prepare(args: &[String]) -> Result<Next> {
             set("AGENT_UI_CWD", &cwd);
         }
     }
-    register_by_default(true);
+    if unregistered {
+        if !owned.contains(&"--state-dir") {
+            bail!("--no-register requires --state-dir DIR");
+        }
+        // The parent owns this process: the runtime must not act as the
+        // Treer Agent whose identity it inherited (it stays available to tools).
+        set("AGENT_UI_UNREGISTERED", "1");
+        set("RUST_SPIKE_REGISTER", "0");
+        set("AGENT_UI_MESSAGE_WATCH", "0");
+    } else if let Some(flag) = owned.first() {
+        bail!("{flag} requires --no-register");
+    } else {
+        std::env::remove_var("AGENT_UI_UNREGISTERED");
+        register_by_default(true);
+    }
     Ok(Next::Run)
+}
+
+/// `--listen` accepts only a loopback IPv4 address; the AIS is never exposed.
+fn loopback_port(value: &str) -> Result<u16> {
+    let Some(port) = value
+        .strip_prefix("127.0.0.1:")
+        .or_else(|| value.strip_prefix("localhost:"))
+    else {
+        bail!("--listen must be 127.0.0.1:PORT");
+    };
+    port.parse::<u16>()
+        .context("--listen must be 127.0.0.1:PORT")
 }
 
 /// `treer-launch update`: the local Controller binary downloads the signed
@@ -154,6 +205,11 @@ mod tests {
             "AGENT_UI_INSTRUCTIONS_FILE",
             "AGENT_UI_MODEL",
             "AGENT_UI_EFFORT",
+            "AGENT_UI_UNREGISTERED",
+            "AGENT_UI_PORT",
+            "AGENT_UI_PORT_FILE",
+            "AGENT_UI_MESSAGE_WATCH",
+            "TREER_RUST_SPIKE_STATE_DIR",
         ] {
             std::env::remove_var(name);
         }
@@ -228,6 +284,58 @@ mod tests {
             prepare(&args(&["session", "--help"])),
             Ok(Next::Run)
         ));
+
+        // Unregistered: owned by a parent process, never registered.
+        assert!(matches!(
+            prepare(&args(&[
+                "--harness",
+                "claude",
+                "--no-register",
+                "--state-dir",
+                "/hub/jobs/j-1",
+                "--listen",
+                "127.0.0.1:0",
+                "--port-file",
+                "/hub/jobs/j-1/port",
+            ])),
+            Ok(Next::Run)
+        ));
+        assert_eq!(std::env::var("AGENT_UI_UNREGISTERED").unwrap(), "1");
+        assert_eq!(std::env::var("RUST_SPIKE_REGISTER").unwrap(), "0");
+        assert_eq!(std::env::var("AGENT_UI_MESSAGE_WATCH").unwrap(), "0");
+        assert_eq!(std::env::var("AGENT_UI_PORT").unwrap(), "0");
+        assert_eq!(
+            std::env::var("AGENT_UI_PORT_FILE").unwrap(),
+            "/hub/jobs/j-1/port"
+        );
+        assert_eq!(
+            std::env::var("TREER_RUST_SPIKE_STATE_DIR").unwrap(),
+            "/hub/jobs/j-1"
+        );
+        assert!(prepare(&args(&["--no-register"]))
+            .unwrap_err()
+            .to_string()
+            .contains("requires --state-dir"));
+        assert!(prepare(&args(&["--state-dir", "/x"]))
+            .unwrap_err()
+            .to_string()
+            .contains("requires --no-register"));
+        assert!(prepare(&args(&[
+            "--no-register",
+            "--state-dir",
+            "/x",
+            "--listen",
+            "0.0.0.0:80"
+        ]))
+        .is_err());
+        // A later registered launch clears the unregistered marker.
+        std::env::remove_var("RUST_SPIKE_REGISTER");
+        assert!(matches!(
+            prepare(&args(&["--harness", "codex"])),
+            Ok(Next::Run)
+        ));
+        assert!(std::env::var_os("AGENT_UI_UNREGISTERED").is_none());
+        assert_eq!(std::env::var("RUST_SPIKE_REGISTER").unwrap(), "1");
         for name in [
             "AGENT_UI_HARNESS",
             "AGENT_UI_SESSION_ID",
@@ -237,6 +345,11 @@ mod tests {
             "AGENT_UI_INSTRUCTIONS_FILE",
             "AGENT_UI_MODEL",
             "AGENT_UI_EFFORT",
+            "AGENT_UI_UNREGISTERED",
+            "AGENT_UI_PORT",
+            "AGENT_UI_PORT_FILE",
+            "AGENT_UI_MESSAGE_WATCH",
+            "TREER_RUST_SPIKE_STATE_DIR",
         ] {
             std::env::remove_var(name);
         }
