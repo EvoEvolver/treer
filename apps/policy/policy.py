@@ -275,6 +275,7 @@ WRITE_ACTIONS = ['agent.prompt', 'agent.queue.cancel', 'agent.input', 'agent.sto
 ADMIN_ACTIONS = ['org.manage', 'org.member.manage', 'org.invite.manage', 'org.group.manage',
                  'workspace.manage', 'workspace.access.manage', 'policy.provider.manage',
                  'audit.read', 'machine.enroll']
+POLICY_PROVIDER_MANAGE = 'policy.provider.manage'
 TEMPLATES = [
     {'id':'team-isolation', 'name':'Team isolation',
      'description':'Same-folder collaboration and parent-folder management. Cross-folder access needs explicit rules. Scoped to listed actions; unmatched actions remain Allow.'},
@@ -811,7 +812,7 @@ class PolicyHandler(BaseHTTPRequestHandler):
                 document = validate_document(body.get('document') if isinstance(body, dict) else None)
                 warnings = safety_warnings(document)
                 result = {'valid':True, 'warnings':warnings, 'core_validated':False}
-                if document['schema_version'] == 2:
+                if document['schema_version'] == 2 or has_admin_rules(document):
                     result['core'] = self._core_validate(document)
                     result['core_validated'] = True
                 self._json(200, result)
@@ -849,7 +850,9 @@ class PolicyHandler(BaseHTTPRequestHandler):
         # Schema 1 remains compatible with existing operator-only automation.
         # Path publication requires the configured Core authorization path;
         # an unavailable/old Core cannot silently accept an unenforceable draft.
-        if document['schema_version'] == 2:
+        # Rules naming administration actions always go through Core, which
+        # requires owner-verified publication when they grant anything new.
+        if document['schema_version'] == 2 or has_admin_rules(document):
             self._core_validate(document)
 
     def _publication_diagnostic(self, operation, body):
@@ -858,7 +861,16 @@ class PolicyHandler(BaseHTTPRequestHandler):
             self._require_operator()
             # No private admin token or human token goes upstream. Core freshly
             # verifies bound runtime + current DB authority on every operation.
-            return self._auth().operator_diagnostic(operation, body)
+            try:
+                return self._auth().operator_diagnostic(operation, body)
+            except AuthError as error:
+                # Changed administration rules need a verified owner even
+                # under provider_operator; retry only with a human session.
+                if operation != 'validate' or error.code != 'policy_admin_owner_session_required':
+                    raise
+                if 'X-Treer-Identity-Token' not in self.headers and not self._raw_cookie('policy_session'):
+                    raise AuthError(403, 'policy_admin_owner_session_required',
+                                    'Administration rules changed: publish them signed in as a workspace owner') from error
         token, _, _, _ = self._identity(mutation=True)
         return self._auth().diagnostic(operation, token, body)
 
@@ -1013,13 +1025,25 @@ def evaluate_request(body: object, bundle: dict[str, Any]) -> dict[str, Any]:
     matched = next((rule for rule in rules if action in rule["actions"] and any(subject_matches(item, subject, resource, groups) for item in rule["subjects"]) and any(resource_matches(item, resource, groups) for item in rule["resources"])), None)
     effect = matched["effect"] if matched else document["defaults"].get(action, "allow")
     if action in ADMIN_ACTIONS and subject.get("kind") != "human":
-        # Core: administration is default-deny for non-humans in every mode;
-        # only a matched allow rule that names the subject (id/tree/group) grants.
-        named = matched is not None and any((item.get("id") or item.get("tree") or item.get("group")) and subject_matches(item, subject, resource, groups) for item in matched["subjects"])
-        effect = "allow" if effect == "allow" and named else "deny"
+        # Core (PolicyEngine::authorize_admin): administration is default-deny
+        # for non-humans in every mode; only a matched allow rule whose subject
+        # selector names the subject by a non-empty id or group grants it. Tree
+        # placement, kind, machine and empty selectors never name a subject;
+        # policy.provider.manage is never granted.
+        named = matched is not None and any(selector_names_subject(item) and subject_matches(item, subject, resource, groups) for item in matched["subjects"])
+        granted = action != POLICY_PROVIDER_MANAGE and matched is not None and matched["effect"] == "allow" and named
+        effect = "allow" if granted else "deny"
         return {"revision": bundle["revision"], "mode": bundle["mode"], "effect": effect, "decision": effect, "matched_rule_id": matched["id"] if matched else None}
     enforced = bundle["mode"] == "enforce" and effect == "deny"
     return {"revision": bundle["revision"], "mode": bundle["mode"], "effect": effect, "decision": "deny" if enforced else "allow", "matched_rule_id": matched["id"] if matched else None}
+
+
+def has_admin_rules(document: dict[str, Any]) -> bool:
+    return any(set(rule.get('actions', [])) & set(ADMIN_ACTIONS) for rule in document.get('rules', []))
+
+
+def selector_names_subject(selector: dict[str, Any]) -> bool:
+    return selector.get("id") not in (None, "") or selector.get("group") not in (None, "")
 
 
 def group_contains(groups: dict[str, Any], name: str, kind: object, identifier: object) -> bool:

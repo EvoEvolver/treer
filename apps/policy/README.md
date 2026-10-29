@@ -203,8 +203,10 @@ Core treats `org.manage`, `org.member.manage`, `org.invite.manage`,
 `policy.provider.manage`, `audit.read` and `machine.enroll` as
 **default-deny** for Agents and Apps, even in monitor mode, with no rules, with
 an `allow` default or with a fail-open Provider. Only a matched allow rule
-whose subject names the Agent (`id`, `tree` or `group`; `{"kind":"agent"}` alone
-is not enough) grants them, and a matching higher-priority deny wins:
+whose subject names the Agent by a non-empty `id` or a `group` (whose
+principals list it by ID) grants them; `tree`, `kind`, `machine_id` and empty
+selectors never do, and a matching higher-priority deny wins.
+`policy.provider.manage` is never granted to Agents or Apps:
 
 ```json
 {"id":"ops-bot-admin","priority":100,"effect":"allow",
@@ -215,9 +217,17 @@ is not enough) grants them, and a matching higher-priority deny wins:
 
 Organization actions use resource `{"kind":"organization","id":ORG_ID}`;
 workspace actions use `{"kind":"workspace","id":WORKSPACE_ID}`. The simulator
-(`POST /v1/policy/test`) applies the same gate. Humans are unaffected: their
-organization and workspace roles decide. Granting `policy.provider.manage` lets
-the Agent replace the Provider, and so its own grants.
+(`POST /v1/policy/test`) applies exactly the same gate. Humans are unaffected:
+their organization and workspace roles decide. Organization actions also need
+an organization grant from an owner/admin in the Console (Organization
+settings → Agent permissions).
+
+Documents with rules naming administration actions are always validated by
+Core (schema 1 too). Under `provider_operator`, the operator token alone cannot
+add or change such rules (or drop an approved deny): Core answers
+`policy_admin_owner_session_required` and the App then needs a signed-in
+workspace owner (an organization owner/admin for organization actions) to
+publish.
 
 ## Isolating the administration Agent
 

@@ -96,4 +96,22 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(run({}, 'monitor', {'kind':'human','id':'usr_1'})['decision'], 'allow')
         self.assertEqual(set(policy.ADMIN_ACTIONS), {'org.manage','org.member.manage','org.invite.manage','org.group.manage','workspace.manage','workspace.access.manage','policy.provider.manage','audit.read','machine.enroll'})
 
+    def test_simulator_naming_matches_core_exactly(self):
+        # Same semantics as Core's selector_names_subject: only a non-empty id
+        # or group names the subject; empty selectors and machine never do.
+        agent={'kind':'agent','id':'agent-a','machine_id':'m'}
+        def run(subject, action='org.manage', groups=None):
+            bundle={'revision':1,'mode':'enforce','document':{'schema_version':1,'groups':groups or {},'defaults':{},
+                'rules':[{'id':'r','priority':1,'effect':'allow','subjects':[subject],'actions':[action],'resources':[{}]}]}}
+            return policy.evaluate_request({'subject':agent,'action':action,'resource':{'kind':'organization','id':'org_1'}},bundle)['decision']
+        self.assertEqual(run({}), 'deny')
+        self.assertEqual(run({'kind':'agent','machine_id':'m'}), 'deny')
+        self.assertEqual(run({'id':'agent-a'}), 'allow')
+        self.assertEqual(run({'group':'admins'}, groups={'admins':{'principals':[{'kind':'agent','id':'agent-a'}]}}), 'allow')
+        self.assertEqual(run({'group':'admins'}, groups={'admins':{'principals':[{'kind':'agent','id':'other'}]}}), 'deny')
+        # policy.provider.manage is never granted to non-humans.
+        self.assertEqual(run({'id':'agent-a'}, action='policy.provider.manage'), 'deny')
+        self.assertFalse(policy.selector_names_subject({'tree':{'path_eq':'/admins/a'}}))
+        self.assertFalse(policy.selector_names_subject({'id':'', 'group':''}))
+
 if __name__ == '__main__': unittest.main()
