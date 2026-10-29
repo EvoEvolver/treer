@@ -137,6 +137,9 @@ struct Runtime {
     models: Value,
     model_revision: u64,
     effort_revision: u64,
+    /// The user's last acknowledged model/effort choice. It is journaled so a
+    /// restarted provider (or launcher) gets the same selection back.
+    selection: Value,
     ready: bool,
     turns: Transcript,
     history_start: usize,
@@ -225,6 +228,24 @@ fn spawn_provider(
         Rpc::spawn(&config.codex, &args, &config.cwd, config.capture_stderr)
     }
 }
+/// Journaled model/effort selection. Anything but strings (or a null effort,
+/// meaning the provider default) is ignored rather than failing startup.
+fn saved_selection(saved: &Value) -> Value {
+    let mut selection = json!({});
+    if let Some(model) = saved
+        .get("model")
+        .filter(|m| m.as_str().is_some_and(|m| !m.is_empty() && m.len() <= 256))
+    {
+        selection["model"] = model.clone();
+    }
+    if let Some(effort) = saved
+        .get("reasoningEffort")
+        .filter(|e| e.is_null() || e.as_str().is_some_and(|e| !e.is_empty() && e.len() <= 64))
+    {
+        selection["reasoningEffort"] = effort.clone();
+    }
+    selection
+}
 /// Capped exponential backoff between provider restarts; there is no attempt cap.
 fn restart_delay(failures: u32) -> Duration {
     Duration::from_secs((1u64 << failures.min(6)).min(60))
@@ -307,6 +328,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
         models: json!([]),
         model_revision: 0,
         effort_revision: 0,
+        selection: json!({}),
         ready: false,
         turns: Transcript::default(),
         history_start: 0,
@@ -824,6 +846,7 @@ impl Runtime {
             self.records = decode_records(saved)?;
             self.goals = Goals::load(&saved["goals"])?;
             self.checkpoint = (self.records.clone(), self.goals.clone());
+            self.selection = saved_selection(&saved["selection"]);
         }
         self.provider_request("initialize", json!({"clientInfo":{"name":"treer-rust-spike","title":"Treer Agent","version":"0.0.1"},"capabilities":{"experimentalApi":true}})).await?;
         self.rpc.write(json!({"method":"initialized"})).await?;
@@ -957,6 +980,7 @@ impl Runtime {
             self.thread["status"] = json!("running");
             self.thread["activeTurnId"] = active["id"].clone();
         }
+        self.reapply_selection().await?;
         self.dispatch_blocked = false;
         if let Ok(result) = self
             .provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
@@ -994,6 +1018,97 @@ impl Runtime {
         self.publish();
         Ok(())
     }
+    fn claude_model_acked(&mut self, result: &Value) {
+        self.thread["model"] = result["model"].clone();
+        self.model_revision = result["modelRevision"].as_u64().unwrap_or(0);
+        self.thread["modelSelectionStatus"] = json!("confirmed");
+        self.models = result["modelOptions"].clone();
+        self.claude_effort_acked(result);
+    }
+    /// A timed-out model mutation has an unknown outcome, not a claim that the
+    /// provider retained the old model.
+    fn claude_model_unknown(&mut self) {
+        self.model_revision = self.rpc.claude_model_revision();
+        self.thread["model"] = Value::Null;
+        self.thread["modelSelectionStatus"] = json!("unknown");
+        self.claude_effort_unknown();
+    }
+    fn claude_effort_acked(&mut self, result: &Value) {
+        self.thread["reasoningEffort"] = result["reasoningEffort"].clone();
+        self.thread["effortSelectionStatus"] = result["effortSelectionStatus"].clone();
+        self.effort_revision = result["effortRevision"]
+            .as_u64()
+            .unwrap_or(self.effort_revision);
+        self.publish();
+    }
+    fn claude_effort_unknown(&mut self) {
+        self.effort_revision = self.rpc.claude_effort_revision();
+        self.thread["reasoningEffort"] = Value::Null;
+        self.thread["effortSelectionStatus"] = json!("unknown");
+        self.publish();
+    }
+    /// Re-apply the journaled selection to a freshly started provider. A
+    /// resumed Claude process starts on its default model, so the selection is
+    /// sent again and only its ACK makes it the reported model. Codex takes the
+    /// model/effort with every turn/start, so restoring the thread is enough.
+    async fn reapply_selection(&mut self) -> Result<()> {
+        let model = self
+            .selection
+            .get("model")
+            .filter(|m| m.is_string())
+            .cloned();
+        if !self.claude {
+            if let Some(model) = model {
+                self.thread["model"] = model;
+            }
+            if let Some(effort) = self.selection.get("reasoningEffort") {
+                self.thread["reasoningEffort"] = effort.clone();
+            }
+            return Ok(());
+        }
+        if let Some(model) = model {
+            match self
+                .provider_request("model/set", json!({"model":model}))
+                .await
+            {
+                Ok(result) => self.claude_model_acked(&result),
+                Err(error) if self.rpc.failed() || self.provider_down => return Err(error),
+                Err(error) => {
+                    eprintln!("Treer launcher: saved model selection not re-applied: {error}");
+                    if error.to_string() == "claude_model_response_timeout" {
+                        self.claude_model_unknown();
+                    } else {
+                        // The provider refused it; stop re-applying a dead choice.
+                        self.selection = json!({});
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        if let Some(effort) = self
+            .selection
+            .get("reasoningEffort")
+            .filter(|e| e.is_string())
+            .cloned()
+        {
+            match self
+                .provider_request("effort/set", json!({"reasoningEffort":effort}))
+                .await
+            {
+                Ok(result) => self.claude_effort_acked(&result),
+                Err(error) if self.rpc.failed() || self.provider_down => return Err(error),
+                Err(error) => {
+                    eprintln!("Treer launcher: saved effort selection not re-applied: {error}");
+                    if error.to_string() == "claude_model_response_timeout" {
+                        self.claude_effort_unknown();
+                    } else if let Some(selection) = self.selection.as_object_mut() {
+                        selection.remove("reasoningEffort");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
     fn persist(&mut self) -> Result<()> {
         // Fresh launch has no dispatch intents. Initialization events may update
         // memory, but must not publish a partial bootstrap before startup ACKs.
@@ -1010,6 +1125,9 @@ impl Runtime {
             &self.thread["activeTurnId"],
         );
         let mut state = json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records,"goals":self.goals});
+        if self.selection.as_object().is_some_and(|s| !s.is_empty()) {
+            state["selection"] = self.selection.clone();
+        }
         if self.claude {
             if let Some(native) = &self.native_bootstrap {
                 state["claudeNativeHistory"] = json!({"source":"native-jsonl","sha256":native["nativeSha256"],"providerConfirmed":false});
@@ -1497,30 +1615,19 @@ impl Runtime {
                             Ok(result) => result,
                             Err(error) => {
                                 if error.to_string() == "claude_model_response_timeout" {
-                                    // Mutation outcome is unknown, not a claim
-                                    // that the provider retained the old model.
-                                    self.model_revision = self.rpc.claude_model_revision();
-                                    self.effort_revision = self.rpc.claude_effort_revision();
-                                    self.thread["model"] = Value::Null;
-                                    self.thread["modelSelectionStatus"] = json!("unknown");
-                                    self.thread["reasoningEffort"] = Value::Null;
-                                    self.thread["effortSelectionStatus"] = json!("unknown");
-                                    self.publish();
+                                    self.claude_model_unknown();
                                 }
                                 return Err(error);
                             }
                         };
-                        self.thread["model"] = result["model"].clone();
-                        self.model_revision = result["modelRevision"].as_u64().unwrap_or(0);
-                        self.thread["modelSelectionStatus"] = json!("confirmed");
-                        self.models = result["modelOptions"].clone();
-                        self.thread["reasoningEffort"] = result["reasoningEffort"].clone();
-                        self.thread["effortSelectionStatus"] =
-                            result["effortSelectionStatus"].clone();
-                        self.effort_revision = result["effortRevision"]
-                            .as_u64()
-                            .unwrap_or(self.effort_revision);
-                        self.publish();
+                        self.claude_model_acked(&result);
+                        self.selection["model"] = body["model"].clone();
+                        if result["effortSelectionStatus"] != "confirmed" {
+                            if let Some(selection) = self.selection.as_object_mut() {
+                                selection.remove("reasoningEffort");
+                            }
+                        }
+                        self.persist()?;
                     }
                     if body.get("reasoningEffort").is_some() {
                         let result = match self
@@ -1533,30 +1640,24 @@ impl Runtime {
                             Ok(result) => result,
                             Err(error) => {
                                 if error.to_string() == "claude_model_response_timeout" {
-                                    self.effort_revision = self.rpc.claude_effort_revision();
-                                    self.thread["reasoningEffort"] = Value::Null;
-                                    self.thread["effortSelectionStatus"] = json!("unknown");
-                                    self.publish();
+                                    self.claude_effort_unknown();
                                 }
                                 return Err(error);
                             }
                         };
-                        self.thread["reasoningEffort"] = result["reasoningEffort"].clone();
-                        self.thread["effortSelectionStatus"] =
-                            result["effortSelectionStatus"].clone();
-                        self.effort_revision = result["effortRevision"]
-                            .as_u64()
-                            .unwrap_or(self.effort_revision);
-                        self.publish();
+                        self.claude_effort_acked(&result);
+                        self.selection["reasoningEffort"] = result["reasoningEffort"].clone();
+                        self.persist()?;
                     }
                     return Ok(json!({"accepted":true}));
                 }
-                if body.get("model").is_some() {
-                    self.thread["model"] = body["model"].clone();
+                for key in ["model", "reasoningEffort"] {
+                    if let Some(value) = body.get(key) {
+                        self.thread[key] = value.clone();
+                        self.selection[key] = value.clone();
+                    }
                 }
-                if body.get("reasoningEffort").is_some() {
-                    self.thread["reasoningEffort"] = body["reasoningEffort"].clone();
-                }
+                self.persist()?;
                 self.publish();
                 Ok(json!({"accepted":true}))
             }
@@ -3038,6 +3139,27 @@ async fn acknowledge_messages(handle: &Handle, ids: &Value) -> Result<()> {
 #[cfg(test)]
 mod journal_tests {
     use super::*;
+
+    #[test]
+    fn saved_selection_keeps_only_well_formed_choices() {
+        assert_eq!(
+            saved_selection(&json!({"model":"opus","reasoningEffort":"high"})),
+            json!({"model":"opus","reasoningEffort":"high"})
+        );
+        assert_eq!(
+            saved_selection(&json!({"model":null,"reasoningEffort":null})),
+            json!({"reasoningEffort":null})
+        );
+        assert_eq!(saved_selection(&Value::Null), json!({}));
+        assert_eq!(
+            saved_selection(&json!({"model":"","reasoningEffort":7})),
+            json!({})
+        );
+        assert_eq!(
+            saved_selection(&json!({"model":"m".repeat(257)})),
+            json!({})
+        );
+    }
 
     #[test]
     fn recovery_rejects_semantic_corruption_without_disclosing_values() {

@@ -411,7 +411,33 @@ test('Claude effort discovers catalog and live setter, validates combined settin
   assert.equal((await f.snapshot()).thread.reasoningEffort,null);assert.equal((await f.snapshot()).thread.effortSelectionStatus,'confirmed');
   assert.equal((await settings(f,{reasoningEffort:'ultra'})).status,400);
   await stop(f.child);const resumed=await f.launch();state=await resumed.snapshot();
-  assert.equal(state.thread.id,thread);assert.equal(state.thread.reasoningEffort,null);assert.equal(state.thread.effortSelectionStatus,'unknown','saved UI selection is not native authority after restart');
+  assert.equal(state.thread.id,thread);assert.equal(state.thread.reasoningEffort,null);assert.equal(state.thread.effortSelectionStatus,'unknown','a default effort is not re-sent, so the fresh provider is not claimed');
+  assert.equal(state.thread.model,'claude-opus-test','saved model is re-applied and ACKed by the resumed provider');
+});
+test('Claude model and effort selection survive a provider crash and a launcher restart',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_EFFORTS:'1',CLAUDE_FIXTURE_CRASH_ONCE:'crash-marker'});
+  const thread=(await f.snapshot()).thread.id;
+  assert.equal((await settings(f,{model:'opus',reasoningEffort:'high'})).status,200);
+  const selected=s=>s.thread.model==='claude-opus-test'&&s.thread.modelSelectionStatus==='confirmed'&&s.thread.reasoningEffort==='high'&&s.thread.effortSelectionStatus==='confirmed';
+  assert.ok(selected(await f.snapshot()));
+  assert.equal((await f.post({prompt:'crashes the provider',mode:'queue'})).status,200);
+  let s=await until(f.snapshot,s=>s.runtime.recovery.restarts>=1&&s.ready&&s.runtime.state==='idle',15000);
+  assert.equal(s.thread.id,thread);assert.ok(selected(s),JSON.stringify(s.thread));
+  assert.equal((await f.post({prompt:'after provider restart',mode:'queue'})).status,200);
+  await until(f.snapshot,s=>s.thread.status==='idle'&&s.queue.length===0&&s.thread.turns.length===2);
+  await stop(f.child);const resumed=await f.launch();s=await resumed.snapshot();
+  assert.equal(s.thread.id,thread);assert.ok(selected(s),JSON.stringify(s.thread));
+  assert.equal((await resumed.post({prompt:'after launcher restart',mode:'queue'})).status,200);
+  await until(resumed.snapshot,s=>s.thread.status==='idle'&&s.queue.length===0&&s.thread.turns.length===3);
+  const calls=(await inputCalls(f)).slice(1);
+  assert.deepEqual(calls.map(c=>[c.text,c.resume,c.model,c.effort]),[['after provider restart',true,'claude-opus-test','high'],['after launcher restart',true,'claude-opus-test','high']]);
+  const controls=await modelCalls(f),inits=controls.flatMap((c,i)=>c.request.subtype==='initialize'?[i]:[]);
+  assert.equal(inits.length,3);
+  for(const start of inits.slice(1)){
+    const next=controls.slice(start+1).findIndex(c=>c.request.subtype==='initialize'),window=controls.slice(start+1,next<0?undefined:start+1+next);
+    assert.deepEqual(window.filter(c=>c.request.subtype==='set_model').map(c=>c.request.model),['opus'],'each resumed process gets the saved model once');
+    assert.deepEqual(window.filter(c=>Object.hasOwn(c.request.settings||{},'effortLevel')).map(c=>c.request.settings.effortLevel),['high']);
+  }
 });
 for(const env of [{CLAUDE_FIXTURE_NO_EFFORT:'1'},{CLAUDE_FIXTURE_PROBE_DELAY:'5500'}])test('Claude effort unsupported or absent probe ACK hides capability without killing prompt transport '+JSON.stringify(env),async t=>{
   const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_EFFORTS:'1',...env});
@@ -495,7 +521,16 @@ test('Claude model catalog aliases and acknowledged switching preserve session a
   state=await until(f.snapshot,s=>s.thread.turns.length===1&&s.thread.status==='idle');
   assert.equal(state.thread.turns[0].status,'completed');assert.equal(state.thread.model,'claude-opus-test');
   await stop(f.child);const resumed=await f.launch();state=await resumed.snapshot();
-  assert.equal(state.thread.id,thread);assert.equal(state.thread.model,'claude-sonnet-test','restart reports new provider initialization rather than stale saved UI selection');
+  assert.equal(state.thread.id,thread);assert.equal(state.thread.model,'claude-opus-test','restart re-applies the saved selection');assert.equal(state.thread.modelSelectionStatus,'confirmed','only the resumed provider ACK confirms it');
+  const controls=await modelCalls(f),second=controls.findLastIndex(c=>c.request.subtype==='initialize');
+  assert.deepEqual(controls.slice(second).filter(c=>c.request.subtype==='set_model').map(c=>c.request.model),['opus']);
+  await stop(resumed.child);
+  const journalPath=join(f.state,'rust-spike.json'),journal=JSON.parse(await readFile(journalPath,'utf8'));
+  assert.deepEqual(journal.selection,{model:'opus'});
+  journal.selection={model:'invalid'};await writeFile(journalPath,JSON.stringify(journal));
+  state=await (await f.launch()).snapshot();
+  assert.equal(state.ready,true,'a refused saved model never blocks startup');assert.equal(state.thread.model,'claude-sonnet-test');
+  assert.equal(JSON.parse(await readFile(journalPath,'utf8')).selection,undefined,'a refused saved model is dropped');
 });
 test('Claude missing model catalog learns only actual reported model without a version table',async t=>{
   const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_NO_MODELS:'1'});
