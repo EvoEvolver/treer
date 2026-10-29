@@ -169,6 +169,24 @@ test('history idle summary cannot interrupt an executing turn or dispatch its su
   assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>c.params.input[0].text),['still executing input','must wait for actual completion']);
 });
 
+test('Codex model and effort selection survive a provider restart and a launcher restart',{timeout:30000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_DISCONNECT:'1'});
+  assert.equal((await fetch(s.base+'/api/settings',{method:'POST',body:JSON.stringify({model:'gpt-picked',reasoningEffort:'high'})})).status,200);
+  const get=id=>fetch(s.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json());
+  const first=await s.post({text:'crashes the provider',operation_id:'selection-first'}).then(r=>r.json());
+  await until(()=>get(first.submission.id),r=>['interrupted','done'].includes(r.submission?.state),18000);
+  let state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.recovery.restarts===1&&x.ready,15000);
+  assert.deepEqual([state.thread.model,state.thread.reasoningEffort],['gpt-picked','high']);
+  const second=await s.post({text:'after provider restart',operation_id:'selection-second'}).then(r=>r.json());
+  await until(()=>get(second.submission.id),r=>r.submission?.state==='done');
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const restarted=await s.launch({});
+  state=await fetch(restarted.base+'/api/state').then(r=>r.json());
+  assert.deepEqual([state.thread.model,state.thread.reasoningEffort],['gpt-picked','high']);
+  const third=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'after launcher restart',operation_id:'selection-third'})}).then(r=>r.json());
+  await until(()=>fetch(restarted.base+'/v1/submissions/'+third.submission.id,{headers:s.headers}).then(r=>r.json()),r=>r.submission?.state==='done');
+  assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>[c.params.input[0].text,c.params.model,c.params.effort]),[['crashes the provider','gpt-picked','high'],['after provider restart','gpt-picked','high'],['after launcher restart','gpt-picked','high']]);
+});
 for(const old of [false,true,'resume-race'])test('provider crash restarts it, resumes the same thread and continues FIFO without replay '+old,{timeout:25000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_OLD_DISCONNECT:old===true?'1':'0',RECOVERY_RESUME_RACE:old==='resume-race'?'1':'0'});
   const first=await s.post({text:'one accepted input',operation_id:'reconnect-first'}).then(r=>r.json());
