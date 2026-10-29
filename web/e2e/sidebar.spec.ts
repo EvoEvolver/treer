@@ -32,8 +32,8 @@ for (const theme of ['light', 'dark']) test(`sidebar inbox, search and machines 
   backend.send({ ...snapshot, revision: 2, agents: agents.map((agent) => agent.agent_id === 'designer' ? { ...agent, status: 'idle' } : agent) })
   await expect(inbox.getByRole('link', { name: 'Open /Product/design, finished', exact: true })).toBeVisible()
 
-  // Ctrl/Cmd+K focuses search; matching rows and their folders stay, everything else hides.
-  await page.keyboard.press('ControlOrMeta+k')
+  // "/" focuses the sidebar filter (Cmd/Ctrl+K opens the Console-wide search); matching rows and their folders stay.
+  await page.keyboard.press('/')
   const search = sidebar.getByRole('searchbox', { name: 'Search' })
   await expect(search).toBeFocused()
   await search.fill('proto')
@@ -54,6 +54,10 @@ for (const theme of ['light', 'dark']) test(`sidebar inbox, search and machines 
   // The offline machine row and the Machines section both open the machine page.
   await inbox.getByRole('button', { name: /^build-node offline/ }).click()
   await expect(page.getByRole('heading', { name: 'build-node', exact: true })).toBeVisible()
+  // Machines are collapsed by default; the section remembers being opened.
+  const toggle = sidebar.getByRole('button', { name: /^Machines/ })
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await toggle.click()
   const machines = sidebar.getByRole('list', { name: 'Machines' })
   await expect(machines.getByRole('button', { name: /^build-node 1 workloads offline$/ })).toBeVisible()
   await machines.getByRole('button', { name: /^workstation/ }).click()

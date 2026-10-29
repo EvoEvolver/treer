@@ -394,17 +394,17 @@ for (const mobile of [false, true]) {
   })
 }
 
-// Helpers — machine entries in workspace settings are <button>s whose accessible
-// name includes the machine name, root path and build label.
-// Machine rows in workspace settings; the sidebar's Machines section has its own rows.
-const workstationRow = (page: Page) => page.locator("main > section").getByRole("button", { name: /^workstation(\s|$)/ })
-const cloudboxRow = (page: Page) => page.locator("main > section").getByRole("button", { name: /^cloudbox(\s|$)/ })
+// Helpers — machine entries on the workspace Machines settings page are <button>s whose
+// accessible name includes the machine name, root path and build label.
+const workstationRow = (page: Page) => page.locator("#settings-content").getByRole("button", { name: /^workstation(\s|$)/ })
+const cloudboxRow = (page: Page) => page.locator("#settings-content").getByRole("button", { name: /^cloudbox(\s|$)/ })
 const agentsTab = (page: Page) => page.locator("aside").getByText("Tree", { exact: true })
 const appsTab = agentsTab
 
-async function openWorkspaceSettings(page: Page) {
-  await page.getByRole("button", { name: "Workspace settings" }).click()
-  await expect(page.getByRole("heading", { name: "Launch profiles" })).toBeVisible()
+// Settings pages have real URLs; tests deep-link to the page they exercise.
+async function openWorkspaceSettings(page: Page, section = "machines") {
+  await page.goto(`/orgs/org-1/workspaces/ws-1/settings/${section}`)
+  await expect(page.locator("#settings-content h1").first()).toBeVisible()
 }
 
 async function expandFolder(page: Page, name: string) {
@@ -569,8 +569,8 @@ for (const mobile of [false, true]) {
 test("opens app, shows org, workspace, Apps and agents", async ({ page }) => {
   await page.goto("/")
   await browseTreeOnMobile(page)
-  await expect(page.locator("aside").getByText("Acme")).toBeVisible()
-  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Demo")
+  await expect(page.getByRole("button", { name: "Organization Acme", exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Workspace Demo", exact: true })).toBeVisible()
   await expect.poll(() => new URL(page.url()).pathname).toBe("/orgs/org-1/workspaces/ws-1")
   await expect(page).toHaveTitle("Acme / Demo")
   await expect(page.getByRole("tree", { name: "Workspace workloads" })).toBeVisible()
@@ -730,11 +730,16 @@ test("workload folders remain workspace scoped and mobile navigation returns to 
   await page.getByRole("menuitem", { name: "Add folder", exact: true }).click()
   await page.getByRole("textbox", { name: "Folder name" }).fill("Private organization")
   await page.getByRole("button", { name: "Save", exact: true }).click()
-  await page.getByRole("combobox", { name: "Organization" }).click()
-  await page.getByRole("option", { name: "Research", exact: true }).click()
+  // The top bar's context switcher: pick the organization, then its workspace.
+  await page.getByRole("button", { name: "Organization Acme", exact: true }).click()
+  const switcher = page.getByRole("dialog", { name: "Switch organization or workspace" })
+  await switcher.getByRole("button", { name: /^Research/ }).click()
+  await switcher.getByRole("button", { name: "Open workspace Experiments", exact: true }).click()
+  await expect(page.getByRole("button", { name: "Workspace Experiments", exact: true })).toBeVisible()
   await expect(page.getByRole("treeitem", { name: "Private organization", exact: true })).toHaveCount(0)
-  await page.getByRole("combobox", { name: "Organization" }).click()
-  await page.getByRole("option", { name: "Acme", exact: true }).click()
+  await page.getByRole("button", { name: "Organization Research", exact: true }).click()
+  await switcher.getByRole("button", { name: /^Acme/ }).click()
+  await switcher.getByRole("button", { name: "Open workspace Demo", exact: true }).click()
   await expect(page.getByRole("treeitem", { name: "Private organization", exact: true })).toBeVisible()
   await page.getByRole("treeitem", { name: "Soul Archive", exact: true }).getByRole("link", { name: /^Soul Archive(\s|$)/ }).click()
   await expect(page.getByRole('button', { name: /^Page .*; long-press for actions$/ })).toBeVisible()
@@ -746,16 +751,16 @@ test("workload folders remain workspace scoped and mobile navigation returns to 
 test("restores organization and workspace from the URL after reload", async ({ page }) => {
   await page.goto("/orgs/org-2/workspaces/ws-2?source=bookmark")
   await browseTreeOnMobile(page)
-  await expect(page.getByRole("combobox", { name: "Organization" })).toHaveText("Research")
-  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Experiments")
+  await expect(page.getByRole("button", { name: "Organization Research", exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Workspace Experiments", exact: true })).toBeVisible()
   await expect.poll(() => new URL(page.url()).searchParams.get("source")).toBe("bookmark")
   await expect(page).toHaveTitle("Research / Experiments")
 
   await page.reload()
   await browseTreeOnMobile(page)
 
-  await expect(page.getByRole("combobox", { name: "Organization" })).toHaveText("Research")
-  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Experiments")
+  await expect(page.getByRole("button", { name: "Organization Research", exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Workspace Experiments", exact: true })).toBeVisible()
   await expect.poll(() => new URL(page.url()).pathname).toBe("/orgs/org-2/workspaces/ws-2")
   await expect(page).toHaveTitle("Research / Experiments")
 })
@@ -821,59 +826,63 @@ test('Tree hides the machine guide when a machine is enrolled', async ({ page })
   await expect(page.locator('#tree-sidebar').getByRole('button', { name: 'Set up a machine', exact: true })).toHaveCount(0)
 })
 
-test("organization actions open a settings page with inline management", async ({ page }) => {
+test("organization settings are pages reached from the context switcher", async ({ page }) => {
   await page.goto("/")
   await browseTreeOnMobile(page)
-  const organizationSettings = page.getByRole("button", { name: "Organization settings" })
-  await expect(organizationSettings.locator("svg")).toHaveClass(/lucide-ellipsis/)
-  await organizationSettings.click()
-
-  await expect(page.getByRole("heading", { name: "Acme", exact: true })).toBeVisible()
-  await expect(page.getByRole("heading", { name: "General" })).toBeVisible()
-  await expect(page.getByRole("heading", { name: "Workspaces" })).toBeVisible()
-  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible()
-  await expect(page.getByRole("heading", { name: "Groups" })).toBeVisible()
-  await expect(page.getByText("Platform", { exact: true })).toBeVisible()
-  await expect(page.getByRole("button", { name: "New organization" })).toBeVisible()
-  await expect(page.getByRole("button", { name: "Open audit" })).toBeVisible()
-  await expect(page.getByRole("button", { name: "Invite member" }).locator("svg")).toHaveClass(/lucide-plus/)
-
+  await page.getByRole("button", { name: "Organization Acme", exact: true }).click()
+  await page.getByRole("dialog", { name: "Switch organization or workspace" }).getByRole("button", { name: "Organization settings" }).click()
+  await expect(page).toHaveURL(/\/orgs\/org-1\/settings\/general$/)
+  await expect(page.getByRole("heading", { name: "General", exact: true })).toBeVisible()
   await expect(page.getByLabel("Organization name")).toBeEnabled()
-  await page.getByRole("button", { name: "Select Demo workspace" }).click()
-  await expect(page.getByRole("heading", { name: "General" })).toBeHidden()
+  const nav = page.getByRole("navigation", { name: "Settings" })
+  await nav.getByRole("group", { name: "Acme" }).getByRole("link", { name: "Groups" }).click()
+  await expect(page.getByText("Platform", { exact: true }).first()).toBeVisible()
+  await nav.getByRole("group", { name: "Acme" }).getByRole("link", { name: "Members" }).click()
+  await expect(page.getByRole("button", { name: "Invite people" })).toBeVisible()
+  await nav.getByRole("group", { name: "Acme" }).getByRole("link", { name: "Audit log" }).click()
+  await expect(page.getByRole("heading", { name: "Audit", exact: true })).toBeVisible()
+  await nav.getByRole("group", { name: "Acme" }).getByRole("link", { name: "Workspaces" }).click()
+  await page.getByRole("link", { name: "Select Demo workspace" }).click()
+  await expect(page).toHaveURL(/\/orgs\/org-1\/workspaces\/ws-1$/)
+  await expect(page.getByRole("heading", { name: "Workspace overview", exact: true })).toBeVisible()
 })
 
-test("mobile organization settings hide the sidebar and fit the viewport", async ({ page }) => {
+test("mobile organization settings hide the workspace and fit the viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto("/")
-  await browseTreeOnMobile(page)
-  await page.getByRole("button", { name: "Organization settings" }).click()
-
+  await page.goto("/orgs/org-1/settings/general")
   await expect(page.locator("aside")).toBeHidden()
-  await expect(page.getByRole("heading", { name: "Acme", exact: true })).toBeVisible()
-  await expect(page.getByRole("button", { name: "Back" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "General", exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Back", exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Close" })).toHaveCount(0)
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.getByRole("button", { name: "Back", exact: true }).click()
+  await expect(page).toHaveURL(/\/orgs\/org-1\/settings$/)
+  await expect(page.getByRole("navigation", { name: "Settings" }).getByRole("link", { name: "Members" })).toBeVisible()
 })
 
-test("workspace settings contain Machines and launch profiles without a separate views menu", async ({ page }) => {
+test("workspace settings pages hold Machines and launch profiles", async ({ page }) => {
   await page.goto("/")
   await browseTreeOnMobile(page)
   await expect(page.getByRole("button", { name: "Workspace views" })).toHaveCount(0)
   await openWorkspaceSettings(page)
   await expect(page.getByRole("heading", { name: "Machines" })).toBeVisible()
   await expect(workstationRow(page)).toBeVisible()
+  await page.getByRole("navigation", { name: "Settings" }).getByRole("link", { name: "Launch profiles" }).click()
   await expect(page.getByText("Codex Agent UI", { exact: true })).toBeVisible()
   await expect(page.getByRole("button", { name: "New profile" })).toBeVisible()
-  await expect(appsTab(page)).toBeVisible()
 })
 
-test("workspace settings show the default policy and install its bundled App", async ({ page }) => {
+test("workspace policy page states the default policy first and installs its bundled App", async ({ page }) => {
   await page.goto("/")
   await browseTreeOnMobile(page)
-  await openWorkspaceSettings(page)
+  await openWorkspaceSettings(page, "policy")
 
-  await expect(page.getByText("Treer Default", { exact: true })).toBeVisible()
+  await expect(page.getByRole("status", { name: "Policy status" })).toContainText("Treer Default is active (monitor): every action is allowed and recorded.")
   await expect(page.getByText("Active · monitor · allow", { exact: true })).toBeVisible()
+  // Tuning lives under Advanced.
+  await expect(page.getByLabel("Policy Provider stale seconds")).toBeHidden()
+  await page.getByText("Advanced", { exact: true }).click()
+  await expect(page.getByLabel("Policy Provider stale seconds")).toHaveValue("300")
   await expect(page.getByRole("combobox", { name: "Default Policy App machine" })).toHaveText("workstation")
 
   const installRequest = page.waitForRequest((request) => request.url().endsWith("/api/workspaces/ws-1/policy-provider/default-app"))
@@ -883,20 +892,25 @@ test("workspace settings show the default policy and install its bundled App", a
   await expect(page.getByRole("link", { name: "Open Policy App" })).toBeVisible()
 })
 
-test("workspace controls open a settings page with inline rename", async ({ page }) => {
+test("Core's policy link opens the workspace Policy page", async ({ page }) => {
+  await page.goto("/orgs/org-1/workspaces/ws-1#policy-provider")
+  await expect(page).toHaveURL(/\/orgs\/org-1\/workspaces\/ws-1\/settings\/policy$/)
+  await expect(page.getByRole("heading", { name: "Policy", exact: true })).toBeVisible()
+})
+
+test("the sidebar's labeled Workspace settings link opens a General page with rename", async ({ page }) => {
   await page.goto("/")
   await browseTreeOnMobile(page)
   const workspaceSettings = page.getByRole("button", { name: "Workspace settings" })
   await expect(workspaceSettings).toHaveCount(1)
-  await expect(workspaceSettings.locator("svg")).toHaveClass(/lucide-ellipsis/)
+  await expect(workspaceSettings).toHaveText("Workspace settings")
   await expect(page.getByRole("button", { name: "Rename workspace" })).toHaveCount(0)
   await expect(page.getByRole("button", { name: "Delete workspace" })).toHaveCount(0)
 
-  await openWorkspaceSettings(page)
-  await expect(page.getByRole("heading", { name: "Demo", exact: true })).toBeVisible()
+  await workspaceSettings.click()
+  await expect(page).toHaveURL(/\/orgs\/org-1\/workspaces\/ws-1\/settings\/general$/)
+  await expect(page.getByRole("heading", { name: "General", exact: true })).toBeVisible()
   await expect(page.getByText("ws-1", { exact: true })).toBeVisible()
-  await expect(page.getByRole("heading", { name: "Machines" })).toBeVisible()
-  await expect(page.getByRole("heading", { name: "Launch profiles" })).toBeVisible()
 
   const name = page.getByLabel("Workspace name")
   await name.fill("Platform")
@@ -905,7 +919,7 @@ test("workspace controls open a settings page with inline rename", async ({ page
   const request = await renaming
   expect(request.postDataJSON()).toEqual({ name: "Platform" })
   await expect(page).toHaveTitle("Acme / Platform")
-  await expect(page.getByRole("heading", { name: "Platform", exact: true })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Workspace Platform", exact: true })).toBeVisible()
 })
 
 test("managed App settings control access and lifecycle without creation or Network UI", async ({ page }) => {
@@ -1089,7 +1103,7 @@ test("offline machines show copyable recovery commands with the workspace id", a
   await browseTreeOnMobile(page)
   await openWorkspaceSettings(page)
   await expect(page.getByText("workstation · srv-b :8794")).toBeVisible()
-  await page.getByRole("button", { name: /^workstation(\s|$)/ }).first().click()
+  await workstationRow(page).first().click()
   await expect(page.getByText("treer-agent-server service --workspace ws-1 restart-controller")).toBeVisible()
   await expect(page.getByRole("button", { name: "Copy restart-controller" })).toBeVisible()
   await expect(page.getByRole("button", { name: "Copy restore" })).toBeVisible()
@@ -1183,10 +1197,14 @@ test("mobile: machine overview hides sidebar and shows back button", async ({ pa
   await workstationRow(page).click()
   await expect(page.getByRole("heading", { name: "workstation" })).toBeVisible()
   await expect(page.locator("aside")).toBeHidden()
-  await page.getByRole("button", { name: "Back" }).dispatchEvent("click")
-  await expect(page.getByRole("heading", { name: "Launch profiles" })).toBeVisible()
+  // Back from the machine returns to the Machines page it came from…
+  await page.getByRole("button", { name: "Back", exact: true }).dispatchEvent("click")
+  await expect(page.getByRole("heading", { name: "Machines" })).toBeVisible()
   await expect(page.locator("aside")).toBeHidden()
-  await page.getByRole("button", { name: "Back" }).dispatchEvent("click")
+  // …then up to the settings list, then out to the workspace.
+  await page.getByRole("button", { name: "Back", exact: true }).dispatchEvent("click")
+  await expect(page).toHaveURL(/\/settings$/)
+  await page.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "Back to Demo" }).click()
   await expect(page.getByRole("heading", { name: "Workspace overview", exact: true })).toBeVisible()
   await browseTreeOnMobile(page)
   await expect(page.locator("aside")).toBeVisible()
@@ -1196,38 +1214,34 @@ async function openUserMenu(page: Page) {
   await page.getByRole("button", { name: "User menu" }).click()
 }
 
-test("user menu contains Settings and Log out, not Edit profile", async ({ page }) => {
+test("avatar menu has Profile, My organizations, theme, tour and Log out", async ({ page }) => {
   await page.goto("/")
-  await browseTreeOnMobile(page)
   await openUserMenu(page)
-  await expect(page.getByRole("menuitem", { name: "Settings" })).toBeVisible()
-  await expect(page.getByRole("menuitem", { name: "Log out" })).toBeVisible()
+  for (const name of ["Profile", "My organizations", "Dark theme", "Replay product tour", "Log out"]) await expect(page.getByRole("menuitem", { name })).toBeVisible()
   await expect(page.getByRole("menuitem", { name: "Edit profile" })).toHaveCount(0)
+  await expect(page.getByRole("menu")).not.toContainText("owner")
+  await page.getByRole("menuitem", { name: "My organizations" }).click()
+  await expect(page).toHaveURL(/\/settings\/organizations$/)
+  await expect(page.getByRole("list", { name: "My organizations" })).toContainText("Research")
 })
 
-test("opening Settings shows a floating panel with Usage & billing, Account, and General", async ({ page }) => {
+test("the top bar Settings link opens the grouped settings hub without billing", async ({ page }) => {
   await page.goto("/")
-  await browseTreeOnMobile(page)
-  await openUserMenu(page)
-  await page.getByRole("menuitem", { name: "Settings" }).click()
-  const settings = page.getByRole("dialog", { name: "Settings" })
-  await expect(settings).toBeVisible()
-  await expect(settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "Usage & billing" })).toBeVisible()
-  await expect(settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "Account" })).toBeVisible()
-  await expect(settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "General" })).toBeVisible()
-  await expect(settings.getByText("Control plane")).toHaveCount(0)
-  await expect(page.locator("header").getByText("Settings")).toHaveCount(0)
+  await page.getByRole("link", { name: "Settings", exact: true }).click()
+  await expect(page).toHaveURL(/\/settings\/profile$/)
+  const nav = page.getByRole("navigation", { name: "Settings" })
+  for (const group of ["You", "Acme", "Workspace · Demo"]) await expect(nav.getByRole("group", { name: group })).toBeVisible()
+  await expect(nav.getByRole("link", { name: "Usage & billing" })).toHaveCount(0)
+  await expect(page.getByText("Control plane")).toHaveCount(0)
+  await expect(page.locator("aside")).toBeHidden()
 })
 
-test("Account settings save preferred name via PATCH /api/auth/profile", async ({ page }) => {
+test("Profile saves preferred name via PATCH /api/auth/profile", async ({ page }) => {
   await page.goto("/")
-  await browseTreeOnMobile(page)
   await openUserMenu(page)
-  await page.getByRole("menuitem", { name: "Settings" }).click()
-
-  const settings = page.getByRole("dialog", { name: "Settings" })
-  const name = settings.getByLabel("Preferred name")
-  const email = settings.getByLabel("Email")
+  await page.getByRole("menuitem", { name: "Profile" }).click()
+  const name = page.getByLabel("Preferred name")
+  const email = page.getByLabel("Email")
   await expect(name).toHaveValue("Test User")
   await expect(email).toHaveValue("user@example.com")
 
@@ -1236,23 +1250,18 @@ test("Account settings save preferred name via PATCH /api/auth/profile", async (
   await page.getByRole("button", { name: "Save" }).click()
   const request = await patched
   expect(request.postDataJSON()).toEqual({ email: "user@example.com", preferred_name: "Dana Owner" })
-
-  await expect(page.locator("aside").getByText("Dana Owner")).toBeVisible()
+  await expect(page.getByRole("status").filter({ hasText: "Saved." })).toBeVisible()
+  await openUserMenu(page)
+  await expect(page.getByRole("menu")).toContainText("Dana Owner")
 })
 
-test("General settings show theme and the language choice, and toggle dark class", async ({ page }) => {
-  await page.goto("/")
-  await browseTreeOnMobile(page)
-  await openUserMenu(page)
-  await page.getByRole("menuitem", { name: "Settings" }).click()
-  const settings = page.getByRole("dialog", { name: "Settings" })
-  await settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "General" }).click()
-
-  await expect(settings.getByRole("group", { name: "Theme" })).toBeVisible()
-  await expect(settings.getByRole("button", { name: "Light" })).toBeVisible()
-  await expect(settings.getByRole("button", { name: "Dark" })).toBeVisible()
-  await expect(settings.getByLabel("Language")).toHaveText("English")
-  await expect(settings.getByText("Applies to the console. Embedded interfaces follow it when they load.")).toBeVisible()
+test("Preferences show theme and the language choice, and toggle dark class", async ({ page }) => {
+  await page.goto("/settings/preferences")
+  await expect(page.getByRole("group", { name: "Theme" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Light" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Dark" })).toBeVisible()
+  await expect(page.getByLabel("Language")).toHaveText("English")
+  await expect(page.getByText("Applies to the console. Embedded interfaces follow it when they load.")).toBeVisible()
 
   await expect(page.locator("html")).not.toHaveClass(/dark/)
   await page.getByRole("button", { name: "Dark" }).click()
@@ -1296,29 +1305,41 @@ test("manager can delete a workspace and the app recovers to no workspace", asyn
 
   await page.goto("/")
   await browseTreeOnMobile(page)
-  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Demo")
+  await expect(page.getByRole("button", { name: "Workspace Demo", exact: true })).toBeVisible()
 
   await page.getByRole("button", { name: "Workspace settings" }).click()
+  await page.getByRole("navigation", { name: "Settings" }).getByRole("link", { name: "Danger zone" }).last().click()
   await page.getByRole("button", { name: "Delete workspace" }).click()
   const dialog = page.getByRole("dialog")
-  await expect(dialog.getByRole("heading", { name: "Delete workspace" })).toBeVisible()
-  await expect(dialog.getByText("Delete Demo?")).toBeVisible()
-  await expect(dialog.getByText("historical traffic and messages are retained")).toBeVisible()
+  await expect(dialog.getByRole("heading", { name: "Delete Demo?" })).toBeVisible()
   await expect(dialog.getByText("This cannot be undone.")).toBeVisible()
+  const confirm = dialog.getByRole("button", { name: "Delete workspace" })
+  await expect(confirm).toBeDisabled()
+  await dialog.getByLabel("Type Demo to confirm").fill("Demo")
 
-  await dialog.getByRole("button", { name: "Delete workspace" }).click()
+  await confirm.click()
   await expect(deletedPaths).toEqual(["/api/workspaces/ws-1"])
-  await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("No workspace")
+  await expect(page.getByRole("button", { name: "Workspace No workspace", exact: true })).toBeVisible()
   await expect.poll(() => new URL(page.url()).pathname).toBe("/orgs/org-1")
 })
 
-test("workspace deletion is blocked until every machine is deleted", async ({ page }) => {
-  await page.goto("/")
-  await browseTreeOnMobile(page)
-  await page.getByRole("button", { name: "Workspace settings" }).click()
-  await expect(page.getByText("Delete all 2 machines before deleting this workspace.")).toBeVisible()
-  await expect(page.getByRole("button", { name: "Delete workspace" })).toBeDisabled()
-  await expect(page.getByRole("dialog")).toHaveCount(0)
+test("deleting a workspace with machines requires revoking them and the exact name", async ({ page }) => {
+  let body: unknown
+  await page.route("**/api/workspaces/ws-1", (route) => {
+    if (route.request().method() !== "DELETE") return route.fallback()
+    body = route.request().postDataJSON()
+    return route.fulfill({ status: 204 })
+  })
+  await openWorkspaceSettings(page, "danger")
+  await expect(page.getByText("2 machines are enrolled. Deleting also revokes them.")).toBeVisible()
+  await page.getByRole("button", { name: "Delete workspace" }).click()
+  const dialog = page.getByRole("dialog")
+  const confirm = dialog.getByRole("button", { name: "Delete workspace" })
+  await dialog.getByLabel("Type Demo to confirm").fill("Demo")
+  await expect(confirm).toBeDisabled()
+  await dialog.getByRole("checkbox", { name: /Also revoke 2 machines/ }).check()
+  await confirm.click()
+  await expect.poll(() => body).toEqual({ confirm_name: "Demo", revoke_machines: true })
 })
 
 test('untrusted Agent names render as text without running markup', async ({ page }) => {
