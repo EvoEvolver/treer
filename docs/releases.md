@@ -1,7 +1,7 @@
 # Release process
 
 - Status: maintained
-- Last reviewed: 2026-10-28
+- Last reviewed: 2026-10-29
 
 A release is an exact Git commit on `main`. The same commit is built once per
 platform by CI, deployed to the hosted Canary, then to Production, tagged for
@@ -216,12 +216,32 @@ manifest without `treer-launch` as predating it.
 
 ### Unreleased
 
+### 0.2.4
+
+Additive release: no schema change; the Proxy is unchanged apart from its
+version. Update machines from the Console or with `treer-agent-server update
+--version v0.2.4`. Redeploy Agent Hubs from `apps/agent-hub` to get the new
+hub features; edited templates stored in a hub are kept.
+
 - **Steadier terminal status:** terminal workloads without an Agent
   Interface no longer flash between working and idle on cursor blinks,
   clocks, spinners, prompt redraws or typing. The Controller filters output
   with hysteresis: sustained new output or a live working marker enters
   working, 4.5 s of quiet (1 s at a shell prompt) returns to idle, blocking
   questions switch at once and hold, and each status is held at least 2 s.
+- **Agent Hub cross-hub handoffs:** `inputs.handoffs` also accepts another
+  hub's handoff by address (`/agent_hub_linux/j-0003`); the hub resolves and
+  copies it at job creation (`400 input_handoff_unresolved` otherwise).
+  Handoffs carry `hub` in front matter. Reviewer jobs must return
+  `verdict: approve|changes-needed` and a `## Notes for the implementer`
+  section (`GET /api/handoff-format?template=T`).
+- **Review loop flow:** the hub serves `flows/review_loop.py` at
+  `/flows/review_loop.py`, a stdlib caller-side script that alternates fresh
+  implementer and reviewer jobs across one or two hubs until approval or
+  `--max-rounds`.
+- **Gateway-based bundled templates:** bundled Agent Hub templates clone and
+  push through the Git Gateway (`agent/<hub>-<job>` branches). Bundled
+  templates seed only templates that were never edited in a hub.
 
 ### 0.2.3
 

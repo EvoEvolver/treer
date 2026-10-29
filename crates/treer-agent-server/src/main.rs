@@ -87,7 +87,7 @@ struct UpdateArgs {
     /// Signed release channel to follow when --version is absent.
     #[arg(long, env = "TREER_RELEASE_CHANNEL", default_value = "stable")]
     channel: String,
-    /// Exact release tag to install, such as v0.2.3.
+    /// Exact release tag to install, such as v0.2.4.
     #[arg(long)]
     version: Option<String>,
     /// Override the bundled official trust with a local SPKI Ed25519 PEM key.
