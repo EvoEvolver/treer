@@ -332,3 +332,135 @@ async fn operator_explain_is_workspace_scoped_and_does_not_publish() {
             .is_none()
     );
 }
+
+fn admin_document(rules: Value) -> WorkspacePolicyDocument {
+    serde_json::from_value(json!({"schema_version": 1,
+        "groups": {"bots": {"principals": [{"kind": "agent", "id": "agent-a"}]}},
+        "rules": rules}))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn provider_operator_publication_cannot_add_or_change_admin_rules() {
+    let (auth, identity, app, headers) = policy_diagnostics::tests::fixture().await;
+    let mut runtime = headers.clone();
+    runtime.remove(TREER_IDENTITY_TOKEN_HEADER);
+    set_policy_publish_authority(
+        Extension(auth.clone()),
+        Extension(session("owner")),
+        Path("diagnostic".into()),
+        switch(&app, PolicyPublishAuthority::ProviderOperator),
+    )
+    .await
+    .unwrap();
+    let operator = |document: WorkspacePolicyDocument| {
+        let (auth, runtime, service) = (auth.clone(), runtime.clone(), app.service_id.clone());
+        async move {
+            app_operator_validate_policy(Extension(auth), Path(service), runtime, Json(document))
+                .await
+                .map(|_| ())
+                .map_err(|failure| failure.error.code)
+        }
+    };
+    let owner = |document: WorkspacePolicyDocument, headers: HeaderMap| {
+        let (auth, identity, service) = (auth.clone(), identity.clone(), app.service_id.clone());
+        async move {
+            app_validate_policy_document(
+                Extension(auth),
+                Extension(identity),
+                Path(service),
+                headers,
+                Json(document),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|failure| failure.error.code)
+        }
+    };
+    let allow = json!({"id": "bot-admin", "priority": 10, "effect": "allow",
+        "subjects": [{"group": "bots"}], "actions": ["workspace.access.manage", "machine.enroll"], "resources": [{}]});
+    let deny = json!({"id": "bot-deny", "priority": 20, "effect": "deny",
+        "subjects": [{"id": "agent-a"}], "actions": ["machine.enroll"], "resources": [{}]});
+    let unrelated = json!({"id": "prompt", "priority": 1, "effect": "allow",
+        "subjects": [{"kind": "agent"}], "actions": ["agent.prompt"], "resources": [{}]});
+    let required = Err("policy_admin_owner_session_required".to_string());
+    // Even with provider_operator selected, a new admin rule needs an owner.
+    assert_eq!(
+        operator(admin_document(json!([allow.clone()]))).await,
+        required
+    );
+    assert_eq!(
+        operator(admin_document(json!([unrelated.clone()]))).await,
+        Ok(())
+    );
+    // An owner (who is an organization owner) approves allow + deny.
+    owner(
+        admin_document(json!([allow.clone(), deny.clone()])),
+        headers.clone(),
+    )
+    .await
+    .unwrap();
+    // Unchanged admin rules (plus unrelated edits) pass the operator path.
+    assert_eq!(
+        operator(admin_document(json!([
+            allow.clone(),
+            deny.clone(),
+            unrelated.clone()
+        ])))
+        .await,
+        Ok(())
+    );
+    // Dropping an approved allow is fine; dropping the deny is not.
+    assert_eq!(
+        operator(admin_document(json!([deny.clone()]))).await,
+        Ok(())
+    );
+    assert_eq!(
+        operator(admin_document(json!([allow.clone()]))).await,
+        required
+    );
+    // Changing a rule, or the group it references, is new.
+    let mut wider = allow.clone();
+    wider["actions"] = json!(["workspace.access.manage", "machine.enroll", "audit.read"]);
+    assert_eq!(
+        operator(admin_document(json!([wider, deny.clone()]))).await,
+        required
+    );
+    let mut grown: WorkspacePolicyDocument = admin_document(json!([allow.clone(), deny.clone()]));
+    grown
+        .groups
+        .get_mut("bots")
+        .unwrap()
+        .principals
+        .push(serde_json::from_value(json!({"kind": "agent", "id": "agent-b"})).unwrap());
+    assert_eq!(operator(grown).await, required);
+    // Organization-scope admin rules need an organization owner/admin as the
+    // verifying human; a mere workspace owner cannot approve them.
+    sqlx::query("INSERT INTO workspace_user_grants(workspace_id,user_id,role,created_at,created_by) VALUES('diagnostic','member','owner','test','owner')")
+        .execute(&auth.pool()).await.unwrap();
+    let token = identity
+        .issue_human_request("diagnostic", "member", "Member", "owner", &app.service_id)
+        .unwrap()
+        .access_token;
+    let mut member = headers.clone();
+    member.insert(TREER_IDENTITY_TOKEN_HEADER, token.parse().unwrap());
+    let org_rule = json!({"id": "bot-org", "priority": 10, "effect": "allow",
+        "subjects": [{"id": "agent-a"}], "actions": ["org.invite.manage"], "resources": [{}]});
+    assert_eq!(
+        owner(admin_document(json!([org_rule.clone()])), member.clone()).await,
+        Err("policy_org_admin_required".to_string())
+    );
+    // Workspace-scope rules are fine for a workspace owner.
+    owner(admin_document(json!([allow.clone()])), member.clone())
+        .await
+        .unwrap();
+    // Once an organization owner approved the org rule, the workspace owner
+    // may keep it unchanged.
+    owner(admin_document(json!([org_rule.clone()])), headers.clone())
+        .await
+        .unwrap();
+    owner(admin_document(json!([org_rule.clone(), allow])), member)
+        .await
+        .unwrap();
+    assert_eq!(operator(admin_document(json!([org_rule]))).await, Ok(()));
+}

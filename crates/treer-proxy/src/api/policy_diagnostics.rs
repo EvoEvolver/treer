@@ -190,6 +190,13 @@ pub(super) async fn validate_policy_document(
         .await?;
     treer_proxy::policy_store::validate_document(&document)
         .map_err(|e| ApiFailure::bad_request(e.code(), &e.to_string()))?;
+    super::policy_admin_approval::record_owner_approval(
+        &auth,
+        &workspace,
+        &session.user_id,
+        &document,
+    )
+    .await?;
     Ok(([(header::CACHE_CONTROL,"no-store")],Json(json!({"valid":true,"schema_version":document.schema_version,"capabilities":[CAPABILITY_POLICY_PATH_RULES],"recovery_guaranteed":true,"warnings":["Owner Provider and Tree management cannot be denied by delegated rules"]}))).into_response())
 }
 
