@@ -7,10 +7,8 @@ import { useState } from "react"
 // State only: request handlers, validation and lifecycle behavior stay in the
 // workspace controller. Defaults match the original component declarations.
 export function useWorkspaceDialogState() {
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [createOrganizationOpen, setCreateOrganizationOpen] = useState(false)
   const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false)
-  const [deleteWorkspaceOpen, setDeleteWorkspaceOpen] = useState(false)
   const [createAgentOpen, setCreateAgentOpen] = useState(false)
   const [agentFolder, setAgentFolder] = useState<NewAgentFolder | null>(null)
   const [renameError, setRenameError] = useState("")
@@ -22,7 +20,6 @@ export function useWorkspaceDialogState() {
   const [launchingProfile, setLaunchingProfile] = useState<AgentLaunchProfile | null>(null)
   const [deletingProfile, setDeletingProfile] = useState<AgentLaunchProfile | null>(null)
   const [installOpen, setInstallOpen] = useState(false)
-  const [inviteOpen, setInviteOpen] = useState(false)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [renameTarget, setRenameTarget] = useState<RenameTarget>(null)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
@@ -48,19 +45,14 @@ export function useWorkspaceDialogState() {
   const [windowsInstallCommand, setWindowsInstallCommand] = useState("")
   const [windowsConnectCommand, setWindowsConnectCommand] = useState("")
   const [installPlatform, setInstallPlatform] = useState("unix")
-  const [inviteUrl, setInviteUrl] = useState("")
   const installCommand = installPlatform === "windows" ? windowsInstallCommand : unixInstallCommand
   const connectCommand = installPlatform === "windows" ? windowsConnectCommand : unixConnectCommand
   return {
     preparedClaude, setPreparedClaude, preparedAttempted, setPreparedAttempted,
-    settingsOpen,
-    setSettingsOpen,
     createOrganizationOpen,
     setCreateOrganizationOpen,
     createWorkspaceOpen,
     setCreateWorkspaceOpen,
-    deleteWorkspaceOpen,
-    setDeleteWorkspaceOpen,
     createAgentOpen,
     setCreateAgentOpen,
     agentFolder,
@@ -83,8 +75,6 @@ export function useWorkspaceDialogState() {
     setDeletingProfile,
     installOpen,
     setInstallOpen,
-    inviteOpen,
-    setInviteOpen,
     uploadOpen,
     setUploadOpen,
     renameTarget,
@@ -131,8 +121,6 @@ export function useWorkspaceDialogState() {
     setWindowsConnectCommand,
     installPlatform,
     setInstallPlatform,
-    inviteUrl,
-    setInviteUrl,
     installCommand,
     connectCommand
   }
