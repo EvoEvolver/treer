@@ -211,14 +211,39 @@ manifest without `treer-launch` as predating it.
   probing; Agent Hub and External Agent declare it. A capability-only update
   does not restart the App and needs `agent.update`.
 - **Agent administration through Policy** (`agent.admin.v1`): Agents call
-  `$TREER_AGENT_SERVER_URL/api/admin/...` (Proxy
+  `$TREER_AGENT_SERVER_URL/api/org-admin/...` (Proxy
   `/agent/workspaces/{ws}/admin/...`) to manage their organization and
   workspace. New actions `org.manage`, `org.member.manage`,
   `org.invite.manage`, `org.group.manage`, `workspace.manage`,
-  `workspace.access.manage`, `policy.provider.manage`, `audit.read` and
-  `machine.enroll` are default-deny for Agents in every Policy mode; only an
-  explicit allow rule naming the Agent grants them. Changes are audited with
-  the Agent as actor (`actor_name` now resolves Agent names).
+  `workspace.access.manage`, `audit.read` and `machine.enroll` are
+  default-deny for Agents in every Policy mode; only an explicit allow rule
+  naming the Agent by `id` (or a group listing its ID) grants them — Tree
+  selectors never do. `policy.provider.manage` is never granted to Agents.
+  Organization-scope actions also need an organization-level Agent grant
+  written by a human owner/admin (`org.agent-grants.v1`,
+  `GET /api/organizations/{org}/agent-grants`,
+  `PUT/DELETE .../agent-grants/{agent_id}`; Console: Organization settings →
+  Agent permissions). Agents never invite or assign `owner`/`admin`, change
+  roles, remove owners, delete or transfer the organization. Changes are
+  audited with the Agent as actor; its name is frozen at write time and the
+  Console shows `agent: <name>`.
+- **Owner-verified administration rules:** rules naming an administration
+  action are validated by Core even in schema 1, and `provider_operator`
+  publication may not add or change them (`403
+  policy_admin_owner_session_required`); a verified owner must publish, and
+  an organization owner/admin for organization-scope actions
+  (`403 policy_org_admin_required`). Approved sets are stored in
+  `workspace_policy_admin_approvals`; existing admin rules need one owner
+  publication before operator publications that keep them succeed.
+- **Invitation hardening:** acceptance and registration re-verify the
+  invitation creator (a human must still be owner/admin, owner for owner
+  invitations; an Agent must still pass its Policy and organization grant),
+  otherwise the invitation counts as revoked. Removing or demoting a creator
+  revokes the pending invitations their role no longer covers. An
+  invitation with `email` can only be accepted by an account whose verified
+  email matches (`403 invitation_email_mismatch`) or registered with that
+  email. `POST /api/auth/password` now rotates the current session token and
+  returns `200` with the new session cookie.
 - **Settings APIs** (`settings.admin.v1`): invitations take `email`, `role`,
   `expires_in_hours`, `group_ids`, `workspace_ids` and can be listed and
   revoked (`GET`/`DELETE`); accepting applies them, and invitations created
@@ -228,7 +253,11 @@ manifest without `treer-launch` as predating it.
   (`409 last_owner`). `GET/DELETE /api/auth/sessions`, `POST /api/auth/password`,
   `GET /api/workspaces/{id}/access/effective`, and
   `DELETE /api/workspaces/{id}` with `{confirm_name, revoke_machines}`.
-  Schema: additive columns on `invitations` and `sessions`.
+  Schema: additive columns on `invitations` and `sessions`; new tables
+  `organization_agent_grants` and `workspace_policy_admin_approvals`.
+- **Console:** if `/api/health` advertises `settings.admin.v1`, an App without
+  `ui_capabilities` is a leaf and is never probed for a tree; older Proxies are
+  still probed.
 - **Console:** machine-page service probes call
   `POST /api/workspaces/{ws}/services/{id}/probe` (the old path had no route).
 

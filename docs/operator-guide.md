@@ -526,9 +526,9 @@ Policy App and its administration token is in
 [apps/policy/README.md](../apps/policy/README.md).
 
 **Delegating administration to an Agent.** Agents never inherit org or
-workspace administration from monitor mode, action defaults or a fail-open
-Provider. Grant it with an explicit allow rule that names the Agent (`id`,
-`tree` or `group` selector) and lists the actions, e.g.:
+workspace administration from monitor mode, action defaults, Tree placement or
+a fail-open Provider. Grant it with an explicit allow rule that names the Agent
+(`id`, or a `group` whose principals list its ID) and lists the actions, e.g.:
 
 ```json
 {"id": "ops-bot-admin", "priority": 100, "effect": "allow",
@@ -537,12 +537,20 @@ Provider. Grant it with an explicit allow rule that names the Agent (`id`,
  "resources": [{}]}
 ```
 
-The Agent then calls `$TREER_AGENT_SERVER_URL/api/admin/...` with its workload
-credential ([Treer skill](../skills/treer/SKILL.md#administration-over-http)).
-It acts only in its own workspace and that workspace's organization, never
-removes or demotes the last owner, and every change is audited with the Agent
-as actor. Grant `policy.provider.manage` only to Agents trusted to change
-everyone's Policy, their own included.
+The Agent then calls `$TREER_AGENT_SERVER_URL/api/org-admin/...` with its
+workload credential ([Treer skill](../skills/treer/SKILL.md#administration-over-http)).
+Workspace actions (`workspace.access.manage`, `machine.enroll`, renaming its
+workspace, its own workspace's audit) need only that rule. Organization actions
+(`org.*`, organization-wide `audit.read`, listing/creating/deleting workspaces)
+also need an organization grant from an owner or admin: Console Organization
+settings → Agent permissions, or
+`PUT /api/organizations/{org}/agent-grants/{agent_id}` with
+`{"workspace_id": ..., "actions": [...]}`. A grant stops working when its
+creator is no longer an owner/admin. Agents never invite or assign
+`owner`/`admin`, change roles, remove owners, delete or transfer the
+organization, and are never granted `policy.provider.manage`. Rules with
+administration actions must be published with a verified owner, even under
+`provider_operator`. Every change is audited with the Agent as actor.
 
 ## Updates
 

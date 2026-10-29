@@ -67,15 +67,42 @@ here are not made.
   allow), projected through per-action allowlists and served `no-store`.
 - Agent administration (`org.manage`, `org.member.manage`, `org.invite.manage`,
   `org.group.manage`, `workspace.manage`, `workspace.access.manage`,
-  `policy.provider.manage`, `audit.read`, `machine.enroll`) is **default-deny**
-  for every non-human subject regardless of mode, action defaults or Provider
-  fail-open: only a matched allow rule whose subject selector names the Agent
-  (`id`, `tree` or `group`) grants it, and a matched deny wins. Grants are
-  bounded to owner-equivalent powers in the Agent's own workspace and its
-  organization, keep the last-owner invariant, and are audited with the Agent
-  as actor. Account routes (sessions, password) are human-session only.
-  Changing the Policy Provider needs `policy.provider.manage`, so an Agent
-  cannot rewrite its own grants without that explicit grant.
+  `audit.read`, `machine.enroll`) is **default-deny** for every non-human
+  subject regardless of mode, action defaults or Provider fail-open: only a
+  matched allow rule whose subject selector names the Agent by a non-empty `id`
+  or a `group` (whose principals are listed by ID) grants it, and a matched
+  deny wins. Tree selectors never name a subject for administration, because
+  whoever can move or rename nodes would otherwise grant it.
+  `policy.provider.manage` is never granted to Agents.
+- A workspace Policy is controlled by that workspace's owners, and any
+  organization member can create a workspace. Organization-scope Agent
+  administration therefore also needs an organization-level grant
+  (`organization_agent_grants`) that only human organization owners/admins
+  write; it authorizes nothing once its creator loses that role. Without it
+  an Agent administers only its own workspace (access, enrollment, rename, its
+  own audit) and cannot list workspaces, read other workspaces' or
+  organization audit, or create invitations.
+- Even with grants an Agent is treated like an `admin` for owner-affecting
+  checks and is capped further: it never invites or assigns `owner`/`admin`,
+  changes member roles, removes an owner, deletes or transfers the
+  organization. Changes are audited with the Agent as actor and its name
+  frozen at write time; the Console labels it `agent: <name>`, since Agents
+  choose their own names. Account routes (sessions, password) are
+  human-session only; a password change rotates the current session token.
+- Rules naming administration actions need owner-verified publication: Core's
+  `provider_operator` validator rejects a document whose administration allow
+  rules (with the groups they reference) are not in the set an owner last
+  validated, or that drops an approved deny; a new organization-scope allow
+  rule needs an organization owner/admin as the verifying human. The Policy
+  App routes such documents through Core even in schema 1.
+- Invitations record their creator. Acceptance and registration re-verify it
+  (human: still owner/admin, owner for owner invitations; Agent: still its
+  Policy allow and organization grant), otherwise the invitation counts as
+  revoked; removing or demoting a creator revokes their pending invitations
+  that the new role no longer covers. An invitation bound to `email` is
+  accepted only by an account whose verified, normalized email matches, or
+  registered with that email (for password registration this is the claimed
+  address, as for every password account).
 
 ### Machine enrollment and the Controller connection
 

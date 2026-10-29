@@ -554,42 +554,48 @@ Agent on it; it does not uninstall the service.
 ## Administration over HTTP
 
 Organization and workspace administration has no CLI command; call the local
-Controller, which forwards `ANY /api/admin/PATH?QUERY` as you (your workload
-credential, never the operator's) to the Proxy's
+Controller, which forwards `ANY /api/org-admin/PATH?QUERY` as you (your
+workload credential, never the operator's) to the Proxy's
 `/agent/workspaces/$TREER_WORKSPACE_ID/admin/PATH`:
 
 ```bash
 admin() { # METHOD PATH [JSON]
-  curl -sS -X "$1" "$TREER_AGENT_SERVER_URL/api/admin/$2" \
+  curl -sS -X "$1" "$TREER_AGENT_SERVER_URL/api/org-admin/$2" \
     -H "X-Treer-Agent-Id: $TREER_AGENT_ID" \
     -H "X-Treer-Workload-Credential: $TREER_WORKLOAD_CREDENTIAL" \
     ${3:+-H 'Content-Type: application/json' -d "$3"}
 }
-admin POST organization/invitations '{"role":"member","email":"a@example.com","workspace_ids":["'"$TREER_WORKSPACE_ID"'"]}'
-admin GET  workspace/access/effective
+admin PATCH workspace '{"name":"Build farm"}'
+admin GET   workspace/access/effective
 ```
 
-| Policy action | Routes under `/api/admin/` |
-| --- | --- |
-| `org.manage` | `GET/PATCH {name}/DELETE {confirm_name} organization` |
-| `org.member.manage` | `GET organization/members`, `PATCH {role}/DELETE organization/members/{user_id}` |
-| `org.invite.manage` | `GET/POST organization/invitations`, `DELETE organization/invitations/{id}` |
-| `org.group.manage` | `GET/POST {name} organization/groups`, `DELETE organization/groups/{id}`, `PUT/DELETE organization/groups/{id}/members/{user_id}` |
-| `audit.read` | `GET organization/audit-events?limit=&before=&workspace_id=` |
-| `workspace.manage` | `GET/POST {name} workspaces`, `PATCH {name}/DELETE {confirm_name,revoke_machines} workspace` |
-| `workspace.access.manage` | `GET/PATCH {access_mode} workspace/access`, `GET workspace/access/effective`, `PUT {role}/DELETE workspace/access/users/{id}` and `.../groups/{id}` |
-| `policy.provider.manage` | `GET/PUT/DELETE workspace/policy-provider` |
-| `machine.enroll` | `POST workspace/bootstrap` (returns a secret enrollment key) |
+| Policy action | Scope | Routes under `/api/org-admin/` |
+| --- | --- | --- |
+| `workspace.access.manage` | workspace | `GET/PATCH {access_mode} workspace/access`, `GET workspace/access/effective`, `PUT {role}/DELETE workspace/access/users/{id}` and `.../groups/{id}` |
+| `machine.enroll` | workspace | `POST workspace/bootstrap` (returns a secret enrollment key) |
+| `workspace.manage` | workspace | `PATCH {name} workspace` |
+| `audit.read` | workspace | `GET organization/audit-events?workspace_id=$TREER_WORKSPACE_ID&limit=&before=` (your workspace only) |
+| `workspace.manage` | organization | `GET/POST {name} workspaces`, `DELETE {confirm_name,revoke_machines} workspace` |
+| `audit.read` | organization | `GET organization/audit-events?limit=&before=[&workspace_id=]` |
+| `org.manage` | organization | `GET/PATCH {name} organization` |
+| `org.member.manage` | organization | `GET organization/members`, `DELETE organization/members/{user_id}` (not owners) |
+| `org.invite.manage` | organization | `GET/POST organization/invitations` (role `member` only), `DELETE organization/invitations/{id}` |
+| `org.group.manage` | organization | `GET/POST {name} organization/groups`, `DELETE organization/groups/{id}`, `PUT/DELETE organization/groups/{id}/members/{user_id}` |
 
 Bodies and responses match the Console's `/api/organizations/...` and
-`/api/workspaces/...` routes. Each action is denied (`403 policy_denied`) until
-a workspace owner adds an explicit allow rule naming you (`id`, `tree` or
-`group`); monitor mode and defaults never grant it. You act only on your own
-workspace (`workspace/...`) and its organization (`organization/...`), as an
-owner would, and the last owner can never be removed or demoted. Every change
-is audited with you as actor. Session and password routes are human-only.
-Never relay an invitation URL or enrollment key anywhere but its intended
-recipient.
+`/api/workspaces/...` routes. Every action is denied (`403 policy_denied`) until
+your workspace Policy has an allow rule naming you by `id` (or a group listing
+your ID); Tree paths, kind, monitor mode and defaults never grant it.
+Organization-scope actions also need an organization grant from a human owner
+or admin (Organization settings → Agent permissions; otherwise
+`403 agent_org_grant_required`). Whatever you are granted, you never invite or
+assign `owner`/`admin`, change member roles, remove an owner, delete or
+transfer the organization, or manage the Policy Provider
+(`policy.provider.manage` is never granted to Agents). Invitations you create
+are re-checked at acceptance and stop working when your grant goes. Every
+change is audited with you as actor. Session and password routes are
+human-only. Never relay an invitation URL or enrollment key anywhere but its
+intended recipient.
 
 ## Operational boundaries
 
