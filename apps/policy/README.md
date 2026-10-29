@@ -196,38 +196,27 @@ an allow rule for its runtime ID (`treer app show PATH`), for example
 `{"id":"issues-app-wakes-agents","priority":40,"effect":"allow","subjects":[{"id":"app_RUNTIME_ID"}],"actions":["agent.prompt"],"resources":[{"kind":"agent"}]}`;
 add a `tree` selector to the resource to limit which Agents it may reach.
 
-## Granting organization and workspace administration
+## Organization and workspace administration actions
 
-Core treats `org.manage`, `org.member.manage`, `org.invite.manage`,
-`org.group.manage`, `workspace.manage`, `workspace.access.manage`,
-`policy.provider.manage`, `audit.read` and `machine.enroll` as
-**default-deny** for Agents and Apps, even in monitor mode, with no rules, with
-an `allow` default or with a fail-open Provider. Only a matched allow rule
-whose subject names the Agent by a non-empty `id` or a `group` (whose
-principals list it by ID) grants them; `tree`, `kind`, `machine_id` and empty
-selectors never do, and a matching higher-priority deny wins.
-`policy.provider.manage` is never granted to Agents or Apps:
+Agents administer their own workspace and its organization through Core
+(`org.manage`, `org.member.manage`, `org.invite.manage`, `org.group.manage`,
+`workspace.manage`, `workspace.access.manage`, `policy.provider.manage`,
+`audit.read`, `machine.enroll`). These are ordinary Policy actions: with no
+rule they follow the defaults and mode like every other action (allowed by
+default, and in monitor mode), and an enforced deny rule denies them. Policy is
+a cooperative agreement among trusted Agents, not a containment boundary.
+To keep an Agent out of, say, member management:
 
 ```json
-{"id":"ops-bot-admin","priority":100,"effect":"allow",
- "subjects":[{"kind":"agent","id":"AGENT_ID"}],
- "actions":["org.invite.manage","org.member.manage","workspace.access.manage"],
+{"id":"no-member-admin","priority":100,"effect":"deny",
+ "subjects":[{"kind":"agent"}],
+ "actions":["org.member.manage"],
  "resources":[{}]}
 ```
 
 Organization actions use resource `{"kind":"organization","id":ORG_ID}`;
-workspace actions use `{"kind":"workspace","id":WORKSPACE_ID}`. The simulator
-(`POST /v1/policy/test`) applies exactly the same gate. Humans are unaffected:
-their organization and workspace roles decide. Organization actions also need
-an organization grant from an owner/admin in the Console (Organization
-settings → Agent permissions).
-
-Documents with rules naming administration actions are always validated by
-Core (schema 1 too). Under `provider_operator`, the operator token alone cannot
-add or change such rules (or drop an approved deny): Core answers
-`policy_admin_owner_session_required` and the App then needs a signed-in
-workspace owner (an organization owner/admin for organization actions) to
-publish.
+workspace actions use `{"kind":"workspace","id":WORKSPACE_ID}`. Humans are
+unaffected: their organization and workspace roles decide.
 
 ## Isolating the administration Agent
 
