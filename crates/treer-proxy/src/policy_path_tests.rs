@@ -23,6 +23,7 @@ async fn invalid_provider_contract_never_falls_back_to_stale_or_fail_open() {
                 port: 8888,
                 hostname: String::new(),
                 public: false,
+                ui_capabilities: Vec::new(),
             },
         )
         .await

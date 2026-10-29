@@ -53,6 +53,7 @@ pub(super) async fn fixture() -> Fixture {
                 port: 9440,
                 hostname: String::new(),
                 public: false,
+                ui_capabilities: Vec::new(),
             },
         )
         .await

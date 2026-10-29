@@ -602,6 +602,8 @@ CREATE TABLE IF NOT EXISTS app_deployments (
 );
 DROP INDEX IF EXISTS app_deployments_workspace_name_lower;
 ALTER TABLE app_deployments ADD COLUMN IF NOT EXISTS startup_revision BIGINT NOT NULL DEFAULT 0 CHECK(startup_revision >= 0);
+-- Browser UI contracts the App declares (e.g. app-tree.v1); presentation only.
+ALTER TABLE app_deployments ADD COLUMN IF NOT EXISTS ui_capabilities JSONB NOT NULL DEFAULT '[]'::jsonb;
 CREATE INDEX IF NOT EXISTS app_deployments_workspace_name ON app_deployments(workspace_id, name);
 CREATE UNIQUE INDEX IF NOT EXISTS app_deployments_workspace_hostname_lower
     ON app_deployments(workspace_id, lower(hostname));

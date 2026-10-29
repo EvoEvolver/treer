@@ -301,6 +301,13 @@ arguments after `--` replace the array and `--clear-args` empties it. A running
 App restarts once; a stopped App stays stopped. It needs `agent.startup.manage`
 plus restart permission. Do not delete/recreate an App to change its command.
 
+`--ui-capability NAME` (repeatable, on `create` and `update`) declares a browser
+UI contract; `app-tree.v1` means the App serves `GET api/tree?path=`
+([App trees](../../docs/app-tree.md)) and the Console shows its subtree without
+probing. An update with only `--ui-capability` replaces the declared set without
+a restart and needs `agent.update`; the update API accepts `"ui_capabilities": []`
+to clear it.
+
 Managed Apps do not install dependencies, store secrets, migrate state or
 isolate hostile code. Keep secrets in private configuration, never argv.
 

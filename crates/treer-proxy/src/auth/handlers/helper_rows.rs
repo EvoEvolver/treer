@@ -99,6 +99,12 @@ pub(crate) fn app_deployment_from_row(
         created_by: row.get("created_by"),
         updated_at: parse_database_timestamp(&row, "updated_at", "App deployment")?,
         updated_by: row.get("updated_by"),
+        ui_capabilities: serde_json::from_value(row.get("ui_capabilities")).map_err(|error| {
+            AuthFailure::internal(
+                "database_error",
+                format!("App deployment has invalid UI capabilities: {error}"),
+            )
+        })?,
     })
 }
 

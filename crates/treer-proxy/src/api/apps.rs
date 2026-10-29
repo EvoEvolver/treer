@@ -678,6 +678,40 @@ pub(super) async fn update_app_deployment(
     .await?;
     require_machine_target(subject.as_ref(), &current.server_id)?;
     let resource = agent_policy_resource(&app_workload_agent(&current));
+    if !patch.changes_startup() {
+        // Capability-only patch: presentation metadata, no process replacement.
+        let Some(capabilities) = patch.ui_capabilities.as_deref() else {
+            return Err(ProtocolError::new(
+                "invalid_app_update",
+                "at least one launch field or ui_capabilities is required",
+            )
+            .into());
+        };
+        authorize_control(
+            &policy,
+            &workspace_id,
+            subject.as_ref(),
+            ACTION_AGENT_UPDATE,
+            resource,
+        )
+        .await?;
+        let actor = app_mutation_actor(session.as_deref(), subject.as_ref());
+        let mut app = auth
+            .set_app_ui_capabilities(&workspace_id, &current.app_id, capabilities, actor)
+            .await?;
+        hydrate_app_deployment(
+            &state,
+            &mut app,
+            super::inventory_view::inventory_view(&headers, machine.is_some()),
+        )
+        .await;
+        hydrate_app_public_url(&auth, &config, &mut app).await?;
+        return Ok(Json(json!({"app": app})));
+    }
+    if let Some(capabilities) = patch.ui_capabilities.as_deref() {
+        treer_protocol::normalize_app_ui_capabilities(capabilities)
+            .map_err(|error| ApiFailure::bad_request(&error.code, &error.message))?;
+    }
     authorize_control(
         &policy,
         &workspace_id,
@@ -727,6 +761,11 @@ pub(super) async fn update_app_deployment(
     let mut app = auth
         .update_app_startup(&workspace_id, &current.app_id, &request, actor)
         .await?;
+    if let Some(capabilities) = patch.ui_capabilities.as_deref() {
+        app = auth
+            .set_app_ui_capabilities(&workspace_id, &app.app_id, capabilities, actor)
+            .await?;
+    }
     // Audit the committed change even if spawn/transport later fails. No argv,
     // credentials or file contents are included in this event.
     record_app_audit(

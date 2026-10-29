@@ -350,6 +350,7 @@ pub(super) mod tests {
                     port: 8888,
                     hostname: String::new(),
                     public: false,
+                    ui_capabilities: Vec::new(),
                 },
             )
             .await

@@ -202,6 +202,17 @@ manifest without `treer-launch` as predating it.
 
 ## Release notes
 
+### Unreleased
+
+- **App UI capabilities:** Apps declare browser UI contracts with
+  `treer app create|update --ui-capability NAME` (repeatable) or
+  `ui_capabilities` on the App create/update API; `AppDeployment.ui_capabilities`
+  persists them. `app-tree.v1` makes the Console show the App's subtree without
+  probing; Agent Hub and External Agent declare it. A capability-only update
+  does not restart the App and needs `agent.update`.
+- **Console:** machine-page service probes call
+  `POST /api/workspaces/{ws}/services/{id}/probe` (the old path had no route).
+
 ### 0.2.1
 
 Additive release: no breaking changes and no schema contraction. Update

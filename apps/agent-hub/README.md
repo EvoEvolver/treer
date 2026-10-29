@@ -22,6 +22,19 @@ python3 -B apps/agent-hub/app.py --state-dir "$state" \
   --service-id "$app_service_id" --host 127.0.0.1 --port "$app_port"
 ```
 
+Run `serve` as a Managed App and declare the tree contract so the Console shows
+its subtree without probing:
+
+```sh
+treer app create --machine self --name agent_hub --cwd treer --port 8791 \
+  --ui-capability app-tree.v1 python3 -- -B apps/agent-hub/app.py \
+  --state-dir "$state" --workspace "$workspace_id" --app-agent-id "$app_runtime_id" \
+  serve --treer "$(command -v treer)" --proxy-url "$proxy_origin" \
+  --service-id "$app_service_id" --host 127.0.0.1 --port 8791
+# An existing deployment: no restart.
+treer app update /agent_hub --ui-capability app-tree.v1
+```
+
 Keep the App's HTTP service workspace-authenticated; no public access is
 needed. The workspace must allow Core Message and the intended Policy
 permissions.

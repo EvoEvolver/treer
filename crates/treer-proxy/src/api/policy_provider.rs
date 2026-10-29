@@ -383,6 +383,7 @@ pub(super) async fn install_default_policy_app(
                 port,
                 hostname: String::new(),
                 public: false,
+                ui_capabilities: Vec::new(),
             }),
         )
         .await?;

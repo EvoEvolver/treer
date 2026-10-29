@@ -149,6 +149,8 @@ export interface AppDeployment {
   created_by: string
   updated_at: string
   updated_by: string
+  /** Browser UI contracts the App declares, e.g. "app-tree.v1"; omitted when none. */
+  ui_capabilities?: string[]
 }
 
 export type PolicyPublishAuthority = "owner_session" | "provider_operator"

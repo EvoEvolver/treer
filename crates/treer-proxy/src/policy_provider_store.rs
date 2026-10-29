@@ -218,6 +218,7 @@ mod tests {
                     port: 8787,
                     hostname: String::new(),
                     public: false,
+                    ui_capabilities: Vec::new(),
                 },
             )
             .await
