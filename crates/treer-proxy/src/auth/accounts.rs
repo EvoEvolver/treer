@@ -153,33 +153,19 @@ impl AuthStore {
         })
     }
 
-    #[cfg(test)]
+    /// Accept an organization invitation for a signed-in user. A bound email
+    /// is only where the invitation was delivered; whoever holds a usable
+    /// invitation link may accept it.
     pub(crate) async fn accept_invitation(
         &self,
         token: &str,
         user_id: &str,
     ) -> Result<treer_protocol::InvitationAcceptance, AuthFailure> {
-        self.accept_invitation_with(token, user_id, None).await
-    }
-
-    /// Accept an organization invitation for a signed-in user. The creator
-    /// must still hold the authority the invitation needed (Agent creators are
-    /// re-checked against `policy`; without it they fail closed), and an
-    /// email-bound invitation needs the account's verified email to match.
-    pub(crate) async fn accept_invitation_with(
-        &self,
-        token: &str,
-        user_id: &str,
-        policy: Option<&crate::policy::PolicyEngine>,
-    ) -> Result<treer_protocol::InvitationAcceptance, AuthFailure> {
         if token.is_empty() || token.len() > 256 {
             return Err(invalid_invitation());
         }
-        let creator_policy = self
-            .check_invitation_creator_policy(Some(token), policy)
-            .await;
         let mut tx = self.pool.begin().await.map_err(AuthFailure::database)?;
-        let invitation = sqlx::query("SELECT kind,organization_id,email,CASE WHEN explicit_role THEN role ELSE 'member' END AS role,used_at,used_by,(revoked_at IS NOT NULL OR (expires_at IS NOT NULL AND expires_at <= now())) AS unusable FROM invitations WHERE token=$1 FOR UPDATE")
+        let invitation = sqlx::query("SELECT kind,organization_id,CASE WHEN explicit_role THEN role ELSE 'member' END AS role,used_at,used_by,(revoked_at IS NOT NULL OR (expires_at IS NOT NULL AND expires_at <= now())) AS unusable FROM invitations WHERE token=$1 FOR UPDATE")
             .bind(token).fetch_optional(&mut *tx).await.map_err(AuthFailure::database)?
             .ok_or_else(invalid_invitation)?;
         if invitation.get::<String, _>("kind") != "organization" {
@@ -230,30 +216,6 @@ impl AuthStore {
             });
         }
         if used || invitation.get::<bool, _>("unusable") {
-            return Err(invalid_invitation());
-        }
-        let account = sqlx::query("SELECT email, email_verified FROM users WHERE id=$1")
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(AuthFailure::database)?;
-        let bound = invitation.get::<Option<String>, _>("email");
-        if bound.is_some()
-            && !(account.get::<bool, _>("email_verified")
-                && super::org_admin::invitation_email_matches(
-                    bound.as_deref(),
-                    &account.get::<String, _>("email"),
-                ))
-        {
-            return Err(invitation_email_mismatch());
-        }
-        if !super::org_admin::invitation_creator_authorized(&mut tx, token, creator_policy).await? {
-            drop(tx);
-            // Record the revocation only when the Policy was actually
-            // evaluated; a caller without an engine just fails closed.
-            if policy.is_some() {
-                super::org_admin::mark_invitation_revoked(&self.pool, token).await;
-            }
             return Err(invalid_invitation());
         }
         let invited_role: String = invitation
@@ -868,10 +830,8 @@ impl AuthStore {
         .await
     }
 
-    /// Owners set `owner`, `admin` or `member`; an organization always keeps
-    /// at least one owner. Agents are treated like admins here and cannot
-    /// change roles. A creator's pending invitations their new role no longer
-    /// covers are revoked.
+    /// Owners (and Agents of the organization) set `owner`, `admin` or
+    /// `member`; an organization always keeps at least one owner.
     pub async fn update_member_role_as(
         &self,
         organization_id: &str,
@@ -911,13 +871,6 @@ impl AuthStore {
         .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
-        super::org_admin::revoke_creator_invitations(
-            &mut transaction,
-            organization_id,
-            target_user_id,
-            Some(role),
-        )
-        .await?;
         audit::insert(
             &mut transaction,
             NewAuditEvent {
@@ -949,9 +902,8 @@ impl AuthStore {
             .await
     }
 
-    /// Managers (and Agents, treated like admins) remove admins and members;
-    /// removing an owner needs a human owner and never leaves the
-    /// organization without one.
+    /// Managers remove admins and members; removing an owner needs an owner
+    /// (or an Agent) and never leaves the organization without one.
     pub async fn remove_member_as(
         &self,
         organization_id: &str,
@@ -967,7 +919,7 @@ impl AuthStore {
             .map(|(_, role)| role.clone())
             .ok_or_else(|| AuthFailure::not_found("member_not_found", "member does not exist"))?;
         if target_role == "owner" {
-            if actor_role != "owner" {
+            if actor_role == "admin" {
                 return Err(AuthFailure::conflict(
                     "owner_cannot_be_removed",
                     "only an organization owner can remove an owner",
@@ -1038,33 +990,6 @@ impl AuthStore {
             &self.pool,
             organization_id,
             workspace_id,
-            before,
-            i64::from(limit.clamp(1, 100)),
-        )
-        .await
-        .map_err(AuthFailure::database)
-    }
-
-    /// Audit of an Agent's own workspace only (no organization-level or other
-    /// workspaces' events): `audit.read` without an organization grant.
-    pub(crate) async fn list_own_workspace_audit_events(
-        &self,
-        actor: &AdminActor,
-        before: Option<i64>,
-        limit: u16,
-    ) -> Result<Vec<OrganizationAuditEvent>, AuthFailure> {
-        let AdminActor::Agent { workspace_id, .. } = actor else {
-            return Err(AuthFailure::forbidden(
-                "agent_identity_required",
-                "workspace-scoped audit is for Agents",
-            ));
-        };
-        let organization_id = self.workspace_organization(workspace_id).await?;
-        audit::list_scoped(
-            &self.pool,
-            &organization_id,
-            Some(workspace_id),
-            true,
             before,
             i64::from(limit.clamp(1, 100)),
         )
@@ -1333,25 +1258,12 @@ impl AuthStore {
         })
     }
 
-    #[cfg(test)]
     pub(super) async fn complete_oauth_login(
         &self,
         profile: OAuthProfile,
         invite: Option<&str>,
         join_organization: bool,
     ) -> Result<CurrentSession, AuthFailure> {
-        self.complete_oauth_login_policy(profile, invite, join_organization, None)
-            .await
-    }
-
-    pub(super) async fn complete_oauth_login_policy(
-        &self,
-        profile: OAuthProfile,
-        invite: Option<&str>,
-        join_organization: bool,
-        policy: Option<&crate::policy::PolicyEngine>,
-    ) -> Result<CurrentSession, AuthFailure> {
-        let creator_policy = self.check_invitation_creator_policy(invite, policy).await;
         let now = Utc::now().to_rfc3339();
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let linked = sqlx::query(
@@ -1423,13 +1335,7 @@ impl AuthStore {
             )
         } else {
             let invitation = self
-                .load_registration_invitation(
-                    &mut transaction,
-                    invite,
-                    join_organization,
-                    &profile.email,
-                    creator_policy,
-                )
+                .load_registration_invitation(&mut transaction, invite, join_organization)
                 .await?;
             let password_hash = hash_password(&format!(
                 "{}{}",
@@ -1506,10 +1412,9 @@ impl AuthStore {
         let preferred_name = validate_preferred_name(preferred_name)?;
         let password = validate_new_password(password)?;
         let password_hash = hash_password(&password)?;
-        let creator_policy = self.check_invitation_creator_policy(invite, None).await;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let invitation = self
-            .load_registration_invitation(&mut transaction, invite, false, &email, creator_policy)
+            .load_registration_invitation(&mut transaction, invite, false)
             .await?;
         let now = Utc::now().to_rfc3339();
         let user_id = insert_user(
@@ -1537,8 +1442,7 @@ impl AuthStore {
         Ok(session)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn register_with_client(
+    pub(super) async fn register_with_client(
         &self,
         invite: Option<&str>,
         email: &str,
@@ -1546,44 +1450,14 @@ impl AuthStore {
         password: &str,
         client: Option<NativeClientAttribution>,
         join_organization: bool,
-    ) -> Result<CurrentSession, AuthFailure> {
-        self.register_with_client_policy(
-            invite,
-            email,
-            preferred_name,
-            password,
-            client,
-            join_organization,
-            None,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn register_with_client_policy(
-        &self,
-        invite: Option<&str>,
-        email: &str,
-        preferred_name: &str,
-        password: &str,
-        client: Option<NativeClientAttribution>,
-        join_organization: bool,
-        policy: Option<&crate::policy::PolicyEngine>,
     ) -> Result<CurrentSession, AuthFailure> {
         let email = normalize_email(email)?;
         let preferred_name = validate_preferred_name(preferred_name)?;
         let password = validate_new_password(password)?;
         let password_hash = hash_password(&password)?;
-        let creator_policy = self.check_invitation_creator_policy(invite, policy).await;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let invitation = self
-            .load_registration_invitation(
-                &mut transaction,
-                invite,
-                join_organization,
-                &email,
-                creator_policy,
-            )
+            .load_registration_invitation(&mut transaction, invite, join_organization)
             .await?;
         let now = Utc::now().to_rfc3339();
         let user_id = insert_user(
@@ -1611,17 +1485,11 @@ impl AuthStore {
         Ok(session)
     }
 
-    /// For an organization invitation the creator must still hold the
-    /// authority it needed, and a bound email must equal the registering
-    /// email (provider-verified for OAuth; the claimed address for password
-    /// registration).
     pub(super) async fn load_registration_invitation(
         &self,
         transaction: &mut Transaction<'_, Postgres>,
         invite: Option<&str>,
         join_organization: bool,
-        email: &str,
-        creator_policy: super::org_admin::CreatorPolicyCheck,
     ) -> Result<Option<RegistrationInvitation>, AuthFailure> {
         let Some(invite) = invite.filter(|value| !value.is_empty()) else {
             if self.oauth.invitation_required {
@@ -1633,7 +1501,7 @@ impl AuthStore {
             return Ok(None);
         };
         let invitation = sqlx::query(&format!(
-            "SELECT i.kind, i.organization_id, i.email, \
+            "SELECT i.kind, i.organization_id, \
              CASE WHEN i.explicit_role THEN i.role ELSE 'member' END AS role FROM invitations i \
              WHERE i.token = $1 AND {} FOR UPDATE",
             super::org_admin::INVITATION_USABLE
@@ -1648,19 +1516,6 @@ impl AuthStore {
                 return Err(invalid_invitation());
             }
             return Ok(None);
-        }
-        if invitation.get::<String, _>("kind") == "organization" {
-            if !super::org_admin::invitation_email_matches(
-                invitation.get::<Option<String>, _>("email").as_deref(),
-                email,
-            ) {
-                return Err(invitation_email_mismatch());
-            }
-            if !super::org_admin::invitation_creator_authorized(transaction, invite, creator_policy)
-                .await?
-            {
-                return Err(invalid_invitation());
-            }
         }
         Ok(Some(RegistrationInvitation {
             token: invite.to_string(),

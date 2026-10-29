@@ -901,7 +901,6 @@ impl AuthStore {
     }
 }
 mod accounts;
-mod agent_grants;
 mod apps;
 mod email;
 mod handlers;

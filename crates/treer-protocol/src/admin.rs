@@ -204,54 +204,6 @@ pub struct EffectiveWorkspaceAccess {
     pub mode: String,
 }
 
-/// Organization-level Agent grants (`/api/organizations/{org}/agent-grants`)
-/// exist; organization-scope Agent administration requires one.
-pub const CAPABILITY_ORG_AGENT_GRANTS: &str = "org.agent-grants.v1";
-
-/// Administration actions an organization owner/admin can grant an Agent at
-/// organization level. Organization-scope Agent administration needs both
-/// this grant and the Agent's workspace Policy allow.
-pub const ORG_AGENT_GRANTABLE_ACTIONS: &[&str] = &[
-    "org.manage",
-    "org.member.manage",
-    "org.invite.manage",
-    "org.group.manage",
-    "workspace.manage",
-    "audit.read",
-];
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PutAgentGrantRequest {
-    /// The Agent's own workspace (must belong to the organization).
-    pub workspace_id: String,
-    /// Non-empty subset of [`ORG_AGENT_GRANTABLE_ACTIONS`].
-    pub actions: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentGrant {
-    pub agent_id: String,
-    /// Current Agent display name, when known.
-    pub agent_name: Option<String>,
-    pub workspace_id: String,
-    pub workspace_name: Option<String>,
-    pub actions: Vec<String>,
-    pub created_by: ActorSummary,
-    /// The creator's organization role when the grant was written.
-    pub created_by_role: OrganizationRole,
-    pub created_at: DateTime<Utc>,
-    /// False when the creator is no longer an owner/admin or the workspace
-    /// is gone: the grant then authorizes nothing until rewritten.
-    pub active: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentGrantList {
-    pub grants: Vec<AgentGrant>,
-    pub grantable_actions: Vec<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
