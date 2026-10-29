@@ -233,6 +233,30 @@ with the other Treer binaries. `bridge` Agents are for providers that
 run outside the Host: their prompts go to a bounded Controller-local queue the
 bridge reads from `GET /api/agents/{id}/prompt-queue`.
 
+### Terminal workload status
+
+Without an AIS that declares `state.observe`, the Controller derives
+`working`/`idle`/`blocked` from PTY output through a small hysteresis filter
+(`TerminalActivity`, `crates/treer-agent-server/src/controller_activity.rs`),
+so cursor blinks, clocks, spinners and TUI redraws do not flap the status:
+
+- **Meaningful output** has visible characters, renders a new line (or is a
+  ≥256-character cursor-addressed redraw), is not one of the last 8 chunk
+  contents (identical redraws), and is not echo within 500 ms of terminal
+  input. Escape-only chunks, in-place repaints and keystrokes never count.
+- **Working** needs 3 meaningful updates within 3 s, or a live working marker
+  (`esc to interrupt`, `Working (`, …) drawn in the last 12 lines, which
+  switches at once and stays live 3 s after the last visible repaint.
+- **Idle** follows 4.5 s without meaningful output or a live marker, or 1 s
+  when the last line is a shell prompt.
+- **Blocked** is immediate when a question (`Do you want to proceed`,
+  `[y/n]`, …) is the latest signal in the last 12 lines, and holds until a
+  later working marker, the question scrolls out, or (for `[y/n]`) a prompt.
+- Every other change waits for a 2 s minimum dwell, and events are sent only
+  on real changes. Raw terminal input no longer marks a workload `working`.
+
+The Proxy and Console display this status as reported; neither re-derives it.
+
 ### Embedding an Agent UI in the Console
 
 With a wildcard apps domain, each Agent UI is served on its own origin

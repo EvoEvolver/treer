@@ -37,12 +37,13 @@ use launch::*;
 #[path = "controller_output.rs"]
 mod output;
 use output::*;
+#[path = "controller_activity.rs"]
+mod activity;
+use activity::*;
 
 const OUTPUT_LIMIT_BYTES: usize = 512 * 1024;
 const OUTPUT_TRIM_SLACK_BYTES: usize = 64 * 1024;
-const STATUS_SCAN_LIMIT_BYTES: usize = 16 * 1024;
 const REPLAY_BOUNDARY_SCAN_BYTES: usize = 4 * 1024;
-const QUIET_IDLE_AFTER: Duration = Duration::from_millis(900);
 const OUTPUT_METADATA_INTERVAL: Duration = Duration::from_millis(150);
 const PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 const AGENT_INTERFACE_FAILURE_LIMIT: u8 = 5;
@@ -268,7 +269,9 @@ struct ControllerAgent {
     text: String,
     prompt_queue: VecDeque<AgentPrompt>,
     bracketed_paste: bool,
-    last_output: Instant,
+    /// Output-derived status filter, used unless an Agent Interface owns
+    /// status (`state.observe`).
+    activity: TerminalActivity,
     last_metadata_event: Instant,
 }
 
@@ -851,7 +854,7 @@ impl ControllerRuntime {
             )
             .await
             .map_err(|error| protocol_error("host_error", error))?;
-        self.process_response(response, AgentStatus::Working)
+        self.process_response(response, Some(AgentStatus::Working))
     }
 
     fn materialize_startup(&self, entry: &StoredAgentStartup) -> Result<AgentInfo, ProtocolError> {
@@ -893,7 +896,7 @@ impl ControllerRuntime {
                     text: String::new(),
                     prompt_queue: VecDeque::new(),
                     bracketed_paste: false,
-                    last_output: Instant::now(),
+                    activity: TerminalActivity::new(info.status, Instant::now()),
                     last_metadata_event: Instant::now(),
                 })),
             );
@@ -1064,7 +1067,7 @@ impl ControllerRuntime {
                     )
                     .await
                     .map_err(host_stop_error)?;
-                return self.process_response(response, AgentStatus::Exited);
+                return self.process_response(response, Some(AgentStatus::Exited));
             }
         }
         if let Ok(agent) = self.get(&agent_id) {
@@ -1149,7 +1152,7 @@ impl ControllerRuntime {
                         )
                         .await
                         .map_err(|error| protocol_error("host_error", error))?;
-                    self.process_response(response, AgentStatus::Exited)?;
+                    self.process_response(response, Some(AgentStatus::Exited))?;
                 }
             }
         }
@@ -2321,7 +2324,7 @@ impl ControllerRuntime {
                     .await;
                 match stop {
                     Ok(response) => {
-                        let _ = self.process_response(response, AgentStatus::Exited);
+                        let _ = self.process_response(response, Some(AgentStatus::Exited));
                     }
                     Err(error) => {
                         warn!(%agent_id, %error, "stop before private state purge failed")
@@ -2596,7 +2599,7 @@ impl ControllerRuntime {
             )
             .await
             .map_err(|error| protocol_error("host_error", error))?;
-        self.process_response(response, AgentStatus::Working)
+        self.process_response(response, Some(AgentStatus::Working))
     }
 
     pub async fn abort(
@@ -2968,7 +2971,15 @@ impl ControllerRuntime {
             )
             .await
             .map_err(|error| protocol_error("host_error", error))?;
-        self.process_response(response, AgentStatus::Working)
+        // Raw input is not evidence of work (keystrokes, focus reports); the
+        // output filter or the Agent Interface decides the status, and output
+        // right after input counts as its echo.
+        if let Ok(agent) = self.get(agent_id) {
+            if let Ok(mut agent) = agent.lock() {
+                agent.activity.input(Instant::now());
+            }
+        }
+        self.process_response(response, None)
     }
 
     pub fn read(
@@ -3146,7 +3157,7 @@ impl ControllerRuntime {
             )
             .await
             .map_err(host_stop_error)?;
-        self.process_response(response, AgentStatus::Exited)
+        self.process_response(response, Some(AgentStatus::Exited))
     }
 
     fn restore_process(
@@ -3229,7 +3240,7 @@ impl ControllerRuntime {
             text,
             prompt_queue: VecDeque::new(),
             bracketed_paste: process.bracketed_paste,
-            last_output: Instant::now(),
+            activity: TerminalActivity::new(info.status, Instant::now()),
             last_metadata_event: Instant::now(),
         };
         let info = {
@@ -3305,10 +3316,12 @@ impl ControllerRuntime {
         Ok(info)
     }
 
+    /// Apply a Host process response; `None` keeps the current status and
+    /// publishes an event only when the exit fields changed.
     fn process_response(
         &self,
         response: HostResponse,
-        status: AgentStatus,
+        status: Option<AgentStatus>,
     ) -> Result<AgentInfo, ProtocolError> {
         let HostResponse::Process { process } = response else {
             return Err(ProtocolError::new(
@@ -3320,11 +3333,18 @@ impl ControllerRuntime {
         let mut agent = agent
             .lock()
             .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?;
+        let changed = status.is_some()
+            || agent.info.exited_at != process.exited_at
+            || agent.info.exit_code != process.exit_code;
+        let status = status.unwrap_or(agent.info.status);
         let terminal = status.is_terminal();
         agent.info.status = status;
-        agent.info.updated_at = Utc::now();
         agent.info.exited_at = process.exited_at;
         agent.info.exit_code = process.exit_code;
+        if !changed {
+            return Ok(agent.info.clone());
+        }
+        agent.info.updated_at = Utc::now();
         if terminal {
             agent.info.interface = None;
         }
@@ -3394,18 +3414,23 @@ impl ControllerRuntime {
                 }
                 let previous_status = agent.info.status;
                 let plain = strip_ansi_escapes::strip(&chunk.data);
-                agent.text.push_str(&String::from_utf8_lossy(&plain));
+                let plain = String::from_utf8_lossy(&plain);
+                agent.text.push_str(&plain);
                 trim_text(&mut agent.text);
                 agent.bracketed_paste = chunk.bracketed_paste;
-                agent.last_output = Instant::now();
                 agent.info.output_revision = chunk.revision;
                 let interface_owns_status = agent
                     .info
                     .interface
                     .as_ref()
                     .is_some_and(|interface| interface.supports("state.observe"));
+                let agent = &mut *agent;
+                let filtered =
+                    agent
+                        .activity
+                        .observe(Instant::now(), agent.info.status, &plain, &agent.text);
                 if !agent.info.status.is_terminal() && !interface_owns_status {
-                    agent.info.status = detect_status(&agent.text).unwrap_or(AgentStatus::Working);
+                    agent.info.status = filtered;
                 }
                 agent.info.updated_at = chunk.emitted_at;
                 let status_changed = previous_status != agent.info.status;
@@ -3521,14 +3546,10 @@ impl ControllerRuntime {
                         .interface
                         .as_ref()
                         .is_some_and(|interface| interface.supports("state.observe"));
-                    if !interface_owns_status
-                        && agent.last_output.elapsed() >= QUIET_IDLE_AFTER
-                        && matches!(
-                            agent.info.status,
-                            AgentStatus::Starting | AgentStatus::Working
-                        )
-                    {
-                        agent.info.status = AgentStatus::Idle;
+                    let current = agent.info.status;
+                    let filtered = agent.activity.tick(Instant::now(), current);
+                    if !interface_owns_status && !current.is_terminal() && filtered != current {
+                        agent.info.status = filtered;
                         agent.info.updated_at = Utc::now();
                         let _ = runtime.inner.events.send(agent.info.clone());
                     }
@@ -3603,3 +3624,7 @@ mod tests;
 #[cfg(test)]
 #[path = "controller_exec_environment_tests.rs"]
 mod exec_environment_tests;
+
+#[cfg(all(test, unix))]
+#[path = "controller_activity_pty_tests.rs"]
+mod activity_pty_tests;

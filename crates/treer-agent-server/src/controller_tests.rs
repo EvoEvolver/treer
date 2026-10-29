@@ -1889,7 +1889,7 @@ async fn bounded_reader_drains_and_marks_truncation() {
 
 #[test]
 fn status_detector_only_scans_recent_output() {
-    let text = format!("Allow command?{}$", " ".repeat(STATUS_SCAN_LIMIT_BYTES));
+    let text = format!("Allow command?{}$", " ".repeat(STATUS_TAIL_BYTES));
     assert_eq!(detect_status(&text), Some(AgentStatus::Idle));
 }
 

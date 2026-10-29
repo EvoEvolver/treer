@@ -216,6 +216,13 @@ manifest without `treer-launch` as predating it.
 
 ### Unreleased
 
+- **Steadier terminal status:** terminal workloads without an Agent
+  Interface no longer flash between working and idle on cursor blinks,
+  clocks, spinners, prompt redraws or typing. The Controller filters output
+  with hysteresis: sustained new output or a live working marker enters
+  working, 4.5 s of quiet (1 s at a shell prompt) returns to idle, blocking
+  questions switch at once and hold, and each status is held at least 2 s.
+
 ### 0.2.3
 
 Additive release: no schema change; the Proxy is unchanged apart from its
