@@ -5,7 +5,6 @@ import { api } from "@/lib/api"
 // session; a failed or non-JSON answer counts as "advertises nothing" (an older
 // or unreachable Proxy) and is asked again on the next mount.
 export const SETTINGS_ADMIN_CAPABILITY = "settings.admin.v1"
-export const ORG_AGENT_GRANTS_CAPABILITY = "org.agent-grants.v1"
 
 let cached: Promise<string[]> | null = null
 

@@ -30,8 +30,6 @@ export type OrgPageContext = {
   refreshOrganizations: () => Promise<void>
   createWorkspace: () => void
   organizationGone: (organizationId: string) => void
-  // The Proxy supports organization Agent grants (and caps what Agents may do).
-  agentGrantsSupported: boolean
 }
 
 const orgPath = (organization: Organization) => `/api/organizations/${encodeURIComponent(organization.organization_id)}`
@@ -226,7 +224,6 @@ export function MembersPage({ context }: { context: OrgPageContext }) {
       actions={canManage ? <Button className="max-md:h-11" onClick={() => setInviteOpen(true)} disabled={preview}><UserPlus />{t("hub.invite_people")}</Button> : undefined} />
     {!canManage && <PermissionNote>{t("hub.members_read_only")}</PermissionNote>}
     {canManage && !isOwner && <PermissionNote>{t("hub.only_owners_change_roles")}</PermissionNote>}
-    {canManage && context.agentGrantsSupported && <AgentCapNote />}
     <div role="tablist" aria-label={t("org.members")} className="mb-4 flex gap-5 border-b">
       {(["active", "pending"] as const).map((value) => <button key={value} type="button" role="tab" aria-selected={tab === value} onClick={() => setParam("tab", value === "pending" ? "pending" : null)} className={cn("-mb-px border-b-2 px-0.5 py-2 text-sm max-md:min-h-11", tab === value ? "border-primary font-medium text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")}>{value === "active" ? t("hub.tab_active", { count: directory.members.length }) : t("hub.tab_pending", { count: pendingInvitations.length })}</button>)}
     </div>
@@ -275,11 +272,6 @@ export function MembersPage({ context }: { context: OrgPageContext }) {
   </>
 }
 
-// Core caps every Agent below the owner/admin line, whatever it was granted.
-function AgentCapNote() {
-  return <p role="note" className="mb-4 rounded-md bg-muted/50 px-3 py-2 text-xs leading-5 text-muted-foreground">{t("grants.agent_caps")}</p>
-}
-
 export function InvitationsPage({ context }: { context: OrgPageContext }) {
   const { organization, preview } = context
   const canManage = isManager(organization.role)
@@ -293,7 +285,6 @@ export function InvitationsPage({ context }: { context: OrgPageContext }) {
   }
   return <>
     <PageHeader title={t("hub.invitations")} description={t("hub.invitations_description")} actions={canManage ? <Button className="max-md:h-11" onClick={() => setInviteOpen(true)} disabled={preview}><UserPlus />{t("hub.invite_people")}</Button> : undefined} />
-    {canManage && context.agentGrantsSupported && <AgentCapNote />}
     {!canManage ? <PermissionNote>{t("hub.only_managers_see_invitations")}</PermissionNote> : invitations.list === "unavailable" ? <><Unavailable>{t("hub.invitations_unavailable")}</Unavailable></> : invitations.list === null ? <p className="text-xs text-muted-foreground">{t("hub.loading")}</p> : <>
       <div className="mb-3 flex items-center gap-2"><Select value={filter} onValueChange={(value: "pending" | "all") => setFilter(value)}><SelectTrigger aria-label={t("hub.status")} className="w-auto min-w-36 max-md:h-11"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="pending">{t("hub.invitation_pending")}</SelectItem><SelectItem value="all">{t("hub.all_statuses")}</SelectItem></SelectContent></Select><Button variant="ghost" size="icon" aria-label={t("hub.refresh")} onClick={() => void invitations.reload()}><RotateCw /></Button></div>
       <InvitationList invitations={invitations.list} canManage={canManage} statusFilter={filter} onRevoke={setRevoking} onCopy={(url) => void context.copy(url)} />

@@ -3,7 +3,7 @@ import { workspacePath } from "@/lib/control-plane"
 // Settings are full pages with real URLs. One shell (WorkspaceApp) owns every
 // Console route so the workspace stays mounted while a settings page is open.
 export const PERSONAL_SECTIONS = ["profile", "sessions", "preferences", "organizations"] as const
-export const ORGANIZATION_SECTIONS = ["general", "members", "invitations", "groups", "workspaces", "agent-permissions", "audit", "danger"] as const
+export const ORGANIZATION_SECTIONS = ["general", "members", "invitations", "groups", "workspaces", "audit", "danger"] as const
 export const WORKSPACE_SECTIONS = ["general", "access", "machines", "launch-profiles", "policy", "audit", "danger"] as const
 
 export type PersonalSection = (typeof PERSONAL_SECTIONS)[number]

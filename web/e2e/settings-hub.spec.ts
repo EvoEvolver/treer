@@ -348,10 +348,10 @@ test('machines are managed in one list with bulk remove; the machine page rename
 })
 
 test('every settings page shows its API equivalent', async ({ page }) => {
-  // Nineteen full page loads; give the loop room on a loaded machine.
+  // Eighteen full page loads; give the loop room on a loaded machine.
   test.setTimeout(90_000)
   await mockHub(page)
-  for (const path of ['/settings/profile', '/settings/sessions', '/settings/preferences', '/settings/organizations', '/orgs/org-acme/settings/general', '/orgs/org-acme/settings/members', '/orgs/org-acme/settings/invitations', '/orgs/org-acme/settings/groups', '/orgs/org-acme/settings/workspaces', '/orgs/org-acme/settings/agent-permissions', '/orgs/org-acme/settings/audit', '/orgs/org-acme/settings/danger', '/orgs/org-acme/workspaces/ws-main/settings/general', '/orgs/org-acme/workspaces/ws-main/settings/access', '/orgs/org-acme/workspaces/ws-main/settings/machines', '/orgs/org-acme/workspaces/ws-main/settings/launch-profiles', '/orgs/org-acme/workspaces/ws-main/settings/policy', '/orgs/org-acme/workspaces/ws-main/settings/audit', '/orgs/org-acme/workspaces/ws-main/settings/danger']) {
+  for (const path of ['/settings/profile', '/settings/sessions', '/settings/preferences', '/settings/organizations', '/orgs/org-acme/settings/general', '/orgs/org-acme/settings/members', '/orgs/org-acme/settings/invitations', '/orgs/org-acme/settings/groups', '/orgs/org-acme/settings/workspaces', '/orgs/org-acme/settings/audit', '/orgs/org-acme/settings/danger', '/orgs/org-acme/workspaces/ws-main/settings/general', '/orgs/org-acme/workspaces/ws-main/settings/access', '/orgs/org-acme/workspaces/ws-main/settings/machines', '/orgs/org-acme/workspaces/ws-main/settings/launch-profiles', '/orgs/org-acme/workspaces/ws-main/settings/policy', '/orgs/org-acme/workspaces/ws-main/settings/audit', '/orgs/org-acme/workspaces/ws-main/settings/danger']) {
     await page.goto(path)
     const api = page.locator('[data-api-equivalent]')
     await expect(api, path).toBeVisible()
