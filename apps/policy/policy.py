@@ -271,6 +271,10 @@ WRITE_ACTIONS = ['agent.prompt', 'agent.queue.cancel', 'agent.input', 'agent.sto
                  'service.update', 'service.delete', 'service.probe', 'virtual_host.create',
                  'virtual_host.delete', 'ingress.create', 'ingress.update', 'ingress.delete',
                  'email.send', 'message.send', 'message.import', 'app.use', 'network.connect']
+# Administration actions (Core default-deny for Agents/Apps; see README).
+ADMIN_ACTIONS = ['org.manage', 'org.member.manage', 'org.invite.manage', 'org.group.manage',
+                 'workspace.manage', 'workspace.access.manage', 'policy.provider.manage',
+                 'audit.read', 'machine.enroll']
 TEMPLATES = [
     {'id':'team-isolation', 'name':'Team isolation',
      'description':'Same-folder collaboration and parent-folder management. Cross-folder access needs explicit rules. Scoped to listed actions; unmatched actions remain Allow.'},
@@ -1008,6 +1012,12 @@ def evaluate_request(body: object, bundle: dict[str, Any]) -> dict[str, Any]:
     rules = sorted(document["rules"], key=lambda rule: (-rule["priority"], 0 if rule["effect"] == "deny" else 1))
     matched = next((rule for rule in rules if action in rule["actions"] and any(subject_matches(item, subject, resource, groups) for item in rule["subjects"]) and any(resource_matches(item, resource, groups) for item in rule["resources"])), None)
     effect = matched["effect"] if matched else document["defaults"].get(action, "allow")
+    if action in ADMIN_ACTIONS and subject.get("kind") != "human":
+        # Core: administration is default-deny for non-humans in every mode;
+        # only a matched allow rule that names the subject (id/tree/group) grants.
+        named = matched is not None and any((item.get("id") or item.get("tree") or item.get("group")) and subject_matches(item, subject, resource, groups) for item in matched["subjects"])
+        effect = "allow" if effect == "allow" and named else "deny"
+        return {"revision": bundle["revision"], "mode": bundle["mode"], "effect": effect, "decision": effect, "matched_rule_id": matched["id"] if matched else None}
     enforced = bundle["mode"] == "enforce" and effect == "deny"
     return {"revision": bundle["revision"], "mode": bundle["mode"], "effect": effect, "decision": "deny" if enforced else "allow", "matched_rule_id": matched["id"] if matched else None}
 
