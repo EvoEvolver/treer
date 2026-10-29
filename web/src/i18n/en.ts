@@ -1,6 +1,9 @@
 // English is the source dictionary. zh.ts must define every key (checked by the type system).
 // Keys are namespaced by screen. Values may contain {name} placeholders filled by t(key, { name }).
+import { hubEn } from "./hub-en"
+
 export const en = {
+  ...hubEn,
   "sessionCopy.ownerPublication": "Owner project: {project}. Publication intent: {intent}. Two locations are published; a partial result must be inspected, never retried automatically.",
   "sessionCopy.auth": "Target authentication",
   "sessionCopy.authEnvironment": "Isolated config · environment authentication",

@@ -13,13 +13,13 @@ export type AppTreeNavigation = {
   href: (selection: AppNodeSelection) => string
 }
 
-// App IDs whose UI implements the App tree contract (docs/app-tree.md). Only
-// running Apps are asked, once per page session; until an App answers, and for
-// every App that does not own a directory, its row stays a plain leaf.
+// App IDs whose UI implements the App tree contract (docs/app-tree.md). Core
+// declares it on the deployment (`ui_capabilities` includes "app-tree.v1");
+// only when a Proxy predates that field does the Console fall back to asking
+// each running App once. Until a legacy App answers, and for every App that
+// does not own a directory, its row stays a plain leaf.
 export function useAppTreeSupport(workspaceId: string | null, apps: AppDeployment[]): Set<string> {
-  // A declared `app-tree.v1` UI capability answers without a probe.
-  const declared = (app: AppDeployment) => app.ui_capabilities?.includes(APP_TREE_UI_CAPABILITY) ?? false
-  const running = workspaceId ? apps.filter(app => app.status === "running" && !declared(app)).map(app => app.app_id).sort() : []
+  const running = workspaceId ? apps.filter(app => app.ui_capabilities === undefined && app.status === "running").map(app => app.app_id).sort() : []
   const runningKey = running.join("\n")
   const [, rerender] = useState(0)
   const [retry, setRetry] = useState(0)
@@ -35,7 +35,10 @@ export function useAppTreeSupport(workspaceId: string | null, apps: AppDeploymen
     })
     return () => { active = false; clearTimeout(timer) }
   }, [workspaceId, runningKey, retry])
-  return new Set(workspaceId ? apps.filter(app => declared(app) || knownAppTreeSupport(workspaceId, app.app_id) === "yes").map(app => app.app_id) : [])
+  if (!workspaceId) return new Set()
+  return new Set(apps.filter(app => app.ui_capabilities !== undefined
+    ? app.ui_capabilities.includes(APP_TREE_UI_CAPABILITY)
+    : knownAppTreeSupport(workspaceId, app.app_id) === "yes").map(app => app.app_id))
 }
 
 // The App row in the workspace Tree owns the root disclosure; this renders its contents at `depth`.

@@ -1,7 +1,6 @@
 import { test, expect, type Page, type Route } from "@playwright/test"
-import { browseTreeOnMobile } from "./fixtures/navigation"
 
-// Self-contained on purpose: this file only covers the personal menu / Settings sheet (issue #19) and must not
+// Self-contained on purpose: this file only covers the personal menu and personal settings pages (issue #19) and must not
 // depend on, or conflict with, the shared mocks in app.spec.ts.
 const user = { user_id: "u1", email: "user@example.com", preferred_name: "Test User" }
 const organization = { organization_id: "org-1", name: "Acme", role: "owner" as const }
@@ -37,26 +36,26 @@ const noHorizontalScroll = (page: Page) => expect.poll(() => page.evaluate(() =>
 test.describe("personal menu on a phone (390px)", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true })
 
-  test("menu stays on screen with 44px touch targets and readable text", async ({ page }, testInfo) => {
+  test("avatar menu stays on screen with 44px touch targets and no org role", async ({ page }, testInfo) => {
     await mockApi(page)
     await page.goto("/")
-    await browseTreeOnMobile(page)
     const trigger = page.getByRole("button", { name: "User menu" })
     const box = (await trigger.boundingBox())!
     expect(box.height).toBeGreaterThanOrEqual(44)
-    expect(box.y + box.height).toBeLessThanOrEqual(844)
-    expect(await trigger.locator("span").last().evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(11)
+    expect(box.y).toBeGreaterThanOrEqual(0)
     await trigger.tap()
     const menu = page.getByRole("menu")
     await expect(menu).toBeVisible()
     const panel = (await menu.boundingBox())!
     expect(panel.x).toBeGreaterThanOrEqual(0)
     expect(panel.x + panel.width).toBeLessThanOrEqual(390)
-    expect(panel.y).toBeGreaterThanOrEqual(0)
     expect(panel.y + panel.height).toBeLessThanOrEqual(844)
-    for (const name of ["Settings", "Replay product tour", "Log out"]) {
+    for (const name of ["Profile", "My organizations", "Dark theme", "Replay product tour", "Log out"]) {
       expect((await page.getByRole("menuitem", { name }).boundingBox())!.height).toBeGreaterThanOrEqual(44)
     }
+    // Your org role belongs to the organization, not to your personal menu.
+    await expect(menu).toContainText("user@example.com")
+    await expect(menu).not.toContainText(/owner/i)
     await noHorizontalScroll(page)
     await page.screenshot({ path: testInfo.outputPath("user-menu-390.png") })
     await page.keyboard.press("Escape")
@@ -64,26 +63,21 @@ test.describe("personal menu on a phone (390px)", () => {
     await expect(trigger).toBeFocused()
   })
 
-  test("Settings is a full-screen sheet: tabs, 16px inputs, no auto-opened keyboard, profile saves", async ({ page }, testInfo) => {
+  test("Settings is a list then a full page with a real Back; 16px inputs, no auto-opened keyboard, profile saves", async ({ page }, testInfo) => {
     const calls = await mockApi(page)
     const pageErrors: string[] = []
     page.on("pageerror", (error) => pageErrors.push(error.message))
     await page.goto("/")
-    await browseTreeOnMobile(page)
-    await page.getByRole("button", { name: "User menu" }).tap()
-    await page.getByRole("menuitem", { name: "Settings" }).tap()
-    const dialog = page.getByRole("dialog", { name: "Settings" })
-    await expect(dialog).toBeVisible()
-    const sheet = (await dialog.boundingBox())!
-    expect([sheet.x, sheet.y, sheet.width, sheet.height]).toEqual([0, 0, 390, 844])
-    // Opening Settings must not pop the on-screen keyboard over the sheet.
+    await page.getByRole("link", { name: "Settings", exact: true }).tap()
+    await expect(page).toHaveURL(/\/settings$/)
+    const nav = page.getByRole("navigation", { name: "Settings" })
+    for (const link of await nav.getByRole("link").all()) expect((await link.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+    await nav.getByRole("link", { name: "Profile", exact: true }).tap()
+    await expect(page).toHaveURL(/\/settings\/profile$/)
+    await expect(page.getByRole("heading", { name: "Profile" })).toBeVisible()
+    // Opening a settings page must not pop the on-screen keyboard.
     expect(await page.evaluate(() => document.activeElement?.tagName)).not.toBe("INPUT")
-    const tabs = page.getByRole("navigation", { name: "Settings" }).getByRole("button")
-    await expect(tabs).toHaveCount(3)
-    for (const tab of await tabs.all()) expect((await tab.boundingBox())!.height).toBeGreaterThanOrEqual(44)
-    const close = (await dialog.getByRole("button", { name: "Close" }).boundingBox())!
-    expect(close.width).toBeGreaterThanOrEqual(40)
-    expect(close.height).toBeGreaterThanOrEqual(40)
+    await expect(page.getByRole("button", { name: "Close" })).toHaveCount(0)
     // iOS zooms the page when a focused field is under 16px.
     for (const id of ["#settings-preferred-name", "#settings-email"]) {
       const field = page.locator(id)
@@ -92,50 +86,48 @@ test.describe("personal menu on a phone (390px)", () => {
       expect((await field.boundingBox())!.width).toBeGreaterThan(300)
     }
     await noHorizontalScroll(page)
-    await page.screenshot({ path: testInfo.outputPath("settings-account-390.png") })
+    await page.screenshot({ path: testInfo.outputPath("settings-profile-390.png") })
     await page.locator("#settings-preferred-name").fill("Renamed User")
     await page.getByRole("button", { name: "Save" }).tap()
     await expect.poll(() => calls.patch.length).toBe(1)
-    await tabs.filter({ hasText: "General" }).tap()
+    // Back returns to the list through history.
+    await page.getByRole("button", { name: "Back", exact: true }).tap()
+    await expect(page).toHaveURL(/\/settings$/)
+    await nav.getByRole("link", { name: "Preferences", exact: true }).tap()
     await expect(page.getByRole("group", { name: "Theme" })).toBeVisible()
     for (const button of await page.getByRole("group", { name: "Theme" }).getByRole("button").all()) expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44)
     await page.getByRole("button", { name: "Dark" }).tap()
     await expect(page.locator("html")).toHaveClass(/dark/)
-    await page.screenshot({ path: testInfo.outputPath("settings-general-dark-390.png") })
-    await tabs.filter({ hasText: "Usage & billing" }).tap()
+    await page.screenshot({ path: testInfo.outputPath("settings-preferences-dark-390.png") })
     await noHorizontalScroll(page)
-    await dialog.getByRole("button", { name: "Close" }).tap()
-    await expect(dialog).toBeHidden()
-    await expect(page.getByRole("button", { name: "User menu" })).toContainText("Renamed User")
+    await page.goBack()
+    await nav.getByRole("button", { name: /^Back to/ }).tap()
+    await expect(page.getByRole("heading", { name: "Workspace overview" })).toBeVisible()
     expect(pageErrors).toEqual([])
   })
 
   test("Log out is reachable and works from the phone menu", async ({ page }) => {
     const calls = await mockApi(page)
     await page.goto("/")
-    await browseTreeOnMobile(page)
     await page.getByRole("button", { name: "User menu" }).tap()
     await page.getByRole("menuitem", { name: "Log out" }).tap()
     await expect.poll(() => calls.logout).toBe(1)
-    await expect(page.getByRole("button", { name: "User menu" })).toBeHidden()
   })
 })
 
 test.describe("personal menu on desktop keeps its compact layout", () => {
   test.use({ viewport: { width: 1280, height: 900 } })
 
-  test("compact menu and a centred Settings dialog", async ({ page }) => {
+  test("compact menu and a settings page with a side navigation", async ({ page }) => {
     await mockApi(page)
     await page.goto("/")
-    await browseTreeOnMobile(page)
     await page.getByRole("button", { name: "User menu" }).click()
     expect((await page.getByRole("menu").boundingBox())!.width).toBe(240)
-    expect((await page.getByRole("menuitem", { name: "Settings" }).boundingBox())!.height).toBeLessThan(40)
-    await page.getByRole("menuitem", { name: "Settings" }).click()
-    const dialog = page.getByRole("dialog", { name: "Settings" })
-    const box = (await dialog.boundingBox())!
-    expect(box.width).toBeLessThanOrEqual(760)
-    expect(box.x).toBeGreaterThan(100)
-    await expect(page.getByRole("navigation", { name: "Settings" })).toHaveCSS("flex-direction", "column")
+    expect((await page.getByRole("menuitem", { name: "Profile" }).boundingBox())!.height).toBeLessThan(40)
+    await page.getByRole("menuitem", { name: "Profile" }).click()
+    await expect(page).toHaveURL(/\/settings\/profile$/)
+    const nav = page.getByRole("navigation", { name: "Settings" })
+    expect((await nav.boundingBox())!.x).toBeLessThan(40)
+    await expect(nav.getByRole("link", { name: "Profile", exact: true })).toHaveAttribute("aria-current", "page")
   })
 })

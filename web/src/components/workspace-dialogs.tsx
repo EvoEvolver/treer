@@ -6,7 +6,6 @@ import { MachineUploadDialog } from "@/components/machine-upload-dialog"
 import { AgentReservationRecovery } from "@/components/agent-reservation-recovery"
 import type { AgentCreationFailure } from "@/lib/agent-creation-failure"
 import { Field,SimpleNameDialog } from "@/components/control-plane-ui"
-import { SettingsDialog } from "@/components/settings"
 import { Button } from "@/components/ui/button"
 import { Dialog,DialogContent,DialogDescription,DialogFooter,DialogHeader,DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
@@ -18,7 +17,7 @@ import { machineName } from "@/lib/api"
 import { formatCommandLine } from "@/lib/command-line"
 import { agentPath } from "@/lib/workload-path"
 import { Copy,Play,Rocket } from "lucide-react"
-import type { Dispatch,FormEvent,SetStateAction } from "react"
+import type { FormEvent } from "react"
 import { t } from "@/i18n"
 
 interface WorkspaceDialogsProps {
@@ -26,9 +25,6 @@ interface WorkspaceDialogsProps {
   creationFailure: AgentCreationFailure | null
   onReservationCleaned: () => void
   state: ReturnType<typeof useWorkspaceDialogState>
-  user: User
-  setUser: Dispatch<SetStateAction<User | null | undefined>>
-  showError: (reason: unknown) => void
   createOrganization: (event: FormEvent) => Promise<void>
   organization: Organization | undefined
   createWorkspace: (event: FormEvent) => Promise<void>
@@ -49,27 +45,26 @@ interface WorkspaceDialogsProps {
   uploadScopeActive: boolean
   selectedAgentMachine: Machine | undefined
   confirmDelete: () => Promise<void>
-  workspaceMachineCount: number | undefined
   workspace: Workspace | undefined
-  confirmDeleteWorkspace: () => Promise<void>
+  user: User
 }
 
-export function WorkspaceDialogs({ reservationCleaned, creationFailure, onReservationCleaned, state, user, setUser, showError, createOrganization, organization, createWorkspace, saveLaunchProfile, launchFromProfile, onlineMachines, deleteLaunchProfile, createAgent, selectAgentProfile, launchProfiles, selectedCreateProfile, changeAgentCommandLine, deleteAppDeployment, copy, submitRename, snapshot, workloadTree, uploadScopeActive, selectedAgentMachine, confirmDelete, workspaceMachineCount, workspace, confirmDeleteWorkspace }: WorkspaceDialogsProps) {
+export function WorkspaceDialogs({ reservationCleaned, creationFailure, onReservationCleaned, state, createOrganization, organization, createWorkspace, saveLaunchProfile, launchFromProfile, onlineMachines, deleteLaunchProfile, createAgent, selectAgentProfile, launchProfiles, selectedCreateProfile, changeAgentCommandLine, deleteAppDeployment, copy, submitRename, snapshot, workloadTree, uploadScopeActive, selectedAgentMachine, confirmDelete, workspace, user }: WorkspaceDialogsProps) {
   const {
     preparedClaude, setPreparedClaude, preparedAttempted,
-    settingsOpen, setSettingsOpen, createOrganizationOpen, setCreateOrganizationOpen,
-    createWorkspaceOpen, setCreateWorkspaceOpen, deleteWorkspaceOpen, setDeleteWorkspaceOpen,
+    createOrganizationOpen, setCreateOrganizationOpen,
+    createWorkspaceOpen, setCreateWorkspaceOpen,
     createAgentOpen, setCreateAgentOpen, agentFolder, renameError, createAgentError, creatingAgent,
     deletingApp, setDeletingApp, profileEditorOpen, setProfileEditorOpen, editingLaunchProfile,
     setEditingLaunchProfile, launchingProfile, setLaunchingProfile, deletingProfile, setDeletingProfile,
-    installOpen, setInstallOpen, inviteOpen, setInviteOpen, uploadOpen, setUploadOpen, renameTarget, setRenameTarget, deleteTarget,
+    installOpen, setInstallOpen, uploadOpen, setUploadOpen, renameTarget, setRenameTarget, deleteTarget,
     setDeleteTarget, createOrganizationName, setCreateOrganizationName, createWorkspaceName,
     setCreateWorkspaceName, agentName, setAgentName, setAgentNameCustomized, agentProfileId,
     agentServerId, setAgentServerId, agentCwd, setAgentCwd, agentCommandLine, launchProfileName,
     setLaunchProfileName, launchProfileDescription, setLaunchProfileDescription, launchProfileCwd,
     setLaunchProfileCwd, launchProfileCommandLine, setLaunchProfileCommandLine, launchMachineId,
     setLaunchMachineId, launchAgentName, setLaunchAgentName, renameName, setRenameName, installPlatform,
-    setInstallPlatform, inviteUrl, installCommand, connectCommand,
+    setInstallPlatform, installCommand, connectCommand,
   } = state
   const installOpener = useRef<HTMLElement | null>(null)
   const createOpener = useRef<HTMLElement | null>(null)
@@ -79,7 +74,6 @@ export function WorkspaceDialogs({ reservationCleaned, creationFailure, onReserv
   const preparedKey = preparedClaudeBinding(agentServerId, preparedMachine?.root ?? '', agentCwd, preparedClaude)
   const preparedArgs = preparedMachine && preparedClaudeArgs(agentServerId, preparedMachine.root, agentCwd, preparedClaude)
   return <>
-    <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} user={user} onUserChange={setUser} onError={showError} />
 
     <SimpleNameDialog open={createOrganizationOpen} onOpenChange={setCreateOrganizationOpen} title={t("dialogs.create_organization")} description={t("dialogs.organizations_contain_members_and_workspaces")} label={t("org.organization_name")} value={createOrganizationName} onValueChange={setCreateOrganizationName} onSubmit={createOrganization} />
     <SimpleNameDialog open={createWorkspaceOpen} onOpenChange={setCreateWorkspaceOpen} title={t("org.create_workspace")} description={t("dialogs.add_workspace_to", { org: organization?.name ?? t("dialogs.this_organization") })} label={t("wsettings.workspace_name")} value={createWorkspaceName} onValueChange={setCreateWorkspaceName} onSubmit={createWorkspace} dataTour="create-workspace-dialog" />
@@ -166,8 +160,6 @@ export function WorkspaceDialogs({ reservationCleaned, creationFailure, onReserv
     {uploadScopeActive && uploadOpen && workspace && selectedAgentMachine && <MachineUploadDialog key={`${user.user_id}/${workspace.workspace_id}/${selectedAgentMachine.server_id}`} workspaceId={workspace.workspace_id} machine={selectedAgentMachine} onClose={() => setUploadOpen(false)} />}
 
     <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}><DialogContent><DialogHeader><DialogTitle>{t("dialogs.delete_title", { kind: deleteTarget ? t(`kind.${deleteTarget.kind}`) : "" })}</DialogTitle><DialogDescription>{deleteTarget?.kind === "machine" ? t("dialogs.remove_machine_confirm", { name: deleteTarget.name }) : t("dialogs.delete_agent_confirm", { path: deleteTarget ? agentPath(snapshot?.agents.find((agent) => agent.agent_id === deleteTarget.id) ?? { agent_id: deleteTarget.id, name: deleteTarget.name, server_id: "", kind: "", status: "" }, workloadTree) : t("dialogs.agent_fallback") })}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteTarget(null)}>{t("common.cancel")}</Button><Button variant="destructive" onClick={confirmDelete}>{t("machine.delete")}</Button></DialogFooter></DialogContent></Dialog>
-    <Dialog open={deleteWorkspaceOpen} onOpenChange={(open) => !open && setDeleteWorkspaceOpen(false)}><DialogContent><DialogHeader><DialogTitle>{t("wsettings.delete_workspace")}</DialogTitle><DialogDescription>{workspaceMachineCount === undefined ? t("dialogs.checking_inventory") : workspaceMachineCount > 0 ? t(workspaceMachineCount === 1 ? "dialogs.delete_machines_first_one" : "dialogs.delete_machines_first_many", { count: workspaceMachineCount, name: workspace?.name ?? t("dialogs.this_workspace") }) : t("dialogs.delete_workspace_confirm", { name: workspace?.name ?? "" })}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteWorkspaceOpen(false)}>{t("common.cancel")}</Button><Button variant="destructive" disabled={workspaceMachineCount !== 0} onClick={() => void confirmDeleteWorkspace()}>{t("wsettings.delete_workspace")}</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={inviteOpen} onOpenChange={setInviteOpen}><DialogContent><DialogHeader><DialogTitle>{t("org.invite_member")}</DialogTitle><DialogDescription>{t("dialogs.this_registration_link_can_be")}</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteOpen(false)}>{t("org.close")}</Button><Button onClick={() => copy(inviteUrl)}><Copy />{t("dialogs.copy_link")}</Button></DialogFooter></DialogContent></Dialog>
   </>
 }

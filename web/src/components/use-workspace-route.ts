@@ -1,4 +1,5 @@
-import { workloadIdFromSplat, workloadPath, workspacePath } from "@/lib/control-plane";
+import { isSettingsPath } from "@/lib/console-routes";
+import { workloadIdFromSplat, workloadPath } from "@/lib/control-plane";
 import { useCallback,useRef } from "react";
 import { useLocation,useNavigate,useParams } from "react-router";
 
@@ -14,6 +15,8 @@ export function useWorkspaceRoute() {
   // socket when React Router changes the navigate function's identity.
   const replaceWorkspaceRoute = useCallback((organizationId: string | null, workspaceId: string | null) => {
     const routing = routingRef.current
+    // A settings page is its own explicit target: discovery never redirects it.
+    if (isSettingsPath(routing.pathname)) return
     const parameters = new URLSearchParams(routing.search)
     parameters.delete("invite")
     // Canonicalizing the same workspace must not drop a deep-linked workload; changing workspace does.
@@ -26,6 +29,7 @@ export function useWorkspaceRoute() {
   // Keeps the address bar on the selected workload (replace, no history entry) so the URL can be copied or reloaded.
   const replaceWorkloadRoute = useCallback((workloadId: string | null) => {
     const routing = routingRef.current
+    if (isSettingsPath(routing.pathname)) return
     const { organizationId, workspaceId } = routeSelectionRef.current
     const parameters = new URLSearchParams(routing.search)
     if (!workloadId || !routing.pathname.endsWith(`/workloads/${encodeURIComponent(workloadId)}`)) parameters.delete("app_node")

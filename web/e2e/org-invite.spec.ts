@@ -68,8 +68,8 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) test(
   await page.screenshot({ path: info.outputPath(`org-invite-${theme}-${mobile ? '390' : 'desktop'}.png`) })
   await page.getByRole('button', { name: 'Join organization', exact: true }).click()
   await expect(page).toHaveURL(/\/orgs\/invited-org/)
-  if (mobile) await page.getByRole('button', { name: 'Browse tree', exact: true }).click()
-  await expect(page.getByRole('combobox', { name: 'Organization', exact: true })).toHaveText('Invited Studio')
+  // The top bar names the joined organization on every viewport.
+  await expect(page.getByRole('button', { name: 'Organization Invited Studio', exact: true })).toBeVisible()
   expect(backend.accepts).toEqual([{ token }])
   expect(new URL(page.url()).pathname).toBe('/orgs/invited-org')
 })
@@ -93,7 +93,7 @@ test('signed-out existing user confirms before login and explicitly accepts afte
   await expect(page.getByRole('dialog', { name: 'Join Invited Studio?' })).toBeVisible()
   expect(backend.accepts).toEqual([])
   await page.getByRole('button', { name: 'Join organization', exact: true }).click()
-  await expect(page.getByRole('combobox', { name: 'Organization', exact: true })).toHaveText('Invited Studio')
+  await expect(page.getByRole('button', { name: 'Organization Invited Studio', exact: true })).toBeVisible()
   expect(backend.accepts).toEqual([{ token }])
 })
 test('new user confirms before registration; existing registration membership is not accepted twice', async ({ page }) => {
@@ -102,7 +102,7 @@ test('new user confirms before registration; existing registration membership is
   expect(backend.registrations).toEqual([])
   await page.getByRole('button', { name: 'Join organization', exact: true }).click()
   await authenticate(page, true)
-  await expect(page.getByRole('combobox', { name: 'Organization', exact: true })).toHaveText('Invited Studio')
+  await expect(page.getByRole('button', { name: 'Organization Invited Studio', exact: true })).toBeVisible()
   expect(backend.registrations[0]).toMatchObject({ invite: token, join_organization: true })
   expect(backend.accepts).toEqual([])
   expect(new URL(page.url()).searchParams.has('invite')).toBe(false)
@@ -197,7 +197,7 @@ test('declining an OAuth pending deletes it and does not prompt again on reload'
 test('OAuth new account already joined in Core opens the organization without another acceptance', async ({ page }) => {
   const backend = await setup(page, { alreadyJoined: true })
   await page.goto('/orgs/invited-org')
-  await expect(page.getByRole('combobox', { name: 'Organization', exact: true })).toHaveText('Invited Studio')
+  await expect(page.getByRole('button', { name: 'Organization Invited Studio', exact: true })).toBeVisible()
   expect(backend.accepts).toEqual([])
   await expect(page.getByRole('dialog')).toHaveCount(0)
 })

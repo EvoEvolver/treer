@@ -12,7 +12,7 @@ import { statusLabel, t } from "@/i18n"
 
 // A collapsible sidebar section with a sticky heading; open state is remembered per section.
 export function SidebarSection({ id, title, count, tone, action, children, defaultOpen = true }: {
-  id: string; title: string; count?: number; tone?: "attention"; action?: ReactNode; children: ReactNode; defaultOpen?: boolean
+  id: string; title: string; count?: number | string; tone?: "attention"; action?: ReactNode; children: ReactNode; defaultOpen?: boolean
 }) {
   const key = `treer:sidebar-section:v1:${id}`
   const [open, setOpen] = useState(() => { try { const value = localStorage.getItem(key); return value === null ? defaultOpen : value === "true" } catch { return defaultOpen } })
@@ -21,7 +21,7 @@ export function SidebarSection({ id, title, count, tone, action, children, defau
     <div className="sticky top-0 z-[3] flex h-8 items-center justify-between bg-sidebar pl-3 pr-2 max-md:h-11">
       <button id={`sidebar-section-${id}`} type="button" aria-expanded={open} onClick={toggle} className="group/section flex h-full min-w-0 items-center gap-1.5 rounded-md px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
         <span className="truncate">{title}</span>
-        {count !== undefined && <span className={cn("rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums normal-case tracking-normal", tone === "attention" && count > 0 ? "bg-status-attention text-background" : "bg-accent text-muted-foreground")}>{count}</span>}
+        {count !== undefined && <span className={cn("rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums normal-case tracking-normal", tone === "attention" && Number(count) > 0 ? "bg-status-attention text-background" : "bg-accent text-muted-foreground")}>{count}</span>}
         <ChevronRight aria-hidden="true" className={cn("size-3 opacity-60 transition-transform group-hover/section:opacity-100 motion-reduce:transition-none", open && "rotate-90")} />
       </button>
       {action}
@@ -30,15 +30,15 @@ export function SidebarSection({ id, title, count, tone, action, children, defau
   </section>
 }
 
-// Finding one Agent among many: filters the Tree, the attention list and machines. Cmd/Ctrl+K focuses it.
+// Filters the Tree, the attention list and machines in place. Cmd/Ctrl+K opens the
+// Console-wide search (top bar) instead; "/" focuses this filter.
 export function SidebarSearch({ value, onChange }: { value: string; onChange: (value: string) => void }) {
   const input = useRef<HTMLInputElement>(null)
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
-      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "k") return
+      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return
       const target = event.target
-      // Terminals and editors keep Ctrl+K (readline kill-line).
-      if (target instanceof Element && target.closest(".xterm, textarea, [contenteditable]:not([contenteditable=\"false\"])")) return
+      if (target instanceof Element && target.closest("input, select, .xterm, textarea, [contenteditable]:not([contenteditable=\"false\"])")) return
       const sidebar = document.getElementById("tree-sidebar")
       if (!sidebar || sidebar.getClientRects().length === 0) return
       event.preventDefault(); input.current?.focus(); input.current?.select()
@@ -46,7 +46,6 @@ export function SidebarSearch({ value, onChange }: { value: string; onChange: (v
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
   }, [])
-  const mac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform)
   return <div className="relative px-2 pb-2">
     <Search aria-hidden="true" className="pointer-events-none absolute left-4 top-1/2 size-3.5 -translate-y-[calc(50%+4px)] text-muted-foreground" />
     <input ref={input} type="search" value={value} onChange={(event) => onChange(event.target.value)} aria-label={t("sidebar.search")} placeholder={t("sidebar.search")}
@@ -57,7 +56,7 @@ export function SidebarSearch({ value, onChange }: { value: string; onChange: (v
       className="h-8 w-full rounded-md border border-transparent bg-background pl-8 pr-14 text-[13px] text-foreground shadow-[0_0_0_1px_hsl(var(--border))] outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring max-md:h-11 [&::-webkit-search-cancel-button]:hidden" />
     {value
       ? <button type="button" aria-label={t("sidebar.clear_search")} onClick={() => { onChange(""); input.current?.focus() }} className="absolute right-3 top-1/2 grid size-6 -translate-y-[calc(50%+4px)] place-items-center rounded text-muted-foreground hover:bg-accent hover:text-foreground max-md:size-10"><X aria-hidden="true" className="size-3.5" /></button>
-      : <kbd aria-hidden="true" className="pointer-events-none absolute right-4 top-1/2 -translate-y-[calc(50%+4px)] rounded border bg-sidebar px-1 font-sans text-[10px] text-muted-foreground max-md:hidden">{mac ? "⌘K" : "Ctrl K"}</kbd>}
+      : <kbd aria-hidden="true" className="pointer-events-none absolute right-4 top-1/2 -translate-y-[calc(50%+4px)] rounded border bg-sidebar px-1 font-sans text-[10px] text-muted-foreground max-md:hidden">/</kbd>}
   </div>
 }
 
@@ -152,9 +151,9 @@ export function MachinesSection({ machines, agents, query, selectedId, onOpen, o
 }) {
   const shown = machines.filter((machine) => matches(query, machineName(machine), machine.hostname))
     .sort((a, b) => Number(b.status === "online") - Number(a.status === "online") || machineName(a).localeCompare(machineName(b)))
-  const offline = machines.filter((machine) => machine.status !== "online").length
   if (query.trim() && !shown.length) return null
-  return <SidebarSection id="machines" title={t("wsettings.machines")} count={machines.length} defaultOpen={offline > 0 || machines.length <= 4}
+  // Collapsed by default: machines are managed in Workspace settings; offline ones also surface in Needs attention.
+  return <SidebarSection id="machines" title={t("wsettings.machines")} count={machines.length} defaultOpen={false}
     action={<button type="button" aria-label={t("dialogs.add_machine")} title={t("dialogs.add_machine")} onClick={onAdd} className="grid size-6 place-items-center rounded-md text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring max-md:size-11"><Plus aria-hidden="true" className="size-4" /></button>}>
     <ul aria-label={t("wsettings.machines")}>{shown.map((machine) => {
       const isOnline = machine.status === "online"

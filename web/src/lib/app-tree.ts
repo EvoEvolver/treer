@@ -45,9 +45,8 @@ export const APP_TREE_UI_CAPABILITY = "app-tree.v1"
 
 export type AppNodeSelection = { appId: string; ownerId: string; path: string[]; node: AppTreeNode }
 
-// Apps that declare the `app-tree.v1` UI capability are expandable without a
-// request. For Apps that declare nothing, the Console asks each running App
-// once whether `GET api/tree?path=` is part of its UI API.
+// Fallback for Proxies that predate AppDeployment.ui_capabilities: the Console asks
+// each running App once whether `GET api/tree?path=` is part of its UI API.
 // A schema_version 1 JSON root page (even an invalid or empty one) or an auth
 // refusal means the App owns a directory; 404/405/501, an HTML SPA fallback or
 // any other non-tree answer means it does not. Definitive answers are kept for

@@ -73,7 +73,12 @@ test('App tab stays mounted through Agent, overview and settings; log choice is 
   await frame.getByRole('textbox', { name: 'Draft' }).fill('App draft')
   await open(page, 'Terminal'); await switchTab(page, 'Archive')
   await expect(frame.getByRole('textbox', { name: 'Draft' })).toHaveValue('App draft')
+  // Settings is a page with its own URL; the workspace (and this App) stays mounted behind it.
   await page.getByRole('button', { name: 'Workspace settings', exact: true }).click()
+  await expect(page).toHaveURL(/\/settings\/general$/)
+  await expect(page.getByRole('heading', { name: 'General', exact: true })).toBeVisible()
+  await page.goBack()
+  await expect(page).toHaveURL(/\/workloads\/tab-7$/)
   await switchTab(page, 'Archive')
   await expect(frame.getByRole('textbox', { name: 'Draft' })).toHaveValue('App draft')
   await tabAction(page, 'Show logs')

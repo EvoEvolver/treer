@@ -383,3 +383,46 @@ export function websocketUrl(path: string) {
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:"
   return url.toString()
 }
+
+export type OrganizationRole = Organization["role"]
+
+export interface OrganizationInvitation {
+  id: string
+  email?: string | null
+  role: OrganizationRole
+  status: "pending" | "accepted" | "revoked" | "expired"
+  created_at: string
+  expires_at: string
+  created_by?: { id: string; name: string; kind?: string } | null
+  group_ids?: string[]
+  workspace_ids?: string[]
+}
+
+export interface CreatedInvitation {
+  id: string
+  url: string
+  email?: string | null
+  role: OrganizationRole
+  expires_at: string
+  created_at: string
+  created_by?: unknown
+  group_ids?: string[]
+  workspace_ids?: string[]
+  // True when the Proxy also emailed the link.
+  email_queued?: boolean
+}
+
+export interface AuthSession {
+  id: string
+  device: string
+  ip?: string | null
+  created_at: string
+  last_seen_at: string
+  current: boolean
+}
+
+// A Proxy that predates an endpoint answers 404/405/501; the Console then shows
+// the feature as unavailable instead of failing the whole page.
+export function isUnavailable(reason: unknown) {
+  return reason instanceof ApiError && [404, 405, 501].includes(reason.status)
+}

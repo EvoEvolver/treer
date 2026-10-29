@@ -14,8 +14,9 @@ UI conventions and the review checklist for changing a screen live in
 
 | Path | Contents |
 | --- | --- |
-| `src/main.tsx`, `src/App.tsx` | Loads `/config.json`, applies the stored theme, mounts the router (`/admin`, `/orgs/:org/workspaces/:ws/*`) |
-| `src/components/workspace-app.tsx` | Workspace shell: selection, views, user actions; dialogs in `workspace-dialog-state.ts` / `workspace-dialogs.tsx`, live data in `use-workspace-*.ts` |
+| `src/main.tsx`, `src/App.tsx` | Loads `/config.json`, applies the stored theme, mounts the router (`/admin`, `/settings/*`, `/orgs/:org/*`, `/orgs/:org/workspaces/:ws/*`) |
+| `src/components/workspace-app.tsx` | Console shell: selection, views, user actions; dialogs in `workspace-dialog-state.ts` / `workspace-dialogs.tsx`, live data in `use-workspace-*.ts` |
+| `src/components/top-bar.tsx`, `command-palette.tsx` | Top bar: Org / Workspace context switcher, Cmd/Ctrl+K search, Settings link, avatar menu |
 | `src/components/workload-tree.tsx` | Sidebar Tree, row menus, drag/move, keyboard navigation |
 | `src/components/workspace-overview.tsx`, `workload-treemap.tsx` | Overview (filters, pins) and the read-only workspace map |
 | `src/components/workload-surface.tsx`, `workspace-tab-bar.tsx` | Retained workload tabs and their terminal / interface surfaces |
@@ -23,7 +24,8 @@ UI conventions and the review checklist for changing a screen live in
 | `src/components/isolated-agent-interface.tsx`, `use-agent-*.ts` | Agent Interface embed handshake, prewarm and fallbacks |
 | `src/components/app-interface.tsx`, `app-owned-tree.tsx`, `app-node-*.tsx` | Managed App embeds and App-owned subtrees |
 | `src/components/machine-view.tsx`, `machine-metrics-panel.tsx`, `machine-upload-dialog.tsx`, `controller-updater.tsx` | Machine detail, hardware metrics, file upload, Controller update |
-| `src/components/*settings-view.tsx`, `workspace-audit*.tsx`, `policy-publish-authority.tsx` | Workspace / organization settings, audit, Policy Provider |
+| `src/components/settings-hub/`, `src/lib/console-routes.ts`, `src/lib/access.ts` | Settings pages (personal, organization, workspace), their routes and effective-access rules |
+| `workspace-audit*.tsx`, `policy-publish-authority.tsx` | Workspace audit and Policy Provider publication authority (used by settings pages) |
 | `src/components/admin-panel.tsx`, `admin-traffic.tsx` | Platform admin at `/admin` |
 | `src/components/ui/` | Radix/shadcn primitives |
 | `src/lib/api.ts` | Runtime config, `api()` fetch helper, wire types |
@@ -139,16 +141,33 @@ and joins only after explicit confirmation (`/api/invitations/accept`). After
 OAuth, a pending invitation is read from `/api/invitations/pending`. Invitation
 tokens stay in memory and JSON bodies, never URLs or storage.
 
+### Top bar
+
+One bar above everything (hidden in focus mode and over a phone's full-screen
+workload):
+
+- **Org ▾ / Workspace ▾** opens one context popover: your organizations with
+  your role on the left, the hovered (tapped) organization's workspaces with
+  your workspace role and a *restricted* badge on the right, plus New
+  organization, New workspace and Organization settings. Choosing navigates,
+  so Back returns to the previous workspace; the selection follows the URL.
+- **Search** (Cmd/Ctrl+K outside terminals and editors) finds Agents and Apps,
+  machines, people (opens Members filtered), workspaces and every settings
+  page.
+- **Settings** opens the settings hub; the **avatar** menu has Profile, My
+  organizations, the theme, the product tour and Log out (no org role).
+
 ### Sidebar
 
-The sidebar is the navigator, ordered by how often each part is used:
-organization and workspace switchers, **Overview**, **Search**, **Needs
-attention**, the **Tree**, then **Machines**, in one scroll region with sticky
-section headings (`sidebar-sections.tsx`).
+The sidebar shows only what runs in the workspace: **Overview**, a filter
+box, **Needs attention**, the **Tree**, then **Machines** (collapsed by
+default), in one scroll region with sticky section headings
+(`sidebar-sections.tsx`), and a labeled **Workspace settings** link with the
+collapse button at the bottom.
 
-- **Search** (Cmd/Ctrl+K outside terminals and editors) filters the Tree by
-  name or path, showing matches with their folders expanded, and also filters
-  the attention list and machines. Escape clears; ArrowDown enters the rows.
+- The filter ("/" focuses it) narrows the Tree by name or path, showing
+  matches with their folders expanded, and also filters the attention list
+  and machines. Escape clears; ArrowDown enters the rows.
 - **Needs attention** is the triage inbox: blocked and failed Agents (flat,
   with their folder), then one row per offline machine ("build-node offline ·
   N Agents down", opens the machine page), then Agents that **finished**: this
@@ -184,7 +203,9 @@ addressed by stable IDs; display names are unique only within a folder.
   and finally Stop/Delete after the last separator, each confirmed. Folder
   menus add new folder/Agent. Tab menus deliberately have no Stop/Delete.
 - An App with an App-owned subtree has a disclosure chevron ("App contents")
-  on its own row; nested App nodes expand the same way.
+  on its own row; nested App nodes expand the same way. Core declares the
+  subtree with `ui_capabilities: ["app-tree.v1"]` on the App deployment; only
+  when the field is absent (older Proxy) does the Console probe the App once.
 - Dragging highlights the target folder or the insertion line, and shows a
   workspace-root drop zone at the bottom.
 - The header **+** menu has Add folder, Add agent and Add machine (opens the
@@ -357,18 +378,51 @@ The machine view shows status, Controller/Host builds and capabilities.
   show an update hint and offline machines a notice, without requesting.
 - **Add machine** opens the enrollment dialog with the connect commands.
 
-### Workspace and organization settings
+### Settings hub
 
-- **Policy Provider** (`policy-publish-authority.tsx`): install the default
-  Policy App, and (with `policy.publish-authority.v1`) let owners switch
-  `publish_authority` between `owner_session` and `provider_operator` after a
-  warning. Deep link: `/orgs/<org>/workspaces/<ws>#policy-provider`.
+Settings are full pages with real URLs (client routes served by the Worker's
+and nginx's SPA fallback; deep links, reload and Back work). Each page has a
+small **API equivalent** disclosure listing the Proxy calls an Agent makes for
+the same change.
+
+| Scope | Routes |
+| --- | --- |
+| You | `/settings/{profile,sessions,preferences,organizations}` |
+| Organization | `/orgs/:org/settings/{general,members,invitations,groups,workspaces,audit,danger}` |
+| Workspace | `/orgs/:org/workspaces/:ws/settings/{general,access,machines,launch-profiles,policy,audit,danger}` |
+
+- Desktop shows a grouped navigation beside the page and opens a scope's first
+  page at its root URL; phones show the grouped list at the root URL and a
+  page with a Back that returns through history (or up to the list after a
+  deep link). There is no separate Close.
+- Controls follow permissions: what you cannot do is hidden or disabled with
+  the reason. Role and access edits are staged behind an unsaved-changes bar
+  (Save / Discard); group membership applies at once and offers Undo.
+  Removals and danger-zone actions name what is lost; deleting a workspace,
+  leaving, transferring or deleting an organization require typing its name.
+- **Members**: searchable table (role, group chips, workspace count) with
+  Active / Pending invitation tabs. **Invitations**: one link per email with
+  role, optional groups and workspaces, and expiry; links are shown once
+  (kept in memory for this page session only) and can be revoked.
+- **Access** is one "who has access and why" list (organization role, group,
+  direct grant) from `/api/workspaces/{ws}/access/effective`, computed
+  locally from `/access` on older Proxies; one picker adds people or groups,
+  the role mapping is explained, and a change that would remove your own
+  owner access cannot be saved.
+- **Machines** is the single management list (bulk remove); the machine page
+  renames, removes and probes services at
+  `/api/workspaces/{ws}/services/{id}/probe`.
+- **Policy** states what is in force in plain language first; failure mode,
+  stale seconds, revisions and publication authority are under Advanced.
+  Core's link `/orgs/<org>/workspaces/<ws>#policy-provider` redirects here.
 - **Audit** (`workspace-audit*.tsx`, requires `workspace.audit.v1`): filtered,
   paged `/api/workspaces/{ws}/audit-events` with ID suggestions; with
   `workspace.audit-summary.v1`, aggregate charts from `/audit-summary` that
   drill into the list. Traffic charts (`traffic-*.tsx`) show billable bytes and
   frames for 6h/24h/7d/30d. Audit is an operational log, not a complete ledger.
-- Organization settings manage members, groups and invitations.
+- Endpoints a Proxy does not have yet (404/405/501: invitation listing,
+  sessions, password, effective access, leave/transfer/delete) show the
+  feature as unavailable instead of failing the page.
 
 ### Platform admin
 
@@ -401,7 +455,7 @@ only), `treer-theme`, `treer-look`, `treer-lang` and the product-tour flags.
 Never store tokens, drafts or terminal output.
 
 **First-run tour.** `lib/first-run-tour.ts` (driver.js) targets
-`data-tour` anchors; replay it from the user menu.
+`data-tour` anchors; replay it from the avatar menu.
 
 ## Browser tests
 

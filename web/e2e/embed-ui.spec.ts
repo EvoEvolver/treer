@@ -530,11 +530,9 @@ test("embedded UI iframe follows the control-plane light and dark theme", async 
   await expect(frame).toHaveCSS("color-scheme", "light")
   await expect(page.frameLocator("iframe[title='/dashboard interface']").locator("html")).toHaveAttribute("data-embed-theme", "light")
 
+  // The avatar menu switches the theme without leaving the open interface.
   await page.getByRole("button", { name: "User menu" }).click()
-  await page.getByRole("menuitem", { name: "Settings" }).click()
-  const settings = page.getByRole("dialog", { name: "Settings" })
-  await settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "General" }).click()
-  await settings.getByRole("button", { name: "Dark" }).click()
+  await page.getByRole("menuitem", { name: "Dark theme" }).click()
 
   await expect(page.locator("html")).toHaveClass(/dark/)
   await expect(frame).toHaveCSS("color-scheme", "dark")
@@ -552,11 +550,9 @@ test("embedded UI receives the console look and browser language", async ({ page
   await expect(frame).toHaveAttribute("src", /[?&]look=c(?:&|$)/)
   await expect(frame).toHaveAttribute("src", /[?&]lang=en(?:&|$)/)
   // The live theme message repeats the look so a running UI can follow without a reload.
+  // The avatar menu switches the theme without leaving the open interface.
   await page.getByRole("button", { name: "User menu" }).click()
-  await page.getByRole("menuitem", { name: "Settings" }).click()
-  const settings = page.getByRole("dialog", { name: "Settings" })
-  await settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "General" }).click()
-  await settings.getByRole("button", { name: "Dark" }).click()
+  await page.getByRole("menuitem", { name: "Dark theme" }).click()
   const inner = page.frameLocator("iframe[title='/dashboard interface']").locator("html")
   await expect(inner).toHaveAttribute("data-embed-look", "c")
   await expect(inner).toHaveAttribute("data-embed-lang", "en")

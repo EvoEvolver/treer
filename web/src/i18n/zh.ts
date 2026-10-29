@@ -1,7 +1,9 @@
 import type { Messages } from "./en"
+import { hubZh } from "./hub-zh"
 
 // 简体中文。键必须与 en.ts 完全一致(缺键会导致类型检查失败)。术语沿用 launcher 的中英对照。
 export const zh: Messages = {
+  ...hubZh,
   "sessionCopy.ownerPublication": "Owner 项目：{project}。发布意图：{intent}。涉及两处发布；部分完成时须检查，不得自动重试。",
   "sessionCopy.auth": "目标认证方式",
   "sessionCopy.authEnvironment": "隔离配置 · 环境认证",

@@ -12,7 +12,7 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
     await page.goto('/')
     await browseTreeOnMobile(page)
     await expect(page.getByRole('tree', { name: 'Workspace workloads' })).toBeVisible()
-    await expect(page.getByRole('combobox', { name: 'Workspace', exact: true })).toHaveText('Studio')
+    await expect(page.getByRole('button', { name: 'Workspace Studio', exact: true })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Ideas', exact: true })).toBeVisible()
     if (!mobile) await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)

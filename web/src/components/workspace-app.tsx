@@ -14,24 +14,22 @@ import { readEmbedAppearance, withEmbedTheme } from "@/lib/embed-ui"
 import { WorkloadFocusBar } from "@/components/workload-focus-bar"
 import { WorkspaceTabBar, type TabLabel, type TabAction, type TabActions } from "@/components/workspace-tab-bar"
 import { OVERVIEW_TAB, useWorkspaceTabs } from "@/components/use-workspace-tabs"
-import { UserMenu } from "@/components/user-menu"
+import { TopBar } from "@/components/top-bar"
+import { CommandPalette, usePaletteShortcut, type PaletteItem } from "@/components/command-palette"
+import { SettingsHub } from "@/components/settings-hub/hub"
+import { useOrgDirectory } from "@/components/settings-hub/use-org-directory"
+import { ORGANIZATION_SECTIONS, PERSONAL_SECTIONS, WORKSPACE_SECTIONS, organizationSettingsPath, parseSettingsRoute, personalSettingsPath, workspaceSettingsPath } from "@/lib/console-routes"
 import { WorkspaceOverview } from "@/components/workspace-overview"
-import { LayoutDashboard } from "lucide-react"
 import { AppSettingsView } from "@/components/apps-view"
-import { AuditView } from "@/components/audit-view"
 import { InvitationEntry, readPendingInvitation, type InvitationIntent } from "@/components/invitation-entry"
 import { AuthScreen } from "@/components/auth-screen"
 import { IconButton } from "@/components/control-plane-ui"
 import { ErrorToast } from "@/components/error-toast"
 import { MachineOverviewView } from "@/components/machine-view"
-import { OrganizationSettingsView } from "@/components/organization-settings-view"
 import { type TerminalPaneHandle } from "@/components/terminal-pane"
 import { TreeResizer,useTreeWidth } from "@/components/tree-resizer"
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
-import { Select,SelectContent,SelectItem,SelectTrigger,SelectValue } from "@/components/ui/select"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import { useOrganizationMembers } from "@/components/use-organization-members"
 import { useWorkspaceLiveFeed } from "@/components/use-workspace-live-feed"
 import { useWorkspaceMetrics } from "@/components/use-workspace-metrics"
 import { useWorkspaceRoute } from "@/components/use-workspace-route"
@@ -40,37 +38,43 @@ import { workspaceWorkloads } from "@/lib/workspace-workloads"
 import { AttentionSection, MachinesSection, SidebarSearch, buildInbox, useFinishedAgents } from "@/components/sidebar-sections"
 import { useWorkspaceDialogState } from "@/components/workspace-dialog-state"
 import { WorkspaceDialogs } from "@/components/workspace-dialogs"
-import { WorkspaceSettingsView } from "@/components/workspace-settings-view"
-import { ApiError,api,machineName,proxyUrl,type Agent,type AgentLaunchProfile,type AppDeployment,type Organization,type Snapshot,type User,type WorkloadTreeState,type Workspace } from "@/lib/api"
+import { ApiError,api,machineName,proxyUrl,type Agent,type AgentLaunchProfile,type AppDeployment,type Machine,type Organization,type Snapshot,type User,type WorkloadTreeState,type Workspace } from "@/lib/api"
 import { formatCommandLine,parseCommandLine } from "@/lib/command-line"
-import { MainView,PREVIEW_CONNECT,PREVIEW_INSTALL,PREVIEW_ORG,PREVIEW_PROFILES,PREVIEW_USER,PREVIEW_WORKSPACE,RenameTarget,activeStatuses,authorizationReturnUrl,controlCharacter,defaultAgentName,defaultProfileAgentName,formatBytes,initials,machineOnline,replaceWorkspace ,workloadPath,isWorkloadDeepLink } from "@/lib/control-plane"
+import { MainView,PREVIEW_CONNECT,PREVIEW_INSTALL,PREVIEW_ORG,PREVIEW_PROFILES,PREVIEW_USER,PREVIEW_WORKSPACE,RenameTarget,activeStatuses,authorizationReturnUrl,controlCharacter,defaultAgentName,defaultProfileAgentName,machineOnline,replaceWorkspace,workloadPath,workspacePath,isWorkloadDeepLink } from "@/lib/control-plane"
 import { clearFirstRunTour,firstRunTourMode,shouldAutoStartFirstRunTour,startFirstRunTour,stopFirstRunTour,type FirstRunTourHost } from "@/lib/first-run-tour"
 import { readTheme,subscribeTheme,type Theme } from "@/lib/theme"
 import { cn } from "@/lib/utils"
 import { agentPath } from "@/lib/workload-path"
 import {
+AppWindow,
+Bot,
 ChevronLeft,
 ChevronRight,
 FolderKanban,
-MoreHorizontal,
-Plus,
+LayoutDashboard,
+Monitor,
+PanelLeftClose,
 RotateCw,
+Settings as SettingsIcon,
 Upload,
+UserRound,
 ExternalLink
 } from "lucide-react"
 import { FormEvent,useCallback,useEffect,useMemo,useRef,useState } from "react"
-import { useLocation,useParams } from "react-router"
-import { roleLabel, statusLabel, t } from "@/i18n"
+import { Navigate,useLocation,useParams } from "react-router"
+import { sidebarShortcutKeys, sidebarShortcutLabel } from "@/lib/shortcut"
+import { statusLabel, t, type MessageKey } from "@/i18n"
 
 const EMPTY_AGENTS: Agent[] = []
 
 export function WorkspaceApp() {
   const route = useParams<{ organizationId?: string; workspaceId?: string }>()
   const location = useLocation()
-  // A trusted settings deep link is a new scope, including SPA back/forward.
-  // Unmount the old workspace and any confirmation before loading its target.
-  const scope = location.hash === "#policy-provider" ? `policy:${route.organizationId ?? ""}/${route.workspaceId ?? ""}` : "workspace"
-  return <WorkspaceAppContent key={scope} />
+  // Core's trusted Policy link (/orgs/:o/workspaces/:w#policy-provider) is the
+  // workspace's Policy settings page.
+  if (location.hash === "#policy-provider" && route.organizationId && route.workspaceId && !parseSettingsRoute(location.pathname))
+    return <Navigate replace to={{ pathname: workspaceSettingsPath(route.organizationId, route.workspaceId, "policy"), search: location.search }} />
+  return <WorkspaceAppContent />
 }
 
 function WorkspaceAppContent() {
@@ -80,7 +84,10 @@ function WorkspaceAppContent() {
     return token === null ? null : { token }
   })
   const [pendingInviteCheckedFor, setPendingInviteCheckedFor] = useState<string | null>(null)
-  const preview = firstRunTourMode() === "preview"
+  // Fixed for the page: settings navigation must not leave or enter the tour preview.
+  const [preview] = useState(() => firstRunTourMode() === "preview")
+  const settingsRoute = parseSettingsRoute(location.pathname)
+  const linkSearch = preview ? "?tour=preview" : ""
   const [user, setUserState] = useState<User | null | undefined>(preview ? PREVIEW_USER : undefined)
   const [authEpoch, setAuthEpoch] = useState(0)
   const setUser = useCallback<React.Dispatch<React.SetStateAction<User | null | undefined>>>((next) => {
@@ -93,7 +100,10 @@ function WorkspaceAppContent() {
   const [organizations, setOrganizations] = useState<Organization[]>(preview ? [PREVIEW_ORG] : [])
   const [organizationId, setOrganizationId] = useState<string | null>(preview ? PREVIEW_ORG.organization_id : null)
   const organizationIdRef = useRef<string | null>(preview ? PREVIEW_ORG.organization_id : null)
+  const [organizationsLoaded, setOrganizationsLoaded] = useState(preview)
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  // The organization the workspace list belongs to (settings pages must not show another org's list).
+  const [workspacesOrganizationId, setWorkspacesOrganizationId] = useState<string | null>(preview ? PREVIEW_ORG.organization_id : null)
   const [workspaceId, setWorkspaceId] = useState<string | null>(null)
   const workspaceIdRef = useRef<string | null>(null)
   workspaceIdRef.current = workspaceId
@@ -135,11 +145,11 @@ function WorkspaceAppContent() {
   const dialogState = useWorkspaceDialogState()
   const {
     preparedClaude, preparedAttempted, setPreparedAttempted,
-    setSettingsOpen, setCreateOrganizationOpen, setCreateWorkspaceOpen, setDeleteWorkspaceOpen,
+    setCreateOrganizationOpen, setCreateWorkspaceOpen,
     createAgentOpen, setCreateAgentOpen, agentFolder, setAgentFolder, setRenameError,
     setCreateAgentError, creatingAgent, setCreatingAgent, deletingApp, setDeletingApp,
     setProfileEditorOpen, editingLaunchProfile, setEditingLaunchProfile, launchingProfile,
-    setLaunchingProfile, deletingProfile, setDeletingProfile, setInstallOpen, setInviteOpen,
+    setLaunchingProfile, deletingProfile, setDeletingProfile, setInstallOpen,
     setUploadOpen, renameTarget,
     setRenameTarget, deleteTarget, setDeleteTarget, createOrganizationName, setCreateOrganizationName,
     createWorkspaceName, setCreateWorkspaceName, agentName, setAgentName, agentNameCustomized,
@@ -148,12 +158,10 @@ function WorkspaceAppContent() {
     launchProfileDescription, setLaunchProfileDescription, launchProfileCwd, setLaunchProfileCwd,
     launchProfileCommandLine, setLaunchProfileCommandLine, launchMachineId, setLaunchMachineId,
     launchAgentName, setLaunchAgentName, renameName, setRenameName, setInstallCommand, setConnectCommand,
-    setWindowsInstallCommand, setWindowsConnectCommand, setInviteUrl,
+    setWindowsInstallCommand, setWindowsConnectCommand,
   } = dialogState
   const [placementRevision, setPlacementRevision] = useState(0)
   const [workloadTree, setWorkloadTree] = useState<WorkloadTreeState>({ folders: [], placements: [] })
-  const [organizationName, setOrganizationName] = useState("")
-  const [workspaceName, setWorkspaceName] = useState("")
   const [launchProfiles, setLaunchProfiles] = useState<AgentLaunchProfile[]>(preview ? PREVIEW_PROFILES : [])
   const createAgentOpenRef = useRef(false)
   const [launchProfilesLoading, setLaunchProfilesLoading] = useState(false)
@@ -201,6 +209,7 @@ function WorkspaceAppContent() {
     const data = await api<{ organizations: Organization[] }>("/api/organizations")
     if (requirePreferred && !data.organizations.some((item) => item.organization_id === preferred)) throw new Error(t("invite.switch_failed"))
     setOrganizations(data.organizations)
+    setOrganizationsLoaded(true)
     const routeSelection = routeSelectionRef.current
     // An explicit target (trusted Policy link or workload deep link) that is unavailable is reported, never replaced
     // by the default organization, workspace or workload.
@@ -226,11 +235,13 @@ function WorkspaceAppContent() {
     if (preview) return
     if (!organizationId) {
       setWorkspaces([])
+      setWorkspacesOrganizationId(null)
       return
     }
     const data = await api<{ workspaces: Workspace[] }>(`/api/workspaces?organization_id=${encodeURIComponent(organizationId)}`)
     if (organizationIdRef.current !== organizationId) return
     setWorkspaces(data.workspaces)
+    setWorkspacesOrganizationId(organizationId)
     const routeSelection = routeSelectionRef.current
     if (routeSelection.workspaceId && !data.workspaces.some((item) => item.workspace_id === routeSelection.workspaceId)) {
       if (routingRef.current.hash === "#policy-provider") throw new Error(t("app.policy_settings_target_is_unavailable"))
@@ -299,10 +310,12 @@ function WorkspaceAppContent() {
   }, [routeWorkloadId, inventoryReady, routeMatchesWorkspace, workspaceId, workloads])
   // The address bar follows the selection so the URL can be copied, shared or reloaded.
   const selectedWorkloadId = mainView === "terminal" ? selectedAgentId : null
+  // A settings page owns the URL; following resumes when the workspace is shown again.
+  const onSettingsPage = Boolean(settingsRoute)
   useEffect(() => {
-    if (!inventoryReady || !routeMatchesWorkspace || preview || !deepLinkInitialized) return
+    if (!inventoryReady || !routeMatchesWorkspace || preview || !deepLinkInitialized || onSettingsPage) return
     if (selectedWorkloadId !== routeWorkloadId) replaceWorkloadRoute(selectedWorkloadId)
-  }, [inventoryReady, routeMatchesWorkspace, preview, routeWorkloadId, selectedWorkloadId, workspaceId, replaceWorkloadRoute, deepLinkInitialized])
+  }, [inventoryReady, routeMatchesWorkspace, preview, routeWorkloadId, selectedWorkloadId, workspaceId, replaceWorkloadRoute, deepLinkInitialized, onSettingsPage])
   // Registered Agent UIs and routed Apps open directly; other workloads retain
   // the Console deep link. Never use a descriptor's ui_path as a navigation URL.
   const appOwnUrls = useMemo(() => {
@@ -375,7 +388,7 @@ function WorkspaceAppContent() {
     setSelectedAgentId(null)
     setMobileTerminalOpen(false)
     setMobileTreeOpen((current) => preview || current)
-    setMainView((current) => current === "terminal" || current === "app" || current === "machine" || current === "audit" ? "overview" : current)
+    setMainView((current) => current === "terminal" || current === "app" || current === "machine" ? "overview" : current)
   }, [workspaceId, preview])
 
 
@@ -385,9 +398,6 @@ function WorkspaceAppContent() {
   const selectedCreateProfile = launchProfiles.find((profile) => profile.profile_id === agentProfileId)
   const organization = organizations.find((item) => item.organization_id === organizationId)
   const workspace = workspaces.find((item) => item.workspace_id === workspaceId)
-  const workspaceMachineCount = snapshot?.workspace.workspace_id === workspaceId
-    ? snapshot.servers.length
-    : undefined
 
   useEffect(() => {
     document.title = organization && workspace
@@ -396,13 +406,7 @@ function WorkspaceAppContent() {
     return () => { document.title = "Treer" }
   }, [organization, workspace])
 
-  const currentRole = organization?.role ?? "member"
-  const canManageMembers = ["owner", "admin"].includes(currentRole)
 
-  useEffect(() => {
-    if (mainView === "organization") setOrganizationName(organization?.name ?? "")
-    if (mainView === "workspace") setWorkspaceName(workspace?.name ?? "")
-  }, [mainView, organization?.organization_id, organization?.name, workspace?.workspace_id, workspace?.name])
   const mobileTerminalIdle = isMobile && ((mainView === "terminal" && !mobileTerminalOpen) || (mainView === "overview" && mobileTreeOpen))
   const mobileSidebarHidden = isMobile && ((mainView === "terminal" && mobileTerminalOpen) || (mainView !== "terminal" && !(mainView === "overview" && mobileTreeOpen)))
   const selectedMachine = snapshot?.servers.find((machine) => machine.server_id === selectedMachineId)
@@ -567,23 +571,41 @@ function WorkspaceAppContent() {
     if (action === "back") closeMobileSurface()
   }
 
-  function selectOrganization(value: string) {
+  function applyOrganization(value: string) {
     organizationIdRef.current = value
     workspaceIdRef.current = null
     setOrganizationId(value)
     setWorkspaceId(null)
-    replaceWorkspaceRoute(value, null)
   }
 
-  function selectWorkspace(value: string) {
+  function applyWorkspace(value: string) {
     workspaceIdRef.current = value
     setWorkspaceId(value)
     setSnapshot((current) => current?.workspace.workspace_id === value ? current : null)
     setApps([])
     setSelectedAppId(null)
     setLaunchProfiles([])
+  }
+
+  function selectWorkspace(value: string) {
+    applyWorkspace(value)
     replaceWorkspaceRoute(organizationId, value)
   }
+
+  // The URL is the source of truth for the context: Back/Forward, settings
+  // links and the context switcher all navigate, and the selection follows.
+  useEffect(() => {
+    if (preview || !organizationsLoaded) return
+    const target = route.organizationId
+    if (!target) return
+    if (target !== organizationIdRef.current) {
+      if (organizations.some((item) => item.organization_id === target)) applyOrganization(target)
+      return
+    }
+    const targetWorkspace = route.workspaceId
+    if (targetWorkspace && targetWorkspace !== workspaceIdRef.current && workspacesOrganizationId === target && workspaces.some((item) => item.workspace_id === targetWorkspace)) applyWorkspace(targetWorkspace)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route.organizationId, route.workspaceId, organizations, organizationsLoaded, workspaces, workspacesOrganizationId, preview])
 
   useEffect(() => {
     if (createAgentOpen && !onlineMachines.some((machine) => machine.server_id === agentServerId)) setAgentServerId(onlineMachines[0]?.server_id ?? "")
@@ -595,6 +617,7 @@ function WorkspaceAppContent() {
     try {
       const data = await api<{ organization: Organization }>("/api/organizations", { method: "POST", body: JSON.stringify({ name: createOrganizationName }) })
       setCreateOrganizationOpen(false); setCreateOrganizationName(""); await loadOrganizations(data.organization.organization_id)
+      if (settingsRoute) routingRef.current.navigate(workspacePath(data.organization.organization_id, null))
     } catch (reason) { showError(reason) }
   }
 
@@ -613,42 +636,37 @@ function WorkspaceAppContent() {
       const data = await api<{ workspace: Workspace }>("/api/workspaces", { method: "POST", body: JSON.stringify({ organization_id: organizationId, name: createWorkspaceName }) })
       setCreateWorkspaceOpen(false); setCreateWorkspaceName("")
       const list = await api<{ workspaces: Workspace[] }>(`/api/workspaces?organization_id=${encodeURIComponent(organizationId)}`)
-      setWorkspaces(list.workspaces); selectWorkspace(data.workspace.workspace_id)
+      setWorkspaces(list.workspaces); setWorkspacesOrganizationId(organizationId)
+      if (settingsRoute) { applyWorkspace(data.workspace.workspace_id); routingRef.current.navigate(workspacePath(organizationId, data.workspace.workspace_id)) }
+      else selectWorkspace(data.workspace.workspace_id)
     } catch (reason) { showError(reason) }
   }
 
-  async function renameOrganization(event: FormEvent) {
-    event.preventDefault()
-    if (!organizationId) return
-    try {
-      await api(`/api/organizations/${encodeURIComponent(organizationId)}`, { method: "PATCH", body: JSON.stringify({ name: organizationName }) })
-      await loadOrganizations(organizationId)
-    } catch (reason) { showError(reason) }
-  }
-
-  async function renameWorkspace(event: FormEvent) {
-    event.preventDefault()
+  async function renameWorkspace(name: string) {
     if (!workspaceId) return
-    try {
-      const data = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(workspaceId)}`, { method: "PATCH", body: JSON.stringify({ name: workspaceName }) })
-      setWorkspaces((items) => replaceWorkspace(items, data.workspace))
-      setSnapshot((current) => current?.workspace.workspace_id === data.workspace.workspace_id ? { ...current, workspace: data.workspace } : current)
-      setWorkspaceName(data.workspace.name)
-    } catch (reason) { showError(reason) }
+    if (preview) { setWorkspaces((items) => items.map((item) => item.workspace_id === workspaceId ? { ...item, name } : item)); return }
+    const data = await api<{ workspace: Workspace }>(`/api/workspaces/${encodeURIComponent(workspaceId)}`, { method: "PATCH", body: JSON.stringify({ name }) })
+    setWorkspaces((items) => replaceWorkspace(items, data.workspace))
+    setSnapshot((current) => current?.workspace.workspace_id === data.workspace.workspace_id ? { ...current, workspace: data.workspace } : current)
   }
 
-  async function confirmDeleteWorkspace() {
-    const targetId = workspaceId
-    if (!targetId) return
-    try {
-      await api(`/api/workspaces/${encodeURIComponent(targetId)}`, { method: "DELETE" })
-    } catch (reason) { showError(reason); return }
-    setDeleteWorkspaceOpen(false)
+  // After a workspace is deleted its settings URL is gone; land on the organization.
+  async function workspaceDeleted(targetId: string) {
     setWorkspaces((items) => items.filter((item) => item.workspace_id !== targetId))
     setSnapshot(null)
     setSelectedAgentId(null)
     setSelectedMachineId(null)
+    workspaceIdRef.current = null
+    setWorkspaceId(null)
+    routingRef.current.navigate(workspacePath(organizationId, null), { replace: true })
     await syncWorkspaces().catch(showError)
+  }
+
+  // Leaving or deleting an organization: return to the Console's default context.
+  async function organizationGone(targetId: string) {
+    routingRef.current.navigate("/", { replace: true })
+    if (organizationIdRef.current === targetId) organizationIdRef.current = null
+    await loadOrganizations().catch(showError)
   }
   async function createAgent(event: FormEvent) {
     event.preventDefault()
@@ -783,8 +801,8 @@ function WorkspaceAppContent() {
   }, [preview, workspaceId])
 
   useEffect(() => {
-    if (mainView === "workspace") loadLaunchProfiles().catch(showError)
-  }, [mainView, loadLaunchProfiles, showError])
+    if (settingsRoute?.scope === "workspace" && settingsRoute.section === "launch-profiles") loadLaunchProfiles().catch(showError)
+  }, [settingsRoute?.scope, settingsRoute?.section, loadLaunchProfiles, showError])
 
   useEffect(() => {
     setApps([])
@@ -831,45 +849,54 @@ function WorkspaceAppContent() {
     } catch (reason) { showError(reason) }
   }
 
-  function openOrganizationSettings() {
-    if (!organization) {
-      setCreateOrganizationName("")
-      setCreateOrganizationOpen(true)
-      return
-    }
-    setOrganizationName(organization.name)
-    setMainView("organization")
+  // Settings are pages: open them by URL (push) so Back returns here.
+  function openSettingsPage(path: string) {
     setMobileTerminalOpen(false)
+    const [pathname, query = ""] = path.split("?")
+    const search = new URLSearchParams(query)
+    if (preview) search.set("tour", "preview")
+    routingRef.current.navigate({ pathname, search: search.toString() })
   }
 
-  useEffect(() => {
-    if (location.hash !== "#policy-provider" || !workspace || route.workspaceId !== workspace.workspace_id || route.organizationId !== organizationId) return
-    setWorkspaceName(workspace.name)
-    setMainView("workspace")
-    setMobileTerminalOpen(false)
-  }, [location.hash, workspace?.workspace_id, route.workspaceId, route.organizationId, organizationId])
-
-  function openWorkspaceSettings() {
-    if (!workspace) {
+  function openWorkspaceSettings(section: (typeof WORKSPACE_SECTIONS)[number] = "general") {
+    if (!organizationId || !workspaceId) {
       setCreateWorkspaceName("")
       setCreateWorkspaceOpen(true)
       return
     }
-    setWorkspaceName(workspace.name)
-    setMainView("workspace")
-    setMobileTerminalOpen(false)
+    openSettingsPage(workspaceSettingsPath(organizationId, workspaceId, section))
   }
 
-  function closeMainView() {
+  // Leaves a settings page for the workspace it belongs to (or the current one).
+  function exitSettings() {
+    routingRef.current.navigate({ pathname: workloadPath(organizationId, workspaceId, mainView === "terminal" ? selectedAgentId : null).split("?")[0], search: linkSearch })
+  }
+
+  // A machine page opened from the settings list goes back there.
+  const [machineFromSettings, setMachineFromSettings] = useState(false)
+  function closeMachineOverview() {
+    if (machineFromSettings) { routingRef.current.navigate(-1); return }
     showOverview()
   }
+  // Returning to the Machines settings page (Close, Back or browser Back) retires that machine page.
+  // Only an actual return to settings counts: the machine page's own navigation commits later.
+  const wasOnSettingsPage = useRef(Boolean(settingsRoute))
+  useEffect(() => {
+    const entered = Boolean(settingsRoute) && !wasOnSettingsPage.current
+    wasOnSettingsPage.current = Boolean(settingsRoute)
+    if (!entered || !machineFromSettings) return
+    setMachineFromSettings(false)
+    setMainView((current) => current === "machine" ? "overview" : current)
+  })
 
-  function closeMachineOverview() {
-    setMainView("workspace")
+  function createWorkspaceIn(targetOrganizationId: string) {
+    if (targetOrganizationId !== organizationId) routingRef.current.navigate({ pathname: workspacePath(targetOrganizationId, null), search: linkSearch })
+    setCreateWorkspaceName("")
+    setCreateWorkspaceOpen(true)
   }
 
-  function openSettings() {
-    setSettingsOpen(true)
+  function selectContext(targetOrganizationId: string, targetWorkspaceId: string | null) {
+    routingRef.current.navigate({ pathname: workspacePath(targetOrganizationId, targetWorkspaceId), search: linkSearch })
   }
 
   function openNewLaunchProfile() {
@@ -977,11 +1004,10 @@ function WorkspaceAppContent() {
       setSnapshot({ revision: 0, workspace: PREVIEW_WORKSPACE, servers: [], agents: [] })
     },
     openWorkspaceSettings: () => {
-      setWorkspaceName(workspaces.find((item) => item.workspace_id === workspaceId)?.name ?? PREVIEW_WORKSPACE.name)
-      setMainView("workspace")
-      setMobileTerminalOpen(false)
+      const target = workspaceSettingsPath(organizationId ?? PREVIEW_ORG.organization_id, workspaceId ?? PREVIEW_WORKSPACE.workspace_id, "machines")
+      if (routingRef.current.pathname !== target) openSettingsPage(target)
     },
-    closeWorkspaceSettings: closeMainView,
+    closeWorkspaceSettings: () => { if (parseSettingsRoute(routingRef.current.pathname)) exitSettings() },
     openInstall,
     closeInstall: () => setInstallOpen(false),
     openCreateAgent,
@@ -1049,30 +1075,65 @@ function WorkspaceAppContent() {
     } catch (reason) { showError(reason) }
   }
 
-  const { members, groups, groupName, setGroupName, createGroup, deleteGroup, setGroupMember, updateMemberRole, removeMember } = useOrganizationMembers({
-    preview, organizationId, organizationIdRef, mainView, showError,
-  })
+  const [paletteOpen, setPaletteOpen] = useState(false)
+  // Members and groups feed the settings pages, the palette's People and Overview pin authors.
+  const directory = useOrgDirectory(organizationId, Boolean(user) && pendingInvite === null, preview)
+  const members = directory.members
 
-  async function createInvite() {
-    if (!organizationId) return
-    try {
-      const invitation = await api<{ url: string }>(`/api/organizations/${encodeURIComponent(organizationId)}/invitations`, { method: "POST", body: "{}" })
-      setInviteUrl(invitation.url); setInviteOpen(true)
-    } catch (reason) { showError(reason) }
-  }
-
-  const { auditEvents, traffic, auditRefreshRevision, auditLoading, virtualHosts, services, refreshAudit } = useWorkspaceMetrics({
-    workspaceId, workspaceIdRef, organizationId, canManageMembers, mainView, showError,
-  })
+  const { traffic, virtualHosts, services } = useWorkspaceMetrics({ workspaceId, workspaceIdRef, mainView, showError })
 
   function showMachineOverview(serverId: string) {
+    setMachineFromSettings(false)
     setSelectedMachineId(serverId)
     setMainView("machine")
+    setMobileTerminalOpen(false)
   }
 
-  function openAudit() {
-    setMainView("audit")
+  // From the settings Machines list: push the workspace URL so Back returns to the list.
+  function openMachineFromSettings(serverId: string) {
+    routingRef.current.navigate({ pathname: workspacePath(organizationId, workspaceId), search: linkSearch })
+    showMachineOverview(serverId)
+    setMachineFromSettings(true)
   }
+
+  async function removeMachines(machineIds: string[]) {
+    if (!workspaceId) return
+    const failures: string[] = []
+    for (const id of machineIds) {
+      try { await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/servers/${encodeURIComponent(id)}`, { method: "DELETE" }) }
+      catch (reason) { failures.push(`${machineName(snapshot?.servers.find((machine) => machine.server_id === id), id)}: ${reason instanceof Error ? reason.message : String(reason)}`) }
+    }
+    if (workspaceIdRef.current === workspaceId) await refreshSnapshot()
+    if (failures.length) throw new Error(failures.join("; "))
+  }
+
+  function openPage(run: () => void) {
+    // Workspace destinations leave a settings page first (push, so Back returns to it).
+    if (settingsRoute) routingRef.current.navigate({ pathname: workspacePath(organizationId, workspaceId), search: linkSearch })
+    run()
+  }
+
+  const paletteItems = useMemo<PaletteItem[]>(() => {
+    if (!paletteOpen) return []
+    const items: PaletteItem[] = []
+    for (const agent of workloads) {
+      const app = apps.find((entry) => (entry.runtime_agent_id ?? entry.app_id) === agent.agent_id)
+      items.push({ id: agent.agent_id, group: "workloads", label: app?.name ?? agent.name, detail: agentPath(agent, workloadTree), keywords: agent.kind, icon: app ? <AppWindow /> : <Bot />, run: () => openPage(() => showAgentTerminal(agent.agent_id)) })
+    }
+    for (const machine of snapshot?.servers ?? []) items.push({ id: machine.server_id, group: "machines", label: machineName(machine), detail: machine.status === "online" ? t("status.online") : t("machine.offline"), keywords: machine.hostname, icon: <Monitor />, run: () => openPage(() => showMachineOverview(machine.server_id)) })
+    if (organizationId) for (const member of members) items.push({ id: member.user_id, group: "people", label: member.preferred_name, detail: member.email, icon: <UserRound />, run: () => openSettingsPage(`${organizationSettingsPath(organizationId, "members")}?q=${encodeURIComponent(member.preferred_name)}`) })
+    if (organizationId) for (const item of workspaces) items.push({ id: item.workspace_id, group: "workspaces", label: item.name, detail: organization?.name, icon: <FolderKanban />, run: () => selectContext(organizationId, item.workspace_id) })
+    const page = (id: string, label: MessageKey, scope: string, path: string) => items.push({ id, group: "settings", label: `${scope} › ${t(label)}`, icon: <SettingsIcon />, run: () => openSettingsPage(path) })
+    const personalLabels: Record<(typeof PERSONAL_SECTIONS)[number], MessageKey> = { profile: "hub.profile", sessions: "hub.sessions", preferences: "hub.preferences", organizations: "hub.organizations" }
+    const orgLabels: Record<(typeof ORGANIZATION_SECTIONS)[number], MessageKey> = { general: "settings.nav.general", members: "org.members", invitations: "hub.invitations", groups: "org.groups", workspaces: "org.workspaces", audit: "hub.audit_log", danger: "apps.danger_zone" }
+    const workspaceLabels: Record<(typeof WORKSPACE_SECTIONS)[number], MessageKey> = { general: "settings.nav.general", access: "hub.access", machines: "wsettings.machines", "launch-profiles": "wsettings.launch_profiles", policy: "hub.policy", audit: "hub.audit_log", danger: "apps.danger_zone" }
+    if (organizationId && workspaceId && workspace) for (const section of WORKSPACE_SECTIONS) page(`ws:${section}`, workspaceLabels[section], workspace.name, workspaceSettingsPath(organizationId, workspaceId, section))
+    if (organizationId && organization) for (const section of ORGANIZATION_SECTIONS) page(`org:${section}`, orgLabels[section], organization.name, organizationSettingsPath(organizationId, section))
+    for (const section of PERSONAL_SECTIONS) page(`me:${section}`, personalLabels[section], t("hub.group_you"), personalSettingsPath(section))
+    return items
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paletteOpen, workloads, apps, snapshot?.servers, members, workspaces, organizationId, workspaceId, organization, workspace, workloadTree, settingsRoute?.scope])
+  usePaletteShortcut(() => setPaletteOpen(true), Boolean(user) && pendingInvite === null && !focusMode)
 
   function openAppExternal(app: AppDeployment) {
     const url = app.public_url ?? (workspaceId ? proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts/${encodeURIComponent(app.hostname)}/proxy/`) : null)
@@ -1102,21 +1163,22 @@ function WorkspaceAppContent() {
   }} />
   if (!user) return <AuthScreen onAuthenticated={setUser} />
 
+  const hubMachines = snapshot?.workspace.workspace_id === workspaceId ? snapshot?.servers ?? null : null
   return <TooltipProvider delayDuration={350}>
-      <main style={treeWidth.style} className={cn("grid h-dvh min-h-0 bg-background md:grid-cols-[var(--tree-width)_var(--tree-divider)_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden", treeWidth.dragging && "select-none cursor-col-resize", mobileTerminalIdle || mobileSidebarHidden ? "grid-rows-1 overflow-hidden" : "grid-rows-[374px_minmax(620px,1fr)] overflow-auto", focusedId && "grid-cols-1 grid-rows-1 overflow-hidden md:grid-cols-1")}>
+    <div className="flex h-dvh min-h-0 flex-col bg-background">
+      {!focusedId && !(isMobile && mobileTerminalOpen && !settingsRoute) && <TopBar user={user} preview={preview} isMobile={isMobile} organizations={organizations} organizationId={organizationId} workspaces={workspacesOrganizationId === organizationId ? workspaces : []} workspaceId={workspaceId} settingsActive={Boolean(settingsRoute)} linkSearch={linkSearch}
+        onSelectWorkspace={selectContext} onCreateOrganization={() => { setCreateOrganizationName(""); setCreateOrganizationOpen(true) }} onCreateWorkspace={createWorkspaceIn} onOrganizationSettings={(id) => openSettingsPage(organizationSettingsPath(id, "general"))}
+        onOpenSearch={() => setPaletteOpen(true)} onProfile={() => openSettingsPage(personalSettingsPath("profile"))} onMyOrganizations={() => openSettingsPage(personalSettingsPath("organizations"))} onTour={replayFirstRunTour} onLogout={logout} />}
+      {settingsRoute && <SettingsHub route={settingsRoute} isMobile={isMobile} preview={preview} user={user} onUserChange={setUser} organizations={organizations} organizationsLoaded={organizationsLoaded} currentOrganizationId={organizationId}
+        workspaces={workspaces} workspacesOrganizationId={workspacesOrganizationId} workspacesLoaded={workspacesOrganizationId !== null} currentWorkspaceId={workspaceId} machines={hubMachines} agents={snapshot?.agents ?? []} apps={apps} profiles={launchProfiles} profilesLoading={launchProfilesLoading}
+        directory={directory} showError={showError} copy={copy} logout={() => void logout()} exit={exitSettings} createOrganization={() => { setCreateOrganizationName(""); setCreateOrganizationOpen(true) }} createWorkspace={() => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) }}
+        refreshOrganizations={() => loadOrganizations(organizationIdRef.current ?? undefined)} organizationGone={(id) => void organizationGone(id)}
+        workspace={{ renameWorkspace, addMachine: () => void openInstall(), openMachine: openMachineFromSettings, renameMachine: (machine: Machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) }), removeMachines,
+          policyAppInstalled: (app) => setApps((current) => [...current.filter((item) => item.app_id !== app.app_id), app].sort((left, right) => left.name.localeCompare(right.name))),
+          refreshProfiles: () => void loadLaunchProfiles().catch(showError), newProfile: openNewLaunchProfile, editProfile: openEditLaunchProfile, launchProfile: openLaunchProfile, deleteProfile: setDeletingProfile, workspaceDeleted: (id) => void workspaceDeleted(id) }} />}
+      <main style={treeWidth.style} className={cn("grid min-h-0 flex-1 bg-background md:grid-cols-[var(--tree-width)_var(--tree-divider)_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden", treeWidth.dragging && "select-none cursor-col-resize", mobileTerminalIdle || mobileSidebarHidden ? "grid-rows-1 overflow-hidden" : "grid-rows-[374px_minmax(620px,1fr)] overflow-auto", focusedId && "grid-cols-1 grid-rows-1 overflow-hidden md:grid-cols-1", settingsRoute && "hidden md:hidden")}>
         <aside id="tree-sidebar" className={cn("flex min-h-0 min-w-0 flex-col border-b bg-sidebar md:border-b-0", mobileSidebarHidden && "hidden md:flex", treeWidth.collapsed && "md:invisible md:overflow-hidden", focusedId && "hidden md:hidden")}>
         {preview && <div className="treer-tour-banner"><span>{t("app.tour_preview_empty_first_run")}</span></div>}
-        {/* Context switcher: organization above workspace, one column with the Tree below. */}
-        <div className="grid grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 px-3 pb-2 pt-3 max-md:grid-cols-[28px_minmax(0,1fr)_44px]">
-          <div aria-hidden="true" className="grid size-7 place-items-center rounded-md bg-primary text-[11px] font-semibold text-primary-foreground">{initials(organization?.name ?? "Treer")}</div>
-          <Select value={organizationId ?? undefined} onValueChange={selectOrganization}><SelectTrigger aria-label={t("app.organization")} className="h-7 border-0 bg-transparent px-1.5 text-[13px] font-semibold shadow-none hover:bg-accent max-md:h-11"><SelectValue placeholder={t("app.no_organization")} /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select>
-          <IconButton label={organization ? t("app.organization_settings") : t("dialogs.create_organization")} className={cn("size-7 text-muted-foreground hover:text-foreground max-md:size-11", mainView === "organization" && "bg-accent text-foreground")} onClick={openOrganizationSettings}>{organization ? <MoreHorizontal /> : <Plus />}</IconButton>
-          <FolderKanban aria-hidden="true" className="size-4 justify-self-center text-muted-foreground" />
-          <div data-tour="workspace-select" className="min-w-0">
-            <Select value={workspaceId ?? undefined} onValueChange={selectWorkspace} disabled={!organizationId}><SelectTrigger aria-label={t("app.workspace")} className="h-7 border-0 bg-transparent px-1.5 text-[13px] text-muted-foreground shadow-none hover:bg-accent hover:text-foreground max-md:h-11"><SelectValue placeholder={t("app.no_workspace")} /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
-          </div>
-          <span data-tour="create-workspace"><IconButton label={workspace ? t("app.workspace_settings") : t("org.create_workspace")} disabled={!organizationId} className={cn("size-7 text-muted-foreground hover:text-foreground max-md:size-11", mainView === "workspace" && "bg-accent text-foreground")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
-        </div>
         <nav aria-label={t("app.workspace")} className="px-2 pb-2">
           <button type="button" aria-label={t("app.workspace_overview")} aria-current={mainView === "overview" ? "page" : undefined} onClick={showOverview} className={cn("flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring motion-reduce:transition-none max-md:h-11 [@media(pointer:coarse)]:h-11", mainView === "overview" && "bg-primary/10 font-medium hover:bg-primary/10 dark:bg-primary/20 dark:hover:bg-primary/20")}><LayoutDashboard aria-hidden="true" className={cn("size-4", mainView === "overview" ? "text-primary" : "text-muted-foreground")} />{t("app.overview")}</button>
         </nav>
@@ -1128,7 +1190,11 @@ function WorkspaceAppContent() {
           {workspaceId && Boolean(snapshot?.servers.length) && <MachinesSection machines={snapshot?.servers ?? []} agents={snapshot?.agents ?? []} query={sidebarQuery} selectedId={mainView === "machine" ? selectedMachineId : null} onOpen={showMachineOverview} onAdd={() => void openInstall()} />}
         </div>
 
-        <UserMenu user={user} role={roleLabel(currentRole)} preview={preview} collapseRef={treeWidth.collapseRef} onCollapse={treeWidth.toggle} onSettings={openSettings} onTour={replayFirstRunTour} onLogout={logout} />
+        {/* Settings live in the top bar and the settings pages; the sidebar only shows what runs here. */}
+        <div className="flex shrink-0 items-center gap-1 border-t p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+          <button type="button" onClick={() => openWorkspaceSettings()} disabled={!organizationId} className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-[13px] text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 max-md:h-11"><SettingsIcon aria-hidden="true" className="size-4 shrink-0" /><span className="truncate">{workspace ? t("app.workspace_settings") : t("org.create_workspace")}</span></button>
+          <button ref={treeWidth.collapseRef} type="button" aria-label={t("resizer.collapse_tree_sidebar")} title={`${t("resizer.collapse_tree_sidebar")} (${sidebarShortcutLabel()})`} aria-keyshortcuts={sidebarShortcutKeys()} aria-expanded="true" aria-controls="tree-sidebar" onClick={treeWidth.toggle} className="hidden size-8 shrink-0 place-items-center rounded-md text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring md:grid"><PanelLeftClose aria-hidden="true" className="size-4" /></button>
+        </div>
       </aside>
       {!focusedId && <TreeResizer settings={treeWidth} />}
 
@@ -1137,12 +1203,11 @@ function WorkspaceAppContent() {
         <p role="status" className="sr-only">{tabNotice}</p>
         {preparedCreated && <p role="status" className="px-4 py-2 text-sm">{t("prepared.created")} {t(`sessionCopy.${preparedReadiness}`)}</p>}
         {/* Pages carry their own title and Close; the bar stays for the phone back button and audit refresh. */}
-        {mainView !== "terminal" && mainView !== "overview" && (isMobile || mainView === "audit") && <header className="flex h-12 shrink-0 min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
+        {(mainView === "machine" || mainView === "app") && isMobile && <header className="flex h-12 shrink-0 min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
 
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
-            {isMobile && <IconButton label={t("org.back")} className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "app" ? showOverview : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}
-            <button type="button" onClick={showOverview} aria-label={t("app.back_to_workspace_overview")} className="hidden truncate rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? t("app.organization") : workspace?.name ?? t("app.workspace")}</button><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "organization" || mainView === "workspace" ? t("settings.title") : mainView === "app" ? selectedApp?.name ?? t("apps.app") : mainView === "audit" ? t("audit.audit") : mainView === "machine" ? machineName(selectedMachine, selectedMachineId ?? "") : t("machine.terminal")}</strong></div>
-          {mainView === "audit" ? <IconButton label={t("app.refresh_audit")} onClick={refreshAudit} disabled={auditLoading}><RotateCw /></IconButton> : null}
+            {isMobile && <IconButton label={t("org.back")} className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : showOverview}><ChevronLeft /></IconButton>}
+            <button type="button" onClick={showOverview} aria-label={t("app.back_to_workspace_overview")} className="hidden truncate rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring sm:block">{workspace?.name ?? t("app.workspace")}</button><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "app" ? selectedApp?.name ?? t("apps.app") : machineName(selectedMachine, selectedMachineId ?? "")}</strong></div>
         </header>}
         <div className={cn("relative min-h-0 flex-1", mainView !== "overview" && mainView !== "terminal" && "hidden")}>
           <div id="workspace-panel-overview" role="tabpanel" aria-labelledby={isMobile ? undefined : "workspace-tab-overview"} aria-label={isMobile ? t("app.overview") : undefined} hidden={mainView !== "overview"} className="absolute inset-0 overflow-auto">
@@ -1163,20 +1228,19 @@ function WorkspaceAppContent() {
             </div>
           })}
         </div>
-        {mainView !== "overview" && mainView !== "terminal" && <div className="min-h-0 flex-1 overflow-auto">{mainView === "organization" ? <OrganizationSettingsView organization={organization} name={organizationName} workspaces={workspaces} selectedWorkspaceId={workspaceId} members={members} groups={groups} groupName={groupName} canManage={canManageMembers} currentRole={currentRole} onNameChange={setOrganizationName} onRename={renameOrganization} onCreateOrganization={() => { setCreateOrganizationName(""); setCreateOrganizationOpen(true) }} onCreateWorkspace={() => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) }} onSelectWorkspace={(selectedWorkspaceId) => { selectWorkspace(selectedWorkspaceId); closeMainView() }} onInvite={createInvite} onMemberRoleChange={updateMemberRole} onRemoveMember={removeMember} onGroupNameChange={setGroupName} onCreateGroup={createGroup} onDeleteGroup={deleteGroup} onSetGroupMember={setGroupMember} onOpenAudit={openAudit} onClose={closeMainView} /> : mainView === "workspace" ? <WorkspaceSettingsView agents={snapshot?.agents ?? []} key={workspaceId} workspace={workspace} organization={organization} name={workspaceName} machines={snapshot?.servers ?? []} machineCount={workspaceMachineCount} profiles={launchProfiles} profilesLoading={launchProfilesLoading} apps={apps} onPolicyAppInstalled={(app) => setApps((current) => [...current.filter((item) => item.app_id !== app.app_id), app].sort((left, right) => left.name.localeCompare(right.name)))} canDelete={canManageMembers} preview={preview} onNameChange={setWorkspaceName} onRename={renameWorkspace} onAddMachine={openInstall} onOpenMachine={(machine) => showMachineOverview(machine.server_id)} onRenameMachine={(machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDeleteMachine={(machine) => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onCopy={copy} onRefreshProfiles={loadLaunchProfiles} onNewProfile={openNewLaunchProfile} onEditProfile={openEditLaunchProfile} onLaunchProfile={openLaunchProfile} onDeleteProfile={setDeletingProfile} onDelete={() => setDeleteWorkspaceOpen(true)} onClose={closeMainView} /> : mainView === "app" ? <AppSettingsView app={selectedApp} machine={selectedAppMachine} onOpen={openAppExternal} onAccess={updateAppAccess} onAction={appLifecycle} onDelete={setDeletingApp} onClose={showOverview} onCopy={copy} /> : mainView === "machine" ? <MachineOverviewView key={`${user.user_id}/${workspaceId}/${selectedMachineId}`} machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMachineOverview} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} workspaceId={workspaceId!} refreshRevision={auditRefreshRevision} agents={snapshot?.agents ?? []} machines={snapshot?.servers ?? []} loading={auditLoading} /> : null}</div>}
+        {mainView !== "overview" && mainView !== "terminal" && <div className="min-h-0 flex-1 overflow-auto">{mainView === "app" ? <AppSettingsView app={selectedApp} machine={selectedAppMachine} onOpen={openAppExternal} onAccess={updateAppAccess} onAction={appLifecycle} onDelete={setDeletingApp} onClose={showOverview} onCopy={copy} /> : mainView === "machine" ? <MachineOverviewView key={`${user.user_id}/${workspaceId}/${selectedMachineId}`} machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMachineOverview} onCopy={copy} onRename={(machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDelete={(machine) => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} /> : null}</div>}
 
       </section>
     </main>
+    </div>
 
+    <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} items={paletteItems} />
     <ErrorToast message={error} onDismiss={() => setError(null)} />
 
     <WorkspaceDialogs state={dialogState}
       creationFailure={creationFailure}
       reservationCleaned={reservationCleaned}
       onReservationCleaned={() => { setCreationFailure(null); setCreateAgentError(""); setReservationCleaned(true) }}
-      user={user}
-      setUser={setUser}
-      showError={showError}
       createOrganization={createOrganization}
       organization={organization}
       createWorkspace={createWorkspace}
@@ -1197,9 +1261,8 @@ function WorkspaceAppContent() {
       uploadScopeActive={route.workspaceId === workspaceId && route.organizationId === organizationId}
       selectedAgentMachine={uploadMachine}
       confirmDelete={confirmDelete}
-      workspaceMachineCount={workspaceMachineCount}
       workspace={workspace}
-      confirmDeleteWorkspace={confirmDeleteWorkspace}
+      user={user}
     />
   </TooltipProvider>
 }

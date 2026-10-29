@@ -10,7 +10,9 @@ export default function App() {
     <Route path="/admin" element={<AdminPanel />} />
     {/* The splat carries an optional /workloads/:id; one route keeps WorkspaceApp mounted while the URL follows the selection. */}
     <Route path="/orgs/:organizationId/workspaces/:workspaceId/*" element={<WorkspaceApp />} />
-    <Route path="/orgs/:organizationId" element={<WorkspaceApp />} />
+    {/* Settings pages are real routes of the same shell: /settings/*, /orgs/:o/settings/*, /orgs/:o/workspaces/:w/settings/*. */}
+    <Route path="/orgs/:organizationId/*" element={<WorkspaceApp />} />
+    <Route path="/settings/*" element={<WorkspaceApp />} />
     <Route path="*" element={<WorkspaceApp />} />
   </Routes>
 }

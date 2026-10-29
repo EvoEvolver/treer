@@ -4,7 +4,7 @@ import { t } from "@/i18n"
 
 export type TerminalState = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
 
-export type MainView = "overview" | "terminal" | "app" | "audit" | "machine" | "organization" | "workspace"
+export type MainView = "overview" | "terminal" | "app" | "machine"
 
 export type RenameTarget = { kind: "machine" | "agent"; id: string; name: string } | null
 
