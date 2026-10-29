@@ -411,7 +411,9 @@ test('the sidebar shows only what runs in the workspace', async ({ page }) => {
   await mockHub(page)
   await page.goto('/orgs/org-acme/workspaces/ws-main')
   const sidebar = page.locator('#tree-sidebar')
-  await expect(sidebar.getByRole('button', { name: 'Workspace overview' })).toBeVisible()
+  // Overview is the pinned tab and search is the top bar's Cmd/Ctrl+K; the sidebar has neither.
+  await expect(sidebar.getByRole('button', { name: 'Workspace overview' })).toHaveCount(0)
+  await expect(sidebar.getByRole('searchbox')).toHaveCount(0)
   await expect(sidebar.getByRole('tree', { name: 'Workspace workloads' })).toBeVisible()
   await expect(sidebar.getByRole('button', { name: /^Machines/ })).toHaveAttribute('aria-expanded', 'false')
   await expect(sidebar.getByRole('button', { name: 'Workspace settings' })).toBeVisible()

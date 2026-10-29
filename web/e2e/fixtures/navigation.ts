@@ -5,9 +5,9 @@ import type { Page } from '@playwright/test'
 export async function browseTreeOnMobile(page: Page) {
   if ((page.viewportSize()?.width ?? 1280) >= 768 || new URL(page.url()).hash === "#policy-provider") return
   // CSS changes immediately on resize, while matchMedia/React may still render
-  // the desktop sidebar. Wait for the React-only mobile button to be mounted;
-  // includeHidden also covers an already-open Tree that hides the main pane.
-  await page.getByRole('button', { name: 'Browse tree', exact: true, includeHidden: true }).waitFor({ state: 'attached' })
+  // the desktop sidebar. Wait for the React-only mobile button to be mounted.
+  // The button reads "Close tree" once the Tree is already open.
+  await page.getByRole('button', { name: /^(Browse|Close) tree$/, includeHidden: true }).waitFor({ state: 'attached' })
   const destination = page.getByRole('button', { name: 'Browse tree', exact: true })
     .or(page.locator('#tree-sidebar:visible'))
     .or(page.getByRole('button', { name: 'Back', exact: true }))
@@ -21,8 +21,11 @@ export async function browseTreeOnMobile(page: Page) {
 
 // The map belongs to Overview, independently of the mobile Tree's visibility.
 export async function openOverviewMap(page: Page) {
-  const overview = page.getByRole('button', { name: 'Workspace overview', exact: true })
-  if (await overview.isVisible()) await overview.click()
+  // Phones close the Tree above Overview; desktop selects the pinned Overview tab.
+  const closeTree = page.getByRole('button', { name: 'Close tree', exact: true })
+  const overviewTab = page.getByRole('tab', { name: 'Tab Overview', exact: true })
+  if (await closeTree.isVisible()) await closeTree.click()
+  else if (await overviewTab.isVisible()) await overviewTab.click()
   await page.getByRole('heading', { name: 'Workspace overview', exact: true }).waitFor({ state: 'visible' })
   await page.getByRole('button', { name: 'Expand tree map', exact: true }).click()
 }

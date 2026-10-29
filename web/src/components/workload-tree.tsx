@@ -15,19 +15,14 @@ import { readFolderExpansion, writeFolderExpansion, type FolderExpansion } from 
 import { AgentStartupDialog } from "@/components/agent-startup-dialog"
 
 import { WorkloadIcon } from "@/components/workload-icon"
-import { matches } from "@/components/sidebar-sections"
 import { t } from "@/i18n"
 import { TreeCount, TreeGroup, TreeRow, TreeStatus, isAttention, isInactive, treeActionsClass, treeIndent, treeStatus } from "@/components/tree-row"
 import { workloadLinkProps } from "@/lib/workload-link"
 
-// Marker in a render ancestor set: an enclosing folder matched the search, so show all of its contents.
-const MATCHED = "\u0000matched"
 export interface NewAgentFolder { folderId: string; path: string }
 type Item = { kind: "folder" | "agent"; id: string; name: string }
 
-export function WorkloadTree({ pins, workspaceId, agents, apps, machines, selectedId, onOpen, workloadHref, onOpenInNewTab, onSettings, onRename, onDelete, onNew, onAddMachine, preview, placementRevision = 0, onTreeChange, prewarm, appTree, query = "" }: {
-  /** Sidebar search: shows matching rows and the folders that contain them. */
-  query?: string
+export function WorkloadTree({ pins, workspaceId, agents, apps, machines, selectedId, onOpen, workloadHref, onOpenInNewTab, onSettings, onRename, onDelete, onNew, onAddMachine, preview, placementRevision = 0, onTreeChange, prewarm, appTree }: {
   appTree?: AppTreeNavigation
   prewarm?: { enter: (id: string, intent: 'pointer' | 'focus') => void; leave: (id: string) => void }
   pins: PinsController; workspaceId: string | null; agents: Agent[]; apps: AppDeployment[]; machines: Machine[]; selectedId: string | null
@@ -348,22 +343,11 @@ export function WorkloadTree({ pins, workspaceId, agents, apps, machines, select
       onDragEnd: () => { setDragged(null); setDropTarget(null); setDropFolder(null) },
     }
   }
-  const searching = query.trim() !== ""
-  const agentMatches = (agent: Agent) => matches(query, agent.name, agentPath(agent, tree))
-  function folderMatches(folderId: string, seen: Set<string>): boolean {
-    const folder = tree.folders.find((entry) => entry.folder_id === folderId)
-    if (!folder || seen.has(folderId)) return false
-    seen.add(folderId)
-    return matches(query, folder.name) || orderedRows(folderId).some(agentMatches) || childFolders(folderId, seen).some((child) => folderMatches(child.folder_id, seen))
-  }
   function render(parent: string | null, ancestors: Set<string> = new Set()): React.ReactNode {
     const depth = ancestors.size
-    // While searching, a folder whose name matches shows everything inside it.
-    const showAll = !searching || (parent !== null && ancestors.has(MATCHED))
-    return <>{childFolders(parent, ancestors).filter((folder) => showAll || folderMatches(folder.folder_id, new Set(ancestors))).map((folder) => {
-      const named = searching && !showAll && matches(query, folder.name)
+    return <>{childFolders(parent, ancestors).map((folder) => {
       const item: Item = { kind: "folder", id: folder.folder_id, name: folder.name }
-      const open = searching || expanded[folder.folder_id] === true
+      const open = expanded[folder.folder_id] === true
       const summary = open ? null : hidden(folder.folder_id, new Set(ancestors))
       const summaryText = summary && [summary.attention && t("tree.hidden_attention", { count: summary.attention }), summary.working && t("tree.hidden_working", { count: summary.working })].filter(Boolean).join(", ")
       return <div key={folder.folder_id} role="treeitem" aria-level={depth + 1} aria-expanded={open} aria-label={folder.name} aria-description={summaryText || undefined}>
@@ -381,10 +365,10 @@ export function WorkloadTree({ pins, workspaceId, agents, apps, machines, select
             onDrop: (event) => { event.preventDefault(); event.stopPropagation(); if (dragged) move(dragged, folder.folder_id); setDragged(null); setDropFolder(null) },
           }} />
         {open && <TreeGroup depth={depth + 1}>{tree.folders.some((entry) => entry.parent_id === folder.folder_id) || orderedRows(folder.folder_id).length
-          ? render(folder.folder_id, new Set([...ancestors, folder.folder_id, ...(named || (searching && showAll) ? [MATCHED] : [])]))
+          ? render(folder.folder_id, new Set([...ancestors, folder.folder_id]))
           : <p className="flex h-7 items-center text-xs text-muted-foreground max-md:h-9" style={{ paddingLeft: treeIndent(depth + 1) + 22 }}>{t("tree.empty_folder")}</p>}</TreeGroup>}
       </div>
-    })}{orderedRows(parent).filter((agent) => showAll || agentMatches(agent)).map((agent) => {
+    })}{orderedRows(parent).map((agent) => {
       const item: Item = { kind: "agent", id: agent.agent_id, name: agent.name }
       const status = statusOf(agent)
       const ownedApps = appTree && workspaceId && !preview ? apps.filter((app) => (app.runtime_agent_id ?? app.app_id) === agent.agent_id && treeApps.has(app.app_id)) : []
@@ -432,7 +416,6 @@ export function WorkloadTree({ pins, workspaceId, agents, apps, machines, select
   }
   const empty = treeLoaded && !tree.folders.length && !workloads.length
   const canAddAgent = Boolean(workspaceId) && (preview || machines.length === 0 || machines.some((machine) => machine.status === "online"))
-  const nothingFound = searching && treeLoaded && !tree.folders.some((folder) => folder.parent_id === null && folderMatches(folder.folder_id, new Set())) && !orderedRows(null).some(agentMatches)
   return <div className="flex flex-col" data-tour="agents-tab">
     {startupAgent && workspaceId && <AgentStartupDialog key={`${workspaceId}/${startupAgent.agent_id}`} workspaceId={workspaceId} agent={{ ...startupAgent, path: agentPath(startupAgent, tree) }} onClose={() => setStartupAgent(null)} onSaved={() => setCopyNotice(`Saved startup command and restarted ${agentPath(startupAgent, tree)}`)} />}
     <div className="sticky top-0 z-[3] flex h-8 shrink-0 items-center justify-between bg-sidebar pl-4 pr-2 max-md:h-11">
@@ -451,7 +434,6 @@ export function WorkloadTree({ pins, workspaceId, agents, apps, machines, select
     <div ref={treeRoot} role="tree" aria-label={t("tree.workspace_workloads")} aria-busy={busy || loading} onKeyDown={treeKeyDown} onFocus={trackTreeFocus} className="flex flex-col px-2 pb-3" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (dragged) move(dragged, null); setDragged(null); setDropFolder(null) }}>
       {loading && !treeLoaded && <p role="status" className="px-2 py-1 text-xs text-muted-foreground">{t("tree.loading_folders")}</p>}
       {render(null)}
-      {nothingFound && <p role="status" className="px-2 py-2 text-xs text-muted-foreground">{t("sidebar.no_matches", { query: query.trim() })}</p>}
       {empty && machines.length > 0 && <div className="px-2 py-3 text-xs text-muted-foreground"><p>{t("tree.no_workloads_in_this_workspace")}</p>{canAddAgent && <Button variant="outline" size="sm" className="mt-2 h-7 max-md:h-11" onClick={() => onNew()}><Plus />{t("overview.add_agent")}</Button>}</div>}
       {/* The whole tree background accepts a drop to the root; while dragging, say so. */}
       {dragged && <div aria-hidden="true" className="mt-1 grid min-h-9 flex-1 place-items-center rounded-md border border-dashed border-muted-foreground/50 text-[11px] text-muted-foreground">{t("tree.move_to_workspace_root")}</div>}

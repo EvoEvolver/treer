@@ -30,13 +30,13 @@ test('Browse tree waits for the React mobile layout after CSS has already resize
     await browseTreeOnMobile(page)
     // Read the committed layout at return time, rather than retrying until the
     // delayed render hides the helper's premature return.
-    expect(await page.getByRole('button', { name: 'Browse tree', exact: true, includeHidden: true }).count()).toBe(1)
+    expect(await page.getByRole('button', { name: /^(Browse|Close) tree$/, includeHidden: true }).count()).toBe(1)
     await expect(page.locator('#tree-sidebar')).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Workspace overview', exact: true })).toBeHidden()
     // Already-open Tree is also a valid completed destination.
     await browseTreeOnMobile(page)
     await expect(page.locator('#tree-sidebar')).toBeVisible()
     await page.setViewportSize({ width: 1280, height: 900 })
-    await expect(page.getByRole('button', { name: 'Browse tree', exact: true, includeHidden: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /^(Browse|Close) tree$/, includeHidden: true })).toHaveCount(0)
   }
 })

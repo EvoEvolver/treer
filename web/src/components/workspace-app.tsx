@@ -35,7 +35,7 @@ import { useWorkspaceMetrics } from "@/components/use-workspace-metrics"
 import { useWorkspaceRoute } from "@/components/use-workspace-route"
 import { WorkloadTree,type NewAgentFolder } from "@/components/workload-tree"
 import { workspaceWorkloads } from "@/lib/workspace-workloads"
-import { MachinesSection, SidebarSearch } from "@/components/sidebar-sections"
+import { MachinesSection } from "@/components/sidebar-sections"
 import { useWorkspaceDialogState } from "@/components/workspace-dialog-state"
 import { WorkspaceDialogs } from "@/components/workspace-dialogs"
 import { ApiError,api,machineName,proxyUrl,type Agent,type AgentLaunchProfile,type AppDeployment,type Machine,type Organization,type Snapshot,type User,type WorkloadTreeState,type Workspace } from "@/lib/api"
@@ -51,7 +51,6 @@ Bot,
 ChevronLeft,
 ChevronRight,
 FolderKanban,
-LayoutDashboard,
 Monitor,
 PanelLeftClose,
 RotateCw,
@@ -112,8 +111,6 @@ function WorkspaceAppContent() {
   const uploadMachine = snapshot?.servers.find((machine) => machine.server_id === uploadAgent?.server_id)
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
-  const [sidebarQuery, setSidebarQuery] = useState("")
-  useEffect(() => { setSidebarQuery("") }, [workspaceId])
   const [appNodeIntent, setAppNodeIntent] = useState<{ workspaceId: string | null; ownerId: string; endpoint: string } | null>(null)
   const [selectedAppId, setSelectedAppId] = useState<string | null>(null)
   const [preparedCreated, setPreparedCreated] = useState(false)
@@ -453,6 +450,14 @@ function WorkspaceAppContent() {
         ?? sidebar.querySelector<HTMLElement>('[data-tree-primary]') ?? sidebar.querySelector<HTMLElement>("button")
       target?.focus()
     })
+  }
+
+  // The phone Tree keeps the tab bar above it; closing returns to the page underneath.
+  function closeMobileTree() {
+    if (mainView === "terminal" && selectedAgentId) {
+      setMobileTreeOpen(false)
+      openMobileTerminal()
+    } else showOverview()
   }
 
   function closeMobileSurface() {
@@ -1172,17 +1177,13 @@ function WorkspaceAppContent() {
         workspace={{ renameWorkspace, addMachine: () => void openInstall(), openMachine: openMachineFromSettings, renameMachine: (machine: Machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) }), removeMachines,
           policyAppInstalled: (app) => setApps((current) => [...current.filter((item) => item.app_id !== app.app_id), app].sort((left, right) => left.name.localeCompare(right.name))),
           refreshProfiles: () => void loadLaunchProfiles().catch(showError), newProfile: openNewLaunchProfile, editProfile: openEditLaunchProfile, launchProfile: openLaunchProfile, deleteProfile: setDeletingProfile, workspaceDeleted: (id) => void workspaceDeleted(id) }} />}
-      <main style={treeWidth.style} className={cn("grid min-h-0 flex-1 bg-background md:grid-cols-[var(--tree-width)_var(--tree-divider)_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden", treeWidth.dragging && "select-none cursor-col-resize", mobileTerminalIdle || mobileSidebarHidden ? "grid-rows-1 overflow-hidden" : "grid-rows-[374px_minmax(620px,1fr)] overflow-auto", focusedId && "grid-cols-1 grid-rows-1 overflow-hidden md:grid-cols-1", settingsRoute && "hidden md:hidden")}>
+      <main style={treeWidth.style} className={cn("grid min-h-0 flex-1 bg-background md:grid-cols-[var(--tree-width)_var(--tree-divider)_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden", treeWidth.dragging && "select-none cursor-col-resize", mobileTerminalIdle ? "grid-rows-[auto_minmax(0,1fr)] overflow-hidden" : mobileSidebarHidden ? "grid-rows-1 overflow-hidden" : "grid-rows-[374px_minmax(620px,1fr)] overflow-auto", focusedId && "grid-cols-1 grid-rows-1 overflow-hidden md:grid-cols-1", settingsRoute && "hidden md:hidden")}>
         <aside id="tree-sidebar" className={cn("flex min-h-0 min-w-0 flex-col border-b bg-sidebar md:border-b-0", mobileSidebarHidden && "hidden md:flex", treeWidth.collapsed && "md:invisible md:overflow-hidden", focusedId && "hidden md:hidden")}>
         {preview && <div className="treer-tour-banner"><span>{t("app.tour_preview_empty_first_run")}</span></div>}
-        <nav aria-label={t("app.workspace")} className="px-2 pb-2">
-          <button type="button" aria-label={t("app.workspace_overview")} aria-current={mainView === "overview" ? "page" : undefined} onClick={showOverview} className={cn("flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring motion-reduce:transition-none max-md:h-11 [@media(pointer:coarse)]:h-11", mainView === "overview" && "bg-primary/10 font-medium hover:bg-primary/10 dark:bg-primary/20 dark:hover:bg-primary/20")}><LayoutDashboard aria-hidden="true" className={cn("size-4", mainView === "overview" ? "text-primary" : "text-muted-foreground")} />{t("app.overview")}</button>
-        </nav>
-        {workspaceId && <SidebarSearch value={sidebarQuery} onChange={setSidebarQuery} />}
         {/* One scroll region: the Tree, then the machines that run it. */}
         <div className="thin-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-          {workspaceId && <WorkloadTree appTree={{ scope: JSON.stringify([user.user_id, authEpoch, workspaceId]), selected: selectedNodeApp && appEndpoint !== null ? { ownerId: selectedAgentId!, path: appEndpoint.split("/") } : null, open: openAppNode, href: appNodeHref }} prewarm={embedPrewarm} pins={pins} key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} workloadHref={workloadHref} onOpenInNewTab={openInNewTab} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} onAddMachine={() => void openInstall()} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} query={sidebarQuery} />}
-          {workspaceId && Boolean(snapshot?.servers.length) && <MachinesSection machines={snapshot?.servers ?? []} agents={snapshot?.agents ?? []} query={sidebarQuery} selectedId={mainView === "machine" ? selectedMachineId : null} onOpen={showMachineOverview} onAdd={() => void openInstall()} />}
+          {workspaceId && <WorkloadTree appTree={{ scope: JSON.stringify([user.user_id, authEpoch, workspaceId]), selected: selectedNodeApp && appEndpoint !== null ? { ownerId: selectedAgentId!, path: appEndpoint.split("/") } : null, open: openAppNode, href: appNodeHref }} prewarm={embedPrewarm} pins={pins} key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} workloadHref={workloadHref} onOpenInNewTab={openInNewTab} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} onAddMachine={() => void openInstall()} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />}
+          {workspaceId && Boolean(snapshot?.servers.length) && <MachinesSection machines={snapshot?.servers ?? []} agents={snapshot?.agents ?? []} selectedId={mainView === "machine" ? selectedMachineId : null} onOpen={showMachineOverview} onAdd={() => void openInstall()} />}
         </div>
 
         {/* Settings live in the top bar and the settings pages; the sidebar only shows what runs here. */}
@@ -1193,8 +1194,8 @@ function WorkspaceAppContent() {
       </aside>
       {!focusedId && <TreeResizer settings={treeWidth} />}
 
-      <section className={cn("min-h-0 min-w-0 flex-col", treeWidth.dragging && "pointer-events-none", mobileTerminalIdle ? "hidden md:flex" : "flex")}>
-        {focusedId ? <WorkloadFocusBar path={tabLabels.get(focusedId)?.path ?? focusedId} status={tabLabels.get(focusedId)?.agent.status ? statusLabel(tabLabels.get(focusedId)!.agent.status) : undefined} consoleHref={workloadPath(organizationId, workspaceId, focusedId)} onOpenConsole={() => routingRef.current.navigate({ pathname: location.pathname, search: "", hash: location.hash })} /> : <WorkspaceTabBar key={`${user.user_id}:${workspaceId}`} tabs={tabs.tabs} labels={tabLabels} activeId={mainView === "overview" ? OVERVIEW_TAB : mainView === "terminal" ? selectedAgentId : null} limit={tabs.limit} liveCount={tabs.liveCount} mobile={isMobile} onOpen={selectTab} onClose={closeTab} actions={tabActions} onAction={tabAction} onCloseMany={closeTabs} onBrowseTree={browseMobileTree} sidebarCollapsed={treeWidth.collapsed} expandRef={treeWidth.expandRef} onExpandSidebar={treeWidth.toggle} />}
+      <section className={cn("min-h-0 min-w-0 flex-col", treeWidth.dragging && "pointer-events-none", mobileTerminalIdle ? "order-first flex md:order-none max-md:[&>*:not(:first-child)]:hidden" : "flex")}>
+        {focusedId ? <WorkloadFocusBar path={tabLabels.get(focusedId)?.path ?? focusedId} status={tabLabels.get(focusedId)?.agent.status ? statusLabel(tabLabels.get(focusedId)!.agent.status) : undefined} consoleHref={workloadPath(organizationId, workspaceId, focusedId)} onOpenConsole={() => routingRef.current.navigate({ pathname: location.pathname, search: "", hash: location.hash })} /> : <WorkspaceTabBar key={`${user.user_id}:${workspaceId}`} tabs={tabs.tabs} labels={tabLabels} activeId={mainView === "overview" ? OVERVIEW_TAB : mainView === "terminal" ? selectedAgentId : null} limit={tabs.limit} liveCount={tabs.liveCount} mobile={isMobile} onOpen={selectTab} onClose={closeTab} actions={tabActions} onAction={tabAction} onCloseMany={closeTabs} onBrowseTree={browseMobileTree} treeOpen={mobileTerminalIdle} onCloseTree={closeMobileTree} sidebarCollapsed={treeWidth.collapsed} expandRef={treeWidth.expandRef} onExpandSidebar={treeWidth.toggle} />}
         <p role="status" className="sr-only">{tabNotice}</p>
         {preparedCreated && <p role="status" className="px-4 py-2 text-sm">{t("prepared.created")} {t(`sessionCopy.${preparedReadiness}`)}</p>}
         {/* Pages carry their own title and Close; the bar stays for the phone back button and audit refresh. */}
