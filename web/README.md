@@ -160,27 +160,20 @@ workload):
 ### Sidebar
 
 The sidebar shows only what runs in the workspace: **Overview**, a filter
-box, **Needs attention**, the **Tree**, then **Machines** (collapsed by
-default), in one scroll region with sticky section headings
-(`sidebar-sections.tsx`), and a labeled **Workspace settings** link with the
-collapse button at the bottom.
+box, the **Tree**, then **Machines** (collapsed by default), in one scroll
+region with sticky section headings (`sidebar-sections.tsx`), and a labeled
+**Workspace settings** link with the collapse button at the bottom. There is
+no separate attention inbox: problems show as status icons on Tree rows and
+collapsed-folder counts, and triage lives on the Overview board.
 
 - The filter ("/" focuses it) narrows the Tree by name or path, showing
-  matches with their folders expanded, and also filters the attention list
-  and machines. Escape clears; ArrowDown enters the rows.
-- **Needs attention** is the triage inbox: blocked and failed Agents (flat,
-  with their folder), then one row per offline machine ("build-node offline ·
-  N Agents down", opens the machine page), then Agents that **finished**: this
-  browser saw them go from working to idle/exited while they were not open
-  (kept per workspace in localStorage, cleared on open; the API has no
-  per-user read state, so this only covers what the open Console observed).
-  First five rows, then "Show N more". On phones the **Browse tree** button
-  carries the row count.
+  matches with their folders expanded, and also filters machines. Escape
+  clears; ArrowDown enters the rows.
 - **Machines** lists each machine with its workload count and online/offline
   state; a row opens the machine page, **+** opens Add machine. With no
   machines the Tree shows a guide; it, the Overview card and "Add agent" all
   open the same Add machine dialog.
-- Attention and Machines collapse from their heading (remembered per browser).
+- Machines collapses from its heading (remembered per browser).
 
 ### Workspace Tree
 
@@ -246,7 +239,7 @@ blocks too small to target.
 ### Tabs, deep links and focus mode
 
 Tabs are the working set of open pages: switching keeps a page's terminal
-connection or interface draft alive, which search and the inbox cannot.
+connection or interface draft alive, which search cannot.
 Opening a workload opens or selects its tab. Overview is pinned. Hidden tabs
 stay mounted up to 6 live pages on desktop / 4 on phones; older ones unmount
 and reconnect when reselected (a reconnect icon marks them; the all-tabs menu
