@@ -11,6 +11,7 @@ import time
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 HERE = Path(__file__).resolve().parent
@@ -22,10 +23,11 @@ CALLER = 'agent:ag_caller'
 HUMAN = 'human:user_1'
 
 
-def handoff(job='j-0001', template='researcher', status='done', summary='Found it.'):
-    return (f'---\njob: {job}\ntemplate: {template}\nstatus: {status}\nsummary: {summary}\nbranch: feat/x\n'
+def handoff(job='j-0001', template='researcher', status='done', summary='Found it.', hub_='/agent_hub', extra='', body=''):
+    return (f'---\njob: {job}\n' + (f'hub: {hub_}\n' if hub_ else '') + f'template: {template}\nstatus: {status}\n'
+            f'summary: {summary}\n{extra}branch: feat/x\n'
             'commits: abc1234 0123456789abcdef\n---\n\n## What changed\nnothing\n\n## Verification\n'
-            'unit tests: 3 passed\n\n## Open questions\nnone\n\n## Next steps\nimplement it\n')
+            f'unit tests: 3 passed\n\n## Open questions\nnone\n\n## Next steps\nimplement it\n{body}')
 
 
 def gone(pid):
@@ -289,7 +291,7 @@ class HubTests(unittest.TestCase):
         chained = self.create('implementer', 'Implement the finding', handoffs=['j-0001'])
         self.until(lambda: self.prompts(chained['id']), 'chained prompt')
         text = self.prompts(chained['id'])[0]['text']
-        self.assertIn('## Input handoff j-0001 (researcher@1)', text)
+        self.assertIn('## Input handoff /agent_hub/j-0001 (researcher@1)', text)
         self.assertIn('unit tests: 3 passed', text)
         self.assertEqual(self.call('POST', 'api/jobs', {'template': 'implementer', 'task': 't', 'inputs': {'handoffs': ['j-0099']}})[0], 409)
 
@@ -311,6 +313,142 @@ class HubTests(unittest.TestCase):
         status, _ = self.call('POST', 'api/jobs/j-0001/handoff', {'markdown': handoff(status='blocked')}, token=HUMAN)
         self.assertEqual(status, 200)
         self.assertEqual(self.store.handoff('j-0001')['submitted_by'], 'user_1')
+
+    def test_handoffs_name_their_hub_and_reviewer_handoffs_carry_a_verdict(self):
+        self.running_job()
+        status, error = self.submit(markdown=handoff(hub_='/elsewhere'))
+        self.assertIn('`hub` must be /agent_hub', error['error']['message'])
+        status, error = self.submit(markdown=handoff(extra='verdict: maybe\n'))
+        self.assertIn('`verdict` must be approve or changes-needed', error['error']['message'])
+        self.assertEqual(self.submit(markdown=handoff(hub_=None))[0], 200)
+        markdown = self.call('GET', 'api/handoffs/j-0001?format=markdown', raw=True)[1]
+        self.assertTrue(markdown.startswith('---\nhub: /agent_hub\njob: j-0001\n'), 'the hub fills in its address')
+        status, view = self.call('GET', 'api/handoffs/j-0001')
+        self.assertEqual((view['hub'], view['ref'], view['address'], view['front']['hub']),
+                         ('/agent_hub', '/agent_hub/j-0001', '/agent_hub/jobs/j-0001', '/agent_hub'))
+        self.assertEqual(self.call('GET', 'api/handoffs')[1]['handoffs'][0]['ref'], '/agent_hub/j-0001')
+        # Reviewer jobs: verdict and implementer notes are required; the first prompt shows both.
+        review = self.running_job(template='reviewer', task='Review feat/x')
+        prompt = self.prompts(review['id'])[0]['text']
+        self.assertIn('verdict: changes-needed', prompt)
+        self.assertIn('## Notes for the implementer', prompt)
+        self.assertIn('hub: /agent_hub', prompt)
+        self.assertNotIn('verdict:', self.prompts()[0]['text'])
+        status, error = self.submit(job=review['id'], markdown=handoff(job=review['id'], template='reviewer'))
+        self.assertEqual(status, 400)
+        self.assertIn('`verdict` must be approve or changes-needed (required for reviewer jobs)', error['error']['message'])
+        self.assertIn('`## Notes for the implementer` is missing', error['error']['message'])
+        notes = '\n## Notes for the implementer\n1. app.py:10 handle None.\n'
+        self.assertEqual(self.submit(job=review['id'], markdown=handoff(
+            job=review['id'], template='reviewer', extra='verdict: changes-needed\n', body=notes))[0], 200)
+        job = self.call('GET', f"api/jobs/{review['id']}")[1]
+        self.assertEqual((job['handoff']['verdict'], job['handoff']['refs']['verdict']), ('changes-needed', 'changes-needed'))
+        self.assertEqual(hub.section(job['handoff']['markdown'], 'Notes for the implementer'), '1. app.py:10 handle None.')
+
+    def start_other_hub(self, address='/agent_hub_linux'):
+        """A second real hub (own store) and a fake workload proxy that reaches it as `svc_linux.treer`,
+        injecting the calling App's identity like the runtime proxy does."""
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        store = hub.Store(self.root / 'state-other')
+        hub.seed(store)
+        seen = []
+
+        def remember(headers):
+            seen.append(headers.get('X-Treer-Identity-Token'))
+            return authorize(headers)
+        other = hub.Hub(store, hub.Cli(str(self.treer)), {**self.config, 'address': address, 'base_url': 'http://svc_linux.treer/',
+                                                         'jobs_root': str(self.root / 'state-other' / 'jobs')})
+        http = hub.server(other, '127.0.0.1', 0, remember)
+        other.config['hub_url'] = f'http://127.0.0.1:{http.server_address[1]}'
+        threading.Thread(target=http.serve_forever, daemon=True).start()
+        self.hubs.append((other, http))
+        self.addCleanup(store.close)
+        services = {'svc_linux.treer': http.server_address[1]}
+        proxied = []
+
+        class Proxy(BaseHTTPRequestHandler):
+            def do_GET(self):
+                url = urlsplit(self.path)
+                proxied.append(self.path)
+                if url.hostname == 'svc_html.treer':
+                    return self.answer(200, b'<html>not a hub</html>')
+                if url.hostname not in services:
+                    return self.answer(502, b'{"error":{"code":"service_unreachable","message":"no route"}}')
+                try:
+                    with urlopen(Request(f'http://127.0.0.1:{services[url.hostname]}{url.path}?{url.query}',
+                                         headers={'X-Treer-Identity-Token': 'agent:app_hub', 'Accept': self.headers['Accept']})) as r:
+                        self.answer(r.status, r.read())
+                except HTTPError as error:
+                    self.answer(error.code, error.read())
+
+            def answer(self, status, raw):
+                self.send_response(status)
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *_):
+                pass
+        proxy = ThreadingHTTPServer(('127.0.0.1', 0), Proxy)
+        threading.Thread(target=proxy.serve_forever, daemon=True).start()
+        self.addCleanup(proxy.server_close)
+        self.addCleanup(proxy.shutdown)
+        os.environ.update({'http_proxy': f'http://127.0.0.1:{proxy.server_address[1]}', 'no_proxy': '127.0.0.1,localhost'})
+        os.environ.pop('HTTP_PROXY', None)
+        self.edit(lambda st: st.update(apps={'/agent_hub_linux': {'service_id': 'svc_linux', 'name': 'agent_hub_linux'},
+                                             '/agent_hub_html': {'service_id': 'svc_html'},
+                                             '/agent_hub_gone': {'service_id': 'svc_gone'},
+                                             '/agent_hub_bad': {'service_id': 'svc_x.evil.example/'}}))
+        return other, f'http://127.0.0.1:{http.server_address[1]}/', seen, proxied
+
+    def test_cross_hub_handoff_references_are_fetched_once_and_embedded(self):
+        other, other_base, seen, proxied = self.start_other_hub()
+        other.config['concurrency'] = 0
+        status, job = self.call('POST', 'api/jobs', {'template': 'implementer', 'task': 'linux work'}, base=other_base)
+        self.assertEqual((status, job['id'], job['address'], job['hub']), (201, 'j-0001', '/agent_hub_linux/jobs/j-0001', '/agent_hub_linux'))
+        remote_text = handoff(template='implementer', summary='Linux branch ready.', hub_='/agent_hub_linux')
+        self.assertEqual(self.call('POST', 'api/jobs/j-0001/handoff', {'markdown': remote_text}, token=HUMAN, base=other_base)[0], 200)
+        # A local job with the same id exists on this hub too: only the hub path tells them apart.
+        local = self.running_job(task='mac work')
+        self.assertEqual(self.submit(markdown=handoff(summary='Mac findings.'))[0], 200)
+        self.until(lambda: self.store.job(local['id'])['status'] == 'archived', 'archived')
+        for ref in ('/agent_hub_linux/j-0001', 'agent_hub_linux/j-0001', '/agent_hub_linux/jobs/j-0001'):
+            self.assertEqual(hub.handoff_ref(ref, '/agent_hub'), ('/agent_hub_linux', 'j-0001'))
+        self.assertEqual(hub.handoff_ref('/agent_hub/j-0001', '/agent_hub'), (None, 'j-0001'))
+        self.assertIsNone(hub.handoff_ref('/agent_hub_linux/x-1', '/agent_hub'))
+        self.edit(lambda st: st.update(calls=[]))
+        job = self.create(template='reviewer', task='Review the linux branch',
+                          handoffs=['j-0001', 'agent_hub_linux/jobs/j-0001'])
+        self.assertEqual(job['inputs']['handoffs'], ['j-0001', '/agent_hub_linux/j-0001'])
+        self.assertEqual(list(job['remote_handoffs']), ['/agent_hub_linux/j-0001'])
+        self.assertEqual(job['remote_handoffs']['/agent_hub_linux/j-0001']['service_id'], 'svc_linux')
+        self.assertIn(['app', 'show', '/agent_hub_linux'], self.fake()['calls'])
+        self.assertEqual(proxied, ['http://svc_linux.treer/api/handoffs/j-0001?format=markdown'])
+        self.assertEqual(seen[-1], 'agent:app_hub', 'the other hub accepted the calling App (an Agent identity)')
+        self.until(lambda: self.store.job(job['id'])['status'] == 'running', 'running')
+        prompt = self.prompts(job['id'])[0]['text']
+        self.assertIn('## Input handoff /agent_hub/j-0001 (researcher@1)', prompt)
+        self.assertIn('Mac findings.', prompt)
+        self.assertIn('## Input handoff /agent_hub_linux/j-0001 (implementer; from hub /agent_hub_linux)', prompt)
+        self.assertIn(remote_text.strip(), prompt)
+        self.assertEqual(len(proxied), 1, 'fetched once at creation, not again when the worker starts')
+        # The same handoff named twice (two spellings) is refused like any duplicate.
+        status, error = self.call('POST', 'api/jobs', {'template': 'researcher', 'task': 'x', 'inputs': {
+            'handoffs': ['/agent_hub_linux/j-0001', 'agent_hub_linux/j-0001']}})
+        self.assertEqual(status, 400)
+        for ref, why in (('/agent_hub_linux/j-0009', 'answered HTTP 404 job j-0009 not found'),
+                         ('/agent_hub_missing/j-0001', 'no App /agent_hub_missing'),
+                         ('/agent_hub_gone/j-0001', 'answered HTTP 502'),
+                         ('/agent_hub_html/j-0001', 'did not return a hub handoff for j-0001'),
+                         ('/agent_hub_bad/j-0001', 'has no service')):
+            status, error = self.call('POST', 'api/jobs', {'template': 'researcher', 'task': 'x', 'inputs': {'handoffs': [ref]}})
+            self.assertEqual((status, error['error']['code']), (400, 'input_handoff_unresolved'), ref)
+            self.assertIn(f'input handoff {ref}: ', error['error']['message'])
+            self.assertIn(why, error['error']['message'])
+        status, error = self.call('POST', 'api/jobs', {'template': 'researcher', 'task': 'x', 'inputs': {'handoffs': ['../j-1']}})
+        self.assertEqual((status, error['error']['code']), (400, 'invalid_inputs'))
+        self.assertEqual(self.call('POST', 'api/jobs', {'template': 'researcher', 'task': 'x', 'inputs': {
+            'handoffs': ['/agent_hub/j-0042']}})[0], 409, 'this hub\'s own address is a local reference')
 
     def test_large_job_descriptions_go_through_a_file(self):
         self.running_job(task='T' * 60000, notes='N' * 30000)
@@ -674,6 +812,8 @@ class HubTests(unittest.TestCase):
         self.assertIn('id="worker"', page, 'the job page embeds the worker UI')
         with urlopen(self.base + 'health') as r:
             self.assertEqual(json.loads(r.read()), {'ok': True})
+        with urlopen(self.base + 'api/handoff-format?template=reviewer') as r:
+            self.assertIn('verdict: changes-needed', r.read().decode())
 
 
 if __name__ == '__main__':

@@ -2,7 +2,8 @@
 """Synthetic `treer` CLI for the Agent Hub tests: a JSON state file, no Core.
 
 Workers are the hub's own child processes, so the hub only uses the CLI for
-Core Messages, requester wake-ups, discovery and deleting a legacy worker Agent.
+Core Messages, requester wake-ups, discovery (incl. other hubs' services for
+cross-hub handoff references) and deleting a legacy worker Agent.
 """
 import fcntl
 import json
@@ -45,6 +46,12 @@ with open(path + '.lock', 'w') as lock:
         out = {'machine': {'root': state['root']}}
     elif args[:2] == ['app', 'list']:
         out = {'apps': []}
+    elif args[:2] == ['app', 'show']:
+        app = state.get('apps', {}).get(args[2])
+        if not app:
+            print('{"error":{"code":"app_not_found","message":"no App ' + args[2] + '"}}', file=sys.stderr)
+            raise SystemExit(save(1))
+        out = {'app': app}
     else:
         print('unsupported fake command: ' + ' '.join(args[:3]), file=sys.stderr)
         code = 2

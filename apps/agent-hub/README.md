@@ -5,8 +5,8 @@ Long-lived Agents that do everything accumulate context; coding Agents work
 best with a clean one. For every job the hub starts a new worker from a
 versioned template, gives it only the task and its input handoffs, collects a
 structured handoff, then archives the job and ends the worker so its memory is
-released. Callers chain jobs themselves (`inputs.handoffs`); there are no
-built-in pipelines and no approval steps.
+released. Callers chain jobs themselves (`inputs.handoffs`, also across hubs);
+there are no built-in pipelines and no approval steps.
 
 Workers are **App-owned subtree Agents**: `/<hub>/jobs/<id>` in the hub's
 [App tree](../../docs/app-tree.md), never Agents in the workspace Tree. Each is
@@ -21,8 +21,8 @@ browser UI ([ui.html](ui.html)) uses the same HTTP API.
 | Concept | Stored as |
 | --- | --- |
 | Template | `name`, immutable `version`s of `agent_md`, `harness` (`codex`/`claude`), optional `model`/`effort`, `cwd` (`job`, `home` or a Host-relative path). Bundled ones in [templates/](templates/) are seeded at first start; a bundled template nobody edited (latest version by `seed`) follows the bundled file as a new version, an edited one is never overwritten. |
-| Job | `j-0001`…: template@version, task, inputs (`handoffs`, `repo`, `branch`, `notes`), requester (verified Core principal), status, worker process (pid, loopback port, instance id, restart count), hash of the per-job token, provider session ID. |
-| Handoff | Markdown with front matter (`job`, `template`, `status: done\|partial\|blocked`, `summary`, optional `branch`, `commits`) and sections *What changed*, *Verification*, *Open questions*, *Next steps*. Validated on submit. |
+| Job | `j-0001`… (per hub; `/<hub>/jobs/<id>` is its global `address`): template@version, task, inputs (`handoffs`: local ids or `/<hub>/<id>` references, `repo`, `branch`, `notes`), the fetched copies of other hubs' input handoffs, requester (verified Core principal), status, worker process (pid, loopback port, instance id, restart count), hash of the per-job token, provider session ID. |
+| Handoff | Markdown with front matter (`job`, `hub`, `template`, `status: done\|partial\|blocked`, `summary`, optional `branch`, `commits`, `verdict`) and sections *What changed*, *Verification*, *Open questions*, *Next steps*. Validated on submit; the hub adds `hub` when missing. `reviewer` jobs must carry `verdict: approve\|changes-needed` and *Notes for the implementer*; other templates may carry a valid `verdict`. Referenced elsewhere as `/<hub>/<id>`. |
 | Archive | the handoff, the worker's transcript export (`/v1/transcript`, with the session id), git refs from the handoff. |
 
 ## Worker processes
@@ -128,6 +128,31 @@ launcher sees a loopback native client. The launcher page uses only relative
 URLs; `/workers/<id>` redirects to `/workers/<id>/`. A finished job answers
 503 `worker_not_running`.
 
+## Cross-hub handoff references
+
+Job ids are per hub (every hub starts at `j-0001`), so `inputs.handoffs` also
+takes `/<hub path>/j-0003` (`<hub path>/j-0003` and `/<hub path>/jobs/j-0003`
+are the same; this hub's own path means a local job). At job creation, before
+the job exists, the hub:
+
+1. resolves the path with its own CLI, `treer app show /<hub path>` → `service_id`;
+2. fetches `GET http://<service>.treer/api/handoffs/<id>?format=markdown`
+   through its workload proxy (`http_proxy` in the runtime environment), which
+   attaches the hub runtime's identity. That is an Agent identity
+   (`principal_kind: agent`), which every hub accepts for its whole API, so no
+   extra route or rule is needed; the hub's Policy subject needs
+   `identity.token.issue` for the other hub's service (granted to Agents by a
+   cooperative Policy, as for the Git Gateway);
+3. checks the answer is that job's handoff (front matter `job`) and stores the
+   copy with the job (`remote_handoffs`), so the first prompt, a restart or a
+   later change on the other hub do not refetch or change it.
+
+Any failure (no such App, no service, HTTP error such as 404 for a job without a
+handoff, unreachable, not a handoff) is a 400 `input_handoff_unresolved` naming
+the reference; nothing is created. The first prompt labels every input handoff
+with its full reference (`## Input handoff /agent_hub_linux/j-0003 (implementer;
+from hub /agent_hub_linux)`, local ones as `/<this hub>/j-0007`).
+
 ## Identity
 
 Every `/api` request needs `X-Treer-Identity-Token`, verified with the Proxy's
@@ -136,7 +161,9 @@ token is remembered for 20 s); humans and Agents are accepted. Managed Agents
 get it automatically for `http://SERVICE_ID.treer/` from their runtime proxy
 (which also sends it as `Authorization: Bearer`; any other Authorization is
 refused). Human API mutations need `X-Hub-Request: 1` and a same-site Origin.
-Only the job's worker (its `X-Hub-Job-Token`) or a human may submit a job's
+Another App (such as another hub fetching a handoff) calls through its workload
+proxy with its runtime identity, which is an Agent identity and is accepted like
+any Agent. Only the job's worker (its `X-Hub-Job-Token`) or a human may submit a job's
 handoff; the rest is cooperative (any workspace principal may create jobs, edit
 templates, message, view or stop jobs).
 
@@ -195,6 +222,31 @@ that was still live with a real worker Agent is marked `failed` ("hub
 upgraded") and that Agent is deleted with `treer agent admin delete`; the
 `/agent-hub-workers` folder is no longer used and can be removed once empty
 (`--folder` was removed).
+
+## Updating templates on existing hubs
+
+`seed` only follows a bundled template nobody edited (latest version by
+`seed`). A hub whose template was edited through the API keeps it, so push a
+new bundled text yourself; this adds a version and leaves the history intact
+(`harness`, `model`, `effort`, `cwd` are inherited unless sent):
+
+```sh
+python3 -c 'import json, sys
+front, body = open(sys.argv[1]).read().split("\n---\n", 1)
+fields = dict(l.split(": ", 1) for l in front.splitlines()[1:] if ": " in l)
+print(json.dumps({"agent_md": body.lstrip("\n"), "description": fields.get("description", "")}))' \
+  apps/agent-hub/templates/reviewer.md > /tmp/reviewer.json
+for hub in http://svc_398dbcf94bce451bb69fc78f8df2bb2d.treer http://svc_7bf2dce3a61043479814cd0c230181de.treer; do
+  curl -fsS -X PUT -H 'Content-Type: application/json' --data-binary @/tmp/reviewer.json "$hub/api/templates/reviewer" \
+    | python3 -c 'import json, sys; t = json.load(sys.stdin); print(t["name"], t["version"])'
+done
+```
+
+The hubs above are `/agent_hub` (mac_m2) and `/agent_hub_linux` (alienware).
+Check with `GET /api/templates/reviewer` (its `versions`). Jobs created before
+the update keep the version they recorded. The hub's handoff validation does not
+depend on the template text: a `reviewer` job needs `verdict` either way, and
+its first prompt shows the format.
 
 ## Validation
 
