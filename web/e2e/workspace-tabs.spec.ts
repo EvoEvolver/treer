@@ -236,7 +236,9 @@ test.describe('workload deep links and new-tab entry points', () => {
     if (mobile) { await page.getByRole('button', { name: /^More actions/ }).first().click() }
     else await page.getByRole('tab', { name: 'Tab /Alpha', exact: true }).click({ button: 'right' })
     const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
-    await expect.poll(() => new URL(popup.url()).pathname).toBe('/api/workspaces/map-workspace/agents/tab-1/interface/ui/')
+    await expect(popup.getByRole('heading', { name: 'Retained interface', exact: true })).toBeVisible()
+    await expect(popup).toHaveURL(url => url.pathname === '/api/workspaces/map-workspace/agents/tab-1/interface/ui/')
+    expect(await popup.evaluate(() => window.opener)).toBeNull()
     expect(popup.url()).not.toMatch(/token|key|secret/i)
     await popup.close()
   })
@@ -251,18 +253,37 @@ test.describe('workload deep links and new-tab entry points', () => {
   })
 })
 
+// Native same-origin tabs can finish loading while Chromium omits the initial
+// frameNavigated event (reproduced with a plain HTML link under load). Both
+// Playwright's popup Page initialization and waitForURL depend on that event.
+// Observe the browser's actual navigation disposition instead; standalone UI
+// loading is covered by the menu-open tests above, and Console boot by deep links.
+async function expectNativeNewTab(page: Page, target: import('@playwright/test').Locator, click: () => Promise<void>) {
+  const href = await target.getAttribute('href')
+  const session = await page.context().newCDPSession(page)
+  let navigation: { url: string; disposition: string } | undefined
+  session.on('Page.frameRequestedNavigation', event => { navigation = event })
+  try {
+    await session.send('Page.enable')
+    await click()
+    await expect.poll(() => navigation).toMatchObject({ url: href, disposition: 'newTab' })
+  } finally {
+    await session.detach()
+  }
+}
+
 test.describe('workload rows are real links: modifier-click and middle-click open a new browser tab natively', () => {
   const expected = '/api/workspaces/map-workspace/agents/tab-1/interface/ui/'
   for (const how of ['ctrl', 'middle'] as const) {
-    test(`overview rows and tree rows have the deep-link href and open natively (${how})`, async ({ page, context }) => {
+    test(`overview rows and tree rows have the deep-link href and open natively (${how})`, async ({ page }) => {
       await page.setViewportSize({ width: 1360, height: 900 })
       await fixture(page)
       await gotoWorkspace(page)
       const click = (locator: import('@playwright/test').Locator) => how === 'ctrl' ? locator.click({ modifiers: ['ControlOrMeta'] }) : locator.click({ button: 'middle' })
       for (const target of [page.getByRole('link', { name: 'Open /Alpha', exact: true }), page.getByRole('tree').getByRole('link', { name: /^Alpha/ })]) {
-        const [popup] = await Promise.all([context.waitForEvent('page'), click(target)])
-        await popup.waitForURL(url => url.pathname === expected, { waitUntil: 'commit' })
-        await popup.close()
+        // Inventory can render before capability discovery chooses the Agent URL.
+        await expect(target).toHaveAttribute('href', new RegExp(`${expected}\\?`))
+        await expectNativeNewTab(page, target, () => click(target))
         // The current page did not navigate in place.
         await expect(page.getByRole('tab', { name: 'Tab Overview', exact: true })).toHaveAttribute('aria-selected', 'true')
       }
@@ -277,16 +298,14 @@ test.describe('workload rows are real links: modifier-click and middle-click ope
     await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toHaveAttribute('aria-selected', 'true')
   })
 
-  test('map blocks are links; ctrl-click opens a new browser tab and keeps the map open', async ({ page, context }) => {
+  test('map blocks are links; ctrl-click opens a new browser tab and keeps the map open', async ({ page }) => {
     await page.setViewportSize({ width: 1360, height: 900 })
     await fixture(page)
     await gotoWorkspace(page)
     await page.getByRole('button', { name: 'Expand tree map' }).click()
     const block = page.getByRole('dialog').getByRole('link', { name: /Alpha/ }).first()
-    expect(new URL((await block.getAttribute('href'))!).pathname).toBe(expected)
-    const [popup] = await Promise.all([context.waitForEvent('page'), block.click({ modifiers: ['ControlOrMeta'] })])
-    await popup.waitForURL(url => url.pathname === expected, { waitUntil: 'commit' })
-    await popup.close()
+    await expect(block).toHaveAttribute('href', new RegExp(`${expected}\\?`))
+    await expectNativeNewTab(page, block, () => block.click({ modifiers: ['ControlOrMeta'] }))
     await expect(page.getByRole('dialog')).toBeVisible()
   })
 })
