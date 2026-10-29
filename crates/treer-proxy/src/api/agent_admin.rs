@@ -1,20 +1,24 @@
 //! Organization and workspace administration by Agents (`/agent/workspaces/
-//! {ws}/admin/...`, reached through the Controller's `/api/admin/...` local
-//! passthrough). Every route needs the Agent's authenticated workload
-//! credential and an explicit Policy allow rule naming the Agent for its
-//! action ([`PolicyEngine::authorize_admin`]): monitor mode, action defaults
-//! and Provider fail-open never grant these. The organization is always the
-//! Agent's own workspace's organization; workspace routes act on the Agent's
-//! own workspace only.
+//! {ws}/admin/...`, reached through the Controller's `/api/org-admin/...`
+//! local passthrough). Every route needs the Agent's authenticated workload
+//! credential and an explicit Policy allow rule naming the Agent by ID or
+//! group for its action ([`PolicyEngine::authorize_admin`]): monitor mode,
+//! action defaults, Tree placement and Provider fail-open never grant these.
+//!
+//! Workspace-scope routes act on the Agent's own workspace and need only that
+//! Policy allow. Organization-scope routes (organization, members,
+//! invitations, groups, organization-wide audit, listing/creating/deleting
+//! workspaces) additionally need an organization-level Agent grant that only a
+//! human owner/admin can write, because any member who creates a workspace
+//! owns that workspace's Policy. `policy.provider.manage` is never granted
+//! to Agents.
 use super::*;
 use crate::auth::{AdminActor, AgentSession};
 use crate::policy::{
     ACTION_AUDIT_READ, ACTION_MACHINE_ENROLL, ACTION_ORG_GROUP_MANAGE, ACTION_ORG_INVITE_MANAGE,
-    ACTION_ORG_MANAGE, ACTION_ORG_MEMBER_MANAGE, ACTION_POLICY_PROVIDER_MANAGE,
-    ACTION_WORKSPACE_ACCESS_MANAGE, ACTION_WORKSPACE_MANAGE, RESOURCE_ORGANIZATION,
-    RESOURCE_WORKSPACE,
+    ACTION_ORG_MANAGE, ACTION_ORG_MEMBER_MANAGE, ACTION_WORKSPACE_ACCESS_MANAGE,
+    ACTION_WORKSPACE_MANAGE, RESOURCE_ORGANIZATION, RESOURCE_WORKSPACE,
 };
-use crate::policy_provider_store::PolicyProviderStore;
 
 type AgentExt = Option<Extension<AgentSession>>;
 
@@ -87,9 +91,12 @@ async fn authorize_agent_admin(
     Ok(AdminActor::Agent {
         agent_id: agent.agent_id.clone(),
         workspace_id: agent.workspace_id.clone(),
+        server_id: agent.server_id.clone(),
     })
 }
 
+/// Organization scope: the Agent's workspace Policy allow for `action` on
+/// its organization **and** an active organization grant of `action`.
 async fn org_admin(
     auth: &AuthStore,
     policy: &PolicyEngine,
@@ -106,6 +113,8 @@ async fn org_admin(
         PolicyResource::new(RESOURCE_ORGANIZATION, &organization_id),
     )
     .await?;
+    auth.require_agent_org_grant(&organization_id, workspace_id, actor.id(), action)
+        .await?;
     Ok((actor, organization_id))
 }
 
@@ -397,17 +406,25 @@ pub(super) async fn audit_events(
     Path(workspace_id): Path<String>,
     Query(query): Query<AdminAuditQuery>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let (actor, organization_id) =
-        org_admin(&auth, &policy, &agent, &workspace_id, ACTION_AUDIT_READ).await?;
-    let events = auth
-        .list_audit_events_as(
+    // Only the Agent's own workspace needs no organization grant; the
+    // organization-wide view and other workspaces' events do.
+    let own_workspace = query.workspace_id.as_deref() == Some(workspace_id.as_str());
+    let events = if own_workspace {
+        let actor = workspace_admin(&policy, &agent, &workspace_id, ACTION_AUDIT_READ).await?;
+        auth.list_own_workspace_audit_events(&actor, query.before, query.limit)
+            .await?
+    } else {
+        let (actor, organization_id) =
+            org_admin(&auth, &policy, &agent, &workspace_id, ACTION_AUDIT_READ).await?;
+        auth.list_audit_events_as(
             &organization_id,
             &actor,
             query.workspace_id.as_deref(),
             query.before,
             query.limit,
         )
-        .await?;
+        .await?
+    };
     let next_cursor = events.last().map(|event| event.sequence);
     Ok(Json(
         json!({ "events": events, "next_cursor": next_cursor }),
@@ -487,7 +504,16 @@ pub(super) async fn delete_workspace(
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, ApiFailure> {
     let request = auth::parse_optional_json::<treer_protocol::DeleteWorkspaceRequest>(&body, "{}")?;
+    // Deleting a workspace changes the organization: organization scope.
     let actor = workspace_admin(&policy, &agent, &workspace_id, ACTION_WORKSPACE_MANAGE).await?;
+    let organization_id = auth.workspace_organization(&workspace_id).await?;
+    auth.require_agent_org_grant(
+        &organization_id,
+        &workspace_id,
+        actor.id(),
+        ACTION_WORKSPACE_MANAGE,
+    )
+    .await?;
     super::workspaces::delete_workspace_as(&state, &auth, &workspace_id, &actor, &request).await
 }
 
@@ -631,83 +657,7 @@ pub(super) async fn delete_group_grant(
     })))
 }
 
-// ---- Policy Provider and machine enrollment -------------------------------
-
-pub(super) async fn get_policy_provider(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(config): Extension<IngressConfig>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(store): Extension<PolicyProviderStore>,
-    agent: AgentExt,
-    Path(workspace_id): Path<String>,
-) -> Result<Json<Value>, ApiFailure> {
-    workspace_admin(
-        &policy,
-        &agent,
-        &workspace_id,
-        ACTION_POLICY_PROVIDER_MANAGE,
-    )
-    .await?;
-    super::policy_provider::get_policy_provider(
-        State(state),
-        Extension(auth),
-        Extension(config),
-        Extension(policy),
-        Extension(store),
-        Path(workspace_id),
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn set_policy_provider(
-    State(state): State<AppState>,
-    Extension(auth): Extension<AuthStore>,
-    Extension(config): Extension<IngressConfig>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(store): Extension<PolicyProviderStore>,
-    agent: AgentExt,
-    Path(workspace_id): Path<String>,
-    Json(request): Json<treer_protocol::SetWorkspacePolicyProviderRequest>,
-) -> Result<Json<Value>, ApiFailure> {
-    let actor = workspace_admin(
-        &policy,
-        &agent,
-        &workspace_id,
-        ACTION_POLICY_PROVIDER_MANAGE,
-    )
-    .await?;
-    super::policy_provider::set_policy_provider_as(
-        &state,
-        &auth,
-        &config,
-        &policy,
-        &store,
-        &actor,
-        workspace_id,
-        request,
-    )
-    .await
-}
-
-pub(super) async fn clear_policy_provider(
-    Extension(auth): Extension<AuthStore>,
-    Extension(policy): Extension<PolicyEngine>,
-    Extension(store): Extension<PolicyProviderStore>,
-    agent: AgentExt,
-    Path(workspace_id): Path<String>,
-) -> Result<Json<Value>, ApiFailure> {
-    let actor = workspace_admin(
-        &policy,
-        &agent,
-        &workspace_id,
-        ACTION_POLICY_PROVIDER_MANAGE,
-    )
-    .await?;
-    super::policy_provider::clear_policy_provider_as(&auth, &policy, &store, &actor, &workspace_id)
-        .await
-}
+// ---- Machine enrollment ------------------------------------------------------
 
 pub(super) async fn machine_bootstrap(
     State(state): State<AppState>,

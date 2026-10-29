@@ -232,6 +232,15 @@ pub(crate) fn invalid_password_reset() -> AuthFailure {
     )
 }
 
+/// The invitation is bound to another email address (or the account's
+/// email is not verified).
+pub(crate) fn invitation_email_mismatch() -> AuthFailure {
+    AuthFailure::forbidden(
+        "invitation_email_mismatch",
+        "this invitation is for another email address; sign in with the verified invited address",
+    )
+}
+
 pub(crate) fn invalid_invitation() -> AuthFailure {
     AuthFailure::bad_request(
         "invalid_invitation",

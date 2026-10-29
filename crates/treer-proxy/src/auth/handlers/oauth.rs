@@ -91,6 +91,7 @@ fn oauth_browser_cookie(auth: &AuthStore, provider: &str, value: &str, max_age: 
 
 pub(crate) async fn oauth_callback(
     Extension(auth): Extension<AuthStore>,
+    policy: Option<Extension<crate::policy::PolicyEngine>>,
     AxumPath(provider): AxumPath<String>,
     Query(query): Query<OAuthCallbackQuery>,
     headers: HeaderMap,
@@ -106,10 +107,11 @@ pub(crate) async fn oauth_callback(
         let code = query.code.as_deref().ok_or_else(oauth_login_failed)?;
         let profile = auth.exchange_oauth_code(&provider, code).await?;
         let session = auth
-            .complete_oauth_login(
+            .complete_oauth_login_policy(
                 profile,
                 pending.invite.as_deref(),
                 pending.join_organization,
+                policy.as_ref().map(|Extension(policy)| policy),
             )
             .await?;
         auth.retain_oauth_invitation_best_effort(&session, pending.invite.as_deref())

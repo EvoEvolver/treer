@@ -59,6 +59,7 @@ pub(crate) async fn discard_pending_invitation(
 
 pub(crate) async fn accept_invitation(
     Extension(auth): Extension<AuthStore>,
+    policy: Option<Extension<crate::policy::PolicyEngine>>,
     peer: Option<Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
     headers: HeaderMap,
     Json(request): Json<treer_protocol::InvitationAcceptRequest>,
@@ -76,7 +77,13 @@ pub(crate) async fn accept_invitation(
         (None, Some(id)) => auth.consume_pending_invitation(&session, &id).await?,
         _ => return Err(invalid_invitation()),
     };
-    let accepted = auth.accept_invitation(&token, &session.user_id).await?;
+    let accepted = auth
+        .accept_invitation_with(
+            &token,
+            &session.user_id,
+            policy.as_ref().map(|Extension(policy)| policy),
+        )
+        .await?;
     auth.discard_pending_invitation(&session).await?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(accepted)).into_response())
 }
@@ -216,6 +223,40 @@ pub(crate) async fn revoke_invitation(
         &invitation_id,
     )
     .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn list_agent_grants(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath(organization_id): AxumPath<String>,
+) -> Result<Json<treer_protocol::AgentGrantList>, AuthFailure> {
+    Ok(Json(
+        auth.list_agent_grants(&organization_id, &session.user_id)
+            .await?,
+    ))
+}
+
+pub(crate) async fn put_agent_grant(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((organization_id, agent_id)): AxumPath<(String, String)>,
+    Json(request): Json<treer_protocol::PutAgentGrantRequest>,
+) -> Result<Json<Value>, AuthFailure> {
+    Ok(Json(json!({
+        "grant": auth
+            .put_agent_grant(&organization_id, &session.user_id, &agent_id, request)
+            .await?
+    })))
+}
+
+pub(crate) async fn delete_agent_grant(
+    Extension(auth): Extension<AuthStore>,
+    Extension(session): Extension<CurrentSession>,
+    AxumPath((organization_id, agent_id)): AxumPath<(String, String)>,
+) -> Result<StatusCode, AuthFailure> {
+    auth.delete_agent_grant(&organization_id, &session.user_id, &agent_id)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

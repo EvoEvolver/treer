@@ -156,18 +156,33 @@ pub(crate) async fn list(
     before: Option<i64>,
     limit: i64,
 ) -> Result<Vec<OrganizationAuditEvent>, sqlx::Error> {
+    list_scoped(pool, organization_id, workspace_id, false, before, limit).await
+}
+
+/// With `workspace_only`, organization-level events (no workspace) are left
+/// out: the view of an Agent holding only a workspace grant.
+pub(crate) async fn list_scoped(
+    pool: &PgPool,
+    organization_id: &str,
+    workspace_id: Option<&str>,
+    workspace_only: bool,
+    before: Option<i64>,
+    limit: i64,
+) -> Result<Vec<OrganizationAuditEvent>, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT sequence, event_id, organization_id, COALESCE(workspace_id,workspace_origin_id) AS workspace_id, occurred_at, actor_kind, \
          actor_id, actor_name, source, action, outcome, resource_kind, resource_id, \
          resource_name, correlation_id, payload \
          FROM organization_audit_events \
-         WHERE organization_id = $1 AND ($2::TEXT IS NULL OR COALESCE(workspace_id,workspace_origin_id) = $2 OR COALESCE(workspace_id,workspace_origin_id) IS NULL) \
+         WHERE organization_id = $1 AND ($2::TEXT IS NULL OR COALESCE(workspace_id,workspace_origin_id) = $2 \
+           OR (NOT $5 AND COALESCE(workspace_id,workspace_origin_id) IS NULL)) \
          AND ($3::BIGINT IS NULL OR sequence < $3) ORDER BY sequence DESC LIMIT $4",
     )
     .bind(organization_id)
     .bind(workspace_id)
     .bind(before)
     .bind(limit)
+    .bind(workspace_only && workspace_id.is_some())
     .fetch_all(pool)
     .await?;
     decode_events(rows)

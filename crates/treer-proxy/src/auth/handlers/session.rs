@@ -63,6 +63,7 @@ pub(crate) async fn oauth_config(
 }
 pub(crate) async fn register(
     Extension(auth): Extension<AuthStore>,
+    policy: Option<Extension<crate::policy::PolicyEngine>>,
     headers: HeaderMap,
     Json(request): Json<RegisterRequest>,
 ) -> Result<Response, AuthFailure> {
@@ -72,13 +73,14 @@ pub(crate) async fn register(
         request.device_name.as_deref(),
     )?;
     let session = auth
-        .register_with_client(
+        .register_with_client_policy(
             request.invite.as_deref(),
             &request.email,
             &request.preferred_name,
             &request.password,
             client,
             request.join_organization,
+            policy.as_ref().map(|Extension(policy)| policy),
         )
         .await?;
     Ok(session_response(&auth, &session, &headers))
@@ -138,12 +140,20 @@ pub(crate) async fn revoke_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Rotates the current session token: the response sets the new cookie
+/// (and returns the token to native clients).
 pub(crate) async fn change_password(
     Extension(auth): Extension<AuthStore>,
     Extension(session): Extension<CurrentSession>,
+    headers: HeaderMap,
     Json(request): Json<treer_protocol::ChangePasswordRequest>,
-) -> Result<StatusCode, AuthFailure> {
-    auth.change_password(&session, &request.current_password, &request.new_password)
+) -> Result<Response, AuthFailure> {
+    let rotated = auth
+        .change_password(&session, &request.current_password, &request.new_password)
         .await?;
-    Ok(StatusCode::NO_CONTENT)
+    let mut response = session_response(&auth, &rotated, &headers);
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }

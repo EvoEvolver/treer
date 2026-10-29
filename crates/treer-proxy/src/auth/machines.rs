@@ -27,7 +27,7 @@ impl AuthStore {
         self.disabled
     }
 
-    pub(super) async fn membership_role(
+    pub(crate) async fn membership_role(
         &self,
         organization_id: &str,
         user_id: &str,

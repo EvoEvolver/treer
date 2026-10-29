@@ -389,6 +389,39 @@ ALTER TABLE invitations ADD COLUMN IF NOT EXISTS workspace_ids JSONB NOT NULL DE
 ALTER TABLE invitations ADD COLUMN IF NOT EXISTS explicit_role BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE INDEX IF NOT EXISTS invitations_organization
     ON invitations(organization_id) WHERE kind = 'organization';
+-- Agent-created invitations remember the creating Agent's workspace and
+-- machine so acceptance can re-verify its Policy and organization grant; the
+-- creator's display name is frozen at creation.
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS created_by_workspace TEXT;
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS created_by_server TEXT;
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS created_by_name TEXT;
+
+-- Administration rules (allow/deny rules naming an administration action)
+-- last validated by a verified workspace owner; provider_operator
+-- publication may not grant beyond them. See api/policy_admin_approval.rs.
+CREATE TABLE IF NOT EXISTS workspace_policy_admin_approvals (
+    workspace_id TEXT PRIMARY KEY,
+    allow_rules JSONB NOT NULL,
+    deny_rules JSONB NOT NULL,
+    approved_by TEXT NOT NULL,
+    approved_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Organization-level Agent grants: organization-scope administration by an
+-- Agent needs one of these (written only by human owners/admins) in addition
+-- to an allow rule in the Agent's workspace Policy. A grant authorizes
+-- nothing once its creator is no longer an owner/admin.
+CREATE TABLE IF NOT EXISTS organization_agent_grants (
+    organization_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    actions JSONB NOT NULL,
+    created_by TEXT NOT NULL,
+    created_by_role TEXT NOT NULL CHECK(created_by_role IN ('owner', 'admin')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY(organization_id, agent_id),
+    FOREIGN KEY(organization_id) REFERENCES organizations(organization_id) ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY,

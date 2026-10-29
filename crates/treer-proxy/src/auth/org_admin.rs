@@ -2,9 +2,12 @@
 //!
 //! Humans keep their organization and workspace role checks. An Agent reaches
 //! these methods only after the API layer authorized an explicit Policy grant
-//! (`PolicyEngine::authorize_admin`); here it is bounded to owner-equivalent
-//! powers in its own workspace and that workspace's organization, and the
-//! same invariants (last owner, membership, scope) apply to both.
+//! (`PolicyEngine::authorize_admin`) and, for organization-scope actions, an
+//! organization-level Agent grant written by a human owner/admin. Here it is
+//! owner-equivalent only in its own workspace; in its organization it is
+//! treated like an `admin` for every owner-affecting check and is further
+//! capped: it never invites or assigns `owner`/`admin`, changes member roles,
+//! removes owners, deletes or transfers the organization.
 use super::*;
 use treer_protocol::{
     AccessVia, AccessViaKind, ActorSummary, AuthSessionInfo, CreateInvitationRequest,
@@ -23,6 +26,7 @@ pub enum AdminActor {
     Agent {
         agent_id: String,
         workspace_id: String,
+        server_id: String,
     },
 }
 
@@ -144,14 +148,15 @@ impl AuthStore {
         }
     }
 
-    /// Owner (humans); an Agent of the organization.
+    /// Owner (humans). Agents never hold organization owner powers: for
+    /// owner-only actions they are treated like an `admin`.
     pub(super) async fn require_owner_as(
         &self,
         organization_id: &str,
         actor: &AdminActor,
     ) -> Result<String, AuthFailure> {
         let role = self.require_member_as(organization_id, actor).await?;
-        if matches!(role.as_str(), "owner" | "agent") {
+        if role == "owner" {
             Ok(role)
         } else {
             Err(AuthFailure::forbidden(
@@ -223,6 +228,62 @@ impl AuthStore {
 
     // ---- Invitations ------------------------------------------------------
 
+    /// Re-check an Agent invitation creator's workspace Policy for
+    /// `org.invite.manage` before acceptance or registration. Humans and
+    /// non-organization invitations need no Policy (their role is re-checked
+    /// in the acceptance transaction); without `policy` an Agent creator fails.
+    pub(crate) async fn check_invitation_creator_policy(
+        &self,
+        token: Option<&str>,
+        policy: Option<&crate::policy::PolicyEngine>,
+    ) -> CreatorPolicyCheck {
+        let Some(token) = token.filter(|token| !token.is_empty() && token.len() <= 256) else {
+            return CreatorPolicyCheck(false);
+        };
+        let row = sqlx::query(
+            "SELECT organization_id, created_by, created_by_kind, created_by_workspace, \
+             created_by_server FROM invitations WHERE token = $1 AND kind = 'organization'",
+        )
+        .bind(token)
+        .fetch_optional(&self.pool)
+        .await;
+        let Ok(Some(row)) = row else {
+            return CreatorPolicyCheck(false);
+        };
+        let creator = InvitationCreator {
+            organization_id: row.get("organization_id"),
+            created_by: row.get("created_by"),
+            kind: row.get("created_by_kind"),
+            workspace_id: row.get("created_by_workspace"),
+            server_id: row.get("created_by_server"),
+        };
+        let (Some(policy), "agent", Some(workspace_id), Some(server_id)) = (
+            policy,
+            creator.kind.as_str(),
+            creator.workspace_id.as_deref(),
+            creator.server_id.as_deref(),
+        ) else {
+            return CreatorPolicyCheck(false);
+        };
+        CreatorPolicyCheck(
+            policy
+                .authorize_admin(&crate::policy::PolicyRequest::new(
+                    workspace_id,
+                    crate::policy::PolicySubject::Agent {
+                        server_id: server_id.to_string(),
+                        agent_id: creator.created_by.clone(),
+                    },
+                    crate::policy::ACTION_ORG_INVITE_MANAGE,
+                    crate::policy::PolicyResource::new(
+                        crate::policy::RESOURCE_ORGANIZATION,
+                        &creator.organization_id,
+                    ),
+                ))
+                .await
+                .is_ok(),
+        )
+    }
+
     pub(crate) async fn create_organization_invitation(
         &self,
         organization_id: &str,
@@ -241,7 +302,13 @@ impl AuthStore {
         explicit_role: bool,
     ) -> Result<CreatedInvitation, AuthFailure> {
         let actor_role = self.require_manager_as(organization_id, actor).await?;
-        if request.role == OrganizationRole::Owner && actor_role == "admin" {
+        if matches!(actor, AdminActor::Agent { .. }) && request.role != OrganizationRole::Member {
+            return Err(AuthFailure::forbidden(
+                "agent_role_cap",
+                "Agents invite members only, never owners or admins",
+            ));
+        }
+        if request.role == OrganizationRole::Owner && actor_role != "owner" {
             return Err(AuthFailure::forbidden(
                 "organization_owner_required",
                 "only an organization owner can invite an owner",
@@ -298,11 +365,21 @@ impl AuthStore {
         let invitation_id = format!("invt_{}", Uuid::new_v4().simple());
         let now = Utc::now();
         let expires_at = now + Duration::hours(i64::from(hours));
+        let created_by = self.actor_summary(actor).await;
+        let (creator_workspace, creator_server) = match actor {
+            AdminActor::Agent {
+                workspace_id,
+                server_id,
+                ..
+            } => (Some(workspace_id.as_str()), Some(server_id.as_str())),
+            AdminActor::User(_) => (None, None),
+        };
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         sqlx::query(
             "INSERT INTO invitations(token, invitation_id, created_at, created_by, created_by_kind, \
-             kind, organization_id, role, email, expires_at, group_ids, workspace_ids, explicit_role) \
-             VALUES($1, $2, $3, $4, $5, 'organization', $6, $7, $8, $9::timestamptz, $10, $11, $12)",
+             kind, organization_id, role, email, expires_at, group_ids, workspace_ids, explicit_role, \
+             created_by_workspace, created_by_server, created_by_name) \
+             VALUES($1, $2, $3, $4, $5, 'organization', $6, $7, $8, $9::timestamptz, $10, $11, $12, $13, $14, $15)",
         )
         .bind(&token)
         .bind(&invitation_id)
@@ -316,6 +393,9 @@ impl AuthStore {
         .bind(json!(group_ids))
         .bind(json!(workspace_ids))
         .bind(explicit_role)
+        .bind(creator_workspace)
+        .bind(creator_server)
+        .bind(&created_by.name)
         .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
@@ -374,7 +454,7 @@ impl AuthStore {
             role: request.role,
             expires_at,
             created_at: now,
-            created_by: self.actor_summary(actor).await,
+            created_by,
             group_ids,
             workspace_ids,
             email_queued,
@@ -399,8 +479,8 @@ impl AuthStore {
              (extract(epoch FROM i.expires_at) * 1000)::bigint AS expires_ms, \
              i.used_at, (i.revoked_at IS NOT NULL) AS revoked, i.created_by, i.created_by_kind, i.group_ids, i.workspace_ids, \
              (i.expires_at IS NOT NULL AND i.expires_at <= now()) AS expired, \
-             CASE i.created_by_kind WHEN 'agent' THEN (SELECT name FROM agent_names a WHERE a.agent_id = i.created_by) \
-                  ELSE (SELECT preferred_name FROM users u WHERE u.id = i.created_by) END AS creator_name \
+             COALESCE(i.created_by_name, CASE i.created_by_kind WHEN 'agent' THEN NULL \
+                  ELSE (SELECT preferred_name FROM users u WHERE u.id = i.created_by) END) AS creator_name \
              FROM invitations i WHERE i.kind = 'organization' AND i.organization_id = $1 \
              ORDER BY i.created_at DESC, i.invitation_id LIMIT 500",
         )
@@ -591,6 +671,8 @@ impl AuthStore {
             .await
             .map_err(AuthFailure::database)?;
         }
+        revoke_creator_invitations(&mut transaction, organization_id, user_id, Some("admin"))
+            .await?;
         audit::insert(
             &mut transaction,
             NewAuditEvent {
@@ -871,13 +953,15 @@ impl AuthStore {
         transaction.commit().await.map_err(AuthFailure::database)
     }
 
-    /// Keeps the current session and ends every other one.
+    /// Ends every other session and rotates the current one's token (the
+    /// caller sets the returned session's cookie), so a token copied before
+    /// the change stops working.
     pub(crate) async fn change_password(
         &self,
         current: &CurrentSession,
         current_password: &str,
         new_password: &str,
-    ) -> Result<(), AuthFailure> {
+    ) -> Result<CurrentSession, AuthFailure> {
         let new_password = validate_new_password(new_password)?;
         self.reserve_login_attempt("user:", &current.email.to_ascii_lowercase())
             .await?;
@@ -917,13 +1001,33 @@ impl AuthStore {
         .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
+        let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let rotated =
+            sqlx::query("UPDATE sessions SET token = $1 WHERE user_id = $2 AND token = $3")
+                .bind(&token)
+                .bind(&current.user_id)
+                .bind(&current.token)
+                .execute(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?
+                .rows_affected();
+        if rotated != 1 {
+            return Err(AuthFailure::unauthorized(
+                "authentication_required",
+                "the current session ended; sign in again",
+            ));
+        }
         sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND token <> $2")
             .bind(&current.user_id)
-            .bind(&current.token)
+            .bind(&token)
             .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
-        transaction.commit().await.map_err(AuthFailure::database)
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        Ok(CurrentSession {
+            token,
+            ..current.clone()
+        })
     }
 
     /// Coarse last-seen tracking: at most one write per session per window.
@@ -999,7 +1103,183 @@ pub(super) async fn remove_member_rows(
         .execute(&mut **transaction)
         .await
         .map_err(AuthFailure::database)?;
+    revoke_creator_invitations(transaction, organization_id, user_id, None).await?;
     Ok(())
+}
+
+/// Revoke the pending invitations a user created that their new
+/// organization role (`None`: no longer a member) no longer covers: an owner
+/// invitation needs an owner, any other invitation an owner or admin.
+pub(super) async fn revoke_creator_invitations(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: &str,
+    user_id: &str,
+    role: Option<&str>,
+) -> Result<u64, AuthFailure> {
+    let roles: &[&str] = match role {
+        Some("owner") => return Ok(0),
+        Some("admin") => &["owner"],
+        _ => &["owner", "admin", "member"],
+    };
+    sqlx::query(&format!(
+        "UPDATE invitations i SET revoked_at = now() WHERE i.kind = 'organization' \
+         AND i.organization_id = $1 AND i.created_by = $2 AND i.created_by_kind = 'user' \
+         AND (CASE WHEN i.explicit_role THEN i.role ELSE 'member' END) = ANY($3) AND {INVITATION_USABLE}"
+    ))
+    .bind(organization_id)
+    .bind(user_id)
+    .bind(roles)
+    .execute(&mut **transaction)
+    .await
+    .map(|result| result.rows_affected())
+    .map_err(AuthFailure::database)
+}
+
+/// Revoke every pending invitation an Agent created in the organization.
+pub(super) async fn revoke_agent_invitations(
+    transaction: &mut Transaction<'_, Postgres>,
+    organization_id: &str,
+    agent_id: &str,
+) -> Result<u64, AuthFailure> {
+    sqlx::query(&format!(
+        "UPDATE invitations i SET revoked_at = now() WHERE i.kind = 'organization' \
+         AND i.organization_id = $1 AND i.created_by = $2 AND i.created_by_kind = 'agent' \
+         AND {INVITATION_USABLE}"
+    ))
+    .bind(organization_id)
+    .bind(agent_id)
+    .execute(&mut **transaction)
+    .await
+    .map(|result| result.rows_affected())
+    .map_err(AuthFailure::database)
+}
+
+/// Actions of an Agent's organization grant, if it currently authorizes
+/// anything: the Agent's workspace is an active workspace of the
+/// organization and the grant's creator is still an owner or admin.
+pub(super) async fn active_agent_grant<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    organization_id: &str,
+    workspace_id: &str,
+    agent_id: &str,
+) -> Result<Option<Vec<String>>, AuthFailure> {
+    let actions: Option<Value> = sqlx::query_scalar(
+        "SELECT g.actions FROM organization_agent_grants g \
+         JOIN workspaces w ON w.workspace_id = g.workspace_id \
+           AND w.organization_id = g.organization_id AND w.deleted_at IS NULL \
+         JOIN organization_members m ON m.organization_id = g.organization_id \
+           AND m.user_id = g.created_by AND m.role IN ('owner', 'admin') \
+         WHERE g.organization_id = $1 AND g.workspace_id = $2 AND g.agent_id = $3",
+    )
+    .bind(organization_id)
+    .bind(workspace_id)
+    .bind(agent_id)
+    .fetch_optional(executor)
+    .await
+    .map_err(AuthFailure::database)?;
+    Ok(actions.map(|value| serde_json::from_value(value).unwrap_or_default()))
+}
+
+/// Who created an organization invitation, read before acceptance so an
+/// Agent creator's Policy can be re-checked outside the transaction.
+#[derive(Clone, Debug)]
+pub(crate) struct InvitationCreator {
+    pub organization_id: String,
+    pub created_by: String,
+    pub kind: String,
+    pub workspace_id: Option<String>,
+    pub server_id: Option<String>,
+}
+
+/// The acceptance-time result of re-checking an Agent creator's workspace
+/// Policy (`org.invite.manage`). Without a Policy engine it is `false`, so an
+/// Agent-created invitation then fails closed.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CreatorPolicyCheck(pub bool);
+
+/// Whether an organization invitation's creator still holds what creating it
+/// required: a human must still be an owner (owner invitation) or owner/admin
+/// (any other); an Agent must still pass its workspace Policy and hold an
+/// active organization grant for `org.invite.manage`, and may only have
+/// invited a member. Otherwise the invitation is treated as revoked.
+pub(super) async fn invitation_creator_authorized(
+    transaction: &mut Transaction<'_, Postgres>,
+    token: &str,
+    agent_policy: CreatorPolicyCheck,
+) -> Result<bool, AuthFailure> {
+    let row = sqlx::query(
+        "SELECT organization_id, created_by, created_by_kind, created_by_workspace, \
+         CASE WHEN explicit_role THEN role ELSE 'member' END AS role \
+         FROM invitations WHERE token = $1 AND kind = 'organization'",
+    )
+    .bind(token)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(AuthFailure::database)?;
+    let Some(row) = row else {
+        return Ok(true);
+    };
+    let organization_id: String = row.get("organization_id");
+    let created_by: String = row.get("created_by");
+    let invited: String = row
+        .get::<Option<String>, _>("role")
+        .unwrap_or_else(|| "member".into());
+    if row.get::<String, _>("created_by_kind") == "agent" {
+        let Some(workspace_id) = row.get::<Option<String>, _>("created_by_workspace") else {
+            return Ok(false);
+        };
+        if !agent_policy.0 || invited != "member" {
+            return Ok(false);
+        }
+        return Ok(active_agent_grant(
+            &mut **transaction,
+            &organization_id,
+            &workspace_id,
+            &created_by,
+        )
+        .await?
+        .is_some_and(|actions| actions.iter().any(|action| action == "org.invite.manage")));
+    }
+    let role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM organization_members WHERE organization_id = $1 AND user_id = $2",
+    )
+    .bind(&organization_id)
+    .bind(&created_by)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(AuthFailure::database)?;
+    Ok(match role.as_deref() {
+        Some("owner") => true,
+        Some("admin") => invited != "owner",
+        _ => false,
+    })
+}
+
+/// Persist the revocation of an invitation whose creator lost the authority
+/// it needed (best effort; acceptance is refused either way).
+pub(super) async fn mark_invitation_revoked(pool: &PgPool, token: &str) {
+    if let Err(error) = sqlx::query(
+        "UPDATE invitations SET revoked_at = now() WHERE token = $1 \
+         AND used_at IS NULL AND revoked_at IS NULL",
+    )
+    .bind(token)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(%error, "failed to persist invitation revocation");
+    }
+}
+
+/// The invitation's bound email, if any, must equal the account's
+/// (normalized) email.
+pub(super) fn invitation_email_matches(bound: Option<&str>, email: &str) -> bool {
+    match bound {
+        None => true,
+        Some(bound) => normalize_email(bound)
+            .ok()
+            .zip(normalize_email(email).ok())
+            .is_some_and(|(bound, email)| bound == email),
+    }
 }
 
 /// Apply an organization invitation's groups and workspace grants to a member
