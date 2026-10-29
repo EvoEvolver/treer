@@ -471,10 +471,14 @@ Never store tokens, drafts or terminal output.
 API traffic is mocked; tests never reach a real Proxy, IdP or machine.
 New-tab destination mocks must use `page.context().route()` before the click:
 `page.route()` does not intercept a popup's initial navigation. Wait for the
-resolved link `href` before modifier/middle clicks. The native-click tests use
-Chromium's `Page.frameRequestedNavigation` event to assert the URL and `newTab`
+resolved link `href` (exact origin and pathname) before modifier/middle clicks.
+The native-click tests use Chromium's `Page.frameRequestedNavigation` event to assert the URL and `newTab`
 disposition: under load, native same-origin tabs can load without emitting the
 initial `frameNavigated` event that Playwright's Page/URL waits depend on.
+The helper also attaches CDP directly to the newly created target and checks its
+committed `document.URL`, fixture heading and completed document state, independent
+of Playwright popup initialization. An aborted destination must fail this check;
+the advertised target URL alone does not prove a commit.
 Menu-open tests separately check that the standalone destination content loads;
 deep-link tests check Console boot and selection.
 
