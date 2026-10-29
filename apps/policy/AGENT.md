@@ -77,11 +77,8 @@ with full policy administration, including changing rules that govern themselves
 Owner Provider selection and rescue remain owner-only. `GET /v1/policy/authority`
 reports Core's current setting; a missing capability/old Proxy explicitly fails
 operator publication instead of falling back to the owner path.
-Exception: rules naming administration actions (`org.*`, `workspace.manage`,
-`workspace.access.manage`, `audit.read`, `machine.enroll`) cannot be added or
-changed with the token alone; Core returns
-`policy_admin_owner_session_required` and a signed-in workspace owner must
-publish them.
+Administration actions (`org.*`, `workspace.manage`, `audit.read`, ...) are
+ordinary rule actions here; nothing extra is needed to publish them.
 
 Use the single-file `treer-policy` JSON client for `read`, `submit FILE` and
 `preview FILE`. Its private `~/.config/treer-policy/config.json` contains the App

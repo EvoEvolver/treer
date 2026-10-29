@@ -184,11 +184,9 @@ pub(super) async fn app_operator_validate_policy(
     headers: HeaderMap,
     Json(document): Json<WorkspacePolicyDocument>,
 ) -> Result<Response, ApiFailure> {
-    let provider = operator_provider(&auth, &service, &headers).await?;
+    operator_provider(&auth, &service, &headers).await?;
     treer_proxy::policy_store::validate_document(&document)
         .map_err(|e| ApiFailure::bad_request(e.code(), &e.to_string()))?;
-    super::policy_admin_approval::require_approved(&auth, &provider.workspace_id, &document)
-        .await?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(json!({

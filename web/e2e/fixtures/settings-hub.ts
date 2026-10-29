@@ -54,11 +54,6 @@ export async function mockHub(page: Page, options: HubOptions = {}) {
     { id: 'inv-0', email: 'old@example.test', role: 'member', status: 'accepted', created_at: now, expires_at: now, created_by: { id: 'u1', name: 'Dana Owner' } },
     ...(options.agentInvitation ? [{ id: 'inv-agent', email: 'bot-invite@example.test', role: 'member', status: 'pending', created_at: now, expires_at: '2026-11-04T10:00:00Z', created_by: { id: 'ag-1', name: 'release-bot', kind: 'agent' } }] : []),
   ]
-  const grantable = ['org.manage', 'org.member.manage', 'org.invite.manage', 'org.group.manage', 'workspace.manage', 'audit.read']
-  let agentGrants = [
-    { agent_id: 'ag-2', agent_name: 'trainer', workspace_id: 'ws-main', workspace_name: 'Main', actions: ['org.invite.manage'], created_by: { id: 'u1', name: 'Dana Owner', kind: 'user' }, created_by_role: 'owner', created_at: now, active: true },
-    { agent_id: 'ag-old', agent_name: null, workspace_id: 'ws-sec', workspace_name: 'Security review', actions: ['audit.read'], created_by: { id: 'u9', name: 'Former Admin', kind: 'user' }, created_by_role: 'admin', created_at: now, active: false },
-  ]
   const machines = [
     { server_id: 'srv-a', name: 'dana-macbook', hostname: 'dana.lan', root: '/Users/dana/treer', controller_build: build, host_build: build, status: 'online' },
     { server_id: 'srv-b', name: 'gpu-node-01', hostname: 'gpu01', root: '/srv/treer', controller_build: build, host_build: build, status: 'offline' },
@@ -125,18 +120,6 @@ export async function mockHub(page: Page, options: HubOptions = {}) {
       const groupMember = rest.match(/^\/groups\/([^/]+)\/members\/([^/]+)$/)
       if (groupMember) { const [, groupId, userId] = groupMember; groups = groups.map((group) => group.group_id !== groupId ? group : { ...group, member_ids: method === 'PUT' ? [...new Set([...group.member_ids, userId])] : group.member_ids.filter((item) => item !== userId) }); return ok(route, { groups }) }
       if (rest.startsWith('/groups/') && method === 'DELETE') { groups = groups.filter((group) => group.group_id !== rest.split('/')[2]); return ok(route, {}) }
-      if (rest === '/agent-grants' && method === 'GET') return orgRole === 'member' ? route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: { code: 'organization_manager_required', message: 'owner or admin required' } }) }) : ok(route, { grants: agentGrants, grantable_actions: grantable })
-      const agentGrant = rest.match(/^\/agent-grants\/([^/]+)$/)
-      if (agentGrant && method === 'PUT') {
-        const id = decodeURIComponent(agentGrant[1])
-        const request = body as { workspace_id: string; actions: string[] }
-        if (!request.actions?.length || request.actions.some((action) => !grantable.includes(action))) return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: { code: 'invalid_agent_grant', message: 'invalid agent grant' } }) })
-        const known = agents.find((agent) => agent.agent_id === id)
-        const grant = { agent_id: id, agent_name: known?.name ?? null, workspace_id: request.workspace_id, workspace_name: Object.values(workspaces).flat().find((item) => item.workspace_id === request.workspace_id)?.name ?? null, actions: request.actions, created_by: { id: 'u1', name: 'Dana Owner', kind: 'user' }, created_by_role: orgRole, created_at: now, active: true }
-        agentGrants = [...agentGrants.filter((item) => item.agent_id !== id), grant]
-        return ok(route, { grant })
-      }
-      if (agentGrant && method === 'DELETE') { agentGrants = agentGrants.filter((item) => item.agent_id !== decodeURIComponent(agentGrant[1])); return route.fulfill({ status: 204 }) }
       if (rest === '/audit-events') return ok(route, { events: [{ sequence: 2, event_id: 'ev-2', organization_id: org, occurred_at: now, actor_kind: 'agent', actor_id: 'ag-1', actor_name: 'release-bot', source: 'api', action: 'invitation.created', outcome: 'succeeded', resource_kind: 'invitation', resource_id: 'inv-agent', payload: {} }, { sequence: 1, event_id: 'ev-1', organization_id: org, occurred_at: now, actor_kind: 'user', actor_id: 'u1', actor_name: 'Dana Owner', source: 'console', action: 'member.role_updated', outcome: 'succeeded', resource_kind: 'member', resource_id: 'u2', resource_name: 'Kenji Sato', payload: {} }] })
       if (rest === '/invitations' && options.invitations === false) return method === 'POST' ? ok(route, { url: 'https://treer.test/?invite=legacy' }) : route.fulfill({ status: 405, body: '' })
       if (rest === '/invitations' && method === 'GET') return ok(route, { invitations })
@@ -187,7 +170,7 @@ export async function mockHub(page: Page, options: HubOptions = {}) {
     }
     return missing(route)
   })
-  return { calls, get agentGrants() { return agentGrants }, get invitations() { return invitations }, get members() { return members }, get groups() { return groups }, access }
+  return { calls, get invitations() { return invitations }, get members() { return members }, get groups() { return groups }, access }
 }
 
 export const noHorizontalScroll = (page: Page) => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)

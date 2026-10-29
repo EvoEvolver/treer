@@ -995,6 +995,7 @@ impl AuthStore {
         name: &str,
         actor: &AdminActor,
     ) -> Result<WorkspaceInfo, AuthFailure> {
+        validate_workspace_id(workspace_id)?;
         self.require_member_as(organization_id, actor).await?;
         let user_id = &actor.label();
         let name = validate_resource_name(name, "workspace")?;

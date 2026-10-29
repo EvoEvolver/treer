@@ -63,7 +63,6 @@ pub(crate) async fn oauth_config(
 }
 pub(crate) async fn register(
     Extension(auth): Extension<AuthStore>,
-    policy: Option<Extension<crate::policy::PolicyEngine>>,
     headers: HeaderMap,
     Json(request): Json<RegisterRequest>,
 ) -> Result<Response, AuthFailure> {
@@ -73,14 +72,13 @@ pub(crate) async fn register(
         request.device_name.as_deref(),
     )?;
     let session = auth
-        .register_with_client_policy(
+        .register_with_client(
             request.invite.as_deref(),
             &request.email,
             &request.preferred_name,
             &request.password,
             client,
             request.join_organization,
-            policy.as_ref().map(|Extension(policy)| policy),
         )
         .await?;
     Ok(session_response(&auth, &session, &headers))

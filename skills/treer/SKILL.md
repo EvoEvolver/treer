@@ -569,33 +569,30 @@ admin PATCH workspace '{"name":"Build farm"}'
 admin GET   workspace/access/effective
 ```
 
-| Policy action | Scope | Routes under `/api/org-admin/` |
-| --- | --- | --- |
-| `workspace.access.manage` | workspace | `GET/PATCH {access_mode} workspace/access`, `GET workspace/access/effective`, `PUT {role}/DELETE workspace/access/users/{id}` and `.../groups/{id}` |
-| `machine.enroll` | workspace | `POST workspace/bootstrap` (returns a secret enrollment key) |
-| `workspace.manage` | workspace | `PATCH {name} workspace` |
-| `audit.read` | workspace | `GET organization/audit-events?workspace_id=$TREER_WORKSPACE_ID&limit=&before=` (your workspace only) |
-| `workspace.manage` | organization | `GET/POST {name} workspaces`, `DELETE {confirm_name,revoke_machines} workspace` |
-| `audit.read` | organization | `GET organization/audit-events?limit=&before=[&workspace_id=]` |
-| `org.manage` | organization | `GET/PATCH {name} organization` |
-| `org.member.manage` | organization | `GET organization/members`, `DELETE organization/members/{user_id}` (not owners) |
-| `org.invite.manage` | organization | `GET/POST organization/invitations` (role `member` only), `DELETE organization/invitations/{id}` |
-| `org.group.manage` | organization | `GET/POST {name} organization/groups`, `DELETE organization/groups/{id}`, `PUT/DELETE organization/groups/{id}/members/{user_id}` |
+| Policy action | Routes under `/api/org-admin/` |
+| --- | --- |
+| `workspace.access.manage` | `GET/PATCH {access_mode} workspace/access`, `GET workspace/access/effective`, `PUT {role}/DELETE workspace/access/users/{id}` and `.../groups/{id}` |
+| `machine.enroll` | `POST workspace/bootstrap` (returns a secret enrollment key) |
+| `workspace.manage` | `PATCH {name} workspace`, `DELETE {confirm_name,revoke_machines} workspace`, `GET/POST {name[,workspace_id]} workspaces` |
+| `policy.provider.manage` | `GET/PUT/DELETE workspace/policy-provider` |
+| `audit.read` | `GET organization/audit-events?limit=&before=[&workspace_id=]` |
+| `org.manage` | `GET/PATCH {name} organization` |
+| `org.member.manage` | `GET organization/members`, `PATCH {role} organization/members/{user_id}`, `DELETE organization/members/{user_id}` |
+| `org.invite.manage` | `GET/POST {role,email,expires_in_hours,group_ids,workspace_ids} organization/invitations`, `DELETE organization/invitations/{id}` |
+| `org.group.manage` | `GET/POST {name} organization/groups`, `DELETE organization/groups/{id}`, `PUT/DELETE organization/groups/{id}/members/{user_id}` |
 
 Bodies and responses match the Console's `/api/organizations/...` and
-`/api/workspaces/...` routes. Every action is denied (`403 policy_denied`) until
-your workspace Policy has an allow rule naming you by `id` (or a group listing
-your ID); Tree paths, kind, monitor mode and defaults never grant it.
-Organization-scope actions also need an organization grant from a human owner
-or admin (Organization settings → Agent permissions; otherwise
-`403 agent_org_grant_required`). Whatever you are granted, you never invite or
-assign `owner`/`admin`, change member roles, remove an owner, delete or
-transfer the organization, or manage the Policy Provider
-(`policy.provider.manage` is never granted to Agents). Invitations you create
-are re-checked at acceptance and stop working when your grant goes. Every
-change is audited with you as actor. Session and password routes are
-human-only. Never relay an invitation URL or enrollment key anywhere but its
-intended recipient.
+`/api/workspaces/...` routes. `organization` is your workspace's organization;
+you never reach another organization. These are ordinary Policy actions:
+allowed unless your workspace Policy enforces a deny (`403 policy_denied`).
+Respect the Policy and the humans' intent even where nothing stops you. You
+act like an organization owner (any role, owners included), but an
+organization always keeps one owner (`409 last_owner`), and deleting or
+transferring the organization is left to humans. An invitation's `email` is
+only where the link is sent; whoever holds the link can accept it until it is
+revoked or expires. Every change is audited with you as actor. Session and
+password routes are human-only. Never relay an invitation URL or enrollment
+key anywhere but its intended recipient.
 
 ## Operational boundaries
 

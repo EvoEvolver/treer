@@ -150,17 +150,11 @@ pub(super) async fn explain_policy_in_workspace(
             policy_revision: 0,
             tree_revision: Some(snapshot.revision),
             source: "owner_break_glass".into(),
-            subject_named: false,
         }
     } else if let Some(document) = candidate {
         crate::policy::CompiledWorkspacePolicy::explain_document(document, mode, &request)
     } else {
         policy.explain_request(&request).await?
-    };
-    let explanation = if matches!(request.subject, PolicySubject::Human { .. }) {
-        explanation
-    } else {
-        explanation.with_admin_default_deny(&request.action)
     };
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
@@ -190,13 +184,6 @@ pub(super) async fn validate_policy_document(
         .await?;
     treer_proxy::policy_store::validate_document(&document)
         .map_err(|e| ApiFailure::bad_request(e.code(), &e.to_string()))?;
-    super::policy_admin_approval::record_owner_approval(
-        &auth,
-        &workspace,
-        &session.user_id,
-        &document,
-    )
-    .await?;
     Ok(([(header::CACHE_CONTROL,"no-store")],Json(json!({"valid":true,"schema_version":document.schema_version,"capabilities":[CAPABILITY_POLICY_PATH_RULES],"recovery_guaranteed":true,"warnings":["Owner Provider and Tree management cannot be denied by delegated rules"]}))).into_response())
 }
 

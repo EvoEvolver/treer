@@ -1,7 +1,7 @@
 {
   "name": "treer-agent-ui",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "scripts": {
     "test": "tsx --test tests/*.test.ts ui/tests/*.test.ts",

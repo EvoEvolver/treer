@@ -383,7 +383,7 @@ the same change.
 | Scope | Routes |
 | --- | --- |
 | You | `/settings/{profile,sessions,preferences,organizations}` |
-| Organization | `/orgs/:org/settings/{general,members,invitations,groups,workspaces,agent-permissions,audit,danger}` |
+| Organization | `/orgs/:org/settings/{general,members,invitations,groups,workspaces,audit,danger}` |
 | Workspace | `/orgs/:org/workspaces/:ws/settings/{general,access,machines,launch-profiles,policy,audit,danger}` |
 
 - Desktop shows a grouped navigation beside the page and opens a scope's first
@@ -399,16 +399,6 @@ the same change.
   Active / Pending invitation tabs. **Invitations**: one link per email with
   role, optional groups and workspaces, and expiry; links are shown once
   (kept in memory for this page session only) and can be revoked.
-- **Agent permissions** (owners/admins only; listed when `/api/health`
-  advertises `org.agent-grants.v1`): organization-level grants that let one
-  Agent use `org.manage`, `org.member.manage`, `org.invite.manage`,
-  `org.group.manage`, `workspace.manage` or `audit.read` through
-  `/api/organizations/{org}/agent-grants[/{agent_id}]` (GET/PUT/DELETE). The
-  Agent's workspace Policy must also allow the action with a rule naming it by
-  id; `policy.provider.manage` is never grantable. A grant whose creator lost
-  owner/admin is shown inactive until re-saved. Members and Invitations note
-  that Agents can invite members only and cannot create owners/admins or
-  remove or demote owners.
 - Audit lists label Agent actors `agent: <name>` with the name Core stored on
   the event (falling back to the Agent id), never the Agent's current name;
   invitations an Agent created read "Invited by agent: <name>".

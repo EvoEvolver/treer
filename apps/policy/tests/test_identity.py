@@ -50,9 +50,6 @@ class FakeProxy(BaseHTTPRequestHandler):
                 if fault == 'flip': self.server.authority='owner_session'
             elif getattr(self.server,'authority','owner_session')!='provider_operator':
                 status=403;result={'error':{'code':'provider_operator_required'}}
-            elif self.path.endswith('/validate') and any('org.manage' in rule.get('actions',[]) for rule in body.get('rules',[])):
-                # Core: changed administration rules need owner-verified publication.
-                status=403;result={'error':{'code':'policy_admin_owner_session_required'}}
             elif self.path.endswith('/validate'):
                 result={'valid':True,'schema_version':body['schema_version'],'recovery_guaranteed':getattr(self.server,'recovery',True),'capabilities':[] if fault=='operator-missingcap' else ['policy.path-rules.v2','policy.publish-authority.v1']}
             else:
@@ -180,24 +177,6 @@ class IdentityTests(unittest.TestCase):
         for extra in ({'Origin':'https://evil.test'}, {'Sec-Fetch-Site':'cross-site'},{'X-Policy-Request':''}):
             self.assertEqual(self.request('POST','/v1/policy/explain',request,extra=extra)[0],403)
         self.assertNotIn(ADMIN,json.dumps(self.proxy.calls))
-    def test_admin_rules_always_need_core_and_an_owner_even_under_provider_operator(self):
-        rule={'id':'agent-org','priority':1,'effect':'allow','subjects':[{'kind':'agent','id':'agent-a'}],'actions':['org.manage'],'resources':[{}]}
-        document={'schema_version':1,'defaults':{},'groups':{},'rules':[rule]}
-        publish={'expected_revision':1,'mode':'enforce','document':document}
-        # owner_session: even schema 1 goes through Core's owner validator.
-        self.assertEqual(self.request('POST','/v1/policy/publish',publish,identity=None)[0],401)
-        self.assertEqual(self.app.RequestHandlerClass.store.bundle()['revision'],1)
-        # provider_operator: the operator token alone cannot publish admin rules.
-        self.proxy.authority='provider_operator'
-        status,result,_=self.request('POST','/v1/policy/publish',publish,identity=None)
-        self.assertEqual((status,result['error']['code']),(403,'policy_admin_owner_session_required'))
-        self.assertEqual(self.request('POST','/v1/policy/publish',publish,identity='agent-valid')[0],401)
-        self.assertEqual(self.app.RequestHandlerClass.store.bundle()['revision'],1)
-        # A verified owner session completes it through the owner validator.
-        self.assertEqual(self.request('POST','/v1/policy/publish',publish)[0],200)
-        self.assertEqual(self.app.RequestHandlerClass.store.bundle()['revision'],2)
-        self.assertTrue(any(call[1].endswith('/svc_policy/policy/validate') for call in self.proxy.calls))
-
     def test_path_publish_requires_owner_core_validation_and_negotiation(self):
         document=policy.template_document('team-isolation',{})['document']
         body={'expected_revision':1,'mode':'monitor','document':document}

@@ -79,39 +79,16 @@ class SchemaTests(unittest.TestCase):
             policy.evaluate_request({'subject':{},'action':'agent.prompt','resource':{}}, {'document':self.rule_document(),'mode':'monitor','revision':1})
         self.assertEqual(caught.exception.code, 'core_explain_required')
 
-    def test_admin_actions_are_default_deny_for_agents_in_the_simulator(self):
-        def run(document, mode, subject):
+    def test_admin_actions_are_ordinary_actions_in_the_simulator(self):
+        def run(document, mode):
             bundle={'revision':1,'mode':mode,'document':{'schema_version':1,'groups':{},'defaults':{},'rules':[],**document}}
-            return policy.evaluate_request({'subject':subject,'action':'org.invite.manage','resource':{'kind':'organization','id':'org_1'}},bundle)
-        agent={'kind':'agent','id':'agent-a'}
-        # No rules (monitor) and an allow default both deny Agents.
-        self.assertEqual(run({}, 'monitor', agent)['decision'], 'deny')
-        self.assertEqual(run({'defaults':{'org.invite.manage':'allow'}}, 'monitor', agent)['decision'], 'deny')
-        rule=lambda subject:{'rules':[{'id':'r','priority':1,'effect':'allow','subjects':[subject],'actions':['org.invite.manage'],'resources':[{}]}]}
-        # Selecting every Agent by kind does not name this one.
-        self.assertEqual(run(rule({'kind':'agent'}), 'enforce', agent)['decision'], 'deny')
-        for mode in ('monitor','enforce'):
-            self.assertEqual(run(rule({'kind':'agent','id':'agent-a'}), mode, agent)['decision'], 'allow')
-        # Humans keep role checks; the simulator does not apply the Agent gate.
-        self.assertEqual(run({}, 'monitor', {'kind':'human','id':'usr_1'})['decision'], 'allow')
-        self.assertEqual(set(policy.ADMIN_ACTIONS), {'org.manage','org.member.manage','org.invite.manage','org.group.manage','workspace.manage','workspace.access.manage','policy.provider.manage','audit.read','machine.enroll'})
-
-    def test_simulator_naming_matches_core_exactly(self):
-        # Same semantics as Core's selector_names_subject: only a non-empty id
-        # or group names the subject; empty selectors and machine never do.
-        agent={'kind':'agent','id':'agent-a','machine_id':'m'}
-        def run(subject, action='org.manage', groups=None):
-            bundle={'revision':1,'mode':'enforce','document':{'schema_version':1,'groups':groups or {},'defaults':{},
-                'rules':[{'id':'r','priority':1,'effect':'allow','subjects':[subject],'actions':[action],'resources':[{}]}]}}
-            return policy.evaluate_request({'subject':agent,'action':action,'resource':{'kind':'organization','id':'org_1'}},bundle)['decision']
-        self.assertEqual(run({}), 'deny')
-        self.assertEqual(run({'kind':'agent','machine_id':'m'}), 'deny')
-        self.assertEqual(run({'id':'agent-a'}), 'allow')
-        self.assertEqual(run({'group':'admins'}, groups={'admins':{'principals':[{'kind':'agent','id':'agent-a'}]}}), 'allow')
-        self.assertEqual(run({'group':'admins'}, groups={'admins':{'principals':[{'kind':'agent','id':'other'}]}}), 'deny')
-        # policy.provider.manage is never granted to non-humans.
-        self.assertEqual(run({'id':'agent-a'}, action='policy.provider.manage'), 'deny')
-        self.assertFalse(policy.selector_names_subject({'tree':{'path_eq':'/admins/a'}}))
-        self.assertFalse(policy.selector_names_subject({'id':'', 'group':''}))
+            return policy.evaluate_request({'subject':{'kind':'agent','id':'agent-a'},'action':'org.invite.manage','resource':{'kind':'organization','id':'org_1'}},bundle)
+        # No rules and monitor mode allow, like every other action.
+        self.assertEqual(run({}, 'enforce')['decision'], 'allow')
+        deny={'rules':[{'id':'r','priority':1,'effect':'deny','subjects':[{'kind':'agent'}],'actions':['org.invite.manage'],'resources':[{}]}]}
+        self.assertEqual(run(deny, 'monitor')['decision'], 'allow')
+        # An enforced explicit deny (or deny default) is respected.
+        self.assertEqual(run(deny, 'enforce')['decision'], 'deny')
+        self.assertEqual(run({'defaults':{'org.invite.manage':'deny'}}, 'enforce')['decision'], 'deny')
 
 if __name__ == '__main__': unittest.main()

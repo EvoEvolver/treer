@@ -27,7 +27,7 @@ impl AuthStore {
         self.disabled
     }
 
-    pub(crate) async fn membership_role(
+    pub(super) async fn membership_role(
         &self,
         organization_id: &str,
         user_id: &str,
@@ -907,7 +907,7 @@ impl AuthStore {
         let (server_id, secret) = parse_credential(token, "srv_")?;
         let row = sqlx::query(
             "SELECT m.workspace_id, m.secret_hash FROM machines m \
-             LEFT JOIN workspaces w ON w.workspace_id = m.workspace_id \
+             JOIN workspaces w ON w.workspace_id = m.workspace_id \
              WHERE m.server_id = $1 AND m.revoked_at IS NULL AND w.deleted_at IS NULL",
         )
         .bind(server_id)
@@ -1020,7 +1020,7 @@ impl AuthStore {
         } else {
             let row = sqlx::query(
                 "SELECT c.workspace_id, c.server_id, c.secret_hash FROM agent_credentials c \
-                 LEFT JOIN workspaces w ON w.workspace_id = c.workspace_id \
+                 JOIN workspaces w ON w.workspace_id = c.workspace_id \
                  WHERE c.agent_id = $1 AND c.revoked_at IS NULL AND w.deleted_at IS NULL",
             )
             .bind(agent_id)

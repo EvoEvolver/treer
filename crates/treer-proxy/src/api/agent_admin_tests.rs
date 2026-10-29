@@ -1,10 +1,9 @@
 //! Agent administration through Policy and the Settings administration
 //! routes, exercised through the complete Core router and middleware.
 use super::*;
-use std::collections::BTreeMap;
 use tower::ServiceExt;
 use treer_protocol::{
-    PolicyEffect, PolicyMode, PolicyPrincipalKind, PolicyPrincipalRef, WorkspacePolicyDocument,
+    PolicyMode, PolicyPrincipalKind, PolicyPrincipalRef, WorkspacePolicyDocument,
     POLICY_SCHEMA_VERSION, WORKLOAD_CREDENTIAL_HEADER,
 };
 use treer_proxy::policy_store::WorkspacePolicyStore;
@@ -30,7 +29,6 @@ struct Fixture {
     agent_headers: HeaderMap,
     machine_headers: HeaderMap,
     server_id: String,
-    state: AppState,
 }
 
 async fn fixture() -> Fixture {
@@ -70,7 +68,6 @@ async fn fixture() -> Fixture {
         .unwrap();
     let state = AppState::new();
     state.create_workspace_info(info).await.unwrap();
-    let app_state = state.clone();
     let store = WorkspacePolicyStore::new(auth.pool());
     let policy = PolicyEngine::durable(store.clone());
     let messages = MessageStore::open(auth.pool()).await.unwrap();
@@ -110,7 +107,6 @@ async fn fixture() -> Fixture {
         agent_headers,
         machine_headers,
         server_id: machine.server_id,
-        state: app_state,
     }
 }
 
@@ -169,10 +165,7 @@ impl Fixture {
     }
 
     async fn publish(&self, mode: PolicyMode, document: Value) {
-        self.publish_in("ws_a", mode, document).await;
-    }
-
-    async fn publish_in(&self, workspace: &str, mode: PolicyMode, document: Value) {
+        let workspace = "ws_a";
         let current = self.store.get(workspace).await.unwrap();
         self.store
             .replace(
@@ -191,104 +184,22 @@ impl Fixture {
         // only through the store, so wait out the cache deterministically.
         tokio::time::sleep(Duration::from_millis(5_100)).await;
     }
-
-    /// The organization-level half: the owner grants `actions` to agent-a.
-    async fn org_grant(&self, actions: &[&str]) {
-        let (status, body) = send(
-            &self.router,
-            Method::PUT,
-            &format!(
-                "/api/organizations/{}/agent-grants/agent-a",
-                self.organization_id
-            ),
-            &human(&self.owner),
-            Some(json!({"workspace_id": "ws_a", "actions": actions})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-    }
-
-    async fn grant(&self, actions: &[&str]) {
-        self.publish(
-            PolicyMode::Enforce,
-            json!({
-                "schema_version": POLICY_SCHEMA_VERSION,
-                "rules": [{
-                    "id": "agent-admin", "priority": 10, "effect": "allow",
-                    "subjects": [{"kind": "agent", "id": "agent-a"}],
-                    "actions": actions, "resources": [{}]
-                }]
-            }),
-        )
-        .await;
-    }
 }
 
 #[tokio::test]
-async fn agent_admin_is_default_deny_until_an_explicit_rule_names_the_agent() {
+async fn agent_admin_is_evaluated_like_any_other_policy_action() {
     let fx = fixture().await;
     let denied = |(status, body): (StatusCode, Value)| {
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(body["error"]["code"], "policy_denied", "{body}");
     };
-    // No Policy at all: the Core fallback allows ordinary actions, never admin.
-    denied(
+    // No Policy at all: the Core fallback allows administration too.
+    assert_eq!(
         fx.agent(Method::GET, "organization/invitations", None)
-            .await,
+            .await
+            .0,
+        StatusCode::OK
     );
-    denied(
-        fx.agent(
-            Method::POST,
-            "organization/invitations",
-            Some(json!({"role": "member"})),
-        )
-        .await,
-    );
-    // Monitor mode, no rules, and an action default of allow: still denied.
-    fx.publish(
-        PolicyMode::Monitor,
-        json!({"schema_version": POLICY_SCHEMA_VERSION,
-               "defaults": {"org.invite.manage": "allow"}, "rules": []}),
-    )
-    .await;
-    denied(
-        fx.agent(Method::GET, "organization/invitations", None)
-            .await,
-    );
-    // An enforced allow rule that selects every Agent by kind does not name it.
-    fx.publish(
-        PolicyMode::Enforce,
-        json!({"schema_version": POLICY_SCHEMA_VERSION, "rules": [{
-            "id": "all-agents", "priority": 1, "effect": "allow",
-            "subjects": [{"kind": "agent"}], "actions": ["org.invite.manage"], "resources": [{}]
-        }]}),
-    )
-    .await;
-    denied(
-        fx.agent(Method::GET, "organization/invitations", None)
-            .await,
-    );
-    // A machine credential without an Agent identity is never an admin subject.
-    let (status, body) = send(
-        &fx.router,
-        Method::GET,
-        "/agent/workspaces/ws_a/admin/organization/invitations",
-        &fx.machine_headers,
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(body["error"]["code"], "agent_identity_required");
-
-    // An explicit rule naming the Agent is not enough at organization scope:
-    // a human owner/admin must also grant the action at organization level.
-    fx.grant(&["org.invite.manage"]).await;
-    let (status, body) = fx
-        .agent(Method::GET, "organization/invitations", None)
-        .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(body["error"]["code"], "agent_org_grant_required");
-    fx.org_grant(&["org.invite.manage", "audit.read"]).await;
     let (status, created) = fx
         .agent(
             Method::POST,
@@ -300,40 +211,64 @@ async fn agent_admin_is_default_deny_until_an_explicit_rule_names_the_agent() {
     assert_eq!(created["created_by"]["kind"], "agent");
     assert_eq!(created["created_by"]["name"], "Admin Bot");
     assert!(created["url"].as_str().unwrap().contains("invite="));
-    denied(fx.agent(Method::GET, "organization/members", None).await);
-    denied(
-        fx.agent(Method::PATCH, "workspace", Some(json!({"name": "Renamed"})))
-            .await,
-    );
-    // policy.provider.manage is never grantable to Agents: no route at all.
-    assert!(fx
-        .agent(Method::GET, "workspace/policy-provider", None)
-        .await
-        .0
-        .is_client_error());
-    denied(fx.agent(Method::POST, "workspace/bootstrap", None).await);
-
-    // A named allow rule also grants in monitor mode; a higher deny wins.
-    fx.publish(
-        PolicyMode::Monitor,
-        json!({"schema_version": POLICY_SCHEMA_VERSION, "rules": [
-            {"id": "allow", "priority": 1, "effect": "allow",
-             "subjects": [{"kind": "agent", "id": "agent-a"}],
-             "actions": ["org.invite.manage", "audit.read"], "resources": [{}]},
-            {"id": "deny", "priority": 5, "effect": "deny",
-             "subjects": [{"kind": "agent", "id": "agent-a"}],
-             "actions": ["audit.read"], "resources": [{}]}
-        ]}),
-    )
-    .await;
     assert_eq!(
-        fx.agent(Method::GET, "organization/invitations", None)
+        fx.agent(Method::GET, "workspace/policy-provider", None)
             .await
             .0,
         StatusCode::OK
     );
+    // A machine credential without an Agent identity is not an Agent.
+    let (status, body) = send(
+        &fx.router,
+        Method::GET,
+        "/agent/workspaces/ws_a/admin/organization/invitations",
+        &fx.machine_headers,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"], "agent_identity_required");
+
+    let rules = json!({"schema_version": POLICY_SCHEMA_VERSION, "rules": [
+        {"id": "deny", "priority": 5, "effect": "deny",
+         "subjects": [{"kind": "agent", "id": "agent-a"}],
+         "actions": ["audit.read", "policy.provider.manage"], "resources": [{}]}
+    ]});
+    // Monitor mode records a matched deny but allows.
+    fx.publish(PolicyMode::Monitor, rules.clone()).await;
+    assert_eq!(
+        fx.agent(Method::GET, "organization/audit-events", None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    // Enforced, the explicit deny is respected; other actions stay allowed.
+    fx.publish(PolicyMode::Enforce, rules).await;
     denied(
         fx.agent(Method::GET, "organization/audit-events", None)
+            .await,
+    );
+    denied(
+        fx.agent(Method::GET, "workspace/policy-provider", None)
+            .await,
+    );
+    for path in [
+        "organization/invitations",
+        "organization/members",
+        "workspaces",
+    ] {
+        let (status, body) = fx.agent(Method::GET, path, None).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {body}");
+    }
+    // An enforced deny default applies the same way.
+    fx.publish(
+        PolicyMode::Enforce,
+        json!({"schema_version": POLICY_SCHEMA_VERSION,
+               "defaults": {"org.invite.manage": "deny"}, "rules": []}),
+    )
+    .await;
+    denied(
+        fx.agent(Method::GET, "organization/invitations", None)
             .await,
     );
 }
@@ -341,14 +276,6 @@ async fn agent_admin_is_default_deny_until_an_explicit_rule_names_the_agent() {
 #[tokio::test]
 async fn agent_admin_is_scoped_to_its_workspace_and_organization() {
     let fx = fixture().await;
-    fx.grant(&[
-        "org.invite.manage",
-        "workspace.manage",
-        "workspace.access.manage",
-    ])
-    .await;
-    fx.org_grant(&["org.invite.manage", "workspace.manage"])
-        .await;
     // Another workspace's admin routes are refused before any handler runs.
     let (status, _) = send(
         &fx.router,
@@ -369,7 +296,7 @@ async fn agent_admin_is_scoped_to_its_workspace_and_organization() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "invitation_workspace_not_found");
-    // Workspace listing covers only the Agent's organization.
+    // Workspace listing and audit cover only the Agent's organization.
     let (status, body) = fx.agent(Method::GET, "workspaces", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let ids: Vec<_> = body["workspaces"]
@@ -379,16 +306,30 @@ async fn agent_admin_is_scoped_to_its_workspace_and_organization() {
         .map(|w| w["workspace_id"].as_str().unwrap().to_string())
         .collect();
     assert_eq!(ids, vec!["ws_a".to_string()]);
-    // Store-level defense in depth: an Agent actor cannot touch organization B.
+    let (status, audit) = fx
+        .agent(Method::GET, "organization/audit-events?limit=100", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{audit}");
+    assert!(audit["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|event| event["organization_id"] == fx.organization_id.as_str()));
+    // Store level: an Agent actor cannot touch organization B or its workspace.
     let other_org = fx.auth.workspace_organization("ws_b").await.unwrap();
     let actor = auth::AdminActor::Agent {
         agent_id: "agent-a".into(),
         workspace_id: "ws_a".into(),
-        server_id: fx.server_id.clone(),
     };
     let error = fx
         .auth
         .list_organization_invitations(&other_org, &actor)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), "agent_scope_denied");
+    let error = fx
+        .auth
+        .update_member_role_as(&other_org, &actor, &fx.owner.user_id, "member")
         .await
         .unwrap_err();
     assert_eq!(error.code(), "agent_scope_denied");
@@ -405,83 +346,71 @@ async fn agent_admin_is_scoped_to_its_workspace_and_organization() {
 }
 
 #[tokio::test]
-async fn agents_never_touch_owners_or_roles_and_are_audited() {
+async fn agents_manage_members_like_an_owner_keep_the_last_owner_and_are_audited() {
     let fx = fixture().await;
-    let all = [
-        "org.manage",
-        "org.member.manage",
-        "org.invite.manage",
-        "org.group.manage",
-        "audit.read",
-    ];
-    fx.grant(&all).await;
-    fx.org_grant(&all).await;
-    // A second owner, an admin and a member; the Agent may touch none of the
-    // owners and may never change a role (it is treated like an admin).
-    let mut users = Vec::new();
-    for (email, role) in [
-        ("second@example.com", "owner"),
-        ("admin@example.com", "admin"),
-        ("member@example.com", "member"),
-    ] {
-        let (token, _) = fx
-            .auth
-            .create_invitation(&fx.organization_id, &fx.owner.user_id)
-            .await
-            .unwrap();
-        let user = register(&fx.auth, email, email, "user-password-1")
-            .await
-            .unwrap();
-        fx.auth
-            .accept_invitation(&token, &user.user_id)
-            .await
-            .unwrap();
-        fx.auth
-            .update_member_role(&fx.organization_id, &fx.owner.user_id, &user.user_id, role)
-            .await
-            .unwrap();
-        users.push(user);
-    }
+    let member = member_user(&fx, "member@example.com").await;
     let path = |user: &str| format!("organization/members/{user}");
-    for target in [&fx.owner.user_id, &users[0].user_id] {
-        for role in ["member", "admin", "owner"] {
-            let (status, body) = fx
-                .agent(Method::PATCH, &path(target), Some(json!({"role": role})))
-                .await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-            assert_eq!(body["error"]["code"], "organization_owner_required");
-        }
-        let (status, body) = fx.agent(Method::DELETE, &path(target), None).await;
-        assert_eq!(status, StatusCode::CONFLICT, "{body}");
-        assert_eq!(body["error"]["code"], "owner_cannot_be_removed");
-    }
-    // No promotion of a member to admin or owner either.
+    // Agents invite any role and change roles, including owners.
+    let (status, body) = fx
+        .agent(
+            Method::POST,
+            "organization/invitations",
+            Some(json!({"role": "owner"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["role"], "owner");
     for role in ["admin", "owner"] {
-        let (status, _) = fx
+        let (status, body) = fx
             .agent(
                 Method::PATCH,
-                &path(&users[2].user_id),
+                &path(&member.user_id),
                 Some(json!({"role": role})),
             )
             .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(status, StatusCode::OK, "{role}: {body}");
     }
-    // The organization cannot be deleted by an Agent.
+    // With two owners, one may be demoted and then removed...
     let (status, body) = fx
+        .agent(
+            Method::PATCH,
+            &path(&member.user_id),
+            Some(json!({"role": "member"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    fx.agent(
+        Method::PATCH,
+        &path(&member.user_id),
+        Some(json!({"role": "owner"})),
+    )
+    .await;
+    let (status, body) = fx.agent(Method::DELETE, &path(&member.user_id), None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // ...but the last owner is never demoted or removed.
+    let (status, body) = fx
+        .agent(
+            Method::PATCH,
+            &path(&fx.owner.user_id),
+            Some(json!({"role": "admin"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["code"], "last_owner");
+    let (status, body) = fx
+        .agent(Method::DELETE, &path(&fx.owner.user_id), None)
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["code"], "last_owner");
+    // Deleting (or transferring) the organization stays a human action.
+    let (status, _) = fx
         .agent(
             Method::DELETE,
             "organization",
             Some(json!({"confirm_name": "Owner Personal"})),
         )
         .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    // Removing an admin or member (an admin's power) is allowed and audited.
-    assert_eq!(
-        fx.agent(Method::DELETE, &path(&users[1].user_id), None)
-            .await
-            .0,
-        StatusCode::OK
-    );
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     let (status, group) = fx
         .agent(
             Method::POST,
@@ -490,16 +419,13 @@ async fn agents_never_touch_owners_or_roles_and_are_audited() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{group}");
-    let roles: Vec<(String, String)> = sqlx::query_as("SELECT user_id, role FROM organization_members WHERE organization_id=$1 AND role='owner' ORDER BY user_id")
-        .bind(&fx.organization_id).fetch_all(&fx.auth.pool()).await.unwrap();
-    assert_eq!(roles.len(), 2, "both owners remain");
 
     let (status, audit) = fx
         .agent(Method::GET, "organization/audit-events?limit=100", None)
         .await;
     assert_eq!(status, StatusCode::OK, "{audit}");
     let events = audit["events"].as_array().unwrap();
-    for action in ["member.removed", "group.created"] {
+    for action in ["member.role_updated", "member.removed", "group.created"] {
         let event = events
             .iter()
             .find(|event| event["action"] == action && event["actor_kind"] == "agent")
@@ -507,9 +433,9 @@ async fn agents_never_touch_owners_or_roles_and_are_audited() {
         assert_eq!(event["actor_id"], "agent-a", "{event}");
         assert_eq!(event["actor_name"], "Admin Bot", "{event}");
     }
-    // The name is frozen at write time: renaming the Agent later (for
-    // example to impersonate someone) does not rewrite history.
-    sqlx::query("UPDATE agent_names SET name='Owner' WHERE agent_id='agent-a'")
+    // The name is frozen at write time: renaming the Agent later does not
+    // rewrite history.
+    sqlx::query("UPDATE agent_names SET name='Renamed' WHERE agent_id='agent-a'")
         .execute(&fx.auth.pool())
         .await
         .unwrap();
@@ -1107,22 +1033,8 @@ async fn account_sessions_and_password_change() {
 }
 
 #[tokio::test]
-async fn agent_workspace_and_enrollment_routes_with_grants() {
+async fn agent_workspace_and_enrollment_routes() {
     let fx = fixture().await;
-    fx.grant(&[
-        "workspace.manage",
-        "machine.enroll",
-        "workspace.access.manage",
-    ])
-    .await;
-    // Workspace scope (own workspace) needs only the Policy allow; creating
-    // or listing workspaces is organization scope and needs the org grant.
-    let (status, body) = fx
-        .agent(Method::POST, "workspaces", Some(json!({"name": "Gamma"})))
-        .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(body["error"]["code"], "agent_org_grant_required");
-    fx.org_grant(&["workspace.manage"]).await;
     let (status, body) = fx
         .agent(Method::POST, "workspaces", Some(json!({"name": "Gamma"})))
         .await;
@@ -1164,26 +1076,43 @@ async fn agent_workspace_and_enrollment_routes_with_grants() {
     assert_eq!(creator, "agent:agent-a");
 }
 
-#[test]
-fn admin_actions_are_listed_for_default_deny() {
-    use crate::policy::ADMIN_ACTIONS;
-    for action in [
-        "org.manage",
-        "org.member.manage",
-        "org.invite.manage",
-        "org.group.manage",
-        "workspace.manage",
-        "workspace.access.manage",
-        "policy.provider.manage",
-        "audit.read",
-        "machine.enroll",
-    ] {
-        assert!(ADMIN_ACTIONS.contains(&action), "{action}");
+#[tokio::test]
+async fn workspace_ids_are_validated_on_create() {
+    let fx = fixture().await;
+    let long = "w".repeat(129);
+    for invalid in ["", "has space", "../escape", "ws/a", "ws.a", long.as_str()] {
+        let (status, body) = fx
+            .agent(
+                Method::POST,
+                "workspaces",
+                Some(json!({"workspace_id": invalid, "name": "Bad"})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid:?}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_workspace_id");
+        let (status, body) = send(
+            &fx.router,
+            Method::POST,
+            "/api/workspaces",
+            &human(&fx.owner),
+            Some(json!({"organization_id": fx.organization_id,
+                        "workspace_id": invalid, "name": "Bad"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid:?}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_workspace_id");
     }
-    let _ = (BTreeMap::<String, PolicyEffect>::new(), PolicyMode::Monitor);
+    let (status, body) = send(
+        &fx.router,
+        Method::POST,
+        "/api/workspaces",
+        &human(&fx.owner),
+        Some(json!({"organization_id": fx.organization_id,
+                    "workspace_id": "ws_Valid-1", "name": "Good"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }
-
-// ---- Security review regressions -------------------------------------------
 
 /// A user who joins the organization as a member (through an invitation).
 async fn member_user(fx: &Fixture, email: &str) -> CurrentSession {
@@ -1202,59 +1131,6 @@ async fn member_user(fx: &Fixture, email: &str) -> CurrentSession {
     user
 }
 
-/// Enroll a machine in `workspace` and return headers for `agent_id` on it.
-async fn agent_headers_in(
-    fx: &Fixture,
-    workspace: &str,
-    created_by: &str,
-    agent_id: &str,
-) -> HeaderMap {
-    let enrollment = fx
-        .auth
-        .create_machine_enrollment(workspace, created_by)
-        .await
-        .unwrap();
-    let machine = fx.auth.claim_machine_enrollment(&enrollment).await.unwrap();
-    let credential = fx
-        .auth
-        .create_agent_credential(workspace, &machine.server_id, agent_id)
-        .await
-        .unwrap();
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::AUTHORIZATION,
-        format!("Bearer {}", machine.machine_token).parse().unwrap(),
-    );
-    headers.insert(AGENT_ID_HEADER, agent_id.parse().unwrap());
-    headers.insert(WORKLOAD_CREDENTIAL_HEADER, credential.parse().unwrap());
-    headers
-}
-
-fn every_admin_action() -> Value {
-    json!([
-        "org.manage",
-        "org.member.manage",
-        "org.invite.manage",
-        "org.group.manage",
-        "workspace.manage",
-        "workspace.access.manage",
-        "policy.provider.manage",
-        "audit.read",
-        "machine.enroll"
-    ])
-}
-
-async fn accept_over_http(fx: &Fixture, user: &CurrentSession, token: &str) -> (StatusCode, Value) {
-    send(
-        &fx.router,
-        Method::POST,
-        "/api/invitations/accept",
-        &human(user),
-        Some(json!({ "token": token })),
-    )
-    .await
-}
-
 fn invite_token(created: &Value) -> String {
     let url = Url::parse(created["url"].as_str().unwrap()).unwrap();
     url.query_pairs()
@@ -1265,625 +1141,152 @@ fn invite_token(created: &Value) -> String {
 }
 
 #[tokio::test]
-async fn member_owned_workspace_policy_cannot_make_its_agent_an_org_admin() {
-    // Exploit chain: a member creates a workspace (becoming its owner), writes
-    // that workspace's Policy naming its own Agent with every admin action,
-    // and drives the Agent at organization administration.
+async fn invitation_email_is_for_delivery_and_creator_changes_do_not_revoke() {
     let fx = fixture().await;
-    let mallory = member_user(&fx, "mallory@example.com").await;
-    let info = fx
-        .auth
-        .create_workspace(&fx.organization_id, "ws_m", "Mallory", &mallory.user_id)
-        .await
-        .unwrap();
-    fx.state.create_workspace_info(info).await.unwrap();
-    // A restricted workspace the member cannot see.
-    let secret = fx
-        .auth
-        .create_workspace(
-            &fx.organization_id,
-            "ws_secret",
-            "Secret",
-            &fx.owner.user_id,
-        )
-        .await
-        .unwrap();
-    fx.state.create_workspace_info(secret).await.unwrap();
+    let admin = member_user(&fx, "admin@example.com").await;
     fx.auth
-        .update_workspace_access_mode("ws_secret", &fx.owner.user_id, "restricted")
+        .update_member_role(
+            &fx.organization_id,
+            &fx.owner.user_id,
+            &admin.user_id,
+            "admin",
+        )
         .await
         .unwrap();
-    let headers = agent_headers_in(&fx, "ws_m", &mallory.user_id, "agent-m").await;
-    fx.publish_in(
-        "ws_m",
-        PolicyMode::Enforce,
-        json!({"schema_version": POLICY_SCHEMA_VERSION, "rules": [{
-            "id": "everything", "priority": 100, "effect": "allow",
-            "subjects": [{"kind": "agent", "id": "agent-m"}],
-            "actions": every_admin_action(), "resources": [{}]}]}),
-    )
-    .await;
-    let call = |method: Method, path: &str, body: Option<Value>| {
-        let headers = headers.clone();
-        let uri = format!("/agent/workspaces/ws_m/admin/{path}");
-        let router = fx.router.clone();
-        async move { send(&router, method, &uri, &headers, body).await }
-    };
-    let refused = |(status, body): (StatusCode, Value)| {
-        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-        assert_eq!(body["error"]["code"], "agent_org_grant_required", "{body}");
-    };
-    // Cannot become owner, list (restricted) workspaces, mint owner invites,
-    // read organization or other workspaces' audit, or touch members/groups.
-    refused(
-        call(
-            Method::PATCH,
-            &format!("organization/members/{}", mallory.user_id),
-            Some(json!({"role": "owner"})),
-        )
-        .await,
-    );
-    refused(call(Method::GET, "workspaces", None).await);
-    refused(
-        call(
-            Method::POST,
-            "organization/invitations",
-            Some(json!({"role": "owner"})),
-        )
-        .await,
-    );
-    refused(
-        call(
-            Method::POST,
-            "organization/invitations",
-            Some(json!({"role": "member", "workspace_ids": ["ws_secret"]})),
-        )
-        .await,
-    );
-    refused(call(Method::GET, "organization/audit-events", None).await);
-    refused(
-        call(
-            Method::GET,
-            "organization/audit-events?workspace_id=ws_a",
-            None,
-        )
-        .await,
-    );
-    refused(call(Method::GET, "organization/members", None).await);
-    refused(
-        call(
-            Method::POST,
-            "organization/groups",
-            Some(json!({"name": "pwn"})),
-        )
-        .await,
-    );
-    refused(
-        call(
-            Method::PATCH,
-            "organization",
-            Some(json!({"name": "Pwned"})),
-        )
-        .await,
-    );
-    refused(call(Method::POST, "workspaces", Some(json!({"name": "More"}))).await);
-    refused(call(Method::DELETE, "workspace", Some(json!({}))).await);
-    // policy.provider.manage is never available to Agents.
-    assert!(
-        call(Method::PUT, "workspace/policy-provider", Some(json!({})))
-            .await
-            .0
-            .is_client_error()
-    );
-    // The member cannot write the organization grant itself.
-    let (status, body) = send(
+    let base = format!("/api/organizations/{}/invitations", fx.organization_id);
+    let (status, by_admin) = send(
         &fx.router,
-        Method::PUT,
-        &format!(
-            "/api/organizations/{}/agent-grants/agent-m",
-            fx.organization_id
-        ),
-        &human(&mallory),
-        Some(json!({"workspace_id": "ws_m", "actions": ["org.member.manage"]})),
+        Method::POST,
+        &base,
+        &human(&admin),
+        Some(json!({"role": "member", "email": "invitee@example.com"})),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    // Workspace scope on its own workspace still works with the Policy alone,
-    // and own-workspace audit holds no organization-level or foreign events.
-    assert_eq!(
-        call(
-            Method::PATCH,
-            "workspace",
-            Some(json!({"name": "Mallory 2"}))
+    assert_eq!(status, StatusCode::OK, "{by_admin}");
+    let (status, by_agent) = fx
+        .agent(
+            Method::POST,
+            "organization/invitations",
+            Some(json!({"role": "admin", "email": "someone@example.com"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{by_agent}");
+    // Demoting the human creator and denying the Agent afterwards leaves
+    // their pending invitations usable; revoke them explicitly instead.
+    fx.auth
+        .update_member_role(
+            &fx.organization_id,
+            &fx.owner.user_id,
+            &admin.user_id,
+            "member",
         )
         .await
-        .0,
-        StatusCode::OK
-    );
-    let (status, audit) = call(
-        Method::GET,
-        "organization/audit-events?workspace_id=ws_m",
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{audit}");
-    let events = audit["events"].as_array().unwrap();
-    assert!(!events.is_empty());
-    assert!(
-        events.iter().all(|event| event["workspace_id"] == "ws_m"),
-        "{audit}"
-    );
-    let roles: Option<String> = sqlx::query_scalar(
-        "SELECT role FROM organization_members WHERE organization_id=$1 AND user_id=$2",
-    )
-    .bind(&fx.organization_id)
-    .bind(&mallory.user_id)
-    .fetch_optional(&fx.auth.pool())
-    .await
-    .unwrap();
-    assert_eq!(roles.as_deref(), Some("member"));
-}
-
-#[tokio::test]
-async fn tree_selector_rule_and_folder_placement_grant_no_administration() {
-    let fx = fixture().await;
-    fx.org_grant(&["org.invite.manage"]).await;
-    // A rule selecting the administration folder by path; the Agent is placed
-    // there (placement facts arrive through Tree enrichment).
+        .unwrap();
     fx.publish(
         PolicyMode::Enforce,
-        json!({"schema_version": 2, "rules": [{
-            "id": "admins-folder", "priority": 100, "effect": "allow",
-            "subjects": [{"kind": "agent", "tree": {"path_prefix": {"path": "/", "include_self": true}}}],
-            "actions": ["org.invite.manage"], "resources": [{}]}]}),
+        json!({"schema_version": POLICY_SCHEMA_VERSION,
+               "defaults": {"org.invite.manage": "deny"}, "rules": []}),
     )
     .await;
-    let (status, body) = fx
-        .agent(Method::GET, "organization/invitations", None)
+    // Any account holding the link accepts, whatever its email.
+    for (created, email, role) in [
+        (&by_admin, "unrelated@example.com", "member"),
+        (&by_agent, "third@example.com", "admin"),
+    ] {
+        let user = register(&fx.auth, email, email, "joiner-password-1")
+            .await
+            .unwrap();
+        let (status, body) = send(
+            &fx.router,
+            Method::POST,
+            "/api/invitations/accept",
+            &human(&user),
+            Some(json!({ "token": invite_token(created) })),
+        )
         .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(body["error"]["code"], "policy_denied");
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["role"], role);
+    }
 }
 
 #[tokio::test]
-async fn agent_grant_api_is_human_owner_admin_only_validated_and_audited() {
+async fn organization_deletes_after_traffic_and_hard_deleted_workspaces_do_not_authenticate() {
     let fx = fixture().await;
-    let base = format!("/api/organizations/{}/agent-grants", fx.organization_id);
     let owner = human(&fx.owner);
-    for (actions, code) in [
-        (json!([]), "invalid_agent_grant"),
-        (json!(["policy.provider.manage"]), "invalid_agent_grant"),
-        (json!(["workspace.access.manage"]), "invalid_agent_grant"),
-    ] {
-        let (status, body) = send(
-            &fx.router,
-            Method::PUT,
-            &format!("{base}/agent-a"),
-            &owner,
-            Some(json!({"workspace_id": "ws_a", "actions": actions})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        assert_eq!(body["error"]["code"], code);
-    }
-    let (status, _) = send(
+    let pool = fx.auth.pool();
+    sqlx::query(
+        "INSERT INTO traffic_usage_hourly(workspace_id, window_start, traffic_class, source_type, \
+         source_id, destination_type, destination_id, payload_bytes, meter_version, updated_at) \
+         VALUES('ws_a', 0, 'virtual_network', 'machine', 'a', 'machine', 'b', 10, 1, 'now')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO agent_traffic_usage_hourly(workspace_id, window_start, traffic_class, \
+         source_type, source_id, destination_type, destination_id, payload_bytes, meter_version, \
+         updated_at) VALUES('ws_a', 0, 'virtual_network', 'agent', 'a', 'machine', 'b', 10, 1, 'now')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO network_usage_receipts(ticket, workspace_id, server_id, destination, created_at) \
+         VALUES('tkt_1', 'ws_a', $1, 'x', 0)",
+    )
+    .bind(&fx.server_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, body) = send(
         &fx.router,
-        Method::PUT,
-        &format!("{base}/agent-a"),
+        Method::DELETE,
+        "/api/workspaces/ws_a",
         &owner,
-        Some(json!({"workspace_id": "ws_b", "actions": ["audit.read"]})),
+        Some(json!({"confirm_name": "Alpha", "revoke_machines": true})),
     )
     .await;
-    assert_eq!(
-        status,
-        StatusCode::NOT_FOUND,
-        "another organization's workspace"
-    );
-    // Agents cannot reach the human API with workload credentials.
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let name = fx.auth.list_organizations(&fx.owner.user_id).await.unwrap()[0]
+        .name
+        .clone();
+    let (status, body) = send(
+        &fx.router,
+        Method::DELETE,
+        &format!("/api/organizations/{}", fx.organization_id),
+        &owner,
+        Some(json!({"confirm_name": name})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    let left: i64 = sqlx::query_scalar(
+        "SELECT (SELECT COUNT(*) FROM traffic_usage_hourly) + \
+         (SELECT COUNT(*) FROM agent_traffic_usage_hourly) + \
+         (SELECT COUNT(*) FROM network_usage_receipts)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 0);
+    // A machine and Agent credential whose workspace row is gone (never
+    // revoked) do not authenticate.
+    sqlx::query("UPDATE machines SET revoked_at = NULL WHERE server_id = $1")
+        .bind(&fx.server_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let (status, _) = send(
         &fx.router,
-        Method::PUT,
-        &format!("{base}/agent-a"),
+        Method::GET,
+        "/agent/workspaces/ws_a/admin/workspace/access",
         &fx.agent_headers,
-        Some(json!({"workspace_id": "ws_a", "actions": ["audit.read"]})),
+        None,
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    // An admin may grant; the grant goes inactive when the admin is demoted.
-    let admin = member_user(&fx, "admin@example.com").await;
-    fx.auth
-        .update_member_role(
-            &fx.organization_id,
-            &fx.owner.user_id,
-            &admin.user_id,
-            "admin",
-        )
-        .await
-        .unwrap();
-    let (status, body) = send(&fx.router, Method::PUT, &format!("{base}/agent-a"), &human(&admin),
-        Some(json!({"workspace_id": "ws_a", "actions": ["org.invite.manage", "audit.read", "audit.read"]}))).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        body["grant"]["actions"],
-        json!(["audit.read", "org.invite.manage"])
-    );
-    assert_eq!(body["grant"]["created_by_role"], "admin");
-    assert_eq!(body["grant"]["agent_name"], "Admin Bot");
-    assert_eq!(body["grant"]["active"], true);
-    fx.grant(&["org.invite.manage"]).await;
-    assert_eq!(
-        fx.agent(Method::GET, "organization/invitations", None)
-            .await
-            .0,
-        StatusCode::OK
-    );
-    fx.auth
-        .update_member_role(
-            &fx.organization_id,
-            &fx.owner.user_id,
-            &admin.user_id,
-            "member",
-        )
-        .await
-        .unwrap();
-    let (_, list) = send(&fx.router, Method::GET, &base, &owner, None).await;
-    assert_eq!(list["grants"][0]["active"], false, "{list}");
-    assert_eq!(list["grantable_actions"].as_array().unwrap().len(), 6);
-    assert_eq!(
-        fx.agent(Method::GET, "organization/invitations", None)
-            .await
-            .0,
-        StatusCode::FORBIDDEN
-    );
-    // A plain member cannot list or delete grants.
-    assert_eq!(
-        send(&fx.router, Method::GET, &base, &human(&admin), None)
-            .await
-            .0,
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(
-        send(
-            &fx.router,
-            Method::DELETE,
-            &format!("{base}/agent-a"),
-            &human(&admin),
-            None
-        )
-        .await
-        .0,
-        StatusCode::FORBIDDEN
-    );
-    // The owner re-saves (active again), then removes it.
-    fx.org_grant(&["org.invite.manage"]).await;
-    assert_eq!(
-        fx.agent(Method::GET, "organization/invitations", None)
-            .await
-            .0,
-        StatusCode::OK
-    );
-    assert_eq!(
-        send(
-            &fx.router,
-            Method::DELETE,
-            &format!("{base}/agent-a"),
-            &owner,
-            None
-        )
-        .await
-        .0,
-        StatusCode::NO_CONTENT
-    );
-    assert_eq!(
-        send(
-            &fx.router,
-            Method::DELETE,
-            &format!("{base}/agent-a"),
-            &owner,
-            None
-        )
-        .await
-        .0,
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        fx.agent(Method::GET, "organization/invitations", None)
-            .await
-            .0,
-        StatusCode::FORBIDDEN
-    );
-    let actions: Vec<String> = sqlx::query_scalar("SELECT action FROM organization_audit_events WHERE action LIKE 'organization.agent_grant.%' ORDER BY sequence")
-        .fetch_all(&fx.auth.pool()).await.unwrap();
-    assert_eq!(
-        actions,
-        [
-            "organization.agent_grant.updated",
-            "organization.agent_grant.updated",
-            "organization.agent_grant.removed"
-        ]
-    );
-}
-
-#[tokio::test]
-async fn agents_cannot_invite_owners_or_admins_and_their_invitations_are_rechecked() {
-    let fx = fixture().await;
-    fx.grant(&["org.invite.manage"]).await;
-    fx.org_grant(&["org.invite.manage"]).await;
-    for role in ["owner", "admin"] {
-        let (status, body) = fx
-            .agent(
-                Method::POST,
-                "organization/invitations",
-                Some(json!({"role": role})),
-            )
-            .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-        assert_eq!(body["error"]["code"], "agent_role_cap");
-    }
-    let mut tokens = Vec::new();
-    for _ in 0..3 {
-        let (status, created) = fx
-            .agent(
-                Method::POST,
-                "organization/invitations",
-                Some(json!({"role": "member"})),
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK, "{created}");
-        tokens.push(invite_token(&created));
-    }
-    // With the Policy and grant intact, acceptance over HTTP works; without a
-    // Policy engine (store call) an Agent-created invitation fails closed.
-    let alice = register(&fx.auth, "alice@example.com", "Alice", "alice-password")
-        .await
-        .unwrap();
     assert!(fx
         .auth
-        .accept_invitation(&tokens[0], &alice.user_id)
+        .authenticate_machine(&fx.machine_headers)
         .await
         .is_err());
-    let (status, body) = accept_over_http(&fx, &alice, &tokens[0]).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    // The workspace Policy no longer allows the Agent: refused and revoked.
-    fx.publish(
-        PolicyMode::Enforce,
-        json!({"schema_version": POLICY_SCHEMA_VERSION, "rules": []}),
-    )
-    .await;
-    let bob = register(&fx.auth, "bob@example.com", "Bob", "bob-password-1")
-        .await
-        .unwrap();
-    let (status, body) = accept_over_http(&fx, &bob, &tokens[1]).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["error"]["code"], "invalid_invitation");
-    let revoked: bool =
-        sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM invitations WHERE token=$1")
-            .bind(&tokens[1])
-            .fetch_one(&fx.auth.pool())
-            .await
-            .unwrap();
-    assert!(revoked);
-    // Removing the organization grant revokes the Agent's pending invitations.
-    fx.grant(&["org.invite.manage"]).await;
-    send(
-        &fx.router,
-        Method::DELETE,
-        &format!(
-            "/api/organizations/{}/agent-grants/agent-a",
-            fx.organization_id
-        ),
-        &human(&fx.owner),
-        None,
-    )
-    .await;
-    let revoked: bool =
-        sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM invitations WHERE token=$1")
-            .bind(&tokens[2])
-            .fetch_one(&fx.auth.pool())
-            .await
-            .unwrap();
-    assert!(revoked);
-    let (status, _) = accept_over_http(&fx, &bob, &tokens[2]).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn revoked_creator_invitations_are_refused() {
-    let fx = fixture().await;
-    let admin = member_user(&fx, "admin@example.com").await;
-    fx.auth
-        .update_member_role(
-            &fx.organization_id,
-            &fx.owner.user_id,
-            &admin.user_id,
-            "admin",
-        )
-        .await
-        .unwrap();
-    let create = |user: &CurrentSession, role: &str| {
-        let (router, headers, org) = (fx.router.clone(), human(user), fx.organization_id.clone());
-        let role = role.to_string();
-        async move {
-            let (status, created) = send(
-                &router,
-                Method::POST,
-                &format!("/api/organizations/{org}/invitations"),
-                &headers,
-                Some(json!({"role": role})),
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK, "{created}");
-            invite_token(&created)
-        }
-    };
-    let status_of = |token: String| {
-        let pool = fx.auth.pool();
-        async move {
-            sqlx::query_scalar::<_, bool>(
-                "SELECT revoked_at IS NOT NULL FROM invitations WHERE token=$1",
-            )
-            .bind(token)
-            .fetch_one(&pool)
-            .await
-            .unwrap()
-        }
-    };
-    // Demotion revokes the pending invitations the new role no longer covers.
-    let by_admin = create(&admin, "member").await;
-    fx.auth
-        .update_member_role(
-            &fx.organization_id,
-            &fx.owner.user_id,
-            &admin.user_id,
-            "member",
-        )
-        .await
-        .unwrap();
-    assert!(status_of(by_admin.clone()).await);
-    let carol = register(&fx.auth, "carol@example.com", "Carol", "carol-password")
-        .await
-        .unwrap();
-    assert_eq!(
-        accept_over_http(&fx, &carol, &by_admin).await.0,
-        StatusCode::BAD_REQUEST
-    );
-    // Re-verification at acceptance even when no revocation was recorded: an
-    // owner invitation from a creator who is now only an admin.
-    let second = member_user(&fx, "second@example.com").await;
-    fx.auth
-        .update_member_role(
-            &fx.organization_id,
-            &fx.owner.user_id,
-            &second.user_id,
-            "owner",
-        )
-        .await
-        .unwrap();
-    let owner_invite = create(&second, "owner").await;
-    let member_invite = create(&second, "member").await;
-    sqlx::query("UPDATE organization_members SET role='admin' WHERE user_id=$1")
-        .bind(&second.user_id)
-        .execute(&fx.auth.pool())
-        .await
-        .unwrap();
-    assert!(!status_of(owner_invite.clone()).await);
-    let (status, body) = accept_over_http(&fx, &carol, &owner_invite).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(
-        status_of(owner_invite.clone()).await,
-        "refusal is persisted as revoked"
-    );
-    // The admin may still have invited a member.
-    assert_eq!(
-        accept_over_http(&fx, &carol, &member_invite).await.0,
-        StatusCode::OK
-    );
-    // Removal of the creator revokes too, and registration re-verifies.
-    let by_second = create(&second, "member").await;
-    fx.auth
-        .remove_member(&fx.organization_id, &fx.owner.user_id, &second.user_id)
-        .await
-        .unwrap();
-    assert!(status_of(by_second.clone()).await);
-    let direct = create(&fx.owner, "member").await;
-    sqlx::query("UPDATE organization_members SET role='member' WHERE user_id=$1")
-        .bind(&fx.owner.user_id)
-        .execute(&fx.auth.pool())
-        .await
-        .unwrap();
-    assert!(fx
-        .auth
-        .register_with_client(
-            Some(&direct),
-            "dave@example.com",
-            "Dave",
-            "dave-password",
-            None,
-            true
-        )
-        .await
-        .is_err());
-}
-
-#[tokio::test]
-async fn email_bound_invitations_need_the_invited_verified_email() {
-    let fx = fixture().await;
-    let (status, created) = send(
-        &fx.router,
-        Method::POST,
-        &format!("/api/organizations/{}/invitations", fx.organization_id),
-        &human(&fx.owner),
-        Some(json!({"role": "member", "email": "Bob@Example.com"})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{created}");
-    let token = invite_token(&created);
-    // Another account (even verified) is refused.
-    let carol = register(&fx.auth, "carol@example.com", "Carol", "carol-password")
-        .await
-        .unwrap();
-    sqlx::query("UPDATE users SET email_verified=TRUE")
-        .execute(&fx.auth.pool())
-        .await
-        .unwrap();
-    let (status, body) = accept_over_http(&fx, &carol, &token).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(body["error"]["code"], "invitation_email_mismatch");
-    // Registering with another email is refused; the invited address works.
-    assert!(fx
-        .auth
-        .register_with_client(
-            Some(&token),
-            "eve@example.com",
-            "Eve",
-            "eve-password-1",
-            None,
-            true
-        )
-        .await
-        .is_err());
-    // An unverified account with the invited address must verify first.
-    let bob = register(&fx.auth, "bob@example.com", "Bob", "bob-password-1")
-        .await
-        .unwrap();
-    let (status, _) = accept_over_http(&fx, &bob, &token).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    sqlx::query("UPDATE users SET email_verified=TRUE WHERE id=$1")
-        .bind(&bob.user_id)
-        .execute(&fx.auth.pool())
-        .await
-        .unwrap();
-    let (status, body) = accept_over_http(&fx, &bob, &token).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    // Registration with the bound address (normalized) succeeds.
-    let (status, created) = send(
-        &fx.router,
-        Method::POST,
-        &format!("/api/organizations/{}/invitations", fx.organization_id),
-        &human(&fx.owner),
-        Some(json!({"email": "frank@example.com"})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let frank = fx
-        .auth
-        .register_with_client(
-            Some(&invite_token(&created)),
-            " FRANK@example.com",
-            "Frank",
-            "frank-password",
-            None,
-            true,
-        )
-        .await
-        .unwrap();
-    let role: String = sqlx::query_scalar(
-        "SELECT role FROM organization_members WHERE organization_id=$1 AND user_id=$2",
-    )
-    .bind(&fx.organization_id)
-    .bind(&frank.user_id)
-    .fetch_one(&fx.auth.pool())
-    .await
-    .unwrap();
-    assert_eq!(role, "member");
 }

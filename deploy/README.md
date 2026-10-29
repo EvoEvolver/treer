@@ -316,7 +316,7 @@ file's hash in `/app/build.json`. The version must also equal `Cargo.toml`.
 ```bash
 docker build -f Dockerfile.single --build-arg TREER_BUILD_COMMIT="$(git rev-parse HEAD)" \
   --build-arg TREER_NATIVE_INPUT_SHA256="$TRUSTED_NATIVE_INPUT_SHA256" \
-  --build-arg TREER_VERSION=0.2.1 -t treer-single:local .
+  --build-arg TREER_VERSION=0.2.2 -t treer-single:local .
 env -i PATH="$PATH" python3 -I -m unittest discover -s deploy/single-container/tests
 node --test deploy/single-container/browser-cookie.test.mjs
 node deploy/single-container/smoke.mjs treer-single:local
@@ -344,7 +344,7 @@ image. No registry publication is enabled for this image.
 
 CI publishes three images when a `v*` git tag is pushed. Push that tag only
 after Canary has passed for the same commit, and only when the tag matches the
-workspace version in `Cargo.toml` (`v0.2.1` for version `0.2.1`).
+workspace version in `Cargo.toml` (`v0.2.2` for version `0.2.2`).
 
 | Image | Role |
 | --- | --- |
@@ -390,7 +390,7 @@ docker compose up -d
 ```
 
 Default `TREER_IMAGE_TAG=stable`. Until a `stable` pointer exists, set
-`TREER_IMAGE_TAG=canary` or a version tag such as `v0.2.1`.
+`TREER_IMAGE_TAG=canary` or a version tag such as `v0.2.2`.
 
 The updater listens only on the Compose network. It does not publish a host
 port. Proxy talks to it at `http://updater:7420` with the shared token.

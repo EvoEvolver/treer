@@ -13,6 +13,12 @@ here are not made.
 - **Workspace members and enrolled machines are trusted administrators of their
   workspace** unless an enforcing Policy restricts them. The default Policy is
   monitor/allow, not deny-by-default.
+- **Agents are trusted collaborators, and Policy is cooperative.** Treer
+  assumes the Agents in a workspace are benign. Policy expresses who should do
+  what (a gentleman's agreement that well-behaved Agents follow and the Proxy
+  applies); it is not a containment boundary against a malicious Agent or a
+  malicious Policy author. The hard boundaries are tenant isolation at the
+  Proxy and the human authentication basics below.
 - **The Proxy is the multi-tenant boundary.** Accounts, organizations,
   workspaces, sessions, tokens, Policy and App identity are enforced there, for
   SaaS and self-hosted clusters alike.
@@ -67,42 +73,23 @@ here are not made.
   allow), projected through per-action allowlists and served `no-store`.
 - Agent administration (`org.manage`, `org.member.manage`, `org.invite.manage`,
   `org.group.manage`, `workspace.manage`, `workspace.access.manage`,
-  `audit.read`, `machine.enroll`) is **default-deny** for every non-human
-  subject regardless of mode, action defaults or Provider fail-open: only a
-  matched allow rule whose subject selector names the Agent by a non-empty `id`
-  or a `group` (whose principals are listed by ID) grants it, and a matched
-  deny wins. Tree selectors never name a subject for administration, because
-  whoever can move or rename nodes would otherwise grant it.
-  `policy.provider.manage` is never granted to Agents.
-- A workspace Policy is controlled by that workspace's owners, and any
-  organization member can create a workspace. Organization-scope Agent
-  administration therefore also needs an organization-level grant
-  (`organization_agent_grants`) that only human organization owners/admins
-  write; it authorizes nothing once its creator loses that role. Without it
-  an Agent administers only its own workspace (access, enrollment, rename, its
-  own audit) and cannot list workspaces, read other workspaces' or
-  organization audit, or create invitations.
-- Even with grants an Agent is treated like an `admin` for owner-affecting
-  checks and is capped further: it never invites or assigns `owner`/`admin`,
-  changes member roles, removes an owner, deletes or transfers the
-  organization. Changes are audited with the Agent as actor and its name
-  frozen at write time; the Console labels it `agent: <name>`, since Agents
-  choose their own names. Account routes (sessions, password) are
-  human-session only; a password change rotates the current session token.
-- Rules naming administration actions need owner-verified publication: Core's
-  `provider_operator` validator rejects a document whose administration allow
-  rules (with the groups they reference) are not in the set an owner last
-  validated, or that drops an approved deny; a new organization-scope allow
-  rule needs an organization owner/admin as the verifying human. The Policy
-  App routes such documents through Core even in schema 1.
-- Invitations record their creator. Acceptance and registration re-verify it
-  (human: still owner/admin, owner for owner invitations; Agent: still its
-  Policy allow and organization grant), otherwise the invitation counts as
-  revoked; removing or demoting a creator revokes their pending invitations
-  that the new role no longer covers. An invitation bound to `email` is
-  accepted only by an account whose verified, normalized email matches, or
-  registered with that email (for password registration this is the claimed
-  address, as for every password account).
+  `policy.provider.manage`, `audit.read`, `machine.enroll`) is evaluated like
+  every other action: with no Policy, in monitor mode or under an allow
+  default it is allowed; an enforced deny rule or deny default denies it.
+- The hard limit is tenancy: an Agent administers only its own workspace and
+  that workspace's organization, never another organization or a workspace
+  outside it. Within that scope it acts like an organization owner (it may
+  invite any role and change or remove members, owners included), except that
+  deleting or transferring the organization is left to humans. Every
+  organization keeps at least one owner. Changes are audited with the Agent as
+  actor and its name frozen at write time; the Console labels it
+  `agent: <name>`, since Agents choose their own names. Account routes
+  (sessions, password) are human-session only; a password change rotates the
+  current session token.
+- Invitations stay usable until accepted, revoked or expired, whoever created
+  them and whatever that creator's role is later. An invitation's `email` is
+  where the link is delivered, not a binding: any signed-in account holding a
+  usable link may accept it.
 
 ### Machine enrollment and the Controller connection
 

@@ -196,7 +196,7 @@ async fn service_connect(
 /// Administration passthrough: `ANY /api/org-admin/PATH?QUERY` is forwarded as
 /// the calling Agent to `/agent/workspaces/{ws}/admin/PATH?QUERY`. Only a
 /// validated workload identity is accepted (never the operator credential);
-/// the Proxy decides with an explicit Policy grant. Status and JSON body are
+/// the Proxy evaluates it with the workspace Policy. Status and JSON body are
 /// relayed unchanged, including 204.
 async fn admin_passthrough(
     State(state): State<LocalApiState>,

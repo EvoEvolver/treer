@@ -252,13 +252,11 @@ pub fn router(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/terminal",
             get(agent_terminal),
         );
-    // Administration by Agents: explicit Policy grant per action (agent_admin.rs).
+    // Administration by Agents: one ordinary Policy action per route (agent_admin.rs).
     let agent_control = agent_control
         .registered_route(
             "/agent/workspaces/{workspace_id}/admin/organization",
-            get(agent_admin::get_organization)
-                .patch(agent_admin::rename_organization)
-                .delete(agent_admin::delete_organization),
+            get(agent_admin::get_organization).patch(agent_admin::rename_organization),
         )
         .registered_route(
             "/agent/workspaces/{workspace_id}/admin/organization/members",
@@ -317,6 +315,12 @@ pub fn router(
             "/agent/workspaces/{workspace_id}/admin/workspace/access/groups/{group_id}",
             axum::routing::put(agent_admin::put_group_grant)
                 .delete(agent_admin::delete_group_grant),
+        )
+        .registered_route(
+            "/agent/workspaces/{workspace_id}/admin/workspace/policy-provider",
+            get(agent_admin::get_policy_provider)
+                .put(agent_admin::set_policy_provider)
+                .delete(agent_admin::clear_policy_provider),
         )
         .registered_route(
             "/agent/workspaces/{workspace_id}/admin/workspace/bootstrap",
@@ -468,14 +472,6 @@ pub fn router(
         .registered_route(
             "/api/organizations/{organization_id}/invitations/{invitation_id}",
             axum::routing::delete(auth::revoke_invitation),
-        )
-        .registered_route(
-            "/api/organizations/{organization_id}/agent-grants",
-            get(auth::list_agent_grants),
-        )
-        .registered_route(
-            "/api/organizations/{organization_id}/agent-grants/{agent_id}",
-            axum::routing::put(auth::put_agent_grant).delete(auth::delete_agent_grant),
         )
         .registered_route(
             "/api/workspaces/{workspace_id}/bootstrap",

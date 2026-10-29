@@ -342,16 +342,12 @@ explicit enforce-mode allow.
 **Agent administration** (`agent.admin.v1`). Organization and workspace
 administration is also exposed to Agents at `/agent/workspaces/{ws}/admin/...`
 (Controller passthrough `ANY /api/org-admin/...`, workload credential only).
-Each route needs one administration action, evaluated by
-`PolicyEngine::authorize_admin`: default-deny in every mode; only a matched
-allow rule naming the Agent by `id` or `group` grants it (never `tree`), and
-`policy.provider.manage` never. Organization-scope routes also require an
-`organization_agent_grants` row written by a human owner/admin
-(`org.agent-grants.v1`). The store treats the Agent as an owner of its own
-workspace and like an admin in its organization, with extra caps (no
-owner/admin invitations, role changes, owner removal, organization
-deletion/transfer). Invitations record their creator and are re-verified at
-acceptance. Humans use the `/api/organizations/...`,
+Each route names one administration action that the Agent's workspace Policy
+evaluates like any other action (allowed unless an enforced rule or default
+denies it). The store treats the Agent as an owner of its own workspace and of
+that workspace's organization, never beyond them, keeps the last-owner
+invariant, and leaves organization deletion/transfer to humans. Invitation
+`email` is for delivery only. Humans use the `/api/organizations/...`,
 `/api/workspaces/...` and `/api/auth/...` routes with their role checks; the
 Settings additions (`settings.admin.v1`) are invitation list/revoke with
 expiry, email, groups and workspace grants, organization leave/transfer/delete,
