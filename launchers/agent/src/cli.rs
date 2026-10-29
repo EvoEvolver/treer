@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 
 pub(crate) const USAGE: &str = "\
 Usage: treer-launch [--harness codex|claude] [--session-id ID|--thread-id ID] [--cwd ABS] [--name NAME]
+                    [--instructions FILE] [--model MODEL] [--effort LEVEL]
        treer-launch session --help   Claude export/import/prepare/launch/run (macOS/Linux)
        treer-launch update [--version vX.Y.Z | --channel NAME] [--release-base-url URL] [--public-key PEM]
        treer-launch --version
@@ -12,6 +13,9 @@ Usage: treer-launch [--harness codex|claude] [--session-id ID|--thread-id ID] [-
 Starts the shared Agent UI for a native Codex or Claude session. Saved launch
 profiles run `treer-launch --harness codex|claude`; `treer-agent` is a
 deprecated alias of this command. `--runtime rust` is accepted and ignored.
+`--instructions` adds system-level instructions (Claude --append-system-prompt,
+Codex developer instructions), kept across restarts and resume. `--model` and
+`--effort` choose the initial selection of a new session.
 `update` replaces only this launcher from the signed release (default: the
 installed Controller's version); running Agents are not restarted.";
 
@@ -85,6 +89,9 @@ pub(crate) fn prepare(args: &[String]) -> Result<Next> {
             "--session-id" | "--thread-id" => set("AGENT_UI_SESSION_ID", value),
             "--cwd" => set("AGENT_UI_CWD", value),
             "--name" => set("AGENT_UI_NAME", value),
+            "--instructions" => set("AGENT_UI_INSTRUCTIONS_FILE", value),
+            "--model" => set("AGENT_UI_MODEL", value),
+            "--effort" => set("AGENT_UI_EFFORT", value),
             _ => bail!("unsupported launcher argument {key}; see treer-launch --help"),
         }
         index += 2;
@@ -144,6 +151,9 @@ mod tests {
             "AGENT_UI_CWD",
             "RUST_SPIKE_REGISTER",
             "CODEX_UI_CWD",
+            "AGENT_UI_INSTRUCTIONS_FILE",
+            "AGENT_UI_MODEL",
+            "AGENT_UI_EFFORT",
         ] {
             std::env::remove_var(name);
         }
@@ -167,11 +177,23 @@ mod tests {
             "s1",
             "--cwd",
             "/work",
+            "--instructions",
+            "/work/agent.md",
+            "--model",
+            "opus",
+            "--effort",
+            "high",
         ]));
         assert!(matches!(prepared, Ok(Next::Run)));
         assert_eq!(std::env::var("AGENT_UI_HARNESS").unwrap(), "claude");
         assert_eq!(std::env::var("AGENT_UI_SESSION_ID").unwrap(), "s1");
         assert_eq!(std::env::var("AGENT_UI_CWD").unwrap(), "/work");
+        assert_eq!(
+            std::env::var("AGENT_UI_INSTRUCTIONS_FILE").unwrap(),
+            "/work/agent.md"
+        );
+        assert_eq!(std::env::var("AGENT_UI_MODEL").unwrap(), "opus");
+        assert_eq!(std::env::var("AGENT_UI_EFFORT").unwrap(), "high");
         assert_eq!(std::env::var("RUST_SPIKE_REGISTER").unwrap(), "1");
         assert!(std::env::var_os("AGENT_UI_PORT_FILE").is_none());
 
@@ -212,6 +234,9 @@ mod tests {
             "AGENT_UI_CWD",
             "RUST_SPIKE_REGISTER",
             "CODEX_UI_CWD",
+            "AGENT_UI_INSTRUCTIONS_FILE",
+            "AGENT_UI_MODEL",
+            "AGENT_UI_EFFORT",
         ] {
             std::env::remove_var(name);
         }

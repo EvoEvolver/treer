@@ -187,6 +187,29 @@ test('Codex model and effort selection survive a provider restart and a launcher
   await until(()=>fetch(restarted.base+'/v1/submissions/'+third.submission.id,{headers:s.headers}).then(r=>r.json()),r=>r.submission?.state==='done');
   assert.deepEqual((await providerCalls(s)).filter(c=>c.method==='turn/start').map(c=>[c.params.input[0].text,c.params.model,c.params.effort]),[['crashes the provider','gpt-picked','high'],['after provider restart','gpt-picked','high'],['after launcher restart','gpt-picked','high']]);
 });
+test('--instructions reach Codex as developer instructions and survive a resume without the flag; --model/--effort seed a new session',{timeout:30000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs')});
+  let exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  await rm(join(s.state,'rust-spike.json'));await writeFile(join(s.root,'provider.jsonl'),'');
+  const file=join(s.root,'agent.md');await writeFile(file,'# Role\nYou are a reviewer.\n');
+  const first=await s.launch({},true,['--instructions',file,'--model','gpt-picked','--effort','high']);
+  let state=await fetch(first.base+'/api/state').then(r=>r.json());
+  assert.deepEqual([state.thread.model,state.thread.reasoningEffort],['gpt-picked','high']);
+  const one=await fetch(first.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'first',operation_id:'instructions-1'})}).then(r=>r.json());
+  await until(()=>fetch(first.base+'/v1/submissions/'+one.submission.id,{headers:s.headers}).then(r=>r.json()),r=>r.submission?.state==='done');
+  assert.equal(JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8')).instructions,'# Role\nYou are a reviewer.\n');
+  exit=once(first.child,'exit');first.child.kill('SIGTERM');await exit;await rm(file);
+  const second=await s.launch({},true,['--model','ignored-after-start']);
+  state=await fetch(second.base+'/api/state').then(r=>r.json());
+  assert.deepEqual([state.thread.model,state.thread.reasoningEffort],['gpt-picked','high'],'a journaled selection wins over --model');
+  const calls=await providerCalls(s);
+  assert.deepEqual(calls.filter(c=>['thread/start','thread/resume'].includes(c.method)).map(c=>[c.method,c.params.developerInstructions]),[['thread/start','# Role\nYou are a reviewer.\n'],['thread/resume','# Role\nYou are a reviewer.\n']]);
+  assert.deepEqual(calls.filter(c=>c.method==='turn/start').map(c=>[c.params.model,c.params.effort]),[['gpt-picked','high']]);
+  exit=once(second.child,'exit');second.child.kill('SIGTERM');await exit;
+  const missing=spawn(binary,['--instructions',join(s.root,'absent.md')],{cwd:s.root,env:s.env,stdio:['ignore','pipe','pipe']});
+  let err='';missing.stderr.on('data',b=>err+=b);
+  assert.notEqual((await once(missing,'exit'))[0],0);assert.match(err,/instructions_file_unreadable/);
+});
 for(const old of [false,true,'resume-race'])test('provider crash restarts it, resumes the same thread and continues FIFO without replay '+old,{timeout:25000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve('tests/fixtures/recovery-provider.mjs'),RECOVERY_HOLD:'1',RECOVERY_DISCONNECT:'1',RECOVERY_OLD_DISCONNECT:old===true?'1':'0',RECOVERY_RESUME_RACE:old==='resume-race'?'1':'0'});
   const first=await s.post({text:'one accepted input',operation_id:'reconnect-first'}).then(r=>r.json());

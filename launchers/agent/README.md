@@ -132,8 +132,19 @@ Every workspace has the default profiles **Codex + UI** and **Claude + UI**
 - CLI: `treer agent admin create --machine <m> --kind command --name <n> -- treer-launch --harness claude`.
 
 Accepted arguments are `--harness codex|claude` (default `codex`),
-`--session-id ID` (alias `--thread-id`), `--cwd ABS` and `--name NAME`; see
-`treer-launch --help`. With no arguments the runtime is configured only by its
+`--session-id ID` (alias `--thread-id`), `--cwd ABS`, `--name NAME`,
+`--instructions FILE`, `--model MODEL` and `--effort LEVEL`; see
+`treer-launch --help`.
+
+`--instructions FILE` (UTF-8, at most 256 KiB, read at startup) adds
+system-level instructions to the session: Claude receives them as
+`--append-system-prompt` on every provider spawn, Codex as
+`developerInstructions` on `thread/start` and `thread/resume`. The text is
+journaled, so a restart or resume without the flag (or after the file is gone)
+keeps it; a later `--instructions` replaces it. `--model`/`--effort` are the
+initial selection of a session that has no journaled selection; a saved UI
+choice always wins. The [Agent Hub](../../apps/agent-hub/README.md) launches its
+template workers this way. With no arguments the runtime is configured only by its
 environment (`AGENT_UI_*`) and does not register an interface, which the
 integration tests use.
 
