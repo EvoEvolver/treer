@@ -61,6 +61,8 @@ export const en = {
   "app_tree.refresh": "Refresh subtree",
   "app_tree.app": "App-managed App",
   "app_tree.agent": "App-managed Agent",
+  "app_tree.page": "Page",
+  "app_tree.view": "Node view",
   "app_tree.messages": "Messages",
   "app_tree.managed": "Managed by the App; no machine process controls.",
   "app_tree.no_send": "This node does not offer messaging.",

@@ -140,6 +140,7 @@ struct Runtime {
     /// The user's last acknowledged model/effort choice. It is journaled so a
     /// restarted provider (or launcher) gets the same selection back.
     selection: Value,
+    instructions: Option<String>,
     ready: bool,
     turns: Transcript,
     history_start: usize,
@@ -202,6 +203,13 @@ pub struct Config {
     pub session: Option<String>,
     pub attachments: Option<Arc<tokio::sync::Mutex<Attachments>>>,
     pub capture_stderr: bool,
+    /// System-level instructions (`treer-launch --instructions FILE`). Claude
+    /// receives them as `--append-system-prompt`, Codex as thread
+    /// `developerInstructions`. Journaled so a resume without the flag keeps them.
+    pub instructions: Option<String>,
+    /// Initial model/effort (`--model`/`--effort`) for a session with no
+    /// journaled selection; a saved selection always wins.
+    pub initial_selection: Value,
 }
 /// Start the provider process. Claude resumes its session when Treer already
 /// holds state for it; Codex sessions are resumed over JSON-RPC by start().
@@ -212,6 +220,9 @@ fn spawn_provider(
 ) -> Result<(Rpc, crate::rpc::ProviderChild, mpsc::Receiver<Value>)> {
     let mut args = config.codex_args.clone();
     if config.claude {
+        if let Some(instructions) = &config.instructions {
+            args.extend(["--append-system-prompt".into(), instructions.clone()]);
+        }
         let session = session.ok_or_else(|| anyhow!("claude_session_required"))?;
         args.extend([
             if resume { "--resume" } else { "--session-id" }.into(),
@@ -250,9 +261,16 @@ fn saved_selection(saved: &Value) -> Value {
 fn restart_delay(failures: u32) -> Duration {
     Duration::from_secs((1u64 << failures.min(6)).min(60))
 }
-pub fn spawn(config: Config) -> Result<Handle> {
+pub fn spawn(mut config: Config) -> Result<Handle> {
     let store = Store::open(&config.private_root, &config.cwd)?;
     let saved = store.load().map_err(|_| anyhow!("private_state_invalid"))?;
+    if config.instructions.is_none() {
+        config.instructions = saved
+            .as_ref()
+            .and_then(|s| s["instructions"].as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+    }
     if config.claude {
         if let Some(saved) = &saved {
             if saved["harness"] != "claude" {
@@ -328,7 +346,12 @@ pub fn spawn(config: Config) -> Result<Handle> {
         models: json!([]),
         model_revision: 0,
         effort_revision: 0,
-        selection: json!({}),
+        selection: if saved.is_none() {
+            saved_selection(&config.initial_selection)
+        } else {
+            json!({})
+        },
+        instructions: config.instructions.clone(),
         ready: false,
         turns: Transcript::default(),
         history_start: 0,
@@ -875,7 +898,20 @@ impl Runtime {
             .session
             .as_deref()
             .or_else(|| saved.as_ref().and_then(|s| s["threadId"].as_str()));
-        let result = self.provider_request(if session.is_some() {"thread/resume"} else {"thread/start"}, json!({"threadId":session,"cwd":config.cwd,"approvalPolicy":"never","sandbox":"danger-full-access","experimentalRawEvents":false,"persistExtendedHistory":true})).await?;
+        let mut params = json!({"threadId":session,"cwd":config.cwd,"approvalPolicy":"never","sandbox":"danger-full-access","experimentalRawEvents":false,"persistExtendedHistory":true});
+        if let Some(instructions) = config.instructions.as_ref().filter(|_| !self.claude) {
+            params["developerInstructions"] = json!(instructions);
+        }
+        let result = self
+            .provider_request(
+                if session.is_some() {
+                    "thread/resume"
+                } else {
+                    "thread/start"
+                },
+                params,
+            )
+            .await?;
         self.history_start = result["treerHistory"]["start"].as_u64().unwrap_or(0) as usize;
         self.history_total = result["treerHistory"]["total"].as_u64().unwrap_or(0) as usize;
         let id = result["thread"]["id"]
@@ -1127,6 +1163,9 @@ impl Runtime {
         let mut state = json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records,"goals":self.goals});
         if self.selection.as_object().is_some_and(|s| !s.is_empty()) {
             state["selection"] = self.selection.clone();
+        }
+        if let Some(instructions) = &self.instructions {
+            state["instructions"] = json!(instructions);
         }
         if self.claude {
             if let Some(native) = &self.native_bootstrap {

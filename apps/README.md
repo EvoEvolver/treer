@@ -2,7 +2,8 @@
 
 Apps can also own a recursive tree of logical Apps and Agents, using their
 existing identity and message mailbox. See [the shared tree/message contract](../docs/app-tree.md)
-and the runnable [Agent Hub example](agent-hub/README.md).
+and the [Agent Hub](agent-hub/README.md), which uses it for fresh single-task
+worker Agents.
 
 Embedded App interfaces can open unsandboxed browser tabs from a user gesture.
 External links must use `rel="noopener noreferrer"`; external `window.open`
@@ -66,6 +67,9 @@ between an Agent-readable GitHub Flavored Markdown manual and the human HTML
 interface, while data pages remain JSON. Agent Interfaces belong to the unified launcher, rather than this App index.
 They continue to expose their registered `ui_path`.
 
+- [`agent-hub`](agent-hub/README.md) creates a fresh coding Agent per job from a
+  versioned template, collects its structured handoff, archives it and
+  deletes the Agent; callers chain jobs by handoff.
 - [`issues`](issues/README.md) is a shared human/Agent issue tracker with SQLite,
   hierarchy, dependencies and comments. Assigning or @mentioning an Agent wakes
   it with `treer agent prompt`, so grant the App's runtime identity

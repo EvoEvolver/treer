@@ -40,7 +40,27 @@ The response contains the requested relative path and its immediate children:
 
 Nodes may have `kind: "app"` or `kind: "agent"`. Only `tree.read` enables
 expansion; only explicit message capabilities enable conversation actions.
-Unknown capabilities confer no action. An App may delegate a child App's page
+Unknown capabilities confer no action.
+
+### Node pages (`page.read`)
+
+A node with `page.read` has a human page that the App renders itself. The
+Console's node view embeds it from the App's own UI at
+
+```text
+GET /api/workspaces/WORKSPACE/apps/APP/ui/?node=team%2Ftools%2Fagent1&theme=dark&embed_origin=...
+```
+
+through the same authenticated App UI tunnel, iframe sandbox and
+responsiveness probe (`HEAD`) as the App's own UI, with the same
+"shares the control-plane origin" note; the App receives the usual forwarded
+identity token on every request and must authorize the node itself. `node` is
+the full relative path; `theme`, `embed_origin`, `look` and `lang` are the
+ordinary embed appearance hints, later changes arrive as `treer:embed-theme`
+messages. When the node also has message capabilities, a Page/Messages toggle
+switches between the page (the default) and the plain Messages view. The page
+cannot choose its URL: the Console always builds it from the App ID and the
+node path. An App may delegate a child App's page
 to another implementation while keeping this root-relative contract. Responses
 cannot choose URLs, credentials, another owning App, or an ancestor mount.
 
@@ -152,13 +172,15 @@ owner, not each internal endpoint; Apps should namespace them. Delivery and App
 execution are separate: Apps must use a durable inbox/outbox and cannot infer
 exactly-once external effects from ACK or a network timeout.
 
-The bundled `apps/agent-hub` example persists local nodes, receipt tombstones,
-immutable outbox replies and retry keys. Its pure echo/reverse handlers have no
-external side effects. Queue/storage bounds refuse further admissions. Confirmed
-terminal rows may be retired in bounded batches; pending work and unconfirmed
-ACKs remain. This depends on Core's current ACK finality and retained sender/key
-idempotency, as documented in the example's README. Removing a key stops its future local
-handling; already accepted work follows the App's persisted job contract.
+The bundled [Agent Hub](../apps/agent-hub/README.md) uses this contract for
+real work: `templates/`, `jobs/` and `handoffs/` are App nodes, and a running
+`jobs/<id>` is an `agent` node backed by a worker process the hub owns (not an
+Agent in the workspace Tree); the hub forwards its Messages to that worker's
+loopback Agent Interface and its `page.read` page is the worker's own UI,
+reverse-proxied by the hub. Once archived it becomes an App node whose page
+shows the handoff and transcript. It records each handled message ID before
+ACK, so a redelivery after a crash is not forwarded twice, and creates at most
+one job per root Message.
 
 Message routes require `TREER_ENABLE_CORE_MESSAGES`. Clients must not strip a
 logical address and retry against the root mailbox when a send fails. Apps

@@ -42,6 +42,8 @@ export async function readAppTree(workspaceId: string, appId: string, path: stri
 }
 
 export const APP_TREE_UI_CAPABILITY = "app-tree.v1"
+/** Node capability: the App renders the node's page at `ui/?node=PATH`. */
+export const APP_PAGE_CAPABILITY = "page.read"
 
 export type AppNodeSelection = { appId: string; ownerId: string; path: string[]; node: AppTreeNode }
 

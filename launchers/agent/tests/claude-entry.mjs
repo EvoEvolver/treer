@@ -414,6 +414,20 @@ test('Claude effort discovers catalog and live setter, validates combined settin
   assert.equal(state.thread.id,thread);assert.equal(state.thread.reasoningEffort,null);assert.equal(state.thread.effortSelectionStatus,'unknown','a default effort is not re-sent, so the fresh provider is not claimed');
   assert.equal(state.thread.model,'claude-opus-test','saved model is re-applied and ACKed by the resumed provider');
 });
+test('Claude --instructions append the system prompt on every spawn and --model seeds a new session',async t=>{
+  const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1'},async({root})=>{const file=join(root,'agent.md');await writeFile(file,'Template rules\n');return {env:{CLAUDE_FIXTURE_ARGV_LOG:join(root,'argv')},args:['--instructions',file,'--model','opus']};});
+  let s=await until(f.snapshot,s=>s.thread.model==='claude-opus-test');
+  const thread=s.thread.id;
+  assert.equal((await f.post({prompt:'hello',mode:'queue'})).status,200);
+  await until(f.snapshot,s=>s.thread.status==='idle'&&s.thread.turns.length===1);
+  await stop(f.child);await rm(join(f.root,'agent.md'));
+  const resumed=await f.launch({CLAUDE_FIXTURE_ARGV_LOG:join(f.root,'argv')});s=await until(resumed.snapshot,s=>s.thread.model==='claude-opus-test');
+  assert.equal(s.thread.id,thread);
+  const spawns=(await readFile(join(f.root,'argv'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(spawns.length,2);
+  for(const argv of spawns){const at=argv.indexOf('--append-system-prompt');assert.ok(at>=0,JSON.stringify(argv));assert.equal(argv[at+1],'Template rules\n');}
+  assert.equal(JSON.parse(await readFile(join(f.state,'rust-spike.json'),'utf8')).instructions,'Template rules\n');
+});
 test('Claude model and effort selection survive a provider crash and a launcher restart',async t=>{
   const f=await fixture(t,{CLAUDE_FIXTURE_MODELS:'1',CLAUDE_FIXTURE_EFFORTS:'1',CLAUDE_FIXTURE_CRASH_ONCE:'crash-marker'});
   const thread=(await f.snapshot()).thread.id;

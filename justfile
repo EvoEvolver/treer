@@ -66,6 +66,7 @@ telegram-test:
 
 soul-test:
     python3 -m unittest discover -s apps/soul/tests -p 'test_*.py' -v
+    python3 -B -m unittest discover -s apps/agent-hub/tests -p 'test_*.py' -v
 
 external-agent-test:
     cargo fmt --check --manifest-path apps/external-agent/Cargo.toml

@@ -122,7 +122,13 @@ async fn main() -> Result<()> {
     let files = files::Files::new(cwd.clone())
         .map_err(|_| anyhow::anyhow!("workspace_file_root_unavailable"))?;
     let task_output = task_output::Output::new(&cwd)?;
-    let agent = env("TREER_AGENT_ID").unwrap_or_default();
+    // Unregistered (`--no-register`): a parent process owns this launcher, so
+    // the inherited Agent identity is left to tools and never used here.
+    let agent = if env("AGENT_UI_UNREGISTERED").as_deref() == Some("1") {
+        String::new()
+    } else {
+        env("TREER_AGENT_ID").unwrap_or_default()
+    };
     let harness = env("AGENT_UI_HARNESS").unwrap_or("codex".into());
     if !matches!(harness.as_str(), "codex" | "claude") {
         bail!("unsupported harness");
@@ -190,6 +196,10 @@ async fn main() -> Result<()> {
     let port = listener.local_addr()?.port();
     let instance =
         env("AGENT_UI_INSTANCE_ID").unwrap_or(format!("rust-spike-{}", uuid::Uuid::new_v4()));
+    let instructions = match env("AGENT_UI_INSTRUCTIONS_FILE") {
+        Some(path) => Some(read_instructions(std::path::Path::new(&path))?),
+        None => None,
+    };
     let (provider, mut codex_args) = tools::provider(&harness)?;
     codex_args.extend(if harness == "claude" {
         if let Some(args) = env("RUST_SPIKE_CLAUDE_ARGS") {
@@ -252,6 +262,11 @@ async fn main() -> Result<()> {
         session: env("AGENT_UI_SESSION_ID"),
         attachments: attachments.clone(),
         capture_stderr: env("RUST_SPIKE_CAPTURE_STDERR").as_deref() == Some("1"),
+        instructions,
+        initial_selection: serde_json::json!({
+            "model": env("AGENT_UI_MODEL"),
+            "reasoningEffort": env("AGENT_UI_EFFORT"),
+        }),
     })?;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     if launch.as_ref().is_some_and(|l| l.history.is_object()) {
@@ -1043,6 +1058,22 @@ fn static_cache_control(path: &str) -> &'static str {
     } else {
         "no-store"
     }
+}
+
+/// `--instructions FILE`: bounded UTF-8 text, read once at startup.
+fn read_instructions(path: &std::path::Path) -> Result<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(256 * 1024 + 1).read_to_string(&mut text))
+        .map_err(|_| anyhow::anyhow!("instructions_file_unreadable"))?;
+    if text.len() > 256 * 1024 {
+        bail!("instructions_file_too_large");
+    }
+    if text.trim().is_empty() {
+        bail!("instructions_file_empty");
+    }
+    Ok(text)
 }
 
 /// Read `name` from a development `AGENT_UI_PUBLIC_DIR`, refusing links and escapes.
