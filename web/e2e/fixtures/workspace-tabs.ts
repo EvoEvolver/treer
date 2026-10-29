@@ -12,7 +12,10 @@ export async function fixture(page: Page, origins: Record<string, string> = {}, 
   await page.route('**/workload-tree', (route) => route.fulfill({ json: { folders: [], placements: [] } }))
   await page.route('**/groups', (route) => route.fulfill({ json: { groups: [] } }))
   await page.route('**/policy-provider', (route) => route.fulfill({ status: 404, json: {} }))
-  await page.route('**/api/workspaces/**/ui/**', (route) => route.fulfill({ contentType: 'text/html', body: '<!doctype html><style>body{font:14px system-ui;padding:20px;background:#faf9f6;color:#24221e}body.dark{background:#22211e;color:#e7e5e0}textarea{display:block;box-sizing:border-box;width:100%;max-width:600px;height:100px;padding:12px;background:transparent;color:inherit;border:1px solid #888;border-radius:8px}main{height:1800px}</style><h1>Retained interface</h1><label>Draft<textarea aria-label="Draft"></textarea></label><main>Scroll stays here</main><script>document.body.classList.toggle("dark",new URLSearchParams(location.search).get("theme")==="dark");window.bootId=Math.random();</script>' }))
+  // Native new tabs issue their first request before a Page handler can be
+  // installed. Also register at context scope for popups; keep the page route
+  // ahead of mockTreeMapApi's page-level catch-all for embedded interfaces.
+  for (const router of [page, page.context()]) await router.route('**/api/workspaces/**/ui/**', (route) => route.fulfill({ contentType: 'text/html', body: '<!doctype html><style>body{font:14px system-ui;padding:20px;background:#faf9f6;color:#24221e}body.dark{background:#22211e;color:#e7e5e0}textarea{display:block;box-sizing:border-box;width:100%;max-width:600px;height:100px;padding:12px;background:transparent;color:inherit;border:1px solid #888;border-radius:8px}main{height:1800px}</style><h1>Retained interface</h1><label>Draft<textarea aria-label="Draft"></textarea></label><main>Scroll stays here</main><script>document.body.classList.toggle("dark",new URLSearchParams(location.search).get("theme")==="dark");window.bootId=Math.random();</script>' }))
   let events: WebSocketRoute | undefined
   const connections: string[] = [], closed: string[] = [], inputs: string[] = []
   const terminals = new Map<string, WebSocketRoute>()

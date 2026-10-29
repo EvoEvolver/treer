@@ -236,7 +236,9 @@ test.describe('workload deep links and new-tab entry points', () => {
     if (mobile) { await page.getByRole('button', { name: /^More actions/ }).first().click() }
     else await page.getByRole('tab', { name: 'Tab /Alpha', exact: true }).click({ button: 'right' })
     const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
-    await expect.poll(() => new URL(popup.url()).pathname).toBe('/api/workspaces/map-workspace/agents/tab-1/interface/ui/')
+    await expect(popup.getByRole('heading', { name: 'Retained interface', exact: true })).toBeVisible()
+    await expect(popup).toHaveURL(url => url.pathname === '/api/workspaces/map-workspace/agents/tab-1/interface/ui/')
+    expect(await popup.evaluate(() => window.opener)).toBeNull()
     expect(popup.url()).not.toMatch(/token|key|secret/i)
     await popup.close()
   })
@@ -251,23 +253,108 @@ test.describe('workload deep links and new-tab entry points', () => {
   })
 })
 
+// Native same-origin tabs can load without the initial frameNavigated event
+// Playwright needs to initialize a popup Page. Inspect the new target directly:
+// targetInfo.url and frameRequestedNavigation alone also pass aborted loads.
+async function expectNativeNewTab(page: Page, target: import('@playwright/test').Locator, click: () => Promise<void>) {
+  const href = await target.getAttribute('href')
+  const source = await page.context().newCDPSession(page)
+  const browser = await page.context().browser()!.newBrowserCDPSession()
+  const { targetInfo: sourceTarget } = await source.send('Target.getTargetInfo')
+  const existing = new Set((await browser.send('Target.getTargets')).targetInfos.map(info => info.targetId))
+  let navigation: { url: string; disposition: string } | undefined
+  let targetId: string | undefined
+  let sessionId: string | undefined
+  let commandId = 0
+  type Evaluation = { result: { value: unknown } }
+  const pending = new Map<number, { resolve: (value: Evaluation) => void; reject: (error: Error) => void }>()
+  // Non-flattened sessions let the browser CDP connection address a target
+  // without waiting for Playwright's popup initialization.
+  browser.on('Target.receivedMessageFromTarget', event => {
+    if (event.sessionId !== sessionId) return
+    const message = JSON.parse(event.message)
+    const command = pending.get(message.id)
+    if (!command) return
+    pending.delete(message.id)
+    if (message.error) command.reject(new Error(message.error.message))
+    else command.resolve(message.result)
+  })
+  source.on('Page.frameRequestedNavigation', event => { navigation = event })
+  try {
+    await source.send('Page.enable')
+    await click()
+    await expect.poll(() => navigation).toMatchObject({ url: href, disposition: 'newTab' })
+    await expect.poll(async () => {
+      const { targetInfos } = await browser.send('Target.getTargets')
+      // noopener links need not expose openerId. Context plus the pre-click
+      // target set identifies the new page without trusting its advertised URL.
+      const created = targetInfos.filter(info => info.type === 'page' && info.browserContextId === sourceTarget.browserContextId && !existing.has(info.targetId))
+      targetId = created.length === 1 ? created[0].targetId : undefined
+      return created.length
+    }).toBe(1)
+    ;({ sessionId } = await browser.send('Target.attachToTarget', { targetId: targetId!, flatten: false }))
+    await expect.poll(async () => {
+      const id = ++commandId
+      const response = new Promise<Evaluation>((resolve, reject) => pending.set(id, { resolve, reject }))
+      await browser.send('Target.sendMessageToTarget', {
+        sessionId,
+        message: JSON.stringify({ id, method: 'Runtime.evaluate', params: {
+          expression: '({ url: document.URL, heading: document.querySelector("h1")?.textContent, ready: document.readyState })',
+          returnByValue: true,
+        } }),
+      })
+      return (await response).result.value
+    }, { message: 'Native new tab must commit the destination and load its fixture heading' }).toEqual({
+      url: href, heading: 'Retained interface', ready: 'complete',
+    })
+  } finally {
+    if (targetId) await browser.send('Target.closeTarget', { targetId })
+    await browser.detach()
+    await source.detach()
+  }
+}
+
+async function expectResolvedAgentHref(page: Page, target: import('@playwright/test').Locator, pathname: string) {
+  // Inventory can render before capability discovery chooses the Agent URL.
+  await expect.poll(async () => {
+    const href = await target.getAttribute('href')
+    if (!href) return null
+    const url = new URL(href, page.url())
+    return { origin: url.origin, pathname: url.pathname }
+  }).toEqual({ origin: new URL(page.url()).origin, pathname })
+}
+
 test.describe('workload rows are real links: modifier-click and middle-click open a new browser tab natively', () => {
   const expected = '/api/workspaces/map-workspace/agents/tab-1/interface/ui/'
   for (const how of ['ctrl', 'middle'] as const) {
-    test(`overview rows and tree rows have the deep-link href and open natively (${how})`, async ({ page, context }) => {
+    test(`overview rows and tree rows have the deep-link href and open natively (${how})`, async ({ page }) => {
       await page.setViewportSize({ width: 1360, height: 900 })
       await fixture(page)
       await gotoWorkspace(page)
       const click = (locator: import('@playwright/test').Locator) => how === 'ctrl' ? locator.click({ modifiers: ['ControlOrMeta'] }) : locator.click({ button: 'middle' })
       for (const target of [page.getByRole('link', { name: 'Open /Alpha', exact: true }), page.getByRole('tree').getByRole('link', { name: /^Alpha/ })]) {
-        const [popup] = await Promise.all([context.waitForEvent('page'), click(target)])
-        await popup.waitForURL(url => url.pathname === expected, { waitUntil: 'commit' })
-        await popup.close()
+        await expectResolvedAgentHref(page, target, expected)
+        await expectNativeNewTab(page, target, () => click(target))
         // The current page did not navigate in place.
         await expect(page.getByRole('tab', { name: 'Tab Overview', exact: true })).toHaveAttribute('aria-selected', 'true')
       }
     })
   }
+
+  test('native new-tab verification rejects an aborted destination', async ({ page, context }) => {
+    await fixture(page)
+    await gotoWorkspace(page)
+    const target = page.getByRole('link', { name: 'Open /Alpha', exact: true })
+    await expectResolvedAgentHref(page, target, expected)
+    let aborted = false
+    await context.route('**/api/workspaces/**/ui/**', async route => {
+      aborted = true
+      await route.abort('blockedbyclient')
+    })
+    await expect(expectNativeNewTab(page, target, () => target.click({ modifiers: ['ControlOrMeta'] })))
+      .rejects.toThrow('Native new tab must commit the destination and load its fixture heading')
+    expect(aborted).toBe(true)
+  })
 
   test('a plain click still opens in place', async ({ page }) => {
     await page.setViewportSize({ width: 1360, height: 900 })
@@ -277,16 +364,14 @@ test.describe('workload rows are real links: modifier-click and middle-click ope
     await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toHaveAttribute('aria-selected', 'true')
   })
 
-  test('map blocks are links; ctrl-click opens a new browser tab and keeps the map open', async ({ page, context }) => {
+  test('map blocks are links; ctrl-click opens a new browser tab and keeps the map open', async ({ page }) => {
     await page.setViewportSize({ width: 1360, height: 900 })
     await fixture(page)
     await gotoWorkspace(page)
     await page.getByRole('button', { name: 'Expand tree map' }).click()
     const block = page.getByRole('dialog').getByRole('link', { name: /Alpha/ }).first()
-    expect(new URL((await block.getAttribute('href'))!).pathname).toBe(expected)
-    const [popup] = await Promise.all([context.waitForEvent('page'), block.click({ modifiers: ['ControlOrMeta'] })])
-    await popup.waitForURL(url => url.pathname === expected, { waitUntil: 'commit' })
-    await popup.close()
+    await expectResolvedAgentHref(page, block, expected)
+    await expectNativeNewTab(page, block, () => block.click({ modifiers: ['ControlOrMeta'] }))
     await expect(page.getByRole('dialog')).toBeVisible()
   })
 })
