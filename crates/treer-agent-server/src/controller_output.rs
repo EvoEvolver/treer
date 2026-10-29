@@ -101,35 +101,19 @@ pub(super) fn select_lines(text: &str, lines: Option<usize>) -> String {
     }
 }
 
+/// One-shot status from retained text (Controller recovery); live output goes
+/// through [`TerminalActivity`] instead.
 pub(super) fn detect_status(text: &str) -> Option<AgentStatus> {
-    let text = recent_text(text, STATUS_SCAN_LIMIT_BYTES);
-    let lower = text.to_lowercase();
-    let blocked = [
-        "allow command?",
-        "do you want to proceed",
-        "press enter to confirm",
-        "enter to submit answer",
-        "[y/n]",
-        "action required",
-    ];
-    if blocked.iter().any(|pattern| lower.contains(pattern)) {
-        return Some(AgentStatus::Blocked);
+    let signals = tail_signals(text);
+    if signals.blocked {
+        Some(AgentStatus::Blocked)
+    } else if signals.marker {
+        Some(AgentStatus::Working)
+    } else if signals.prompt {
+        Some(AgentStatus::Idle)
+    } else {
+        None
     }
-    let working = [
-        "esc to interrupt",
-        "working (",
-        "thinking (",
-        "running tool",
-    ];
-    if working.iter().any(|pattern| lower.contains(pattern)) {
-        return Some(AgentStatus::Working);
-    }
-    let last = text.lines().next_back().unwrap_or_default().trim_end();
-    if last.ends_with('❯') || last.ends_with('›') || last.ends_with('$') || last.ends_with('#')
-    {
-        return Some(AgentStatus::Idle);
-    }
-    None
 }
 
 pub(super) fn recent_text(text: &str, limit: usize) -> &str {

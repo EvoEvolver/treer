@@ -3705,6 +3705,7 @@ dependencies = [
  "libc",
  "nix 0.29.0",
  "percent-encoding",
+ "portable-pty",
  "ratatui",
  "reqwest",
  "rustix",
