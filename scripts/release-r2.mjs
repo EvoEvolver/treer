@@ -4,16 +4,18 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 import { keychainSigner as protectedSigner } from "./release-keychain.mjs";
 
@@ -363,13 +365,35 @@ function uploadObject({ wrangler, profile, bucket, key, file, contentType, cache
   execFileSync(wrangler, args, { cwd: root, stdio: "inherit" });
 }
 
-async function fetchExact(url, expectedBytes) {
-  const response = await fetch(url, { headers: { "cache-control": "no-cache" } });
-  if (!response.ok) {
-    return { status: response.status, equal: false, bytes: null };
+const R2_MISSING_KEY = "The specified key does not exist";
+
+// Read an object straight from the R2 bucket through Wrangler. Existence checks
+// before upload must never touch the public custom domain: a GET of a not yet
+// uploaded object there is cached by the Cloudflare edge as a 404 and keeps
+// failing long after the object is written. Returns null when the key is absent.
+export function readR2Object({ wrangler, profile, bucket, key }) {
+  const scratch = mkdtempSync(join(tmpdir(), "treer-r2-read-"));
+  try {
+    const file = join(scratch, "object");
+    const result = spawnSync(
+      wrangler,
+      wranglerArgs(profile, ["r2", "object", "get", `${bucket}/${key}`, "--remote", "--file", file]),
+      { cwd: root, encoding: "utf8" },
+    );
+    if (result.error) {
+      fail(`could not run ${wrangler} to read R2 ${bucket}/${key}: ${result.error.message}`);
+    }
+    if (result.status === 0) {
+      return readFileSync(file);
+    }
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    if (output.includes(R2_MISSING_KEY)) {
+      return null;
+    }
+    fail(`could not read R2 ${bucket}/${key} (exit ${result.status}): ${output.trim().split("\n").slice(-3).join(" ")}`);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
-  const bytes = Buffer.from(await response.arrayBuffer());
-  return { status: response.status, equal: bytes.equals(expectedBytes), bytes };
 }
 
 async function fetchJsonWithSignature(baseUrl, path, publicKey) {
@@ -481,16 +505,13 @@ async function publishRelease(config) {
   requireMatchingWorkspaceVersion(config.version);
   const gitCommit = currentCommit();
   const prepared = prepareRelease({ ...config, gitCommit });
-  const manifestUrl = new URL(`releases/${config.version}/manifest.json`, config.baseUrl);
-  const existing = await fetchExact(manifestUrl, prepared.manifestBytes);
-  if (existing.status !== 200 && existing.status !== 404) {
-    fail(`failed to check immutable release ${config.version}: HTTP ${existing.status}`);
-  }
-  if (existing.status !== 404 && !existing.equal) {
+  // Existence is checked in R2 itself, never via the public URL (see readR2Object).
+  const existing = readR2Object({ ...config, key: manifestPath(config.version) });
+  if (existing && !existing.equals(prepared.manifestBytes)) {
     fail(`immutable release ${config.version} already exists with different contents`);
   }
 
-  if (existing.status === 404) {
+  if (!existing) {
     for (const artifact of prepared.artifacts) {
       uploadObject({
         ...config,

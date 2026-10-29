@@ -11,6 +11,7 @@ import {
   generateReleaseKey,
   normalizeVersion,
   prepareRelease,
+  readR2Object,
   verifyDetachedSignature,
 } from "./release-r2.mjs";
 
@@ -169,4 +170,33 @@ test("all requested binaries are mandatory", () => {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+function fakeWrangler(body) {
+  const directory = mkdtempSync(join(tmpdir(), "treer-fake-wrangler-"));
+  const path = join(directory, "wrangler");
+  writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' "$@" > "${directory}/args"\n${body}\n`);
+  chmodSync(path, 0o755);
+  return { directory, path };
+}
+
+test("R2 existence checks read the bucket through Wrangler, not the public URL", (t) => {
+  const present = fakeWrangler(`while [ "$1" != "--file" ]; do shift; done; printf 'manifest-bytes' > "$2"`);
+  t.after(() => rmSync(present.directory, { recursive: true, force: true }));
+  const bytes = readR2Object({ wrangler: present.path, bucket: "bucket", key: "releases/v1.2.3/manifest.json", profile: "ops" });
+  assert.equal(bytes.toString(), "manifest-bytes");
+  const args = readFileSync(join(present.directory, "args"), "utf8").trim().split("\n");
+  assert.deepEqual(args.slice(0, 7), ["--profile", "ops", "r2", "object", "get", "bucket/releases/v1.2.3/manifest.json", "--remote"]);
+  assert.ok(!args.some((arg) => arg.startsWith("http")));
+});
+
+test("missing R2 objects read as absent, other Wrangler failures stop the release", (t) => {
+  const missing = fakeWrangler(`echo 'ERROR The specified key does not exist.' >&2; exit 1`);
+  const broken = fakeWrangler(`echo 'ERROR Authentication error [code: 10000]' >&2; exit 1`);
+  t.after(() => {
+    rmSync(missing.directory, { recursive: true, force: true });
+    rmSync(broken.directory, { recursive: true, force: true });
+  });
+  assert.equal(readR2Object({ wrangler: missing.path, bucket: "bucket", key: "k" }), null);
+  assert.throws(() => readR2Object({ wrangler: broken.path, bucket: "bucket", key: "k" }), /Authentication error/);
 });

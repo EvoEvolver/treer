@@ -165,6 +165,18 @@ Promotion never re-uploads binaries; republishing identical bytes is
 idempotent and different bytes for an existing version are rejected. Uploads
 use Wrangler; `TREER_RELEASE_BUCKET`, `TREER_RELEASE_BASE_URL`,
 `TREER_CLOUDFLARE_PROFILE` and `TREER_WRANGLER` select another environment.
+`publish` checks whether a version already exists by reading the manifest
+straight from the bucket (`wrangler r2 object get --remote`) and touches the
+public URL only after every upload, for the HTTPS readback verification.
+
+Pitfall: never request a release object through `https://releases.treer.ai/`
+before it is uploaded. The Cloudflare edge caches the 404 of a GET for hours
+and keeps serving it after the object exists (0.2.2's canary publish was
+blocked this way until the exact URL was purged). HEAD is answered differently
+at the edge and can report 200 while GET still returns the cached 404, so
+verify served objects with a real GET
+(`curl -s -o /dev/null -w '%{http_code}' URL`), never `curl -I`.
+
 Publishing does not update machines; see
 [Updates](operator-guide.md#machines).
 
