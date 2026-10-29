@@ -542,17 +542,24 @@ impl PolicyEngine {
 
     /// Administration actions are default-deny for every non-human subject,
     /// whatever the Policy mode, action defaults or Provider failure mode:
-    /// only a matched allow rule that names the subject (by ID, Tree or
-    /// group selector) grants them. A matched deny always wins; in monitor
-    /// mode the rule's computed effect is applied as if enforced.
+    /// only a matched allow rule that names the subject (by ID or group, see
+    /// [`selector_names_subject`]) grants them. A matched deny always wins; in
+    /// monitor mode the rule's computed effect is applied as if enforced.
+    /// `policy.provider.manage` is never granted to a non-human subject.
     pub async fn authorize_admin(&self, request: &PolicyRequest) -> Result<(), ProtocolError> {
-        let request = self.enrich(request).await?;
         let denied = || {
             ProtocolError::new(
                 "policy_denied",
                 "administration requires an explicit Policy allow rule naming this Agent",
             )
         };
+        if request.action == ACTION_POLICY_PROVIDER_MANAGE {
+            return Err(ProtocolError::new(
+                "policy_denied",
+                "policy.provider.manage is never granted to Agents",
+            ));
+        }
+        let request = self.enrich(request).await?;
         for evaluator in self.evaluators.iter() {
             if let Some(explanation) = evaluator.explain(&request).await? {
                 self.check_tree_revision(&request).await?;
@@ -695,8 +702,8 @@ pub struct PolicyExplanation {
     pub policy_revision: u64,
     pub tree_revision: Option<u64>,
     pub source: String,
-    /// The matched rule selects the subject by ID, Tree or group, not only by
-    /// kind/machine or an empty selector. Administration grants require it.
+    /// The matched rule selects the subject by ID or group (see
+    /// [`selector_names_subject`]). Administration grants require it.
     #[serde(skip)]
     pub subject_named: bool,
 }
@@ -707,7 +714,8 @@ impl PolicyExplanation {
         if !ADMIN_ACTIONS.contains(&action) {
             return self;
         }
-        let granted = self.matched_rule_id.is_some()
+        let granted = action != ACTION_POLICY_PROVIDER_MANAGE
+            && self.matched_rule_id.is_some()
             && self.subject_named
             && self.computed_effect == PolicyEffect::Allow
             && self.effective_decision == PolicyEffect::Allow;
@@ -1388,8 +1396,7 @@ impl CompiledWorkspacePolicy {
             .unwrap_or(PolicyEffect::Allow);
         let subject_named = matched.is_some_and(|rule| {
             rule.subjects.iter().any(|selector| {
-                (selector.id.is_some() || selector.tree.is_some() || selector.group.is_some())
-                    && self.subject_matches(selector, request)
+                selector_names_subject(selector) && self.subject_matches(selector, request)
             })
         });
         PolicyExplanation {
@@ -1453,6 +1460,18 @@ impl CompiledWorkspacePolicy {
                 .any(|principal| principal.kind == kind && principal.id == id)
         })
     }
+}
+
+/// Only a stable identity names a subject for administration: a non-empty
+/// `id`, or a group (whose principals are always listed by kind and ID).
+/// Tree placement, kind, machine and empty selectors never do: anyone who can
+/// move or rename a node could otherwise grant administration.
+pub fn selector_names_subject(selector: &PolicySubjectSelector) -> bool {
+    selector.id.as_deref().is_some_and(|id| !id.is_empty())
+        || selector
+            .group
+            .as_deref()
+            .is_some_and(|group| !group.is_empty())
 }
 
 const fn effect_order(effect: PolicyEffect) -> u8 {
@@ -1764,6 +1783,119 @@ mod tests {
                     .is_ok());
             }
         }
+    }
+
+    #[test]
+    fn tree_placement_and_empty_selectors_never_name_an_admin_subject() {
+        // Exploit chain: an allow rule selecting by Tree path, plus moving the
+        // Agent into that folder, must not grant administration.
+        let compiled = |rules: serde_json::Value| {
+            CompiledWorkspacePolicy::compile(WorkspacePolicy {
+                workspace_id: "workspace-a".into(),
+                revision: 1,
+                mode: PolicyMode::Enforce,
+                document: serde_json::from_value(serde_json::json!({
+                    "schema_version": 2,
+                    "groups": {"empty": {"principals": []},
+                               "admins": {"principals": [{"kind": "agent", "id": "agent-a"}]}},
+                    "rules": rules
+                }))
+                .unwrap(),
+                updated_at: Utc::now(),
+                updated_by: PolicyPrincipalRef {
+                    kind: PolicyPrincipalKind::Human,
+                    id: "owner".into(),
+                },
+            })
+        };
+        let mut request = PolicyRequest::new(
+            "workspace-a",
+            PolicySubject::Agent {
+                server_id: "machine-a".into(),
+                agent_id: "agent-a".into(),
+            },
+            ACTION_ORG_MANAGE,
+            PolicyResource::new(RESOURCE_ORGANIZATION, "org-a"),
+        );
+        request.subject_tree = Some(
+            serde_json::from_value(serde_json::json!({"node_id":"agent-a","kind":"agent",
+                "name":"a","path":"/admins/a","folder_id":"f","folder_path":"/admins",
+                "ancestor_ids":["f"],"ancestor_paths":["/","/admins"],"placed":true,
+                "tree_revision":1}))
+            .unwrap(),
+        );
+        let rule = |subjects: serde_json::Value| {
+            serde_json::json!([{"id": "r", "priority": 1, "effect": "allow",
+                "subjects": subjects, "actions": [ACTION_ORG_MANAGE], "resources": [{}]}])
+        };
+        for subjects in [
+            serde_json::json!([{"kind": "agent", "tree": {"path_prefix": {"path": "/admins", "include_self": true}}}]),
+            serde_json::json!([{"tree": {"path_eq": "/admins/a"}}]),
+            serde_json::json!([{}]),
+            serde_json::json!([{"kind": "agent", "machine_id": "machine-a"}]),
+        ] {
+            let explanation = compiled(rule(subjects.clone())).explain(&request);
+            assert_eq!(
+                explanation.matched_rule_id.as_deref(),
+                Some("r"),
+                "{subjects}"
+            );
+            assert!(!explanation.subject_named, "{subjects}");
+            assert_eq!(
+                explanation
+                    .with_admin_default_deny(ACTION_ORG_MANAGE)
+                    .effective_decision,
+                PolicyEffect::Deny
+            );
+        }
+        for subjects in [
+            serde_json::json!([{"id": "agent-a"}]),
+            serde_json::json!([{"kind": "agent", "group": "admins"}]),
+            serde_json::json!([{"id": "agent-a", "tree": {"path_eq": "/admins/a"}}]),
+        ] {
+            assert!(
+                compiled(rule(subjects.clone()))
+                    .explain(&request)
+                    .subject_named,
+                "{subjects}"
+            );
+        }
+        // policy.provider.manage is never granted, even by a naming rule.
+        let explanation = compiled(serde_json::json!([{"id": "r", "priority": 1,
+            "effect": "allow", "subjects": [{"id": "agent-a"}],
+            "actions": [ACTION_POLICY_PROVIDER_MANAGE], "resources": [{}]}]))
+        .explain(&PolicyRequest {
+            action: ACTION_POLICY_PROVIDER_MANAGE.into(),
+            ..request.clone()
+        });
+        assert!(explanation.subject_named);
+        assert_eq!(
+            explanation
+                .with_admin_default_deny(ACTION_POLICY_PROVIDER_MANAGE)
+                .effective_decision,
+            PolicyEffect::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_provider_manage_is_never_granted_to_agents() {
+        let engine = admin_engine(
+            PolicyMode::Enforce,
+            serde_json::json!({"schema_version": POLICY_SCHEMA_VERSION,
+                "rules": [{"id": "r", "priority": 1, "effect": "allow",
+                    "subjects": [{"kind": "agent", "id": "agent-a"}],
+                    "actions": [ACTION_POLICY_PROVIDER_MANAGE], "resources": [{}]}]}),
+        );
+        let request = PolicyRequest::new(
+            "workspace-a",
+            PolicySubject::Agent {
+                server_id: "machine-a".into(),
+                agent_id: "agent-a".into(),
+            },
+            ACTION_POLICY_PROVIDER_MANAGE,
+            PolicyResource::new(RESOURCE_WORKSPACE, "workspace-a"),
+        );
+        assert!(engine.authorize_admin(&request).await.is_err());
     }
 
     #[test]
