@@ -78,6 +78,10 @@ They continue to expose their registered `ui_path`.
   uploads environment-bound state bundles and launches command Agents from them.
 - [`gits`](gits/README.md) is a small workspace-local Git Smart HTTP host for
   repositories shared by Agents and humans.
+- [`git-gateway`](git-gateway/README.md) lets Agents on any machine clone, push
+  and call the GitHub REST API through one gateway-held credential (`gh` login
+  or a GitHub App), with identity-checked branch rules (`agent/**` for Agents)
+  and an audit log.
 - [`policy`](policy/README.md) is a versioned workspace Policy Provider with a
   browser editor, publication status, cache invalidation, and decision simulator.
 - [`external-agent`](external-agent/README.md) lets programs outside Treer

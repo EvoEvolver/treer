@@ -61,6 +61,9 @@ mail-test:
 gits-test:
     python3 -m unittest discover -s apps/gits/tests -p 'test_*.py' -v
 
+git-gateway-test:
+    python3 -m unittest discover -s apps/git-gateway/tests -p 'test_*.py' -v
+
 telegram-test:
     python3 -m unittest discover -s apps/telegram/tests -p 'test_*.py' -v
 
@@ -81,6 +84,7 @@ app-test:
     python3 -m unittest discover -s apps/tests -p 'test_*.py' -v
     python3 -m unittest discover -s apps/mail/tests -p 'test_*.py' -v
     python3 -m unittest discover -s apps/gits/tests -p 'test_*.py' -v
+    python3 -m unittest discover -s apps/git-gateway/tests -p 'test_*.py' -v
     python3 -m unittest discover -s apps/telegram/tests -p 'test_*.py' -v
     python3 -m unittest discover -s apps/soul/tests -p 'test_*.py' -v
     just agent-launcher-test
