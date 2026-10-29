@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Git Gateway</title>
+  <link rel="stylesheet" href="./app.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="mark">GH</span><h1>Git Gateway</h1></div>
+    <div class="actions">
+      <span id="whoami" class="muted"></span>
+      <button id="refresh" type="button">Refresh</button>
+    </div>
+  </header>
+  <main>
+    <p id="notice" class="notice" hidden></p>
+
+    <section class="panel">
+      <h2>Status</h2>
+      <dl id="status" class="grid"><dt>Loading</dt><dd>…</dd></dl>
+    </section>
+
+    <section class="panel">
+      <h2>Credential</h2>
+      <div id="gh-state"></div>
+      <div id="app-state"></div>
+      <div class="row">
+        <label>Mode
+          <select id="mode">
+            <option value="auto">auto (GitHub App when installed, else gh)</option>
+            <option value="gh">gh (gateway machine's gh login)</option>
+            <option value="github_app">github_app only</option>
+          </select>
+        </label>
+        <button id="save-mode" type="button">Save mode</button>
+        <button id="reload-credentials" type="button">Re-read credentials</button>
+      </div>
+      <div id="create-app" class="subpanel">
+        <h3>GitHub App (optional)</h3>
+        <p class="muted">Two owner clicks: create the App on GitHub, then install it on the repositories.
+          Leave the organization empty to create it under your user account.</p>
+        <div class="row">
+          <label>Organization <input id="org" placeholder="EvoEvolver" autocomplete="off"></label>
+          <button id="prepare-app" type="button">Create GitHub App…</button>
+        </div>
+        <form id="manifest-form" method="post" target="_blank" rel="noopener noreferrer" hidden>
+          <input type="hidden" name="manifest" id="manifest">
+          <button class="primary" type="submit">Continue on GitHub</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Rules</h2>
+      <p class="muted">Humans and <code>trusted_agents</code> may push any ref; other Agents only
+        <code>agent_push_refs</code>. Nobody may delete <code>protected_refs</code>.
+        <code>*</code> matches inside one path segment, <code>**</code> across segments.</p>
+      <textarea id="config" spellcheck="false" rows="18"></textarea>
+      <div class="row"><button id="save-config" class="primary" type="button">Save rules</button></div>
+    </section>
+
+    <section class="panel">
+      <h2>Audit</h2>
+      <div class="row">
+        <input id="filter-repo" placeholder="repo (owner/name)" autocomplete="off">
+        <select id="filter-op">
+          <option value="">all operations</option>
+          <option>push</option><option>fetch</option><option>advertise-fetch</option>
+          <option>advertise-push</option><option>api</option><option>config</option><option>github_app</option>
+        </select>
+        <select id="filter-result">
+          <option value="">all results</option><option>ok</option><option>denied</option>
+          <option>rejected</option><option>error</option>
+        </select>
+        <button id="reload-audit" type="button">Apply</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>Caller</th><th>Operation</th><th>Repo / path</th><th>Refs</th><th>Result</th></tr></thead>
+          <tbody id="audit"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
