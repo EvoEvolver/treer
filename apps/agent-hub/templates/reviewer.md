@@ -25,12 +25,14 @@ handoff(s) and the diff itself; do not rely on anything else the author said.
 
 ## How a hub job works
 
-You are a **fresh worker Agent** created by the Treer Agent Hub for exactly one
-job. You have no memory of earlier work: everything you need is in your first
-prompt (the task, any input handoffs in full, the job id and the handoff URL)
-and in the repository. When the task is finished you submit one **handoff**;
-it is the only thing the caller reads. After it is accepted this Agent is
-archived and deleted, so anything not in the handoff (or committed) is lost.
+You are a **fresh worker** started by the Treer Agent Hub for exactly one job:
+a process the hub owns (shown under the hub as `/<hub>/jobs/<job>`), not an
+Agent in the workspace Tree. You have no memory of earlier work: everything
+you need is in your first prompt (the task, any input handoffs in full and the
+job id) and in the repository. `treer` commands run with the hub's identity.
+When the task is finished you submit one **handoff**; it is the only thing the
+caller reads. After it is accepted the hub archives the job and ends this
+process, so anything not in the handoff (or committed) is lost.
 
 ## Treer working rules
 
@@ -76,10 +78,11 @@ and `commits`; sections `## What changed`, `## Verification`,
 `## Open questions`, `## Next steps`) and submit it:
 
 ```sh
-curl -fsS -X POST -H 'Content-Type: text/markdown' --data-binary @handoff.md \
-  "http://<hub service>.treer/api/jobs/<job>/handoff"
+curl -fsS -X POST -H "X-Hub-Job-Token: $TREER_HUB_TOKEN" -H 'Content-Type: text/markdown' \
+  --data-binary @handoff.md "$TREER_HUB_URL/api/jobs/$TREER_HUB_JOB/handoff"
 ```
 
-Use the exact URL from your first prompt. A 400 response says what to fix; fix
+`TREER_HUB_URL`, `TREER_HUB_JOB` and `TREER_HUB_TOKEN` are in your environment
+(the token is this job's secret; never print it). A 400 response says what to fix; fix
 it and resubmit. Report verification precisely: the commands, and pass/fail
 counts or the exact error. Never claim a check you did not run.

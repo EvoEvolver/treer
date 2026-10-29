@@ -1,10 +1,11 @@
 # Agent Hub
 
-Runs one task per **fresh** coding Agent. Each job creates a new Treer Agent from
-a template (its `agent.md` becomes the Agent's system instructions), sends it
+Runs one task per **fresh** coding Agent. Each job starts a new worker from a
+template (its `agent.md` becomes the worker's system instructions), sends it
 only your task and input handoffs, and waits for its **handoff**: a structured
-Markdown report. Then the worker is archived (handoff, transcript export,
-provider session id kept) and deleted from Core, and you get a Core Message.
+Markdown report. Then the job is archived (handoff, transcript export, provider
+session id kept), the worker process ends, and you get a Core Message. Workers
+live under the hub (`HUB_ADDRESS/jobs/<id>`), not in the workspace Tree.
 Chain work yourself: pass earlier job ids in `inputs.handoffs`. Browsers and
 `Accept: text/html` get the human interface; it uses the same API.
 
@@ -81,8 +82,9 @@ curl -fsS -X POST HUB_URL/api/jobs/j-0008/stop
 ```
 
 Messages may also be sent with `treer message send --to HUB_ADDRESS/jobs/j-0008`.
-Stop asks the worker for an interruption handoff (`status: partial`) and
-deletes it after a grace period either way.
+Stop asks the worker for an interruption handoff (`status: partial`) and ends
+it after a grace period either way. A running job's live worker UI is
+`HUB_URL/workers/<id>/` (the Console shows it in the job's node view).
 
 ## API
 
@@ -94,15 +96,18 @@ deletes it after a grace period either way.
 | `PUT /api/templates/{name}` `{fields to change}` | new version (unchanged fields inherited) |
 | `POST /api/jobs` `{template, task, inputs?, model?}` | create a job (201) |
 | `GET /api/jobs?status=a,b&requester=me\|ID&limit=N` | jobs, newest first |
-| `GET /api/jobs/{id}` | job, messages, handoff, transcript link |
+| `GET /api/jobs/{id}` | job, worker (`running`, `pid`, `restarts`, `ui`), messages, handoff, transcript link |
 | `POST /api/jobs/{id}/message` `{text, mode: queue\|steer}` | forward to the live worker |
 | `POST /api/jobs/{id}/stop` | interruption handoff, then stop |
-| `POST /api/jobs/{id}/handoff` `{markdown}` or `text/markdown` | worker (or a human) submits |
+| `POST /api/jobs/{id}/handoff` `{markdown}` or `text/markdown` | worker (`X-Hub-Job-Token`) or a human submits |
 | `GET /api/handoffs`, `GET /api/handoffs/{id}[?format=markdown]` | handoffs by recency; one |
 | `GET /api/jobs/{id}/transcript` | archived transcript export |
 | `GET /api/tree?path=` | App tree: `templates/`, `jobs/`, `handoffs/` |
+| `GET /?node=PATH` | the page of a `page.read` node (HTML) |
+| `/workers/{id}/…` | the live worker's own UI and API (HTTP + WebSocket) |
 
 Errors are `{"error": {"code", "message"}}`. Every `/api` route needs a verified
-Treer identity; only the job's own worker Agent or a human may submit its
-handoff. Workers run on the hub's machine with full tool access, like any
-Agent: put only what they may know into tasks.
+Treer identity; only the job's own worker (with its per-job token) or a human
+may submit its handoff. Workers run on the hub's machine with full tool access
+and use `treer` with the hub's identity: put only what they may know into
+tasks.
