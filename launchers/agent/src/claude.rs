@@ -35,6 +35,7 @@ pub struct Adapter {
     native_commands: BTreeSet<String>,
     native_command: Option<String>,
     scheduled_result: Option<Value>,
+    active_input: Option<String>,
 }
 pub enum Request {
     Local(Value),
@@ -162,6 +163,7 @@ impl Adapter {
             native_commands: BTreeSet::new(),
             native_command: None,
             scheduled_result: None,
+            active_input: None,
         })
     }
     /// After a frame the adapter could not place, drop any background
@@ -503,6 +505,7 @@ impl Adapter {
                     self.interrupted = false;
                     self.announced = false;
                     self.user = text.clone();
+                    self.active_input = Some(id.clone());
                     id
                 };
                 // Correlated local dispatch result is emitted only after stdin write completes.
@@ -569,6 +572,7 @@ impl Adapter {
             self.interrupted = false;
             self.announced = false;
             self.user = text;
+            self.active_input = item["id"].as_str().map(str::to_owned);
             return Ok(self.dispatched());
         }
         // A background invocation started meanwhile: the input is not tracked.
@@ -608,6 +612,17 @@ impl Adapter {
                 .cloned(),
         );
         json!({"turn":{"id":self.active,"status":"inProgress","items":items}})
+    }
+    fn stamped_input(&self, event: &Value) -> bool {
+        let owned = |id: &Value| {
+            id.as_str().is_some_and(|id| {
+                self.active_input.as_deref() == Some(id) || self.input_commands.contains(id)
+            })
+        };
+        owned(&event["user_message_uuid"])
+            || event["user_message_uuids"]
+                .as_array()
+                .is_some_and(|ids| ids.iter().any(owned))
     }
     fn item_event(&self, item: Value) -> Value {
         json!({"method":"item/completed","params":{"threadId":self.session,"turnId":self.active,"item":item}})
@@ -791,7 +806,13 @@ impl Adapter {
             && event["subtype"] == "init"
             && event.get("user_message_uuids").is_none()
             && (self.task_runs.values().any(|consumed| !consumed) || self.native_command.is_some());
-        if task_init && self.task_followup.is_none() {
+        // Claude may report the task completion after that invocation's init.
+        // Its first output then still belongs to the task, not to nobody.
+        let late_task = matches!(event["type"].as_str(), Some("stream_event" | "assistant"))
+            && self.active.is_none()
+            && self.native_command.is_none()
+            && self.task_runs.values().any(|consumed| !consumed);
+        if (task_init || late_task) && self.task_followup.is_none() {
             if self.scheduled_result.is_some() {
                 bail!("claude_command_incomplete");
             }
@@ -805,7 +826,35 @@ impl Adapter {
                 .ok_or_else(|| anyhow::anyhow!("claude_invocation_limit"))?;
             followup.active = Some(uuid::Uuid::new_v4().to_string());
             self.task_followup = Some(Box::new(followup));
-            return Ok(vec![]);
+            if task_init {
+                return Ok(vec![]);
+            }
+        }
+        // Claude folds a queued input into the running task invocation
+        // ("absorbed_mid_turn") and stamps the replies with its uuid. From
+        // then on the invocation answers that input: its task output so far
+        // becomes the start of the input's turn, and its result closes it.
+        let stamped = self.active.is_some() && self.stamped_input(&event);
+        let mut folded = vec![];
+        if stamped {
+            if let Some(followup) = self.task_followup.take() {
+                let followup = *followup;
+                self.order.retain(|id| !followup.items.contains_key(id));
+                self.order.splice(0..0, followup.order);
+                for (id, item) in followup.items {
+                    self.items.entry(id).or_insert(item);
+                }
+                if self.blocks.is_empty() {
+                    self.message = followup.message;
+                    self.blocks = followup.blocks;
+                }
+                folded = self
+                    .order
+                    .iter()
+                    .filter_map(|id| self.items.get(id))
+                    .cloned()
+                    .collect();
+            }
         }
         if self.task_followup.is_some()
             && matches!(
@@ -865,6 +914,10 @@ impl Adapter {
             return Ok(vec![]);
         }
         if self.task_followup.is_some() && event["type"] == "system" && event["subtype"] == "init" {
+            // A repeated init of the same task invocation carries no input.
+            if event.get("user_message_uuids").is_none() {
+                return Ok(vec![]);
+            }
             bail!("claude_task_input_interleaving");
         }
         if self.native_command.is_some()
@@ -876,7 +929,15 @@ impl Adapter {
             bail!("claude_command_incomplete");
         }
         if event["type"] == "result" && event["origin"]["kind"] == "task-notification" {
-            bail!("claude_unowned_task_result");
+            if !stamped {
+                bail!("claude_unowned_task_result");
+            }
+            if let Some(consumed) = event["origin"]["runId"]
+                .as_str()
+                .and_then(|run| self.task_runs.get_mut(run))
+            {
+                *consumed = true;
+            }
         }
         if event["type"] == "system"
             && event["subtype"] == "task_notification"
@@ -924,6 +985,9 @@ impl Adapter {
         if self.active.is_some() && !self.announced {
             self.announced = true;
             out.push(json!({"method":"turn/started","params":{"threadId":self.session,"turn":self.dispatched()["turn"]}}));
+        }
+        for item in folded {
+            out.push(self.item_event(item));
         }
         match event["type"].as_str() {
             Some("control_response") => {
@@ -1090,6 +1154,7 @@ impl Adapter {
                     .take()
                     .ok_or_else(|| anyhow::anyhow!("claude_unowned_result"))?;
                 self.input_commands.clear();
+                self.active_input = None;
                 let status = if self.interrupted {
                     "interrupted"
                 } else if event["is_error"] == true {
@@ -1161,6 +1226,68 @@ impl Adapter {
 #[cfg(test)]
 mod task_followup_tests {
     use super::*;
+    // Claude 2.1.312 shape: a task-notification invocation absorbs the input
+    // queued mid-turn and stamps its later replies and result with that uuid.
+    fn absorbed_input_turn(notification_after_init: bool) {
+        let mut a = Adapter::new("session".into()).unwrap();
+        let notification = json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","run_id":"run","status":"completed"});
+        if !notification_after_init {
+            a.consume(notification.clone()).unwrap();
+        }
+        a.consume(json!({"type":"system","subtype":"init","session_id":"session"}))
+            .unwrap();
+        if notification_after_init {
+            a.consume(notification).unwrap();
+        }
+        a.consume(json!({"type":"stream_event","session_id":"session","event":{"type":"message_start","message":{"id":"m1"}}})).unwrap();
+        a.consume(json!({"type":"stream_event","session_id":"session","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"Bash","input":{}}}})).unwrap();
+        a.consume(json!({"type":"assistant","session_id":"session","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}})).unwrap();
+        let Request::Input { wire, dispatched } = a
+            .request(
+                1,
+                "turn/start",
+                &json!({"input":[{"type":"text","text":"B"}]}),
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        let input = wire["uuid"].clone();
+        let turn = dispatched["turn"]["id"].clone();
+        for state in ["queued", "started"] {
+            a.consume(json!({"type":"command_lifecycle","session_id":"session","command_uuid":input,"state":state})).unwrap();
+        }
+        a.consume(json!({"type":"user","session_id":"session","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}})).unwrap();
+        if notification_after_init {
+            a.consume(json!({"type":"system","subtype":"init","session_id":"session"}))
+                .unwrap();
+        }
+        let started = a.consume(json!({"type":"stream_event","session_id":"session","user_message_uuid":input,"user_message_uuids":[input],"event":{"type":"message_start","message":{"id":"m2"}}})).unwrap();
+        assert_eq!(started[0]["method"], "turn/started");
+        assert_eq!(started[0]["params"]["turn"]["id"], turn);
+        a.consume(json!({"type":"assistant","session_id":"session","user_message_uuid":input,"user_message_uuids":[input],"message":{"id":"m2","content":[{"type":"text","text":"answer B"}]}})).unwrap();
+        a.consume(json!({"type":"command_lifecycle","session_id":"session","command_uuid":input,"state":"completed"})).unwrap();
+        let done = a.consume(json!({"type":"result","session_id":"session","result":"answer B","origin":{"kind":"task-notification","producer":"session-task","runId":"run"},"user_message_uuid":input,"user_message_uuids":[input]})).unwrap();
+        let completed = &done.last().unwrap()["params"]["turn"];
+        assert_eq!(done.last().unwrap()["method"], "turn/completed");
+        assert_eq!(completed["id"], turn);
+        assert_eq!(completed["status"], "completed");
+        let items = completed["items"].as_array().unwrap();
+        assert!(items
+            .iter()
+            .any(|i| i["id"] == "t1" && i["status"] == "completed"));
+        assert!(items.iter().any(|i| i["text"] == "answer B"));
+        assert!(a.idle_for_disposition());
+        assert_eq!(a.task_runs.get("run"), Some(&true));
+    }
+    #[test]
+    fn task_invocation_absorbing_queued_input_completes_that_input_turn() {
+        absorbed_input_turn(false);
+    }
+    #[test]
+    fn late_task_notification_and_repeated_init_still_complete_absorbed_turn() {
+        absorbed_input_turn(true);
+    }
     #[test]
     fn scheduled_invocation_epoch_protects_interrupt_and_waiting_input() {
         let mut a = Adapter::new("session".into()).unwrap();
