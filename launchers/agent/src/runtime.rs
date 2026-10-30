@@ -7,6 +7,11 @@ use crate::{
     transcript::{HistoryLimit, InvalidTurnIdentity, Transcript},
 };
 use anyhow::{anyhow, bail, Result};
+/// Display-only journal changes (streamed items, task metadata) are written
+/// at most this often; receipts, goals and turn boundaries commit at once.
+const DISPLAY_PERSIST_INTERVAL: Duration = Duration::from_secs(5);
+/// Streamed display changes reach the UI state at most this often.
+const PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -151,6 +156,12 @@ struct Runtime {
     provider_down: bool,
     state_failed: bool,
     last_disk_snapshot: Option<std::time::Instant>,
+    // Display-only changes not yet in the journal, and the last commit time.
+    display_dirty: bool,
+    last_persist: std::time::Instant,
+    // Coalesced publication of streamed display changes.
+    publish_pending: std::sync::atomic::AtomicBool,
+    last_publish: std::sync::Mutex<std::time::Instant>,
     disk_history_status: &'static str,
     provider_exit: &'static str,
     final_projection: Value,
@@ -361,6 +372,10 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
         provider_down: false,
         state_failed: false,
         last_disk_snapshot: None,
+        display_dirty: false,
+        last_persist: std::time::Instant::now(),
+        publish_pending: std::sync::atomic::AtomicBool::new(false),
+        last_publish: std::sync::Mutex::new(std::time::Instant::now()),
         disk_history_status: "not_requested",
         provider_exit: "not_requested",
         final_projection: Value::Null,
@@ -465,6 +480,9 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
                             }
                         }
                     }
+                    if rt.display_dirty && !rt.state_failed && rt.last_persist.elapsed() >= DISPLAY_PERSIST_INTERVAL && rt.persist().is_err() {
+                        eprintln!("Treer launcher: display checkpoint failed");
+                    }
                     if rt.claude && !rt.provider_down { let _ = rt.check_claude_goal(); }
                     if !rt.provider_down && rt.goals.edits.iter().any(|e| !e.sent && e.error.is_null()) && rt.flush_goals().await.is_err() {
                         eprintln!("Treer launcher: goal edit retained for reconciliation");
@@ -484,6 +502,7 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
                         }
                     }
                 },
+                _ = tokio::time::sleep(PUBLISH_INTERVAL), if rt.publish_pending.load(std::sync::atomic::Ordering::Relaxed) => rt.publish(),
                 Some((id, success)) = result_rx.recv() => {
                     notification_pending = false;
                     if success && !rt.state_failed {
@@ -534,6 +553,7 @@ pub fn spawn(mut config: Config) -> Result<Handle> {
         while let Ok(request) = requests.try_recv() {
             let _ = request.reply.send(Err(anyhow!("runtime_stopping")));
         }
+        rt.flush_display();
         rt.ready = false;
         rt.dispatch_blocked = true;
         rt.thread["status"] = json!("error");
@@ -824,6 +844,7 @@ impl Runtime {
     /// durable journal, exactly as a launcher restart would.
     async fn restart(&mut self, config: &Config) -> Result<crate::rpc::ProviderChild> {
         self.restarts = self.restarts.saturating_add(1);
+        self.flush_display();
         let saved = self.store.load()?;
         let session = self.thread["id"].as_str().map(str::to_owned).or_else(|| {
             saved
@@ -962,6 +983,9 @@ impl Runtime {
                     .ok_or_else(|| anyhow!("claude_history_checkpoint_invalid"))?;
                 for turn in turns {
                     let mut turn = turn.clone();
+                    // Journals written before display caps can hold whole
+                    // tool outputs; restore them in display form.
+                    cap_restored_display(&mut turn);
                     // A fresh Claude process has no running turn: the one that
                     // was in progress ended with the previous process.
                     if turn["status"] == "inProgress" {
@@ -1187,6 +1211,8 @@ impl Runtime {
             bail!("private_state_write_failed");
         }
         self.checkpoint = (self.records.clone(), self.goals.clone());
+        self.display_dirty = false;
+        self.last_persist = std::time::Instant::now();
         // Non-authoritative evidence is sampled only after the live checkpoint
         // commits, at most once per five minutes. Its failure cannot undo that
         // commit or fence dispatch. The copy is bounded to one 32 MiB snapshot.
@@ -1203,6 +1229,37 @@ impl Runtime {
         }
         Ok(())
     }
+    /// Record a display-only change; it is committed with the next checkpoint
+    /// or within DISPLAY_PERSIST_INTERVAL, never once per stream delta.
+    fn persist_display(&mut self) -> Result<()> {
+        self.display_dirty = true;
+        if self.last_persist.elapsed() >= DISPLAY_PERSIST_INTERVAL {
+            return self.persist();
+        }
+        Ok(())
+    }
+    /// Commit pending display changes with the last committed receipts and
+    /// goals: a handler interrupted mid-flight never reaches the journal.
+    fn flush_display(&mut self) {
+        if !self.display_dirty || self.state_failed {
+            return;
+        }
+        let live = (self.records.clone(), self.goals.clone());
+        (self.records, self.goals) = self.checkpoint.clone();
+        let committed = self.persist().is_ok();
+        if committed {
+            (self.records, self.goals) = live;
+        }
+    }
+    /// Publish now, or within PUBLISH_INTERVAL when one was just published.
+    fn publish_soon(&self) {
+        if self.last_publish.lock().unwrap().elapsed() >= PUBLISH_INTERVAL {
+            self.publish();
+        } else {
+            self.publish_pending
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     fn stop_for_state_error(&mut self) {
         // Storage is unavailable: do not claim that this fence was persisted.
         // Existing durable intent remains authoritative on restart.
@@ -1215,6 +1272,9 @@ impl Runtime {
             json!("private_state_write_failed; launcher exiting for restart");
     }
     fn publish(&self) {
+        self.publish_pending
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        *self.last_publish.lock().unwrap() = std::time::Instant::now();
         let mut thread = self.thread.clone();
         thread["turns"] = json!(&*self.turns);
         let queue: Vec<_> = self.records.iter().filter(|r|r.submission["state"] == "queued").enumerate().map(|(n,r)|json!({"id":r.submission["id"],"text":r.text,"createdAt":r.submission["created_at"],"sender":r.submission["sender"],"position":n+1})).collect();
@@ -2569,7 +2629,7 @@ impl Runtime {
             "thread/tasks/updated" if self.claude => {
                 // Auxiliary metadata cannot complete a turn or poison its transport.
                 if crate::tasks::update(&mut self.terminal_tasks, &p["event"]).is_ok() {
-                    self.persist()?;
+                    self.persist_display()?;
                 } else {
                     eprintln!("Rust launcher: claude_task_metadata_refused");
                 }
@@ -2712,7 +2772,7 @@ impl Runtime {
                     }
                     self.upsert_turn(turn)?;
                     if self.claude {
-                        self.persist()?;
+                        self.persist_display()?;
                     }
                 }
             }
@@ -2761,7 +2821,21 @@ impl Runtime {
             _ => return Ok(()),
         }
         self.thread["updatedAt"] = json!(now());
-        self.publish();
+        if matches!(
+            method,
+            "item/started"
+                | "item/completed"
+                | "item/agentMessage/delta"
+                | "item/reasoning/textDelta"
+                | "item/reasoning/summaryTextDelta"
+                | "item/commandExecution/outputDelta"
+                | "turn/plan/updated"
+                | "thread/tasks/updated"
+        ) {
+            self.publish_soon();
+        } else {
+            self.publish();
+        }
         Ok(())
     }
     fn next_notification(&self) -> Option<Notification> {
@@ -2803,6 +2877,31 @@ impl Runtime {
             });
         }
         None
+    }
+}
+/// Cap tool detail and diffs of a restored display turn (the Claude
+/// transcript keeps the full text).
+fn cap_restored_display(turn: &mut Value) {
+    const LIMIT: usize = 64 * 1024;
+    let cap = |value: &mut Value| {
+        if let Some(text) = value.as_str().filter(|t| t.len() > LIMIT) {
+            *value = json!(crate::claude::display_text(text, LIMIT / 2));
+        }
+    };
+    for item in turn["items"].as_array_mut().into_iter().flatten() {
+        if let Some(detail) = item.get_mut("detailText") {
+            cap(detail);
+        }
+        for change in item
+            .get_mut("changes")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(diff) = change.get_mut("diff") {
+                cap(diff);
+            }
+        }
     }
 }
 fn receipt(record: &Record) -> Value {

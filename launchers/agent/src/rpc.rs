@@ -283,8 +283,7 @@ impl Rpc {
                                 "Treer launcher: ignored Claude frame: {}",
                                 adapter.refusal_diagnostic(&error)["code"]
                             );
-                            adapter.skip_refused_frame();
-                            vec![]
+                            adapter.skip_refused_frame()
                         }
                     }
                 } else {

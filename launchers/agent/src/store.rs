@@ -153,6 +153,13 @@ impl Store {
         // must stop dispatch, but must not restore stale in-memory receipts.
         self.publish(".rust-spike", "rust-spike.json", &data)?;
         #[cfg(feature = "fixture-harness")]
+        if let Ok(log) = std::env::var("RUST_SPIKE_SAVE_LOG") {
+            use std::io::Write as _;
+            if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(log) {
+                let _ = writeln!(file, "{}", data.len());
+            }
+        }
+        #[cfg(feature = "fixture-harness")]
         if std::env::var("RUST_SPIKE_CHECKPOINT_FAIL").as_deref() == Ok("directory-sync")
             && state["records"]
                 .as_array()

@@ -9,6 +9,9 @@ pub struct Adapter {
     message: String,
     blocks: BTreeMap<u64, (String, Value, String)>,
     items: BTreeMap<String, Value>,
+    // Serialized size of each retained item, so a stream delta costs O(item)
+    // instead of re-serializing the whole turn.
+    sizes: BTreeMap<String, usize>,
     order: Vec<String>,
     user: String,
     interrupted: bool,
@@ -36,6 +39,12 @@ pub struct Adapter {
     native_command: Option<String>,
     scheduled_result: Option<Value>,
     active_input: Option<String>,
+    // A task invocation opened only to display output that no tracked
+    // invocation owns (unknown task run, restart, ...). Display-only.
+    orphan: bool,
+    // The last turn this adapter completed: late output that belongs to no
+    // open turn is attached there instead of being dropped.
+    last_turn: Option<String>,
 }
 pub enum Request {
     Local(Value),
@@ -53,6 +62,66 @@ pub enum Request {
     },
 }
 const IMAGE_BYTES: usize = 24 * 1024 * 1024;
+/// Display-journal cap for one tool output. The journal is a display cache;
+/// the Claude transcript stays the source of truth for the full text.
+const DISPLAY_OUTPUT_BYTES: usize = 32 * 1024;
+/// Display cap for one string inside a tool's input or a file diff.
+const DISPLAY_INPUT_BYTES: usize = 16 * 1024;
+/// Per-turn display budget; past it items are shrunk, not refused.
+const TURN_BYTES: usize = 4 * 1024 * 1024;
+/// Keep the head and tail of `text` within about `limit` bytes.
+pub(crate) fn display_text(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.into();
+    }
+    let mut head = limit * 3 / 4;
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len() - limit / 4;
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!(
+        "{}\n… [{} bytes not kept in the display journal; the Claude transcript has the full text] …\n{}",
+        &text[..head],
+        tail - head,
+        &text[tail..]
+    )
+}
+/// Cap every string in `value` (tool input, structured output) for display.
+fn display_value(value: &Value, limit: usize) -> Value {
+    match value {
+        Value::String(text) if text.len() > limit => json!(display_text(text, limit)),
+        Value::Array(values) => {
+            Value::Array(values.iter().map(|v| display_value(v, limit)).collect())
+        }
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), display_value(v, limit)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+/// A tool_result's display text: text blocks joined, other blocks (images)
+/// named, never their payload.
+fn tool_result_text(content: &Value) -> String {
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .map(|b| match b["text"].as_str() {
+                Some(text) if b["type"] == "text" => text.to_owned(),
+                _ => format!("[{}]", b["type"].as_str().unwrap_or("content")),
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    };
+    display_text(&text, DISPLAY_OUTPUT_BYTES)
+}
 const IMAGE_BASE64_BYTES: usize = 32 * 1024 * 1024;
 fn image_source(source: &Value) -> Result<usize> {
     use base64::Engine;
@@ -137,6 +206,7 @@ impl Adapter {
             message: String::new(),
             blocks: BTreeMap::new(),
             items: BTreeMap::new(),
+            sizes: BTreeMap::new(),
             order: vec![],
             user: String::new(),
             interrupted: false,
@@ -164,14 +234,34 @@ impl Adapter {
             native_command: None,
             scheduled_result: None,
             active_input: None,
+            orphan: false,
+            last_turn: None,
         })
     }
     /// After a frame the adapter could not place, drop any background
-    /// invocation scope it was tracking so the stream keeps flowing.
-    pub fn skip_refused_frame(&mut self) {
-        self.task_followup = None;
+    /// invocation scope it was tracking so the stream keeps flowing. Output
+    /// that scope already buffered is returned as display-only task output
+    /// rather than discarded.
+    pub fn skip_refused_frame(&mut self) -> Vec<Value> {
         self.native_command = None;
         self.scheduled_result = None;
+        self.salvage_followup().into_iter().collect()
+    }
+    fn salvage_followup(&mut self) -> Option<Value> {
+        let followup = self.task_followup.take()?;
+        let items: Vec<Value> = followup
+            .order
+            .iter()
+            .filter_map(|id| followup.items.get(id))
+            .cloned()
+            .collect();
+        if items.is_empty() {
+            return None;
+        }
+        let id = followup.active.clone()?;
+        Some(
+            json!({"method":"thread/claude-task-output","params":{"threadId":self.session,"turn":{"id":id,"status":"interrupted","error":null,"items":items,"projectionOnly":true,"taskRunId":null}}}),
+        )
     }
     pub fn forget_control(&mut self, id: u64) {
         self.model_controls.remove(&id);
@@ -500,6 +590,7 @@ impl Adapter {
                     self.input_model_revision = self.model_revision;
                     self.input_settings_epoch = Some(self.settings_epoch);
                     self.items.clear();
+                    self.sizes.clear();
                     self.order.clear();
                     self.blocks.clear();
                     self.interrupted = false;
@@ -567,6 +658,7 @@ impl Adapter {
             self.input_model_revision = self.model_revision;
             self.input_settings_epoch = Some(self.settings_epoch);
             self.items.clear();
+            self.sizes.clear();
             self.order.clear();
             self.blocks.clear();
             self.interrupted = false;
@@ -633,7 +725,7 @@ impl Adapter {
             Some("thinking") => json!({"id":id,"type":"reasoning","text":b["thinking"]}),
             Some("tool_use") => match b["name"].as_str() {
                 Some("Bash") => {
-                    json!({"id":id,"type":"commandExecution","command":b["input"]["command"],"aggregatedOutput":"","status":"inProgress"})
+                    json!({"id":id,"type":"commandExecution","command":display_value(&b["input"]["command"], DISPLAY_INPUT_BYTES),"aggregatedOutput":"","status":"inProgress"})
                 }
                 Some("Edit" | "Write" | "MultiEdit") => {
                     let input = &b["input"];
@@ -678,19 +770,19 @@ impl Adapter {
                                     .collect::<Vec<_>>()
                                     .join("\n")
                             );
-                            json!({"path":path,"kind":if add{"add"}else{"update"},"diff":diff})
+                            json!({"path":path,"kind":if add{"add"}else{"update"},"diff":display_text(&diff, DISPLAY_OUTPUT_BYTES)})
                         })
                         .collect::<Vec<_>>();
                     json!({"id":id,"type":"fileChange","status":"inProgress","changes":changes})
                 }
                 _ => {
-                    json!({"id":id,"type":"claudeToolCall","tool":b["name"],"input":b["input"],"status":"inProgress"})
+                    json!({"id":id,"type":"claudeToolCall","tool":b["name"],"input":display_value(&b["input"], DISPLAY_INPUT_BYTES),"status":"inProgress"})
                 }
             },
             _ => json!({"id":id,"type":"other"}),
         }
     }
-    fn retain(&mut self, id: String, item: Value) -> Result<Value> {
+    fn retain(&mut self, id: String, mut item: Value) -> Result<Value> {
         if id.is_empty() || id.len() > 1024 {
             bail!("claude_item_identity");
         }
@@ -713,19 +805,45 @@ impl Adapter {
                 }
             }
         }
-        let bytes = self
+        // Only the changed item is serialized; the others' sizes are cached.
+        let others = self
             .items
             .iter()
             .filter(|(key, _)| *key != &id)
-            .map(|(_, v)| v.to_string().len())
-            .sum::<usize>()
-            + item.to_string().len();
-        if bytes > 4 * 1024 * 1024 {
-            bail!("claude_turn_limit");
+            .map(|(key, value)| {
+                self.sizes
+                    .get(key)
+                    .copied()
+                    .unwrap_or_else(|| value.to_string().len())
+            })
+            .sum::<usize>();
+        let mut size = item.to_string().len();
+        if others + size > TURN_BYTES / 4 * 3 {
+            // Past the soft budget, degrade instead of refusing the frame:
+            // keep a short display form of this item (the last quarter of
+            // the budget is headroom for these). The Claude transcript keeps
+            // the full text.
+            for key in [
+                "aggregatedOutput",
+                "output",
+                "input",
+                "changes",
+                "text",
+                "command",
+            ] {
+                if let Some(value) = item.get(key) {
+                    item[key] = display_value(value, 1024);
+                }
+            }
+            size = item.to_string().len();
+            if others + size > TURN_BYTES {
+                bail!("claude_turn_limit");
+            }
         }
         if !self.items.contains_key(&id) {
             self.order.push(id.clone());
         }
+        self.sizes.insert(id.clone(), size);
         self.items.insert(id, item.clone());
         Ok(item)
     }
@@ -802,6 +920,17 @@ impl Adapter {
         // submitted input's result. Its result has task origin, not an input
         // UUID. Keep all of that invocation separate, even if a new local
         // input has already been written and is waiting in Claude's queue.
+        // Sub-agent frames (parent_tool_use_id set) are nested output. They
+        // never start, own or close an invocation and never touch the main
+        // message's stream state. Claude sends only their tool calls and
+        // results; partial stream events are skipped outright.
+        let parent = event["parent_tool_use_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        if parent.is_some() && event["type"] == "stream_event" {
+            return Ok(vec![]);
+        }
         let task_init = event["type"] == "system"
             && event["subtype"] == "init"
             && event.get("user_message_uuids").is_none()
@@ -809,10 +938,23 @@ impl Adapter {
         // Claude may report the task completion after that invocation's init.
         // Its first output then still belongs to the task, not to nobody.
         let late_task = matches!(event["type"].as_str(), Some("stream_event" | "assistant"))
+            && parent.is_none()
             && self.active.is_none()
             && self.native_command.is_none()
             && self.task_runs.values().any(|consumed| !consumed);
-        if (task_init || late_task) && self.task_followup.is_none() {
+        // Model output nobody tracks (an invocation whose task run was never
+        // announced, output after a restart, ...) is still the user's
+        // visible output: show it as display-only task output, never drop it.
+        let orphan = !late_task
+            && parent.is_none()
+            && event["is_meta"] != true
+            && event["isReplay"] != true
+            && self.active.is_none()
+            && self.native_command.is_none()
+            && self.task_followup.is_none()
+            && (event["type"] == "assistant"
+                || event["type"] == "stream_event" && event["event"]["type"] == "message_start");
+        if (task_init || late_task || orphan) && self.task_followup.is_none() {
             if self.scheduled_result.is_some() {
                 bail!("claude_command_incomplete");
             }
@@ -825,6 +967,7 @@ impl Adapter {
                 .checked_add(1)
                 .ok_or_else(|| anyhow::anyhow!("claude_invocation_limit"))?;
             followup.active = Some(uuid::Uuid::new_v4().to_string());
+            followup.orphan = orphan;
             self.task_followup = Some(Box::new(followup));
             if task_init {
                 return Ok(vec![]);
@@ -842,7 +985,10 @@ impl Adapter {
                 self.order.retain(|id| !followup.items.contains_key(id));
                 self.order.splice(0..0, followup.order);
                 for (id, item) in followup.items {
-                    self.items.entry(id).or_insert(item);
+                    if !self.items.contains_key(&id) {
+                        self.sizes.insert(id.clone(), item.to_string().len());
+                        self.items.insert(id, item);
+                    }
                 }
                 if self.blocks.is_empty() {
                     self.message = followup.message;
@@ -865,9 +1011,11 @@ impl Adapter {
             let final_result = event["type"] == "result";
             let run = event["origin"]["runId"].as_str().unwrap_or("").to_owned();
             let scheduled = event.get("origin").is_none() && self.native_command.is_some();
+            let orphan = self.task_followup.as_ref().is_some_and(|f| f.orphan);
             if final_result
                 && (event["session_id"] != self.session
                     || (!scheduled
+                        && !orphan
                         && (event["origin"]["kind"] != "task-notification"
                             || event["origin"]["producer"] != "session-task"
                             || self.task_runs.get(&run) != Some(&false)))
@@ -886,7 +1034,7 @@ impl Adapter {
             // Partial content is bounded by the ordinary per-turn adapter
             // limits. Publish only a complete origin-validated display turn.
             if final_result {
-                if !scheduled {
+                if !scheduled && (!orphan || self.task_runs.contains_key(&run)) {
                     self.task_runs.insert(run.clone(), true);
                 }
                 self.task_followup = None;
@@ -906,7 +1054,11 @@ impl Adapter {
                     self.scheduled_result = Some(turn);
                     return Ok(vec![]);
                 }
-                turn["taskRunId"] = json!(run);
+                turn["taskRunId"] = if run.is_empty() {
+                    Value::Null
+                } else {
+                    json!(run)
+                };
                 return Ok(vec![
                     json!({"method":"thread/claude-task-output","params":{"threadId":self.session,"turn":turn}}),
                 ]);
@@ -918,7 +1070,15 @@ impl Adapter {
             if event.get("user_message_uuids").is_none() {
                 return Ok(vec![]);
             }
-            bail!("claude_task_input_interleaving");
+            // A new input invocation began without the task's result: keep
+            // the task's partial output and continue with the input.
+            if self.native_command.is_some() {
+                bail!("claude_task_input_interleaving");
+            }
+            let salvaged = self.salvage_followup();
+            let mut out = self.consume(event)?;
+            out.splice(0..0, salvaged);
+            return Ok(out);
         }
         if self.native_command.is_some()
             && (matches!(
@@ -973,6 +1133,7 @@ impl Adapter {
             }
         }
         if event["type"] == "assistant"
+            && parent.is_none()
             && self.input_settings_epoch == Some(self.settings_epoch)
             && self.model_revision <= self.input_model_revision
         {
@@ -1045,8 +1206,13 @@ impl Adapter {
                     self.blocks.clear();
                 }
                 if e["type"] == "content_block_start" {
-                    if self.message.is_empty() || !e["index"].is_u64() {
+                    if !e["index"].is_u64() {
                         bail!("claude_block_identity");
+                    }
+                    if self.message.is_empty() {
+                        // Its message_start was not seen (scope opened mid-
+                        // message): give the blocks a local message identity.
+                        self.message = format!("message-{}", uuid::Uuid::new_v4());
                     }
                     if self.blocks.len() >= 2048 {
                         bail!("claude_block_limit");
@@ -1090,45 +1256,74 @@ impl Adapter {
             }
             Some("assistant" | "user") => {
                 let user = event["type"] == "user";
+                // A sub-agent's calls belong under its parent call while that
+                // call runs (a foreground Agent). A background agent's parent
+                // call already returned; its activity is shown by its task.
+                if let Some(parent) = &parent {
+                    if !self
+                        .items
+                        .get(parent)
+                        .is_some_and(|item| item["status"] == "inProgress")
+                    {
+                        return Ok(out);
+                    }
+                }
                 if let Some(blocks) = event["message"]["content"].as_array() {
                     for (index, b) in blocks.iter().enumerate() {
                         if b["type"] == "tool_result" {
                             let id = b["tool_use_id"]
                                 .as_str()
+                                .filter(|s| !s.is_empty() && s.len() <= 1024)
                                 .ok_or_else(|| anyhow::anyhow!("claude_tool_id"))?
                                 .to_owned();
-                            let mut item = self
-                                .items
-                                .get(&id)
-                                .cloned()
-                                .ok_or_else(|| anyhow::anyhow!("claude_unknown_tool_result"))?;
+                            let known = self.items.get(&id).cloned();
+                            if known.is_none() && (parent.is_some() || event["isReplay"] == true) {
+                                continue;
+                            }
+                            // A result whose call this scope never saw (call
+                            // refused or evicted, result after a restart or a
+                            // scope change) is still shown, as an untracked
+                            // tool result, never dropped.
+                            let mut item = known.unwrap_or_else(|| {
+                                json!({"id":id,"type":"claudeToolCall","tool":"Tool result","input":null,"status":"inProgress","untracked":true})
+                            });
                             item["status"] = json!(if b["is_error"] == true {
                                 "failed"
                             } else {
                                 "completed"
                             });
-                            let text = b["content"]
-                                .as_str()
-                                .map(str::to_owned)
-                                .unwrap_or_else(|| b["content"].to_string());
+                            let text = tool_result_text(&b["content"]);
                             if item["type"] == "commandExecution" {
                                 item["aggregatedOutput"] = json!(text);
                             } else {
                                 item["output"] = json!(text);
                             }
+                            if self.active.is_none() {
+                                // No open turn: attach to the turn just closed.
+                                if let Some(turn) = &self.last_turn {
+                                    out.push(json!({"method":"item/completed","params":{"threadId":self.session,"turnId":turn,"item":item}}));
+                                }
+                                continue;
+                            }
                             let item = self.retain(id, item)?;
                             out.push(self.item_event(item));
                         } else if !user {
                             if self.active.is_none() {
-                                bail!("claude_unowned_assistant");
+                                // Unowned synthetic/meta output: nothing to attach.
+                                continue;
                             }
                             let message = event["message"]["id"]
                                 .as_str()
                                 .filter(|s| !s.is_empty() && s.len() <= 512)
                                 .ok_or_else(|| anyhow::anyhow!("claude_message_id"))?;
+                            // Sub-agent text and thinking are not the user's
+                            // conversation; keep only its tool calls.
+                            if parent.is_some() && b["type"] != "tool_use" {
+                                continue;
+                            }
                             // A final-only message can repeat another message's
                             // body. Only this same message owns streamed blocks.
-                            let streamed = (message == self.message)
+                            let streamed = (parent.is_none() && message == self.message)
                                 .then(|| {
                                     self.blocks
                                         .values()
@@ -1153,6 +1348,7 @@ impl Adapter {
                     .active
                     .take()
                     .ok_or_else(|| anyhow::anyhow!("claude_unowned_result"))?;
+                self.last_turn = Some(turn.clone());
                 self.input_commands.clear();
                 self.active_input = None;
                 let status = if self.interrupted {
@@ -1181,6 +1377,7 @@ impl Adapter {
                 }
                 out.push(json!({"method":"turn/completed","params":{"threadId":self.session,"turn":{"id":turn,"status":status,"error":if status=="failed"{json!({"message":"Claude turn failed"})}else{Value::Null},"items":items}}}));
                 self.items.clear();
+                self.sizes.clear();
                 self.order.clear();
                 self.blocks.clear();
             }
@@ -1449,6 +1646,243 @@ mod task_followup_tests {
         a.consume(json!({"type":"system","subtype":"init","session_id":"session"}))
             .unwrap();
         assert!(a.consume(json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"duplicate"}}})).is_err());
+    }
+}
+#[cfg(test)]
+mod degrade_tests {
+    use super::*;
+    const S: &str = "session";
+    fn ev(mut v: Value) -> Value {
+        v["session_id"] = json!(S);
+        v
+    }
+    fn input(a: &mut Adapter, id: u64, text: &str) -> Value {
+        let Request::Input { wire, .. } = a
+            .request(
+                id,
+                "turn/start",
+                &json!({"input":[{"type":"text","text":text}]}),
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        wire["uuid"].clone()
+    }
+    fn task_output(out: &[Value]) -> Value {
+        out.iter()
+            .find(|m| m["method"] == "thread/claude-task-output")
+            .expect("task output")["params"]["turn"]
+            .clone()
+    }
+    // Live shape (Claude 2.1.314): background Agent calls return at once;
+    // the sub-agents' tool calls and results arrive later with
+    // parent_tool_use_id set, while idle or inside a task invocation.
+    #[test]
+    fn background_subagent_frames_never_refuse_or_clobber_task_output() {
+        let mut a = Adapter::new(S.into()).unwrap();
+        let uuid = input(&mut a, 1, "launch agents");
+        a.consume(ev(
+            json!({"type":"system","subtype":"init","user_message_uuids":[uuid]}),
+        ))
+        .unwrap();
+        a.consume(ev(json!({"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"agent-1","name":"Agent","input":{"run_in_background":true}}]}}))).unwrap();
+        a.consume(ev(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"agent-1","content":"launched"}]}}))).unwrap();
+        a.consume(ev(
+            json!({"type":"result","result":"started","user_message_uuids":[uuid]}),
+        ))
+        .unwrap();
+        // Idle: the sub-agent works.
+        let sub_call = ev(
+            json!({"type":"assistant","parent_tool_use_id":"agent-1","message":{"id":"sub-m","model":"sub-model","content":[{"type":"tool_use","id":"sub-bash","name":"Bash","input":{"command":"ls"}}]}}),
+        );
+        let sub_result = ev(
+            json!({"type":"user","parent_tool_use_id":"agent-1","message":{"content":[{"type":"tool_result","tool_use_id":"sub-bash","content":"files"}]}}),
+        );
+        assert!(a.consume(sub_call.clone()).unwrap().is_empty());
+        assert!(a.consume(sub_result.clone()).unwrap().is_empty());
+        assert!(a.consume(ev(json!({"type":"stream_event","parent_tool_use_id":"agent-1","event":{"type":"message_start","message":{"id":"sub-m2"}}}))).unwrap().is_empty());
+        assert!(
+            a.idle_for_disposition(),
+            "sub-agent frames open no invocation"
+        );
+        // Its completion starts a task invocation; sub-agent frames of other
+        // agents interleave with that invocation's stream.
+        a.consume(ev(json!({"type":"system","subtype":"task_notification","task_id":"t","run_id":"run","status":"completed"}))).unwrap();
+        a.consume(ev(json!({"type":"system","subtype":"init"})))
+            .unwrap();
+        a.consume(ev(
+            json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"m2"}}}),
+        ))
+        .unwrap();
+        a.consume(ev(json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}))).unwrap();
+        a.consume(ev(json!({"type":"stream_event","parent_tool_use_id":"agent-2","event":{"type":"message_start","message":{"id":"other"}}}))).unwrap();
+        a.consume(sub_call).unwrap();
+        a.consume(sub_result).unwrap();
+        a.consume(ev(json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"agent done"}}}))).unwrap();
+        let out = a.consume(ev(json!({"type":"result","result":"agent done","origin":{"kind":"task-notification","producer":"session-task","runId":"run"}}))).unwrap();
+        let turn = task_output(&out);
+        let items = turn["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0]["text"], "agent done");
+        assert!(a.idle_for_disposition());
+        // A sub-agent's model never becomes the session's model.
+        assert_ne!(a.current_model.as_deref(), Some("sub-model"));
+    }
+    #[test]
+    fn foreground_subagent_calls_stay_under_the_running_parent_call() {
+        let mut a = Adapter::new(S.into()).unwrap();
+        input(&mut a, 1, "go");
+        a.consume(ev(json!({"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"agent","name":"Agent","input":{}}]}}))).unwrap();
+        let out = a.consume(ev(json!({"type":"assistant","parent_tool_use_id":"agent","message":{"id":"s","content":[{"type":"text","text":"sub text"},{"type":"tool_use","id":"sub","name":"Read","input":{}}]}}))).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["params"]["item"]["id"], "sub");
+        let out = a.consume(ev(json!({"type":"user","parent_tool_use_id":"agent","message":{"content":[{"type":"tool_result","tool_use_id":"sub","content":"read"}]}}))).unwrap();
+        assert_eq!(out[0]["params"]["item"]["status"], "completed");
+    }
+    #[test]
+    fn unknown_result_inside_task_invocation_is_shown_and_keeps_the_invocation() {
+        let mut a = Adapter::new(S.into()).unwrap();
+        a.consume(ev(json!({"type":"system","subtype":"task_notification","task_id":"t","run_id":"run","status":"completed"}))).unwrap();
+        a.consume(ev(json!({"type":"system","subtype":"init"})))
+            .unwrap();
+        a.consume(ev(json!({"type":"assistant","message":{"id":"m","content":[{"type":"text","text":"before"}]}}))).unwrap();
+        a.consume(ev(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"never-seen","content":[{"type":"text","text":"out"},{"type":"image","source":{"data":"AAAA"}}]}]}}))).unwrap();
+        let out = a.consume(ev(json!({"type":"result","origin":{"kind":"task-notification","producer":"session-task","runId":"run"}}))).unwrap();
+        let items = task_output(&out)["items"].as_array().unwrap().clone();
+        assert_eq!(items[0]["text"], "before");
+        assert_eq!(items[1]["output"], "out\n[image]");
+    }
+    #[test]
+    fn result_after_its_turn_closed_attaches_to_that_turn() {
+        let mut a = Adapter::new(S.into()).unwrap();
+        input(&mut a, 1, "go");
+        let done = a
+            .consume(ev(json!({"type":"result","result":"ok"})))
+            .unwrap();
+        let turn = done.last().unwrap()["params"]["turn"]["id"].clone();
+        let late = a.consume(ev(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"bg","content":"late"}]}}))).unwrap();
+        assert_eq!(late[0]["method"], "item/completed");
+        assert_eq!(late[0]["params"]["turnId"], turn);
+        assert_eq!(late[0]["params"]["item"]["output"], "late");
+    }
+    #[test]
+    fn untracked_invocation_output_is_displayed_not_dropped() {
+        let mut a = Adapter::new(S.into()).unwrap();
+        // No announced task run (or output after a restart): still shown.
+        a.consume(ev(
+            json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"m"}}}),
+        ))
+        .unwrap();
+        a.consume(ev(json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"hello"}}}))).unwrap();
+        assert!(!a.idle_for_disposition());
+        let out = a.consume(ev(json!({"type":"result","result":"hello","origin":{"kind":"task-notification","producer":"session-task","runId":"unknown"}}))).unwrap();
+        let turn = task_output(&out);
+        assert_eq!(turn["items"][0]["text"], "hello");
+        assert_eq!(turn["projectionOnly"], true);
+        assert!(a.idle_for_disposition());
+        assert!(a.task_runs.is_empty(), "an untracked run is not armed");
+        // Then an ordinary input still works.
+        let uuid = input(&mut a, 2, "next");
+        let out = a
+            .consume(ev(
+                json!({"type":"result","result":"fine","user_message_uuids":[uuid]}),
+            ))
+            .unwrap();
+        assert_eq!(out.last().unwrap()["method"], "turn/completed");
+    }
+    #[test]
+    fn block_without_message_start_gets_a_local_message_identity() {
+        let mut a = Adapter::new(S.into()).unwrap();
+        input(&mut a, 1, "go");
+        let out = a.consume(ev(json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"mid"}}}))).unwrap();
+        assert_eq!(out.last().unwrap()["params"]["item"]["text"], "mid");
+    }
+    #[test]
+    fn new_input_invocation_salvages_an_unfinished_task_invocation() {
+        for absorbed in [true, false] {
+            let mut a = Adapter::new(S.into()).unwrap();
+            a.consume(ev(json!({"type":"system","subtype":"task_notification","task_id":"t","run_id":"run","status":"completed"}))).unwrap();
+            a.consume(ev(json!({"type":"system","subtype":"init"})))
+                .unwrap();
+            a.consume(ev(json!({"type":"assistant","message":{"id":"m","content":[{"type":"text","text":"partial task"}]}}))).unwrap();
+            let uuid = input(&mut a, 1, "next");
+            // Stamped with the waiting input: the task output is folded into
+            // its turn. Any other input invocation: shown as task output.
+            let stamp = if absorbed {
+                uuid.clone()
+            } else {
+                json!("other-client")
+            };
+            let out = a
+                .consume(ev(
+                    json!({"type":"system","subtype":"init","user_message_uuids":[stamp]}),
+                ))
+                .unwrap();
+            if !absorbed {
+                assert_eq!(task_output(&out)["items"][0]["text"], "partial task");
+            }
+            a.consume(ev(json!({"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"answer"}]}}))).unwrap();
+            let out = a
+                .consume(ev(json!({"type":"result","user_message_uuids":[uuid]})))
+                .unwrap();
+            let turn = &out.last().unwrap()["params"]["turn"];
+            assert_eq!(turn["status"], "completed");
+            let items = turn["items"].as_array().unwrap();
+            assert!(items.iter().any(|i| i["text"] == "answer"));
+            assert_eq!(items.iter().any(|i| i["text"] == "partial task"), absorbed);
+        }
+    }
+    #[test]
+    fn refused_frame_salvages_buffered_task_output() {
+        let mut a = Adapter::new(S.into()).unwrap();
+        a.consume(ev(json!({"type":"system","subtype":"task_notification","task_id":"t","run_id":"run","status":"completed"}))).unwrap();
+        a.consume(ev(json!({"type":"system","subtype":"init"})))
+            .unwrap();
+        a.consume(ev(json!({"type":"assistant","message":{"id":"m","content":[{"type":"text","text":"kept"}]}}))).unwrap();
+        assert!(a
+            .consume(ev(json!({"type":"result","origin":{"kind":"other"}})))
+            .is_err());
+        let out = a.skip_refused_frame();
+        assert_eq!(task_output(&out)["items"][0]["text"], "kept");
+        assert!(a.idle_for_disposition());
+    }
+    #[test]
+    fn huge_tool_output_is_capped_and_turn_budget_degrades_instead_of_refusing() {
+        let mut a = Adapter::new(S.into()).unwrap();
+        input(&mut a, 1, "go");
+        let big = "x".repeat(DISPLAY_OUTPUT_BYTES * 8);
+        for n in 0..200 {
+            let id = format!("read-{n}");
+            a.consume(ev(json!({"type":"assistant","message":{"id":format!("m{n}"),"content":[{"type":"tool_use","id":id,"name":"Read","input":{"file_path":"f"}}]}}))).unwrap();
+            let out = a.consume(ev(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"content":big}]}}))).unwrap();
+            let output = out.last().unwrap()["params"]["item"]["output"]
+                .as_str()
+                .unwrap()
+                .len();
+            assert!(output <= DISPLAY_OUTPUT_BYTES + 256, "{output}");
+        }
+        let total: usize = a.items.values().map(|v| v.to_string().len()).sum();
+        assert!(total <= TURN_BYTES);
+        assert_eq!(a.sizes.values().sum::<usize>(), total, "cached sizes match");
+        let out = a
+            .consume(ev(json!({"type":"result","result":"done"})))
+            .unwrap();
+        assert_eq!(
+            out.last().unwrap()["params"]["turn"]["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            202
+        );
+    }
+    #[test]
+    fn display_text_keeps_utf8_head_and_tail() {
+        let text = "é".repeat(50_000);
+        let capped = display_text(&text, 1000);
+        assert!(capped.len() < 1200);
+        assert!(capped.starts_with('é') && capped.ends_with('é'));
+        assert_eq!(display_text("short", 1000), "short");
     }
 }
 #[cfg(test)]
@@ -1841,7 +2275,13 @@ mod tests {
         assert!(a
             .consume(json!({"type":"system","session_id":"wrong"}))
             .is_err());
-        assert!(a.consume(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"unknown"}]}})).is_err());
+        // An unknown call's result is shown as an untracked item, not refused.
+        let shown = a.consume(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"unknown","content":"late output"}]}})).unwrap();
+        assert_eq!(
+            shown.last().unwrap()["params"]["item"]["output"],
+            "late output"
+        );
+        assert_eq!(shown.last().unwrap()["params"]["item"]["untracked"], true);
         a.retain("tool".into(),json!({"id":"tool","type":"commandExecution","command":"first","aggregatedOutput":"done","status":"completed"})).unwrap();
         assert!(a.retain("tool".into(),json!({"id":"tool","type":"commandExecution","command":"changed","status":"inProgress"})).is_err());
     }
