@@ -2382,11 +2382,53 @@ fn nohup_process_is_current(process: &NohupProcess) -> Result<bool> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn start_nohup(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
     require_nohup()?;
-    start_nohup_with(&nohup_executable(), paths, config)
+    start_nohup_with(
+        &nohup_executable(),
+        &host_scope_prefix(config),
+        paths,
+        config,
+    )
+}
+
+/// On Linux, run the nohup Host in its own transient user scope when the user
+/// systemd manager is usable, so it leaves the caller's (terminal) cgroup and
+/// systemd-oomd cannot kill it together with that cgroup. Agents get their own
+/// scopes from the Host. Without systemd the Host starts exactly as before.
+#[cfg(target_os = "linux")]
+fn host_scope_prefix(config: &ServiceConfig) -> Vec<std::ffi::OsString> {
+    use treer_platform::workload_isolation as isolation;
+    match isolation::probe_systemd_user_scope(&isolation::systemd_run_executable()) {
+        Ok(()) => {
+            let started = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or_default();
+            let unit = format!(
+                "treer-host-{}-{started}",
+                isolation::systemd_unit_component(&component_key(&config.server_id))
+            );
+            println!("treer: starting the nohup Host in systemd user scope {unit}.scope");
+            isolation::systemd_scope_prefix(&unit)
+        }
+        Err(reason) => {
+            println!("treer: systemd user scopes unavailable ({reason}); starting the Host with plain nohup");
+            Vec::new()
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn host_scope_prefix(_config: &ServiceConfig) -> Vec<std::ffi::OsString> {
+    Vec::new()
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn start_nohup_with(nohup: &OsStr, paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
+fn start_nohup_with(
+    nohup: &OsStr,
+    scope: &[std::ffi::OsString],
+    paths: &ServicePaths,
+    config: &ServiceConfig,
+) -> Result<()> {
     let pid_path = nohup_pid_path(paths, config);
     if let Some(process) = read_nohup_process(paths, config)? {
         if nohup_process_is_current(&process)? {
@@ -2430,12 +2472,15 @@ fn start_nohup_with(nohup: &OsStr, paths: &ServicePaths, config: &ServiceConfig)
         .env_clear()
         .envs(treer_platform::inherited_environment())
         .arg("-c")
-        .arg(r#""$1" "$2" run --config "$3" </dev/null >>"$4" 2>&1 & printf '%s\n' "$!""#)
+        .arg(r#"log=$1; shift; "$@" </dev/null >>"$log" 2>&1 & printf '%s\n' "$!""#)
         .arg("treer-nohup")
+        .arg(&log_path)
         .arg(nohup)
+        .args(scope)
         .arg(&paths.host_executable)
-        .arg(&paths.host_config)
-        .arg(&log_path);
+        .arg("run")
+        .arg("--config")
+        .arg(&paths.host_config);
     // The Host must outlive whatever started it. A caller's process group can
     // be reaped as a unit (launchd kills a job's process group when the job
     // exits), so the launcher shell and the Host it backgrounds start in their

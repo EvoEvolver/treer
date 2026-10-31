@@ -61,6 +61,8 @@ pub struct HostRuntime {
 
 struct RuntimeInner {
     host_epoch: String,
+    #[cfg(target_os = "linux")]
+    isolation: treer_platform::workload_isolation::WorkloadIsolation,
     root: PathBuf,
     processes: RwLock<HashMap<String, Arc<HostProcess>>>,
     completed_processes: Mutex<VecDeque<String>>,
@@ -196,6 +198,8 @@ impl HostRuntime {
         Ok(Self {
             inner: Arc::new(RuntimeInner {
                 host_epoch: format!("host_{}", Uuid::new_v4().simple()),
+                #[cfg(target_os = "linux")]
+                isolation: treer_platform::workload_isolation::workload_isolation(),
                 root,
                 processes: RwLock::new(HashMap::new()),
                 completed_processes: Mutex::new(VecDeque::new()),
@@ -268,8 +272,14 @@ impl HostRuntime {
                 pixel_height: 0,
             })
             .map_err(|error| RuntimeError::Terminal(error.to_string()))?;
-        let mut builder = CommandBuilder::new(request.command);
-        builder.args(request.args);
+        #[cfg(not(target_os = "linux"))]
+        let mut builder = {
+            let mut builder = CommandBuilder::new(&request.command);
+            builder.args(&request.args);
+            builder
+        };
+        #[cfg(target_os = "linux")]
+        let mut builder = self.isolated_builder(&request, &cwd)?;
         builder.cwd(&cwd);
         // portable-pty otherwise captures the Host's entire environment.
         builder.env_clear();
@@ -447,6 +457,40 @@ impl HostRuntime {
                 info.exited_at = Some(Utc::now());
             })
             .ok_or_else(|| RuntimeError::Terminal("process state lock poisoned".to_string()))
+    }
+
+    /// Run the workload in its own systemd scope when available, and with a
+    /// raised OOM score, so memory pressure kills it rather than the Host.
+    #[cfg(target_os = "linux")]
+    fn isolated_builder(
+        &self,
+        request: &HostSpawnRequest,
+        cwd: &Path,
+    ) -> Result<CommandBuilder, RuntimeError> {
+        use treer_platform::workload_isolation as isolation;
+        let path = request
+            .env
+            .get("PATH")
+            .map(std::ffi::OsString::from)
+            .or_else(|| {
+                treer_platform::inherited_environment().remove(std::ffi::OsStr::new("PATH"))
+            });
+        let program = isolation::resolve_workload_program(&request.command, cwd, path.as_deref())
+            .map_err(RuntimeError::Spawn)?;
+        let unit = format!(
+            "treer-workload-{}-{}",
+            isolation::systemd_unit_component(&request.process_id),
+            &Uuid::new_v4().simple().to_string()[..8]
+        );
+        let (shell, args) = isolation::isolated_workload_command(
+            self.inner.isolation,
+            &unit,
+            &program,
+            &request.args,
+        );
+        let mut builder = CommandBuilder::new(shell);
+        builder.args(args);
+        Ok(builder)
     }
 
     fn get(&self, process_id: &str) -> Result<Arc<HostProcess>, RuntimeError> {
@@ -1175,6 +1219,64 @@ mod tests {
         let process = runtime.get("p1").expect("process record");
         runtime.stop("p1").expect("stop process");
         wait_for_resources_released(&process);
+        std::fs::remove_dir_all(temporary).expect("remove temporary directory");
+    }
+
+    /// The isolation wrapper execs in place: the recorded PID is the workload,
+    /// its OOM score is raised, it gets its own scope when systemd is usable,
+    /// and stop still terminates it. Missing programs still fail at spawn.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn isolated_workload_keeps_its_pid_and_raises_its_oom_score() {
+        use treer_platform::workload_isolation::WorkloadIsolation;
+        let temporary = std::env::temp_dir().join(format!(
+            "treer-host-runtime-isolation-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&temporary).expect("create temporary directory");
+        let runtime = HostRuntime::new(&temporary).expect("create runtime");
+        let request = |command: &str| HostSpawnRequest {
+            process_id: "agent:isolated".to_string(),
+            command: command.to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'pid=%s;' $$; exec cat".to_string(),
+            ],
+            cwd: ".".to_string(),
+            env: BTreeMap::new(),
+            cols: 80,
+            rows: 24,
+            metadata: "{}".to_string(),
+        };
+        let error = runtime
+            .spawn(request("treer-missing-workload-program"))
+            .expect_err("missing program");
+        assert!(matches!(error, RuntimeError::Spawn(_)), "{error}");
+
+        let info = runtime.spawn(request("sh")).expect("spawn process");
+        let pid = info.pid.expect("workload PID");
+        wait_for_output(&runtime, "agent:isolated", &format!("pid={pid};"));
+        let score =
+            std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj")).expect("read OOM score");
+        assert!(score.trim().parse::<i32>().expect("numeric score") >= 500);
+        let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).expect("read cgroup");
+        if runtime.inner.isolation == WorkloadIsolation::SystemdScope {
+            assert!(
+                cgroup.contains("/treer-workload-agent_isolated-"),
+                "{cgroup}"
+            );
+        }
+        let process = runtime.get("agent:isolated").expect("process record");
+        runtime.stop("agent:isolated").expect("stop process");
+        wait_for_resources_released(&process);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while std::path::Path::new(&format!("/proc/{pid}/stat")).exists()
+            && std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|stat| !stat.contains(") Z "))
+        {
+            assert!(Instant::now() < deadline, "workload survived stop");
+            std::thread::sleep(Duration::from_millis(50));
+        }
         std::fs::remove_dir_all(temporary).expect("remove temporary directory");
     }
 

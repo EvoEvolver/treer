@@ -224,6 +224,17 @@ stop and asks once (`y/N`); non-interactive runs need `--replace`.
 **Service modes** (`--service-mode`): `auto`/`nohup` (default; detached, survives
 logout, not reboot), `systemd` (Linux user unit; enable linger for it to
 survive logout), `launchd` (macOS LaunchAgent), `foreground` (diagnosis).
+
+**Linux memory isolation**: so that memory pressure kills the offending Agent
+rather than the whole Host, the Host probes `systemd-run --user --scope true`
+when it starts. If that works, a nohup Host starts in its own user scope
+(`treer-host-<id>-<time>.scope`, not the terminal's cgroup) and every Agent/App
+workload runs in its own scope (`treer-workload-<process>-<n>.scope`), so
+systemd-oomd kills only that scope. Without user systemd (clusters, NFS homes,
+SSH sessions without a user manager) the Host starts with plain nohup as before.
+Either way workloads run with `oom_score_adj` 500 (raised, never lowered), so
+the kernel OOM killer picks them before the Host and Controller. The Host log
+records the chosen mode; set `TREER_SYSTEMD_RUN=false` to disable scopes.
 An Apple container machine is a Linux guest: follow `treer --skill
 macos-container` and never reuse a Mac's `server_id` inside the guest.
 
