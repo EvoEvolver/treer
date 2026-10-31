@@ -2,7 +2,9 @@
 // long transcript (prose, code blocks, command output, images that decode after first layout).
 //   RUST_SPIKE_BIN=$CARGO_TARGET_DIR/debug/treer-launch node --test tests/browser-scroll.mjs
 // Standalone and inside a Console-like frame (cross-site parent, bootstrap document first, a status bar removed after the
-// frame loads, inactive tabs hidden with `hidden`), desktop and narrow, fast and slow history. All data is synthetic.
+// frame loads, inactive tabs hidden with `hidden`, a press released outside the frame), desktop and narrow, fast and slow
+// history. New headless Chromium: the old headless shell does not reproduce the lost release outside a frame. All data
+// is synthetic.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
@@ -54,9 +56,10 @@ async function consolePage(t, base) {
   const server = createServer((_, res) => {
     res.setHeader('content-type', 'text/html');
     res.end(`<!doctype html><body style="margin:0;height:100vh;display:flex;flex-direction:column"><header style="height:56px;flex:none">Console</header>
+<style>@media (max-width:600px){nav{display:none}}</style><div style="display:flex;flex:1;min-height:0"><nav style="width:160px;flex:none">Tree</nav>
 <div style="position:relative;flex:1;min-height:0"><div id="panel" role="tabpanel" style="position:absolute;inset:0;overflow:hidden"><div style="display:flex;flex-direction:column;width:100%;height:100%;overflow:hidden">
 <p id="notice" style="margin:0;padding:12px;border-bottom:1px solid">Checking…</p>
-<iframe title="Agent interface" style="display:block;width:100%;flex:1;min-height:0;border:0" sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads allow-popups"></iframe></div></div></div>
+<iframe title="Agent interface" style="display:block;width:100%;flex:1;min-height:0;border:0" sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads allow-popups"></iframe></div></div></div></div>
 <script>const f=document.querySelector('iframe');let loads=0;f.onload=()=>{if(++loads===2)document.getElementById('notice').remove()};f.src=${JSON.stringify(base + '/.treer/embed')};setTimeout(()=>{f.src=${JSON.stringify(base + '/?lang=en')}},300);</script></body>`);
   }).listen(0);
   await once(server, 'listening');
@@ -95,7 +98,7 @@ async function open(browser, target, { width, slow }) {
 test('the conversation opens at the latest message and keeps following until the reader scrolls up', { timeout: 240000 }, async (t) => {
   const agent = await launcher(t);
   const consoleUrl = await consolePage(t, agent.base);
-  const browser = await chromium.launch({ env: hermeticEnv({ HOME: process.env.HOME }) }); t.after(() => browser.close());
+  const browser = await chromium.launch({ channel: 'chromium', env: hermeticEnv({ HOME: process.env.HOME }) }); t.after(() => browser.close());
   for (const width of [1280, 390]) for (const embedded of [false, true]) for (const slow of [false, true]) {
     const what = `${width}px ${embedded ? 'embedded' : 'standalone'}${slow ? ' slow history' : ''}`;
     const { context, page, frame } = await open(browser, embedded ? consoleUrl : agent.base + '/?lang=en', { width, slow });
@@ -114,6 +117,18 @@ test('the conversation opens at the latest message and keeps following until the
       await page.evaluate(() => { document.getElementById('panel').hidden = false; });
       await until(() => frame.evaluate((value) => document.querySelector('.chat').textContent.includes(value), text), Boolean);
       await settledAtBottom(frame, `${what} after the tab was shown again`);
+    }
+
+    if (embedded && !slow && width > 600) {
+      // A press in the frame released over the Console (a scrollbar or selection drag that overshoots) never reports
+      // pointerup in the frame. Once that hold lapses, a browser reset is again not the reader.
+      const box = await page.locator('iframe').boundingBox();
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2); await page.mouse.down();
+      await page.mouse.move(40, box.y + box.height / 2, { steps: 8 }); await page.mouse.up();
+      await settledAtBottom(frame, `${what} after a press released outside the frame`);
+      await new Promise((r) => setTimeout(r, 5200));
+      await frame.evaluate(() => { document.querySelector('#thread').scrollTop = 0; });
+      await until(() => position(frame), atBottom, 3000).catch(() => assert.fail(`${what}: a press released outside the frame kept counting as the reader`));
     }
 
     if (!slow) {

@@ -7,6 +7,17 @@
 
 export const NEAR = 48; // px from the bottom that counts as "at the latest message"
 export const INTENT_MS = 1000; // a scroll this soon after the reader's own wheel/touch/key/pointer input is theirs
+export const HOLD_MS = 5000; // a press (e.g. on the scrollbar) counts as held at most this long after its last sign
+
+/**
+ * Whether a scroll now is the reader's: input within INTENT_MS, or a pointer still held. Inside the Console this page
+ * is a frame, and a press released over the Console around it (a scrollbar or selection drag that overshoots) never
+ * reports pointerup here; a hold taken as permanent made every later layout move "the reader scrolling up". So a hold
+ * lapses HOLD_MS after it was last seen (scrollbar drags report no pointer moves, only the press).
+ */
+export function readerActive(now: number, inputAt: number, heldAt: number | null): boolean {
+  return now - inputAt < INTENT_MS || (heldAt !== null && now - heldAt < HOLD_MS);
+}
 
 export interface ScrollSample {
   top: number;

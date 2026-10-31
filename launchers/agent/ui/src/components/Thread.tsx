@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { t } from "../i18n";
-import { decideScroll, INTENT_MS, type ScrollSample } from "../lib/follow";
+import { decideScroll, readerActive, type ScrollSample } from "../lib/follow";
 import { duration } from "../lib/format";
 import { useStore } from "../state/store";
 import type { Snapshot, ThreadState } from "../types";
@@ -52,7 +52,7 @@ export function Thread() {
   const pinned = useRef(true);
   const last = useRef<ScrollSample>({ top: 0, height: 0, client: 0 });
   const readerAt = useRef(-Infinity); // last wheel/touch/key/pointer input on the conversation
-  const dragging = useRef(false); // pointer held down, e.g. on the scrollbar
+  const heldAt = useRef<number | null>(null); // pointer held down (e.g. on the scrollbar), when last seen held
   const hiddenWatch = useRef(0);
   const anchor = useRef<{ height: number; top: number } | null>(null);
   const initialThread = useRef<string | null>(null);
@@ -102,7 +102,7 @@ export function Thread() {
   const onScroll = useCallback(() => {
     const element = scroller.current;
     if (!element) return;
-    const reader = dragging.current || performance.now() - readerAt.current < INTENT_MS;
+    const reader = readerActive(performance.now(), readerAt.current, heldAt.current);
     const decision = decideScroll({ pinned: pinned.current, last: last.current }, sample(element), reader);
     if (decision === "hidden") { whenShown(); return; }
     if (decision === "follow" || decision === "restore") { restore(); return; }
@@ -118,18 +118,26 @@ export function Thread() {
     const element = scroller.current;
     if (!element) return;
     const mark = () => { readerAt.current = performance.now(); };
-    const down = () => { dragging.current = true; mark(); };
-    const up = () => { if (dragging.current) { dragging.current = false; mark(); } };
+    const down = () => { heldAt.current = performance.now(); mark(); };
+    const up = () => { if (heldAt.current !== null) { heldAt.current = null; mark(); } };
+    // A release outside this frame is never reported (see readerActive): the hold also ends when the frame loses focus
+    // or a pointer moves here with no button held, and a pointer moving with a button held renews it.
+    const end = () => { heldAt.current = null; };
+    const move = (event: PointerEvent) => { if (heldAt.current !== null) heldAt.current = event.buttons ? performance.now() : null; };
     const options = { passive: true } as const;
     for (const type of ["wheel", "touchstart", "touchmove", "keydown"]) element.addEventListener(type, mark, options);
     element.addEventListener("pointerdown", down, options);
     window.addEventListener("pointerup", up, options);
     window.addEventListener("pointercancel", up, options);
+    window.addEventListener("pointermove", move, options);
+    window.addEventListener("blur", end);
     return () => {
       for (const type of ["wheel", "touchstart", "touchmove", "keydown"]) element.removeEventListener(type, mark);
       element.removeEventListener("pointerdown", down);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("blur", end);
     };
   }, []);
 
