@@ -2398,7 +2398,7 @@ fn start_nohup(paths: &ServicePaths, config: &ServiceConfig) -> Result<()> {
 fn host_scope_prefix(config: &ServiceConfig) -> Vec<std::ffi::OsString> {
     use treer_platform::workload_isolation as isolation;
     match isolation::probe_systemd_user_scope(&isolation::systemd_run_executable()) {
-        Ok(()) => {
+        Ok(literal) => {
             let started = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|elapsed| elapsed.as_secs())
@@ -2408,7 +2408,7 @@ fn host_scope_prefix(config: &ServiceConfig) -> Vec<std::ffi::OsString> {
                 isolation::systemd_unit_component(&component_key(&config.server_id))
             );
             println!("treer: starting the nohup Host in systemd user scope {unit}.scope");
-            isolation::systemd_scope_prefix(&unit)
+            isolation::systemd_scope_prefix(&unit, literal)
         }
         Err(reason) => {
             println!("treer: systemd user scopes unavailable ({reason}); starting the Host with plain nohup");

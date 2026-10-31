@@ -22,8 +22,11 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkloadIsolation {
-    /// Each workload runs in its own transient user scope.
-    SystemdScope,
+    /// Each workload runs in its own transient user scope. `literal` is set
+    /// when systemd-run accepts `--expand-environment=no`: since systemd 254
+    /// it otherwise expands `$VAR` in the command line (older versions never
+    /// expand and reject the flag).
+    SystemdScope { literal: bool },
     /// Only the workload's OOM score is raised.
     OomScore,
 }
@@ -34,10 +37,25 @@ pub fn systemd_run_executable() -> OsString {
     env::var_os("TREER_SYSTEMD_RUN").unwrap_or_else(|| "systemd-run".into())
 }
 
+const NO_EXPAND: &str = "--expand-environment=no";
+
 /// The user manager can create scopes iff a trivial scoped command succeeds.
-pub fn probe_systemd_user_scope(executable: &OsStr) -> Result<(), String> {
-    let mut child = Command::new(executable)
-        .args(["--user", "--scope", "--quiet", "--collect", "true"])
+/// Returns whether `--expand-environment=no` is supported (and needed).
+pub fn probe_systemd_user_scope(executable: &OsStr) -> Result<bool, String> {
+    if run_scope_probe(executable, true).is_ok() {
+        return Ok(true);
+    }
+    run_scope_probe(executable, false).map(|()| false)
+}
+
+fn run_scope_probe(executable: &OsStr, literal: bool) -> Result<(), String> {
+    let mut command = Command::new(executable);
+    command.args(["--user", "--scope", "--quiet", "--collect"]);
+    if literal {
+        command.arg(NO_EXPAND);
+    }
+    let mut child = command
+        .arg("true")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -79,9 +97,12 @@ pub fn workload_isolation() -> WorkloadIsolation {
     static MODE: OnceLock<WorkloadIsolation> = OnceLock::new();
     *MODE.get_or_init(
         || match probe_systemd_user_scope(&systemd_run_executable()) {
-            Ok(()) => {
-                tracing::info!("workload isolation: one systemd user scope per workload");
-                WorkloadIsolation::SystemdScope
+            Ok(literal) => {
+                tracing::info!(
+                    literal,
+                    "workload isolation: one systemd user scope per workload"
+                );
+                WorkloadIsolation::SystemdScope { literal }
             }
             Err(reason) => {
                 tracing::info!(
@@ -111,16 +132,20 @@ pub fn systemd_unit_component(value: &str) -> String {
 
 /// `systemd-run --scope` registers itself in a new scope and then execs the
 /// command, so the PID, session and process group stay those of the caller.
-pub fn systemd_scope_prefix(unit: &str) -> Vec<OsString> {
-    vec![
+pub fn systemd_scope_prefix(unit: &str, literal: bool) -> Vec<OsString> {
+    let mut prefix: Vec<OsString> = vec![
         systemd_run_executable(),
         "--user".into(),
         "--scope".into(),
         "--quiet".into(),
         "--collect".into(),
-        format!("--unit={unit}").into(),
-        "--".into(),
-    ]
+    ];
+    if literal {
+        prefix.push(NO_EXPAND.into());
+    }
+    prefix.push(format!("--unit={unit}").into());
+    prefix.push("--".into());
+    prefix
 }
 
 /// Raise (never lower) the shell's OOM score, then exec the command in place.
@@ -145,8 +170,8 @@ pub fn isolated_workload_command(
         workload_wrapper().into(),
         "treer-workload".into(),
     ];
-    if isolation == WorkloadIsolation::SystemdScope {
-        wrapped.extend(systemd_scope_prefix(unit));
+    if let WorkloadIsolation::SystemdScope { literal } = isolation {
+        wrapped.extend(systemd_scope_prefix(unit, literal));
     }
     wrapped.push(program.into());
     wrapped.extend(args.iter().map(OsString::from));
@@ -213,9 +238,16 @@ mod tests {
         let ok = directory.join("ok");
         script(
             &ok,
-            r#"[ "$*" = "--user --scope --quiet --collect true" ] || exit 9"#,
+            r#"[ "$*" = "--user --scope --quiet --collect --expand-environment=no true" ] || exit 9"#,
         );
-        assert_eq!(probe_systemd_user_scope(ok.as_os_str()), Ok(()));
+        assert_eq!(probe_systemd_user_scope(ok.as_os_str()), Ok(true));
+        // systemd < 254 rejects the flag but never expands arguments.
+        let old = directory.join("old");
+        script(
+            &old,
+            r#"case "$*" in *--expand-environment*) echo "unrecognized option" >&2; exit 1;; esac"#,
+        );
+        assert_eq!(probe_systemd_user_scope(old.as_os_str()), Ok(false));
 
         let failing = directory.join("failing");
         script(
@@ -243,7 +275,7 @@ mod tests {
             ["treer-workload", "/usr/bin/codex", "--flag", "two words"].map(OsString::from)
         );
         let (_, scoped) = isolated_workload_command(
-            WorkloadIsolation::SystemdScope,
+            WorkloadIsolation::SystemdScope { literal: true },
             "treer-workload-a_1-x",
             program,
             &args,
@@ -260,6 +292,7 @@ mod tests {
                 "--scope",
                 "--quiet",
                 "--collect",
+                "--expand-environment=no",
                 "--unit=treer-workload-a_1-x",
                 "--",
                 "/usr/bin/codex",

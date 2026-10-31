@@ -1238,9 +1238,12 @@ mod tests {
         let request = |command: &str| HostSpawnRequest {
             process_id: "agent:isolated".to_string(),
             command: command.to_string(),
+            // `$` must reach the program verbatim (systemd-run >= 254 would
+            // otherwise expand `$$`, `$HOME`, ...).
             args: vec![
                 "-c".to_string(),
-                "printf 'pid=%s;' $$; exec cat".to_string(),
+                "printf 'pid=%s;%s;' $$ \"$0\"; exec cat".to_string(),
+                "literal-$HOME-${X}".to_string(),
             ],
             cwd: ".".to_string(),
             env: BTreeMap::new(),
@@ -1255,12 +1258,19 @@ mod tests {
 
         let info = runtime.spawn(request("sh")).expect("spawn process");
         let pid = info.pid.expect("workload PID");
-        wait_for_output(&runtime, "agent:isolated", &format!("pid={pid};"));
+        wait_for_output(
+            &runtime,
+            "agent:isolated",
+            &format!("pid={pid};literal-$HOME-${{X}};"),
+        );
         let score =
             std::fs::read_to_string(format!("/proc/{pid}/oom_score_adj")).expect("read OOM score");
         assert!(score.trim().parse::<i32>().expect("numeric score") >= 500);
         let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).expect("read cgroup");
-        if runtime.inner.isolation == WorkloadIsolation::SystemdScope {
+        if matches!(
+            runtime.inner.isolation,
+            WorkloadIsolation::SystemdScope { .. }
+        ) {
             assert!(
                 cgroup.contains("/treer-workload-agent_isolated-"),
                 "{cgroup}"
