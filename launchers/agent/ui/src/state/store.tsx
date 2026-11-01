@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, type Dispatch, type ReactNode } from "react";
 import { openSocket, request } from "../api";
+import { applyPatch } from "./patch";
 import { t } from "../i18n";
 import type { GoalInput, PromptMode, Snapshot, ThreadState, TurnDto } from "../types";
 
@@ -46,7 +47,7 @@ export function shareTurns(previous: Snapshot | null, next: Snapshot): Snapshot 
   let changed = false;
   const turns = next.thread.turns.map((turn) => {
     const before = byId.get(turn.id);
-    if (before && json(before) === JSON.stringify(turn)) { changed = true; return before; }
+    if (before && (before === turn || json(before) === json(turn))) { changed = true; return before; }
     return turn;
   });
   return changed ? { ...next, thread: { ...next.thread, turns } } : next;
@@ -126,6 +127,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let socket: WebSocket | null = null;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // A reconnect that delivers state within 3 s is not worth a banner; a retry that fails shows it at once.
+    let lost: ReturnType<typeof setTimeout> | undefined;
     let closed = false;
     let socketSnapshotReceived = false;
     request<Snapshot>("api/state")
@@ -135,32 +138,46 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       .catch((error: Error) => { if (!closed && !socketSnapshotReceived) dispatch({ type: "error", message: error.message }); });
     function connect() {
       clearTimeout(timer);
-      socket = openSocket();
-      socketRef.current = socket;
-      socket.addEventListener("open", () => {
-        dispatch({ type: "connected", value: true });
+      const current = openSocket();
+      socket = current;
+      socketRef.current = current;
+      // `patch` frames are decoded against the previous frame of this same socket.
+      let wire: Snapshot | null = null;
+      current.addEventListener("open", () => {
+        if (socket !== current) return;
         // Re-send the widened history window after every reconnect.
         const limit = historyLimit(stateRef.current);
-        if (limit > 50) socket?.send(JSON.stringify({ type: "history-limit", limit }));
+        if (limit > 50) current.send(JSON.stringify({ type: "history-limit", limit }));
       });
-      socket.addEventListener("message", (event) => {
+      current.addEventListener("message", (event) => {
+        if (socket !== current) return;
+        let frame: { type?: unknown } | null;
+        try { frame = JSON.parse(String(event.data)) as { type?: unknown } | null; } catch { return; /* ignore malformed frames */ }
+        let payload = frame as Snapshot | null;
         try {
-          const payload = JSON.parse(String(event.data)) as Snapshot;
-          if (payload?.type === "state") {
-            socketSnapshotReceived = true;
-            dispatch({ type: "snapshot", snapshot: payload, source: "ws" });
+          if (frame?.type === "patch") {
+            if (!wire) throw new Error("patch before state");
+            payload = applyPatch(wire, frame as Record<string, unknown>);
           }
-          dispatch({ type: "connected", value: true });
-        } catch { /* ignore malformed frames */ }
+        } catch { current.close(); return; /* a fresh socket starts from a full state */ }
+        if (payload?.type === "state") {
+          wire = payload;
+          socketSnapshotReceived = true;
+          dispatch({ type: "snapshot", snapshot: payload, source: "ws" });
+        }
+        clearTimeout(lost); lost = undefined;
+        dispatch({ type: "connected", value: true });
       });
-      socket.addEventListener("close", () => {
-        dispatch({ type: "connected", value: false });
+      current.addEventListener("close", () => {
+        if (socket !== current) return;
+        if (!wire) { clearTimeout(lost); lost = undefined; dispatch({ type: "connected", value: false }); }
+        else if (lost === undefined) lost = setTimeout(() => dispatch({ type: "connected", value: false }), 3000);
         if (!closed) timer = setTimeout(connect, 1000);
       });
     }
-    reconnect.current = () => { socket?.close(); connect(); };
+    reconnect.current = () => { const previous = socket; connect(); previous?.close(); };
     connect();
-    return () => { closed = true; clearTimeout(timer); socket?.close(); };
+    return () => { closed = true; clearTimeout(timer); clearTimeout(lost); socket?.close(); };
   }, []);
 
   const actions = useMemo<Actions>(() => ({

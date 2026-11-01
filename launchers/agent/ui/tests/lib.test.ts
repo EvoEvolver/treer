@@ -6,6 +6,7 @@ import { changedFiles, liveStep, retryText, runStatus, shortPath } from "../src/
 import { activityStats, compact, duration, toolState } from "../src/lib/format";
 import { safeImageUrl, safeUrl, workspaceFilePath } from "../src/lib/url";
 import { reducer, shareTurns, type State } from "../src/state/store";
+import { applyPatch } from "../src/state/patch";
 import { t } from "../src/i18n";
 import { exportName, toMarkdown } from "../src/lib/export";
 import { decideScroll, HOLD_MS, INTENT_MS, NEAR, readerActive } from "../src/lib/follow";
@@ -74,6 +75,23 @@ test("unchanged turns keep their identity across snapshots; changed turns do not
   assert.equal(after.thread?.turns[0], before.thread?.turns[0]);
   assert.notEqual(after.thread?.turns[1], before.thread?.turns[1]);
   assert.equal(after.thread?.turns.length, 3);
+});
+
+test("patch frames rebuild the state from the previous frame and keep unchanged turns and items", () => {
+  const base = snapshot([turn("1", "one"), { ...turn("2", "tw"), items: [item("2-u", "userMessage"), item("2-a", "agentMessage", { text: "tw" })] }]);
+  const patch = { type: "patch", same: ["ready", "runtime", "harness", "modelOptions", "backgroundTasks", "queue", "goal", "history"],
+    thread: { ...base.thread, status: "running", turns: ["1", { ...base.thread!.turns[1], items: ["2-u", item("2-a", "agentMessage", { text: "two" })] }] } };
+  const next = applyPatch(base, patch);
+  assert.equal(next.type, "state");
+  assert.equal(next.thread?.status, "running");
+  assert.equal(next.thread?.turns[0], base.thread?.turns[0]);
+  assert.equal(next.thread?.turns[1]?.items[0], base.thread?.turns[1]?.items[0]);
+  assert.equal(next.thread?.turns[1]?.items[1]?.text, "two");
+  assert.deepEqual(next.modelOptions, base.modelOptions);
+  assert.equal("submission" in applyPatch({ ...base, submission: { downgraded: true } }, patch), false, "fields not named in the patch are gone");
+  const other = applyPatch(base, { type: "patch", same: [], thread: { ...base.thread, id: "t2", turns: [turn("1", "x")] } });
+  assert.equal(other.thread?.turns[0]?.items[0]?.text, "x", "another thread is sent whole");
+  assert.throws(() => applyPatch(base, { type: "patch", same: [], thread: { ...base.thread, turns: ["missing"] } }));
 });
 
 test("a late HTTP snapshot never shrinks a history window the reader widened", () => {

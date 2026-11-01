@@ -16,6 +16,7 @@ mod runtime;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod session_transfer;
 mod soul_terminal;
+mod state_patch;
 mod store;
 mod task_output;
 mod tasks;
@@ -565,6 +566,11 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
         return failure(StatusCode::FORBIDDEN, "controller_provenance_required");
     }
     if path == "/ws" {
+        // `ws?patches=1`: after the first whole `state`, send `patch` frames.
+        let patches = request
+            .uri()
+            .query()
+            .is_some_and(|query| query.split('&').any(|pair| pair == "patches=1"));
         let (mut parts, _) = request.into_parts();
         use axum::extract::FromRequestParts;
         let Ok(upgrade) = WebSocketUpgrade::from_request_parts(&mut parts, &()).await else {
@@ -572,14 +578,34 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
         };
         let mut states = app.runtime.state.clone();
         return upgrade.max_message_size(16*1024).on_upgrade(move |mut socket|async move {
-            let mut limit=50;
+            // A frame may take long on a slow tunnel; only a socket slower than
+            // 32 KiB/s on it is dead. The watch hands the next send the latest
+            // state, so updates published meanwhile coalesce into one frame.
+            async fn send(socket:&mut axum::extract::ws::WebSocket,message:Message,bytes:usize)->bool{
+                let deadline=std::time::Duration::from_secs(5)+std::time::Duration::from_millis((bytes/32) as u64);
+                matches!(tokio::time::timeout(deadline,socket.send(message)).await,Ok(Ok(())))
+            }
+            let (mut limit,mut sent,mut dirty)=(50,Value::Null,true);
+            // Idle tunnels and proxies drop silent sockets; browsers answer pings.
+            let mut keepalive=tokio::time::interval_at(tokio::time::Instant::now()+std::time::Duration::from_secs(25),std::time::Duration::from_secs(25));
+            keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                let payload={let state=states.borrow_and_update(); let mut value=limited(&state,limit);value["type"]=json!("state");value.to_string()};
-                if !matches!(tokio::time::timeout(std::time::Duration::from_secs(5),socket.send(Message::Text(payload.into()))).await,Ok(Ok(()))){break}
+                if dirty {
+                    let mut state={let state=states.borrow_and_update(); limited(&state,limit)};
+                    let payload=if patches&&!sent.is_null(){state_patch::encode(&state,&sent).to_string()}else{
+                        state["type"]=json!("state");let payload=state.to_string();
+                        if let Some(object)=state.as_object_mut(){object.remove("type");}
+                        payload
+                    };
+                    let bytes=payload.len();
+                    if !send(&mut socket,Message::Text(payload.into()),bytes).await{break}
+                    (sent,dirty)=(state,false);
+                }
                 tokio::select! {
-                    result=states.changed()=>if result.is_err(){break},
                     message=socket.recv()=>match message {
-                        Some(Ok(Message::Text(text)))=>{if let Ok(value)=serde_json::from_str::<Value>(&text){if value["type"]=="history-limit" {limit=value["limit"].as_u64().unwrap_or(50).clamp(50,10000) as usize;}}},
+                        Some(Ok(Message::Text(text)))=>{if let Ok(value)=serde_json::from_str::<Value>(&text){
+                            if value["type"]=="history-limit" {limit=value["limit"].as_u64().unwrap_or(50).clamp(50,10000) as usize;dirty=true}
+                        }},
                         Some(Ok(Message::Ping(data)))=>{let _=socket.send(Message::Pong(data)).await;},
                         Some(Err(error))=>{
                             let size_error=error.to_string().contains("Space limit exceeded");
@@ -588,7 +614,9 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
                         },
                         Some(Ok(Message::Close(_)))|None=>break,
                         _=>{},
-                    }
+                    },
+                    result=states.changed()=>if result.is_err(){break}else{dirty=true},
+                    _=keepalive.tick()=>if !send(&mut socket,Message::Ping(Default::default()),0).await{break},
                 }
             }
         }).into_response();

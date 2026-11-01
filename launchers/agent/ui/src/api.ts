@@ -15,8 +15,9 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return payload as T;
 }
 
+/** The socket sends one whole `state`, then `patch` frames (decoded by state/patch.ts). */
 export function openSocket(): WebSocket {
-  const url = new URL("ws", document.baseURI);
+  const url = new URL("ws?patches=1", document.baseURI);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return new WebSocket(url);
 }

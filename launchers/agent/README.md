@@ -271,8 +271,15 @@ macOS/Linux only. `treer-launch.exe` is the Windows release artifact;
 ## Browser UI
 
 The page (`ui/`) is a client of the same HTTP/WebSocket API the Console and
-Agents use; it adds no endpoint. One design, light and dark, at every width
-(standalone, phone, or framed by the Console):
+Agents use; it adds no endpoint. Live state arrives over `ws`: the first
+frame is a whole `state`; on `ws?patches=1` (the page) later frames are
+`patch` frames that name unchanged top-level fields in `same` and
+send unchanged turns and items as their id (`src/state_patch.rs`), so a
+streaming turn costs the changed item, not the multi-MB page. Other clients
+keep receiving whole `state` frames. A frame is given 5 s plus 1 s per 32 KiB,
+the server pings every 25 s, and the page shows "Connection lost" only after
+3 s without state or when a reconnect fails. One design, light and dark, at
+every width (standalone, phone, or framed by the Console):
 
 - **Header:** a worded run status (Ready, Working, Last turn failed,
   Restarting, Reconnecting, Blocked), the thread title and short workspace
