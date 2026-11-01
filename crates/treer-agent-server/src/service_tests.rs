@@ -1368,9 +1368,38 @@ fn nohup_stop_discards_a_reused_pid_without_signaling_it() {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn nohup_launcher_detaches_and_stops_the_recorded_process() {
+    nohup_lifecycle("lifecycle", false);
+}
+
+/// A scope wrapper such as `systemd-run --scope` execs in place, so the PID
+/// record still names the Host itself.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn nohup_launcher_records_the_host_through_an_in_place_scope_wrapper() {
+    nohup_lifecycle("scoped", true);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn nohup_lifecycle(label: &str, scoped: bool) {
     use std::os::unix::fs::PermissionsExt;
 
-    let (directory, mut paths, config) = nohup_test_service("lifecycle");
+    let (directory, mut paths, config) = nohup_test_service(label);
+    let mut scope = Vec::new();
+    if scoped {
+        let fake_scope = directory.join("fake systemd-run");
+        fs::write(
+            &fake_scope,
+            "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+        )
+        .expect("write fake scope wrapper");
+        fs::set_permissions(&fake_scope, fs::Permissions::from_mode(0o755))
+            .expect("make fake scope wrapper executable");
+        scope = vec![
+            fake_scope.into_os_string(),
+            "--unit=treer-host-test".into(),
+            "--".into(),
+        ];
+    }
     let fake_nohup = directory.join("fake nohup");
     let fake_host = directory.join("fake host");
     fs::write(&fake_nohup, "#!/bin/sh\nexec \"$@\"\n").expect("write fake nohup");
@@ -1385,11 +1414,17 @@ fn nohup_launcher_detaches_and_stops_the_recorded_process() {
         .expect("make fake Host executable");
     paths.host_executable = fake_host;
 
-    start_nohup_with(fake_nohup.as_os_str(), &paths, &config).expect("start detached fake Host");
+    start_nohup_with(fake_nohup.as_os_str(), &scope, &paths, &config)
+        .expect("start detached fake Host");
     let process = read_nohup_process(&paths, &config)
         .expect("read PID record")
         .expect("PID record");
     assert!(nohup_process_is_current(&process).expect("inspect fake Host"));
+    let command = Command::new("ps")
+        .args(["-o", "args=", "-p", &process.pid.to_string()])
+        .output()
+        .expect("read Host command");
+    assert!(String::from_utf8_lossy(&command.stdout).contains("fake host"));
     // An own process group keeps the Host alive when the caller's group is
     // reaped, as launchd does when a job that ran `service restart` exits.
     let process_group = |pid: u32| {
