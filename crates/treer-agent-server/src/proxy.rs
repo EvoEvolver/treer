@@ -26,7 +26,12 @@ use crate::controller::{ControllerRuntime, ProxyLinkStatus, TerminalSnapshot};
 use crate::network::NetworkRuntime;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+/// No frame at all from the Proxy for this long means the link is dead. The
+/// Proxy pings every 20 s and closes a machine socket silent for 60 s.
 const PROXY_DEAD_INTERVAL: Duration = Duration::from_secs(60);
+/// A websocket write that cannot complete in this time means the peer stopped
+/// reading or the path is gone; the connection is dropped and redialed.
+const SEND_TIMEOUT: Duration = Duration::from_secs(15);
 const RESULT_CACHE_LIMIT: usize = 256;
 
 #[derive(Clone)]
@@ -140,6 +145,22 @@ fn decode_proxy_message(text: &str) -> anyhow::Result<DecodedProxyMessage> {
         .context("failed to decode proxy message")
 }
 
+/// Liveness timings of one Proxy link; tests shorten them.
+#[derive(Clone, Copy, Debug)]
+struct LinkTimings {
+    heartbeat: Duration,
+    dead_after: Duration,
+}
+
+impl Default for LinkTimings {
+    fn default() -> Self {
+        Self {
+            heartbeat: HEARTBEAT_INTERVAL,
+            dead_after: PROXY_DEAD_INTERVAL,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ProxyClient {
     pub proxy_ws: Url,
@@ -155,6 +176,10 @@ pub struct ProxyClient {
     reported_failures: Arc<Mutex<HashMap<String, String>>>,
     last_activity: Arc<Mutex<Instant>>,
     continue_signal: Arc<Notify>,
+    /// Held by the running startup reconciliation, which is spawned off the
+    /// socket loop so a slow Proxy HTTP call cannot stall heartbeats.
+    startup_reconcile: Arc<tokio::sync::Mutex<()>>,
+    timings: LinkTimings,
 }
 
 impl ProxyClient {
@@ -195,12 +220,40 @@ impl ProxyClient {
             reported_failures: Arc::new(Mutex::new(HashMap::new())),
             last_activity: Arc::new(Mutex::new(Instant::now())),
             continue_signal,
+            startup_reconcile: Arc::new(tokio::sync::Mutex::new(())),
+            timings: LinkTimings::default(),
         }
     }
 
     fn touch_activity(&self) {
         if let Ok(mut last_activity) = self.last_activity.lock() {
             *last_activity = Instant::now();
+        }
+    }
+
+    fn proxy_silence(&self) -> Duration {
+        self.last_activity
+            .lock()
+            .map(|value| value.elapsed())
+            .unwrap_or_default()
+    }
+
+    /// Resolves once nothing has been read from the Proxy for the dead
+    /// interval. It runs beside the whole connection, so it also ends a link
+    /// whose loop is stuck in a write or any other await (TCP gives no EOF on
+    /// a vanished path until its retransmit timeout, many minutes later).
+    async fn proxy_went_silent(&self) -> anyhow::Error {
+        let mut tick = tokio::time::interval(self.timings.heartbeat);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            let silence = self.proxy_silence();
+            if silence >= self.timings.dead_after {
+                return anyhow!(
+                    "no frames from the Proxy for {}s; dropping the dead connection",
+                    silence.as_secs()
+                );
+            }
         }
     }
 
@@ -255,6 +308,16 @@ impl ProxyClient {
     }
 
     async fn run_connection(&self) -> anyhow::Result<ConnectionDisposition> {
+        // The silence clock covers dialing too, so a hung connect or TLS
+        // handshake is abandoned as well.
+        self.touch_activity();
+        tokio::select! {
+            outcome = self.serve_connection() => outcome,
+            error = self.proxy_went_silent() => Err(error),
+        }
+    }
+
+    async fn serve_connection(&self) -> anyhow::Result<ConnectionDisposition> {
         let mut request = self
             .proxy_ws
             .as_str()
@@ -284,7 +347,10 @@ impl ProxyClient {
             },
         )
         .await?;
-        self.reconcile_startups(false).await;
+        {
+            let _reconciling = self.startup_reconcile.lock().await;
+            self.reconcile_startups(false).await;
+        }
         send(
             &mut outgoing,
             &AgentServerMessage::Snapshot {
@@ -301,7 +367,7 @@ impl ProxyClient {
         // replayed as new connections after sleep/reconnect.
         self.network.set_proxy_connected();
 
-        let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+        let mut heartbeat = tokio::time::interval(self.timings.heartbeat);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut events = self.runtime.subscribe();
         let mut terminal_events = self.runtime.subscribe_terminal();
@@ -323,7 +389,23 @@ impl ProxyClient {
                 }
                 _ = heartbeat.tick() => {
                     send(&mut outgoing, &AgentServerMessage::Heartbeat { sent_at: Utc::now() }).await?;
-                    self.reconcile_startups(true).await;
+                    // Heartbeats carry no reply; a ping makes the Proxy answer
+                    // even when it sends nothing else, keeping the silence
+                    // clock meaningful.
+                    if self.proxy_silence() >= self.timings.dead_after / 3 {
+                        send_frame(&mut outgoing, Message::Ping(Vec::new().into()))
+                            .await
+                            .context("failed to ping proxy")?;
+                    }
+                    // Validation is an HTTP round trip to the Proxy and restores
+                    // spawn processes: never block this socket loop on them.
+                    if let Ok(reconciling) = self.startup_reconcile.clone().try_lock_owned() {
+                        let client = self.clone();
+                        tokio::spawn(async move {
+                            let _reconciling = reconciling;
+                            client.reconcile_startups(true).await;
+                        });
+                    }
                     let kinds = self.runtime.available_agent_kinds();
                     let changed = self
                         .advertised_agents
@@ -444,7 +526,7 @@ impl ProxyClient {
                         .lock()
                         .map(|value| *value)
                         .unwrap_or_else(|_| Instant::now());
-                    if should_reconnect_after_continue(last, Instant::now()) {
+                    if should_reconnect_after_continue(last, Instant::now(), self.timings.dead_after) {
                         warn!("SIGCONT with a stale proxy socket; reconnecting");
                         return Ok(ConnectionDisposition::Reconnect);
                     }
@@ -458,7 +540,9 @@ impl ProxyClient {
                     let Message::Text(text) = message else {
                         match message {
                             Message::Ping(payload) => {
-                                outgoing.send(Message::Pong(payload)).await?;
+                                send_frame(&mut outgoing, Message::Pong(payload))
+                                    .await
+                                    .context("failed to answer proxy ping")?;
                                 continue;
                             }
                             Message::Pong(_) => continue,
@@ -501,7 +585,10 @@ impl ProxyClient {
                                     }).await?;
                                 }
                             }
-                            Message::Close(_) => return Ok(ConnectionDisposition::Reconnect),
+                            Message::Close(frame) => {
+                                warn!(?frame, "proxy closed the websocket");
+                                return Ok(ConnectionDisposition::Reconnect);
+                            }
                             _ => {}
                         }
                         continue;
@@ -1328,8 +1415,12 @@ fn connection_error_disposition(code: &str) -> Option<ConnectionDisposition> {
     }
 }
 
-fn should_reconnect_after_continue(last_activity: Instant, now: Instant) -> bool {
-    now.saturating_duration_since(last_activity) >= PROXY_DEAD_INTERVAL
+fn should_reconnect_after_continue(
+    last_activity: Instant,
+    now: Instant,
+    dead_after: Duration,
+) -> bool {
+    now.saturating_duration_since(last_activity) >= dead_after
 }
 
 fn schedule_machine_shutdown(workspace: String) {
@@ -1422,10 +1513,33 @@ where
     S::Error: std::error::Error + Send + Sync + 'static,
 {
     let encoded = serde_json::to_string(message).context("failed to encode agent message")?;
-    outgoing
-        .send(Message::Text(encoded.into()))
+    send_frame(outgoing, Message::Text(encoded.into()))
         .await
         .context("failed to send agent message")
+}
+
+/// Every websocket write is bounded: a half-dead TCP path can otherwise block
+/// a write forever and freeze the whole connection loop without an error.
+async fn send_frame<S>(outgoing: &mut S, message: Message) -> anyhow::Result<()>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    write_within(outgoing, message, SEND_TIMEOUT).await
+}
+
+async fn write_within<S>(outgoing: &mut S, message: Message, limit: Duration) -> anyhow::Result<()>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    match tokio::time::timeout(limit, outgoing.send(message)).await {
+        Ok(result) => Ok(result?),
+        Err(_) => Err(anyhow!(
+            "proxy websocket write did not complete in {}s",
+            limit.as_secs_f32()
+        )),
+    }
 }
 
 async fn send_binary<S>(outgoing: &mut S, frame: TerminalBinaryFrame) -> anyhow::Result<()>
@@ -1436,8 +1550,7 @@ where
     let encoded = frame
         .encode()
         .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
-    outgoing
-        .send(Message::Binary(encoded.into()))
+    send_frame(outgoing, Message::Binary(encoded.into()))
         .await
         .context("failed to send terminal binary frame")
 }
@@ -1450,8 +1563,7 @@ where
     let encoded = frame
         .encode()
         .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
-    outgoing
-        .send(Message::Binary(encoded.into()))
+    send_frame(outgoing, Message::Binary(encoded.into()))
         .await
         .context("failed to send network binary frame")
 }
@@ -1987,14 +2099,20 @@ mod tests {
     #[test]
     fn sleep_wake_reconnects_when_the_socket_is_past_the_dead_interval() {
         let now = Instant::now();
-        assert!(!should_reconnect_after_continue(now, now));
+        assert!(!should_reconnect_after_continue(
+            now,
+            now,
+            PROXY_DEAD_INTERVAL
+        ));
         assert!(should_reconnect_after_continue(
             now,
-            now + PROXY_DEAD_INTERVAL
+            now + PROXY_DEAD_INTERVAL,
+            PROXY_DEAD_INTERVAL
         ));
         assert!(!should_reconnect_after_continue(
             now,
-            now + PROXY_DEAD_INTERVAL - Duration::from_secs(1)
+            now + PROXY_DEAD_INTERVAL - Duration::from_secs(1),
+            PROXY_DEAD_INTERVAL
         ));
     }
 
@@ -2087,5 +2205,216 @@ mod tests {
             .expect_err("redirect must not be followed");
         assert_eq!(error.code, "service_http_status");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    const FAST_LINK: LinkTimings = LinkTimings {
+        heartbeat: Duration::from_millis(20),
+        dead_after: Duration::from_millis(300),
+    };
+
+    fn link_client(
+        address: std::net::SocketAddr,
+        runtime: ControllerRuntime,
+        root: &std::path::Path,
+    ) -> ProxyClient {
+        let mut client = ProxyClient::new(
+            Url::parse(&format!("ws://{address}/")).unwrap(),
+            None,
+            server_info(
+                "srv_a".into(),
+                "workspace".into(),
+                "fixture".into(),
+                root.to_string_lossy().into_owned(),
+                treer_protocol::BuildInfo {
+                    version: "test".into(),
+                    git_commit: "test".into(),
+                },
+                vec![],
+                None,
+            ),
+            runtime,
+            NetworkRuntime::new(),
+        );
+        client.timings = FAST_LINK;
+        client
+    }
+
+    struct StuckSink;
+
+    impl futures_util::Sink<Message> for StuckSink {
+        type Error = std::io::Error;
+        fn poll_ready(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+        fn start_send(self: std::pin::Pin<&mut Self>, _: Message) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_that_never_completes_fails_the_connection() {
+        let error = write_within(
+            &mut StuckSink,
+            Message::Text("{}".into()),
+            Duration::from_millis(50),
+        )
+        .await
+        .expect_err("a stuck write must not block forever");
+        assert!(
+            format!("{error:#}").contains("did not complete"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_silent_proxy_connection_is_dropped_and_redialed() {
+        use crate::controller::private_state_tests::fixture;
+        let fixture = fixture().await;
+        let runtime = fixture
+            .runtime(fixture.config("srv_a", fixture.state.join("agent-private")))
+            .await
+            .unwrap();
+        // Completes the handshake, then never reads or writes again: a path
+        // that vanished without FIN/RST looks exactly like this.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (accepted_tx, mut accepted) = tokio::sync::mpsc::unbounded_channel();
+        let proxy = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                held.push(tokio_tungstenite::accept_async(stream).await.unwrap());
+                let _ = accepted_tx.send(());
+            }
+        });
+        let client = link_client(address, runtime, &fixture.root);
+        let controller = tokio::spawn(client.run_forever());
+        let redialed = tokio::time::timeout(Duration::from_secs(10), async {
+            accepted.recv().await.unwrap();
+            accepted.recv().await.unwrap();
+        })
+        .await;
+        controller.abort();
+        proxy.abort();
+        redialed.expect("Controller never noticed the silent Proxy link");
+    }
+
+    #[tokio::test]
+    async fn a_quiet_but_live_proxy_keeps_the_connection() {
+        use crate::controller::private_state_tests::fixture;
+        let fixture = fixture().await;
+        let runtime = fixture
+            .runtime(fixture.config("srv_a", fixture.state.join("agent-private")))
+            .await
+            .unwrap();
+        // Reads (and so answers pings) but never sends anything itself.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(_)) = socket.next().await {}
+        });
+        let client = link_client(address, runtime, &fixture.root);
+        let outcome = tokio::time::timeout(FAST_LINK.dead_after * 5, client.run_connection()).await;
+        proxy.abort();
+        assert!(outcome.is_err(), "live link was dropped: {outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn hanging_startup_validation_does_not_stall_heartbeats() {
+        use crate::controller::private_state_tests::fixture;
+        use axum::extract::ws::{Message as WsMessage, WebSocketUpgrade};
+        use axum::routing::post;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fixture = fixture().await;
+        let private_root = fixture.state.join("agent-private");
+        let runtime = fixture
+            .runtime(fixture.config("srv_a", private_root.clone()))
+            .await
+            .unwrap();
+        // A private state directory makes every heartbeat validate it.
+        std::fs::create_dir(private_root.join("srv_a").join("ag_one")).unwrap();
+        let validations = Arc::new(AtomicUsize::new(0));
+        let stalled = Arc::new(Notify::new());
+        let (heartbeat_tx, mut heartbeats) = tokio::sync::mpsc::unbounded_channel();
+        let counted = validations.clone();
+        let notify = stalled.clone();
+        let app = Router::new()
+            .route(
+                "/",
+                get(move |upgrade: WebSocketUpgrade| {
+                    let heartbeat_tx = heartbeat_tx.clone();
+                    async move {
+                        upgrade.on_upgrade(move |mut socket| async move {
+                            while let Some(Ok(message)) = socket.recv().await {
+                                if let WsMessage::Text(text) = message {
+                                    if matches!(
+                                        serde_json::from_str::<AgentServerMessage>(&text),
+                                        Ok(AgentServerMessage::Heartbeat { .. })
+                                    ) {
+                                        let _ = heartbeat_tx.send(());
+                                    }
+                                }
+                            }
+                        })
+                    }
+                }),
+            )
+            .route(
+                "/agent/workspaces/workspace/machines/srv_a/startup/validate",
+                post(move || {
+                    let counted = counted.clone();
+                    let notify = notify.clone();
+                    async move {
+                        // The connect-time pass answers; every later one hangs.
+                        if counted.fetch_add(1, Ordering::SeqCst) > 0 {
+                            notify.notify_one();
+                            std::future::pending::<()>().await;
+                        }
+                        Json(ValidateAgentStartupResponse {
+                            active_agent_ids: vec![],
+                            stopped_agent_ids: vec![],
+                            deleted_agent_ids: vec![],
+                            app_startups: vec![],
+                        })
+                    }
+                }),
+            );
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = link_client(address, runtime, &fixture.root);
+        let connection = tokio::spawn(async move { client.run_connection().await });
+        let flowing = tokio::time::timeout(Duration::from_secs(5), async {
+            stalled.notified().await;
+            while heartbeats.try_recv().is_ok() {}
+            for _ in 0..10 {
+                heartbeats.recv().await.unwrap();
+            }
+        })
+        .await;
+        let ended_early = connection.is_finished();
+        connection.abort();
+        http.abort();
+        flowing.expect("heartbeats stopped while startup validation hung");
+        assert!(!ended_early, "connection ended while validation hung");
+        assert_eq!(validations.load(Ordering::SeqCst), 2, "one pass at a time");
     }
 }
