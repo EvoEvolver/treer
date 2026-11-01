@@ -6,9 +6,10 @@ import { changedFiles, liveStep, retryText, runStatus, shortPath } from "../src/
 import { activityStats, compact, duration, toolState } from "../src/lib/format";
 import { safeImageUrl, safeUrl, workspaceFilePath } from "../src/lib/url";
 import { reducer, shareTurns, type State } from "../src/state/store";
+import { applyPatch } from "../src/state/patch";
 import { t } from "../src/i18n";
 import { exportName, toMarkdown } from "../src/lib/export";
-import { decideScroll, NEAR } from "../src/lib/follow";
+import { decideScroll, HOLD_MS, INTENT_MS, NEAR, readerActive } from "../src/lib/follow";
 import type { HistoryItem, Snapshot, TurnDto } from "../src/types";
 
 const item = (id: string, kind: HistoryItem["kind"], extra: Partial<HistoryItem> = {}): HistoryItem => ({ id, kind, text: id, ...extra });
@@ -74,6 +75,23 @@ test("unchanged turns keep their identity across snapshots; changed turns do not
   assert.equal(after.thread?.turns[0], before.thread?.turns[0]);
   assert.notEqual(after.thread?.turns[1], before.thread?.turns[1]);
   assert.equal(after.thread?.turns.length, 3);
+});
+
+test("patch frames rebuild the state from the previous frame and keep unchanged turns and items", () => {
+  const base = snapshot([turn("1", "one"), { ...turn("2", "tw"), items: [item("2-u", "userMessage"), item("2-a", "agentMessage", { text: "tw" })] }]);
+  const patch = { type: "patch", same: ["ready", "runtime", "harness", "modelOptions", "backgroundTasks", "queue", "goal", "history"],
+    thread: { ...base.thread, status: "running", turns: ["1", { ...base.thread!.turns[1], items: ["2-u", item("2-a", "agentMessage", { text: "two" })] }] } };
+  const next = applyPatch(base, patch);
+  assert.equal(next.type, "state");
+  assert.equal(next.thread?.status, "running");
+  assert.equal(next.thread?.turns[0], base.thread?.turns[0]);
+  assert.equal(next.thread?.turns[1]?.items[0], base.thread?.turns[1]?.items[0]);
+  assert.equal(next.thread?.turns[1]?.items[1]?.text, "two");
+  assert.deepEqual(next.modelOptions, base.modelOptions);
+  assert.equal("submission" in applyPatch({ ...base, submission: { downgraded: true } }, patch), false, "fields not named in the patch are gone");
+  const other = applyPatch(base, { type: "patch", same: [], thread: { ...base.thread, id: "t2", turns: [turn("1", "x")] } });
+  assert.equal(other.thread?.turns[0]?.items[0]?.text, "x", "another thread is sent whole");
+  assert.throws(() => applyPatch(base, { type: "patch", same: [], thread: { ...base.thread, turns: ["missing"] } }));
 });
 
 test("a late HTTP snapshot never shrinks a history window the reader widened", () => {
@@ -189,4 +207,18 @@ test("only the reader scrolling up stops following; browser resets and hidden fr
   // A reader who scrolled up keeps their place: a reset to the top while away restores it, layout shifts keep it.
   assert.equal(decideScroll({ pinned: false, last: at(15000) }, at(0), false), "restore");
   assert.equal(decideScroll({ pinned: false, last: at(15000) }, at(14000, 39000), false), "keep");
+});
+
+test("a press released outside the Console frame does not leave the reader \"holding\" forever", () => {
+  // Measured in Chrome: a scrollbar or selection drag inside the cross-site frame that ends over the Console reports
+  // pointerdown (and moves while inside) but never pointerup. A permanent hold made every later browser reset
+  // "the reader scrolling up", leaving the conversation at the top.
+  const pressed = 10_000;
+  assert.equal(readerActive(pressed + 200, pressed, pressed), true, "a fresh press is the reader");
+  assert.equal(readerActive(pressed + HOLD_MS - 1, pressed, pressed), true, "holding the scrollbar still is the reader");
+  assert.equal(readerActive(pressed + HOLD_MS, pressed, pressed), false, "an unreported release lapses");
+  assert.equal(readerActive(pressed + INTENT_MS, pressed, null), false, "released: only recent input counts");
+  assert.equal(readerActive(pressed + INTENT_MS - 1, pressed, null), true);
+  const following = { pinned: true, last: { top: 39400, height: 40000, client: 600 } };
+  assert.equal(decideScroll(following, { top: 0, height: 40000, client: 600 }, readerActive(pressed + HOLD_MS + 1, pressed, pressed)), "follow");
 });

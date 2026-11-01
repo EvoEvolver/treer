@@ -2,7 +2,7 @@ import { memo, useState, type ReactNode } from "react";
 import { t, type MessageKey } from "../i18n";
 import { useNow } from "../lib/clock";
 import { toBlocks } from "../lib/blocks";
-import { activityStats, compact, duration, toolState } from "../lib/format";
+import { activityStats, compact, duration, toolState, turnError } from "../lib/format";
 import { changedFiles, RELAYED, retryText, type ChangedFile } from "../lib/run";
 import { useOpen } from "../state/open";
 import { useFileNavigation } from "../state/files";
@@ -176,12 +176,12 @@ function TurnError({ turn, latest }: { turn: TurnDto; latest: boolean }) {
   const retry = latest ? retryText(turn) : null;
   const canRetry = Boolean(retry) && Boolean(state.snapshot?.ready) && state.snapshot?.thread?.status !== "running" && !state.submitting;
   async function copy() {
-    try { await navigator.clipboard.writeText(turn.error ?? ""); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ }
+    try { await navigator.clipboard.writeText(turnError(turn.error) ?? ""); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ }
   }
   return (
     <div className="turn-error" role="alert">
       <Icon name="warn" />
-      <div className="te-body"><b>{t(turn.status === "interrupted" ? "turn.interrupted" : "turn.failed")}</b><p>{turn.error}</p></div>
+      <div className="te-body"><b>{t(turn.status === "interrupted" ? "turn.interrupted" : "turn.failed")}</b><p>{turnError(turn.error)}</p></div>
       <div className="te-actions">
         {retry && <button type="button" className="btn" disabled={!canRetry} title={t("turn.retryTitle")} onClick={() => void actions.prompt(retry, "steer")}><Icon name="retry" />{t("turn.retry")}</button>}
         <button type="button" className="btn" onClick={() => void copy()}><Icon name="copy" />{copied ? t("dialog.copied") : t("turn.copy")}</button>

@@ -1,4 +1,5 @@
 import type { HistoryItem, Snapshot } from "../types";
+import { turnError } from "./format";
 
 const fence = (text: string, lang = "") => {
   const longest = Math.max(2, ...[...text.matchAll(/`+/g)].map((match) => match[0].length));
@@ -27,7 +28,7 @@ function itemMarkdown(item: HistoryItem): string {
 export function toMarkdown(snapshot: Snapshot): string {
   const turns = snapshot.thread?.turns ?? [];
   const title = snapshot.thread?.title || snapshot.harness.name;
-  const body = turns.flatMap((turn) => [...turn.items.map(itemMarkdown), ...(turn.error ? [`> Error: ${turn.error}`] : [])]).filter(Boolean);
+  const body = turns.flatMap((turn) => [...turn.items.map(itemMarkdown), ...(turn.error ? [`> Error: ${turnError(turn.error)}`] : [])]).filter(Boolean);
   return `# ${title}\n\n${body.join("\n\n")}\n`;
 }
 

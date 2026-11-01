@@ -29,6 +29,10 @@ impl std::error::Error for InvalidTurnIdentity {}
 pub struct Transcript {
     turns: Vec<Value>,
     sizes: Vec<usize>,
+    // Cached shape-node count per turn: admission of one changed turn costs
+    // O(that turn), not O(history), on every stream delta.
+    nodes: Vec<usize>,
+    node_total: usize,
     positions: HashMap<String, usize>,
     bytes: usize,
     pub dropped: usize,
@@ -56,14 +60,9 @@ impl Transcript {
         }
         let mut next_bytes = self.bytes - old_size + counter.bytes;
         let mut next_count = self.turns.len() + usize::from(index.is_none());
-        let mut next_nodes = crate::provider_stream::shape_nodes(&turn)
-            + self
-                .turns
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| Some(*i) != index)
-                .map(|(_, t)| crate::provider_stream::shape_nodes(t))
-                .sum::<usize>();
+        let turn_nodes = crate::provider_stream::shape_nodes(&turn);
+        let mut next_nodes =
+            self.node_total - index.map(|i| self.nodes[i]).unwrap_or(0) + turn_nodes;
         let mut remove = Vec::new();
         for (i, old) in self.turns.iter().enumerate() {
             if next_bytes <= MAX_BYTES && next_count <= MAX_TURNS && next_nodes <= 500_000 {
@@ -73,23 +72,31 @@ impl Transcript {
                 remove.push(i);
                 next_bytes -= self.sizes[i];
                 next_count -= 1;
-                next_nodes -= crate::provider_stream::shape_nodes(old);
+                next_nodes -= self.nodes[i];
             }
         }
         if next_bytes > MAX_BYTES || next_count > MAX_TURNS || next_nodes > 500_000 {
             return Err(HistoryLimit.into());
         }
         self.bytes = self.bytes - old_size + counter.bytes;
+        self.node_total = next_nodes;
         if let Some(i) = index {
             self.turns[i] = turn;
             self.sizes[i] = counter.bytes;
+            self.nodes[i] = turn_nodes;
+            // Same identity, same position: the index map is unchanged.
+            if remove.is_empty() {
+                return Ok(());
+            }
         } else {
             self.positions.insert(id.to_owned(), self.turns.len());
             self.turns.push(turn);
             self.sizes.push(counter.bytes);
+            self.nodes.push(turn_nodes);
         }
         for i in remove.into_iter().rev() {
             self.bytes -= self.sizes.remove(i);
+            self.nodes.remove(i);
             self.turns.remove(i);
             self.dropped += 1;
         }
@@ -124,6 +131,24 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn cached_node_counts_track_replacements_and_evictions() {
+        let mut history = Transcript::default();
+        for n in 0..120 {
+            let id = format!("t{}", n % 70);
+            let items: Vec<_> = (0..n % 7).map(|i| json!({"id": i})).collect();
+            history
+                .insert(json!({"id": id, "status": "completed", "items": items}))
+                .unwrap();
+            let expected: usize = history
+                .iter()
+                .map(crate::provider_stream::shape_nodes)
+                .sum();
+            assert_eq!(history.node_total, expected);
+            assert_eq!(history.nodes.len(), history.len());
+            assert!(history.len() <= MAX_TURNS);
+        }
+    }
     #[test]
     fn invalid_identity_is_rejected_without_changing_history() {
         let mut history = Transcript::default();

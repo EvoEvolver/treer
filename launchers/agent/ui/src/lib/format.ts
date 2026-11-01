@@ -1,4 +1,10 @@
-import type { HistoryItem } from "../types";
+import type { HistoryItem, TurnDto } from "../types";
+
+// Turns restored after a provider restart can carry {message} instead of text.
+export function turnError(error: TurnDto["error"] | { message?: unknown }): string | null {
+  if (error == null || typeof error === "string") return error ?? null;
+  return typeof error.message === "string" ? error.message : JSON.stringify(error);
+}
 
 export function duration(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));

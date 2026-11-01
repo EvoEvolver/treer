@@ -271,8 +271,15 @@ macOS/Linux only. `treer-launch.exe` is the Windows release artifact;
 ## Browser UI
 
 The page (`ui/`) is a client of the same HTTP/WebSocket API the Console and
-Agents use; it adds no endpoint. One design, light and dark, at every width
-(standalone, phone, or framed by the Console):
+Agents use; it adds no endpoint. Live state arrives over `ws`: the first
+frame is a whole `state`; on `ws?patches=1` (the page) later frames are
+`patch` frames that name unchanged top-level fields in `same` and
+send unchanged turns and items as their id (`src/state_patch.rs`), so a
+streaming turn costs the changed item, not the multi-MB page. Other clients
+keep receiving whole `state` frames. A frame is given 5 s plus 1 s per 32 KiB,
+the server pings every 25 s, and the page shows "Connection lost" only after
+3 s without state or when a reconnect fails. One design, light and dark, at
+every width (standalone, phone, or framed by the Console):
 
 - **Header:** a worded run status (Ready, Working, Last turn failed,
   Restarting, Reconnecting, Blocked), the thread title and short workspace
@@ -282,7 +289,9 @@ Agents use; it adds no endpoint. One design, light and dark, at every width
   the reader scrolls up themselves (wheel, touch, keys, scrollbar). Scroll
   resets the browser makes on its own (a hidden Console tab, layout changes)
   never stop following; a hidden tab returns to the latest message, or to the
-  reader's place, when shown again. Each turn folds its commands and tool calls into one
+  reader's place, when shown again. A press held in the Console frame and
+  released over the Console (never reported to the frame) stops counting as
+  the reader 5 s after it was last seen. Each turn folds its commands and tool calls into one
   summary row, lists every changed file with +/− counts, its diff and an Open
   action, and shows a failed turn's error with Retry (the same message through
   `api/prompt`) and Copy. A divider marks what is new since this browser last

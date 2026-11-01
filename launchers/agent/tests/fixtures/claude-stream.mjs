@@ -123,6 +123,23 @@ createInterface({input:process.stdin}).on('line',async line=>{
   emit({type:'assistant',message:{id,content:[{type:'text',text:'thinking first'},{type:'tool_use',id:'tool-'+id,name:'Bash',input:{command:'synthetic readonly probe'}}]}});
   if(process.env.CLAUDE_FIXTURE_DISTINCT_FINAL)emit({type:'assistant',message:{id:id+'-different',content:[{type:'text',text:'thinking first'}]}});
   emit({type:'user',message:{role:'user',content:[{type:'tool_result',tool_use_id:'tool-'+id,content:'synthetic retained output',is_error:false}]}});
+  if(process.env.CLAUDE_FIXTURE_STORM){
+    // A huge tool output, background sub-agent frames and a long streamed
+    // answer: journal writes and per-delta work must stay bounded.
+    emit({type:'assistant',message:{id,content:[{type:'tool_use',id:'read-'+id,name:'Read',input:{file_path:'big'}}]}});
+    emit({type:'user',message:{role:'user',content:[{type:'tool_result',tool_use_id:'read-'+id,content:'r'.repeat(1900*1024)}]}});
+    emit({type:'assistant',parent_tool_use_id:'background-agent',message:{id:'sub-'+id,content:[{type:'tool_use',id:'sub-tool-'+id,name:'Bash',input:{command:'sub'}}]}});
+    emit({type:'user',parent_tool_use_id:'background-agent',message:{role:'user',content:[{type:'tool_result',tool_use_id:'sub-tool-'+id,content:'sub output'}]}});
+    const answer=id+'-answer';
+    emit({type:'stream_event',event:{type:'message_start',message:{id:answer}}});
+    emit({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'text',text:''}}});
+    const deltas=Number(process.env.CLAUDE_FIXTURE_STORM);
+    for(let i=0;i<deltas;i++){
+      emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'text_delta',text:'w'}}});
+      if(i%500===499)await new Promise(r=>setTimeout(r,5));
+    }
+    emit({type:'assistant',message:{id:answer,content:[{type:'text',text:'w'.repeat(deltas)}]}});
+  }
   // Provider idle can precede result; acceptance of another user here is a bug.
   emit({type:'system',subtype:'session_state_changed',state:'idle'});
   const wait=()=>{

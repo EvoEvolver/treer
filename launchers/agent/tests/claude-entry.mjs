@@ -128,7 +128,11 @@ for(const fault of ['BAD_TASK_ORIGIN','UNSOLICITED'])test('Claude task-followup 
   await new Promise(r=>setTimeout(r,300));
   const s=await f.snapshot();
   assert.notEqual(s.runtime.state,'blocked');assert.equal(s.runtime.provider.transport,'open');
-  assert.equal(s.thread.turns.some(t=>t.historySource==='native-task-notification'),false);
+  // A refused task result never settles input, but the output it carried
+  // is still shown as display-only task output (never dropped).
+  const shown=s.thread.turns.filter(t=>t.historySource==='native-task-notification');
+  if(fault==='BAD_TASK_ORIGIN'){assert.equal(shown.length,1);assert.equal(shown[0].projectionOnly,true);assert.ok(shown[0].items.some(i=>i.text==='own task followup'));}
+  else assert.equal(shown.length,0);
   let receipts=await (await fetch(f.base+'/v1/queue')).json();
   assert.equal(receipts.submissions[0].state,'done');
   if(fault==='BAD_TASK_ORIGIN'){
@@ -147,6 +151,34 @@ test('Claude unknown frames are skipped and permission requests are allowed with
   const reply=await until(async()=>JSON.parse((await readFile(join(f.root,'calls.replies'),'utf8')).trim().split('\n')[0]),Boolean);
   assert.equal(reply.response.request_id,'perm-1');assert.equal(reply.response.response.behavior,'allow');
   assert.deepEqual(reply.response.response.updatedInput,{command:'synthetic'});
+});
+test('Claude delta storm with a huge tool output keeps journal writes, journal size and state reads bounded',async t=>{
+  const logs=await realpath(await mkdtemp(join(tmpdir(),'rust-saves-'))),saves=join(logs,'saves');
+  t.after(()=>rm(logs,{recursive:true,force:true}));
+  const deltas=5000;
+  const f=await fixture(t,{CLAUDE_FIXTURE_STORM:String(deltas),RUST_SPIKE_SAVE_LOG:saves});
+  const before=(await readFile(saves,'utf8').catch(()=>'')).trim().split('\n').filter(Boolean).length;
+  assert.equal((await f.post({prompt:'storm',mode:'queue'})).status,200);
+  let slowest=0,s;
+  for(const end=Date.now()+60000;Date.now()<end;){
+    const started=Date.now();s=await f.snapshot();slowest=Math.max(slowest,Date.now()-started);
+    if(s.thread.status==='idle'&&s.thread.turns.length===1)break;
+    await new Promise(r=>setTimeout(r,10));
+  }
+  assert.equal(s.thread.status,'idle');
+  const items=s.thread.turns[0].items;
+  assert.ok(items.some(i=>i.kind==='agentMessage'&&i.text==='w'.repeat(deltas)),'every streamed delta is displayed');
+  const read=items.find(i=>i.id.startsWith('read-'));
+  assert.ok(read&&read.detailText.length<64*1024,'huge tool output is capped in the display journal');
+  assert.ok(!items.some(i=>i.id.startsWith('sub-tool-')),'background sub-agent calls stay out of the turn');
+  assert.equal(s.runtime.provider.transport,'open');
+  const sizes=(await readFile(saves,'utf8')).trim().split('\n').map(Number).slice(before);
+  // Submit, dispatch and turn completion commit at once; the thousands of
+  // streamed deltas add at most a few interval checkpoints.
+  assert.ok(sizes.length<=12,`journal writes during the storm: ${sizes.length}`);
+  assert.ok(Math.max(...sizes)<512*1024,`largest journal write: ${Math.max(...sizes)}`);
+  assert.ok(slowest<2000,`slowest state read: ${slowest} ms`);
+  assert.equal((await (await fetch(f.base+'/v1/queue')).json()).submissions[0].state,'done');
 });
 test('Claude provider crash restarts the provider, resumes the session and keeps the queue moving',async t=>{
   const f=await fixture(t,{CLAUDE_FIXTURE_CRASH_ONCE:'crash-marker',CLAUDE_FIXTURE_SPAWN_LOG:'spawns'});
