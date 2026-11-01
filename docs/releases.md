@@ -1,7 +1,7 @@
 # Release process
 
 - Status: maintained
-- Last reviewed: 2026-10-29
+- Last reviewed: 2026-11-01
 
 A release is an exact Git commit on `main`. The same commit is built once per
 platform by CI, deployed to the hosted Canary, then to Production, tagged for
@@ -215,6 +215,34 @@ manifest without `treer-launch` as predating it.
 ## Release notes
 
 ### Unreleased
+
+### 0.2.5
+
+Additive release: no schema change; the Proxy is unchanged apart from its
+version. Update machines from the Console or with `treer-agent-server update
+--version v0.2.5`. Linux OOM isolation takes effect only after the Host is
+restarted; running launcher Agents keep their old launcher until restarted.
+
+- **Controller Proxy liveness:** a Controller drops a Proxy link that has
+  sent no frame for 60 s and redials, instead of staying "connected" until
+  TCP gives up. Quiet links get a WebSocket ping after 20 s, every write is
+  bounded at 15 s, and per-heartbeat startup validation/restore runs off the
+  connection loop.
+- **Linux OOM isolation:** when `systemd-run --user --scope` works, a nohup
+  Host starts in its own user scope and each Agent/App workload in its own
+  scope, so systemd-oomd kills only the offending workload; otherwise plain
+  nohup as before. Workloads raise `oom_score_adj` to 500. Workload argv
+  stays literal under systemd-run >= 254. `TREER_SYSTEMD_RUN=false` disables
+  scopes.
+- **Launcher Claude adapter:** turns whose prompt Claude folded into a task
+  invocation complete; background sub-agent frames no longer break the main
+  stream; journal writes of display-only changes are bounded (at most every
+  5 s) and large tool outputs are capped, ending the per-token fsync storm.
+- **Launcher UI:** restored turns with object errors render; in the Console
+  frame a press released outside the frame no longer pins the conversation
+  scroll; the page's WebSocket sends patch frames (unchanged fields and turns
+  by id), scales its send timeout with frame size and pings every 25 s, so
+  slow tunnels no longer reconnect-loop.
 
 ### 0.2.4
 
