@@ -1,7 +1,7 @@
 # Release process
 
 - Status: maintained
-- Last reviewed: 2026-11-01
+- Last reviewed: 2026-11-02
 
 A release is an exact Git commit on `main`. The same commit is built once per
 platform by CI, deployed to the hosted Canary, then to Production, tagged for
@@ -215,6 +215,21 @@ manifest without `treer-launch` as predating it.
 ## Release notes
 
 ### Unreleased
+
+### 0.2.6
+
+Fix release: no schema change; the Proxy is unchanged apart from its version.
+Update machines from the Console or with `treer-agent-server update --version
+v0.2.6`.
+
+- **Restart and update with a stopped Host:** `treer-agent-server service
+  restart-controller` and `update` no longer fail with "failed to connect to
+  .../h-*.sock" when the Host is down (for example after a reboot). A live
+  Host still gets the hot Controller restart; a missing Host is started
+  through its service manager and waited on until Controller and Proxy are
+  ready. `update` no longer rolls back freshly installed binaries in that
+  case. A stopped foreground-mode Host is not spawned: `restart-controller`
+  fails with a `service start` hint and `update` skips it with a notice.
 
 ### 0.2.5
 
