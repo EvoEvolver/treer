@@ -445,7 +445,9 @@ async fn run_service_command(args: ServiceArgs) -> Result<()> {
                 }
                 ServiceCommand::Stop => service::stop(&workspace),
                 ServiceCommand::Restart => service::restart(&workspace),
-                ServiceCommand::RestartController => service::restart_controller(&workspace),
+                ServiceCommand::RestartController => {
+                    service::restart_controller(&workspace).await.map(drop)
+                }
                 ServiceCommand::Repair { service_mode } => {
                     let network = select_network_mode(config.network_mode)?;
                     let activation =

@@ -977,9 +977,41 @@ pub fn restart(workspace: &str) -> Result<()> {
     platform::restart(&paths, &config)
 }
 
-pub fn restart_controller(workspace: &str) -> Result<()> {
+pub enum ControllerRestart {
+    Requested,
+    HostStarted,
+}
+
+pub async fn restart_controller(workspace: &str) -> Result<ControllerRestart> {
     let (paths, config) = installed_service(workspace)?;
-    restart_controller_at(&paths, &config.host_socket)
+    restart_or_start_controller(&paths, &config).await
+}
+
+/// Hot-restart the Controller of a live Host, or start a Host that is not
+/// running (for example after a reboot) through its service manager.
+async fn restart_or_start_controller(
+    paths: &ServicePaths,
+    config: &ServiceConfig,
+) -> Result<ControllerRestart> {
+    if host_is_running(&config.host_socket) {
+        match restart_controller_at(paths, &config.host_socket) {
+            Ok(()) => return Ok(ControllerRestart::Requested),
+            // The Host may have exited between the probe and the request.
+            Err(error) if host_is_running(&config.host_socket) => return Err(error),
+            Err(_) => {}
+        }
+    }
+    if config.service_manager == ServiceManager::Foreground {
+        // A foreground Host lives in its owner's terminal; starting one here
+        // would tie it to this command instead.
+        bail!(
+            "the Host is not running and is registered in foreground mode; start it with `treer-agent-server service --workspace {} start` and keep that terminal open",
+            config.workspace
+        );
+    }
+    eprintln!("treer: Host was not running; starting it");
+    start_service_and_wait(paths, config).await?;
+    Ok(ControllerRestart::HostStarted)
 }
 
 #[cfg(any(windows, test))]
@@ -1066,11 +1098,24 @@ async fn activate_controllers(
     previous_epochs: &[Option<String>],
 ) -> Result<()> {
     for ((paths, config), previous_epoch) in services.iter().zip(previous_epochs) {
-        restart_controller_at(paths, &config.host_socket)
-            .with_context(|| format!("failed to restart Controller for {}", config.server_id))?;
-        wait_for_controller(config, previous_epoch.as_deref())
+        if config.service_manager == ServiceManager::Foreground
+            && !host_is_running(&config.host_socket)
+        {
+            eprintln!(
+                "treer: foreground Host for {} is not running; the installed binaries take effect when it is started",
+                config.server_id
+            );
+            continue;
+        }
+        let restart = restart_or_start_controller(paths, config)
             .await
-            .with_context(|| format!("Controller {} did not activate", config.server_id))?;
+            .with_context(|| format!("failed to restart Controller for {}", config.server_id))?;
+        // A newly started Host already waited for its Controller and Proxy.
+        if let ControllerRestart::Requested = restart {
+            wait_for_controller(config, previous_epoch.as_deref())
+                .await
+                .with_context(|| format!("Controller {} did not activate", config.server_id))?;
+        }
     }
     Ok(())
 }
@@ -1452,7 +1497,7 @@ pub fn uninstall(workspace: &str) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ServicePaths {
     executable: PathBuf,
     host_executable: PathBuf,

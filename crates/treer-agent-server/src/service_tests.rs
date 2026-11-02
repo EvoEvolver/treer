@@ -1177,7 +1177,9 @@ async fn service_canary_live_foreground_restart_failure_keeps_host_and_diagnosti
     assert!(format!("{error:#}").contains("simulated Host restart failure"));
     assert_eq!(fixture.invocations(), "restart-controller\n");
     assert!(host_is_running(&fixture.config.host_socket));
+    // Unlink too: a concurrent test's fork may still hold the listener.
     drop(listener);
+    fs::remove_file(&fixture.config.host_socket).unwrap();
 
     fs::remove_file(&fixture.paths.host_executable).unwrap();
     let error = match activate_registered_service(&fixture.paths, &fixture.config).await {
@@ -1185,6 +1187,78 @@ async fn service_canary_live_foreground_restart_failure_keeps_host_and_diagnosti
         Ok(_) => panic!("expected missing executable failure"),
     };
     assert!(format!("{error:#}").contains("failed to start foreground Host"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn restart_controller_requests_a_hot_restart_from_a_live_host() {
+    let fixture = ActivationFixture::new().await;
+    let _listener = std::os::unix::net::UnixListener::bind(&fixture.config.host_socket).unwrap();
+    fs::write(fixture.paths.state_dir.join("succeed"), "").unwrap();
+    assert!(matches!(
+        restart_or_start_controller(&fixture.paths, &fixture.config)
+            .await
+            .unwrap(),
+        ControllerRestart::Requested
+    ));
+    assert_eq!(fixture.invocations(), "restart-controller\n");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn restart_controller_starts_a_stopped_or_vanishing_managed_host() {
+    for vanishing in [false, true] {
+        let mut fixture = ActivationFixture::new().await;
+        fixture.config.service_manager = ServiceManager::Nohup;
+        let _listener = vanishing.then(|| {
+            fs::write(fixture.paths.state_dir.join("disappear"), "").unwrap();
+            std::os::unix::net::UnixListener::bind(&fixture.config.host_socket).unwrap()
+        });
+        assert!(matches!(
+            restart_or_start_controller(&fixture.paths, &fixture.config)
+                .await
+                .unwrap(),
+            ControllerRestart::HostStarted
+        ));
+        fixture.wait_for_run().await;
+        let expected = if vanishing {
+            "restart-controller\nrun\n"
+        } else {
+            "run\n"
+        };
+        assert_eq!(fixture.invocations(), expected);
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn restart_controller_does_not_start_a_stopped_foreground_host() {
+    let fixture = ActivationFixture::new().await;
+    let error = match restart_or_start_controller(&fixture.paths, &fixture.config).await {
+        Err(error) => error,
+        Ok(_) => panic!("expected a foreground start hint"),
+    };
+    assert!(format!("{error:#}").contains("service --workspace default start"));
+    assert_eq!(fixture.invocations(), "");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn update_activation_starts_a_stopped_host_and_skips_a_stopped_foreground_host() {
+    let foreground = ActivationFixture::new().await;
+    let mut managed = ActivationFixture::new().await;
+    managed.config.service_manager = ServiceManager::Nohup;
+    let services = [
+        (foreground.paths.clone(), foreground.config.clone()),
+        (managed.paths.clone(), managed.config.clone()),
+    ];
+    let services = services.iter().collect::<Vec<_>>();
+    activate_controllers(&services, &[None, None])
+        .await
+        .unwrap();
+    managed.wait_for_run().await;
+    assert_eq!(foreground.invocations(), "");
+    assert_eq!(managed.invocations(), "run\n");
 }
 
 #[test]

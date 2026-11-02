@@ -307,16 +307,14 @@ impl App {
 
     async fn restart_controller(&mut self) {
         let workspace = self.workspace.clone();
-        self.message = match tokio::task::spawn_blocking(move || {
-            service::restart_controller(&workspace)
-        })
-        .await
-        {
-            Ok(Ok(())) => {
+        self.message = match service::restart_controller(&workspace).await {
+            Ok(service::ControllerRestart::Requested) => {
                 "Controller restart requested; Host and Agents are preserved.".to_string()
             }
-            Ok(Err(error)) => format!("Could not restart Controller: {error:#}"),
-            Err(error) => format!("Controller action task failed: {error}"),
+            Ok(service::ControllerRestart::HostStarted) => {
+                "Host was not running; started it.".to_string()
+            }
+            Err(error) => format!("Could not restart Controller: {error:#}"),
         };
         self.last_refresh = None;
     }

@@ -266,7 +266,7 @@ does not move files or rewrite saved paths.
 ```bash
 treer-agent-server service status            # lists every local install
 treer-agent-server service logs --follow
-treer-agent-server service restart-controller # replace the Controller; workloads keep running
+treer-agent-server service restart-controller # replace the Controller (starts a stopped Host); workloads keep running
 treer-agent-server service restart           # restart the Host; stops all workloads
 treer-agent-server service stop | start | repair | uninstall
 treer-agent-server --tui --workspace WS      # local dashboard
